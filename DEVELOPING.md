@@ -106,6 +106,11 @@ path `/etc/pacman.d/hooks/aurascan.hook`. The installer must refuse hook writes
 unless `/usr/bin/aurascan` exists and the template is release-safe. Packaged
 installers should still own `/usr/share/libalpm/hooks/aurascan.hook`.
 
+Package install scripts must stay non-interactive. They may print advisory
+first-use guidance, but they must not run `aurascan init`, run `aurascan
+doctor`, request secrets, write user config, install local `/etc` hooks, run
+makepkg, inspect packages, or contact the network during install or upgrade.
+
 ## Curated Fixture Pack
 
 The curated fixture pack lives under `tests/fixtures/curated_packages/`.

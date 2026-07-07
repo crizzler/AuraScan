@@ -7,6 +7,7 @@ from aurascan.core.cache import ScanCache
 from aurascan.core.engine import AuraScanEngine
 from aurascan.core.models import AnalysisResult, Confidence, EvidenceQuality, Finding, Phase, ScanReport, Severity, Source
 from aurascan.core.update_policy import UpdateScanPolicy
+import aurascan.__main__ as module_entrypoint
 import aurascan.cli as cli
 
 
@@ -153,6 +154,15 @@ def test_doctor_subcommand_dispatches_before_scan_parser(monkeypatch):
         assert exc.code == 0
 
     assert calls == [["--json"]]
+
+
+def test_python_module_entrypoint_delegates_to_cli(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "main", lambda: calls.append("called"))
+
+    module_entrypoint.main()
+
+    assert calls == ["called"]
 
 
 def test_default_scan_does_not_enable_deep_static():

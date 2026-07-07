@@ -74,9 +74,50 @@ def test_packaging_readme_documents_hook_limitations_and_recovery():
         "does not enable `--update-scan-policy smart`",
         "missing package archive targets are reported as warnings",
         "if `/usr/bin/aurascan` is missing",
+        "aurascan.install",
+        "advisory text only",
+        "must not prompt",
     ]
     for phrase in required:
         assert phrase in text
+
+
+def test_arch_pkgbuild_references_advisory_install_script():
+    text = read_text("packaging/arch/PKGBUILD")
+
+    assert "install=aurascan.install" in text
+
+
+def test_arch_install_script_is_advisory_only():
+    text = read_text("packaging/arch/aurascan.install")
+    stripped_command_lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped in {"post_install() {", "post_upgrade() {", "cat <<'EOF'", "EOF", "}"}:
+            continue
+        if stripped.startswith("AuraScan ") or stripped.startswith("Run ") or stripped.startswith("Check ") or stripped.startswith("For ") or stripped.startswith("Review "):
+            continue
+        if stripped.startswith("aurascan "):
+            continue
+        if stripped == "aurascan-makepkg":
+            continue
+        stripped_command_lines.append(stripped)
+
+    assert "post_install() {" in text
+    assert "post_upgrade() {" in text
+    assert "aurascan init" in text
+    assert "aurascan doctor" in text
+    assert "aurascan-makepkg" in text
+    assert stripped_command_lines == []
+    assert "read " not in text
+    assert "sudo" not in text
+    assert "pacman" not in text
+    assert "makepkg " not in text
+    assert "curl" not in text
+    assert "wget" not in text
+    assert "AURASCAN_" not in text
 
 
 def test_readme_documents_hook_install_uninstall_and_wrapper_boundary():

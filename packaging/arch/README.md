@@ -21,6 +21,12 @@ home directory. A pip install does not install pacman hooks. Pacman hooks
 require root/package-manager installation, and uninstalling the Arch package
 should remove the hook with the package files.
 
+The packaging skeleton also includes `aurascan.install`. It is advisory text only:
+it prints first-use guidance for `aurascan init`, `aurascan doctor`, and
+`aurascan-makepkg`. It must not prompt, run AuraScan, request API keys, write
+configuration, install hooks manually, contact the network, run makepkg, or
+inspect packages during package install or upgrade.
+
 Manual hook installation is possible by copying a hook to
 `/etc/pacman.d/hooks/`, but users should do this carefully and remove it if
 AuraScan is uninstalled. A hook left behind that points to a missing executable

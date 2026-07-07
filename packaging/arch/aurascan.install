@@ -1,0 +1,27 @@
+post_install() {
+  cat <<'EOF'
+AuraScan installed.
+
+Run first-run setup:
+  aurascan init
+
+Check local configuration:
+  aurascan doctor
+
+For AUR build-time protection, configure your helper to use:
+  aurascan-makepkg
+EOF
+}
+
+post_upgrade() {
+  cat <<'EOF'
+AuraScan upgraded.
+
+Review setup and local diagnostics when needed:
+  aurascan init
+  aurascan doctor
+
+For AUR build-time protection, configure your helper to use:
+  aurascan-makepkg
+EOF
+}

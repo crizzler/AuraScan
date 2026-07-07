@@ -24,9 +24,11 @@ def test_pyproject_console_scripts_are_registered():
 
 def test_entry_point_targets_import():
     from aurascan.cli import main as cli_main
+    from aurascan.__main__ import main as module_main
     from aurascan.makepkg_wrapper import main as wrapper_main
 
     assert callable(cli_main)
+    assert callable(module_main)
     assert callable(wrapper_main)
 
 
@@ -47,6 +49,11 @@ def test_readme_contains_release_safety_boundaries():
         "metadata-only tuning is opt-in",
         "aurascan init",
         "aurascan doctor",
+        "python -m aurascan init",
+        "python -m aurascan doctor",
+        "python -m pip install -e \".[test]\" && python -m aurascan init",
+        "sudo pacman -s aurascan && aurascan init",
+        "does not auto-run the wizard",
         "aurascan_ai_enabled",
         "provider-specific keys",
     ]

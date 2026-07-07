@@ -19,6 +19,32 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
+## Quickstart
+
+For a development checkout, install AuraScan and launch the setup wizard with
+one shell command:
+
+```bash
+python -m pip install -e ".[test]" && python -m aurascan init
+```
+
+Then verify the local setup:
+
+```bash
+python -m aurascan doctor
+```
+
+For a packaged Arch/CachyOS install, the intended first-use flow is:
+
+```bash
+sudo pacman -S aurascan && aurascan init
+aurascan doctor
+```
+
+Installation does not auto-run the wizard, collect API keys, write user config,
+or install local `/etc` hooks as a side effect. Setup starts only when you run
+`aurascan init` or `python -m aurascan init`.
+
 ## Why AuraScan Is Useful For Arch Users
 
 AUR packages can run build scripts. Maintainer/package takeovers, source URL
@@ -39,12 +65,14 @@ python -m pip install -e ".[test]"
 ```
 
 This installs the `aurascan` and `aurascan-makepkg` console scripts into the
-active environment. It does not install pacman hooks.
+active environment. It does not install pacman hooks and does not run the
+wizard.
 
 The Arch packaging skeleton lives under `packaging/arch/`. It is a starting
 point for an Arch package that installs `/usr/bin/aurascan`,
-`/usr/bin/aurascan-makepkg`, and the pacman hook template. Review and finalize
-that package recipe before publishing it.
+`/usr/bin/aurascan-makepkg`, the pacman hook template, and a non-interactive
+post-install message that points users to `aurascan init` and `aurascan doctor`.
+Review and finalize that package recipe before publishing it.
 
 ## What It Checks
 
@@ -84,6 +112,8 @@ First-run setup:
 aurascan init
 aurascan doctor
 aurascan doctor --check-ai
+python -m aurascan init
+python -m aurascan doctor
 ```
 
 `aurascan init` can configure an AI provider, save the API key in

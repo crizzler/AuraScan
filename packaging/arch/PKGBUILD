@@ -10,6 +10,7 @@ pkgdesc="Security-focused package scanner and auditor for Arch/CachyOS/AUR workf
 arch=('any')
 url="https://example.invalid/aurascan"
 license=('MIT')
+install=aurascan.install
 depends=('python')
 makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel')
 checkdepends=('python-pytest')

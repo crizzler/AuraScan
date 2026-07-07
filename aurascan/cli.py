@@ -6,13 +6,18 @@ from typing import List
 
 from aurascan.core.config import load_env
 from aurascan.core.engine import AuraScanEngine
+from aurascan.setup_wizard import run_doctor, run_init
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aurascan",
         description="Scan Arch/CachyOS/AUR package metadata, PKGBUILDs, and package archives.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
+            "Setup commands:\n"
+            "  aurascan init      First-run configuration wizard.\n"
+            "  aurascan doctor    Local diagnostics for config, tools, AI, and hooks.\n\n"
             "Pacman hook mode: when no --pkg or --pkgbuild is supplied, AuraScan "
             "reads pacman NeedsTargets from stdin and scans package archives. This "
             "mode is conservative, does not prove update context for smart fast "
@@ -84,8 +89,14 @@ def scan_pacman_hook_targets(engine: AuraScanEngine, targets: List[str], *, cach
 
 
 def main(argv=None):
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     load_env()
-    args = build_parser().parse_args(argv)
+    if raw_argv and raw_argv[0] == "init":
+        sys.exit(run_init(raw_argv[1:]))
+    if raw_argv and raw_argv[0] == "doctor":
+        sys.exit(run_doctor(raw_argv[1:]))
+
+    args = build_parser().parse_args(raw_argv)
     engine = AuraScanEngine(
         json_output=args.json_mode,
         deep_static=args.deep_static,

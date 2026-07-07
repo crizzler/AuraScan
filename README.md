@@ -78,6 +78,25 @@ that packaging behavior is harmless.
 
 ## Basic Usage
 
+First-run setup:
+
+```bash
+aurascan init
+aurascan doctor
+aurascan doctor --check-ai
+```
+
+`aurascan init` can configure an AI provider, save the API key in
+`~/.config/aurascan/.env`, and optionally install a local pacman hook at
+`/etc/pacman.d/hooks/aurascan.hook`. API keys are prompted with hidden input
+and the user config file is written with restrictive permissions.
+
+Network AI analysis is explicit in wizard-created configs. If you choose
+local-only mode, AuraScan writes `AURASCAN_AI_ENABLED=0` and keeps normal scans
+local. `aurascan doctor` checks the selected provider, key presence, optional
+tools, hook status, and config permissions. It does not contact the provider
+unless `--check-ai` is supplied.
+
 Scan a PKGBUILD:
 
 ```bash
@@ -218,10 +237,22 @@ participate in smart or new-only decisions only with
 
 ## Privacy And External Tools
 
-Default scans are local. Deep static source acquisition can contact source
-hosts and, unless disabled, a configured keyserver for PGP key lookup. The
-metadata-only tuning helper fetches only PKGBUILD and `.SRCINFO` text from the
-AUR and does not download declared sources.
+Default scans are local unless network AI analysis has been explicitly enabled
+or a legacy `AURASCAN_AI_KEY` environment variable is present. The first-run
+wizard writes an explicit `AURASCAN_AI_ENABLED` value so the user's choice is
+clear. When enabled, AI analysis may send package metadata, PKGBUILD text, and
+install-script text to the configured provider.
+
+Supported AI provider IDs are `openai`, `anthropic`, `deepseek`, `gemini`, and
+`openrouter`. Provider-specific keys use `AURASCAN_OPENAI_API_KEY`,
+`AURASCAN_ANTHROPIC_API_KEY`, `AURASCAN_DEEPSEEK_API_KEY`,
+`AURASCAN_GEMINI_API_KEY`, or `AURASCAN_OPENROUTER_API_KEY`. Legacy
+`AURASCAN_AI_KEY` remains supported for existing setups.
+
+Deep static source acquisition can contact source hosts and, unless disabled,
+a configured keyserver for PGP key lookup. The metadata-only tuning helper
+fetches only PKGBUILD and `.SRCINFO` text from the AUR and does not download
+declared sources.
 
 External tools are optional where appropriate. Missing ClamAV, GPG, makepkg,
 pacman, or vercmp should fail gracefully in the paths that can proceed without

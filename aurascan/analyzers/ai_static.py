@@ -1,24 +1,30 @@
 import os
 import sys
-import json
-import urllib.request
 import urllib.error
 import socket
 import subprocess
 from aurascan.core.models import AnalysisResult, Finding, Phase, Source, Severity, Confidence, EvidenceQuality
 from aurascan.core.config import MAX_SCRIPT_SIZE
+from aurascan.core.ai_provider import AIProviderError, call_ai_provider, resolve_ai_config
 from aurascan.analyzers.base import BaseAnalyzer
 
 class AIStaticAnalyzer(BaseAnalyzer):
     def _call_api(self, content_type: str, content: str, pkg_path: str = None) -> AnalysisResult:
-        api_key = os.environ.get("AURASCAN_AI_KEY")
-        provider = os.environ.get("AURASCAN_AI_PROVIDER", "gemini").lower()
+        config = resolve_ai_config(os.environ)
 
-        if not api_key:
-            print("[AuraScan] WARNING: AURASCAN_AI_KEY environment variable not set. Skipping AI reasoning.", file=sys.stderr)
+        if config.error:
+            print(f"[AuraScan] WARNING: AI provider configuration is invalid ({config.error}). Skipping AI reasoning.", file=sys.stderr)
+            return AnalysisResult(True, "AI scan skipped (Invalid provider configuration)")
+
+        if not config.enabled:
+            print("[AuraScan] AI reasoning is disabled or not configured. Skipping AI review.", file=sys.stderr)
+            return AnalysisResult(True, "AI scan skipped (Disabled or not configured)")
+
+        if not config.api_key:
+            print(f"[AuraScan] WARNING: {config.key_env or 'AURASCAN_AI_KEY'} environment variable not set. Skipping AI reasoning.", file=sys.stderr)
             return AnalysisResult(True, "AI scan skipped (No API key)")
 
-        print(f"[AuraScan] Analyzing {content_type} with AI ({provider})...", file=sys.stderr)
+        print(f"[AuraScan] Analyzing {content_type} with AI ({config.provider})...", file=sys.stderr)
 
         sanitized_content = content.replace("<UNTRUSTED_DATA>", "[REDACTED]").replace("</UNTRUSTED_DATA>", "[REDACTED]")
 
@@ -38,69 +44,45 @@ CRITICAL INSTRUCTIONS:
 </UNTRUSTED_DATA>
 """
 
-        headers = {'Content-Type': 'application/json'}
-        data_dict = {}
-
-        if provider == "openai":
-            url = "https://api.openai.com/v1/chat/completions"
-            headers["Authorization"] = f"Bearer {api_key}"
-            data_dict = {"model": "gpt-4o", "messages": [{"role": "user", "content": prompt}], "temperature": 0.0}
-        elif provider == "deepseek":
-            url = "https://api.deepseek.com/chat/completions"
-            headers["Authorization"] = f"Bearer {api_key}"
-            data_dict = {"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}], "temperature": 0.0}
-        else:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-            data_dict = {"contents": [{"parts": [{"text": prompt}]}]}
-
-        data = json.dumps(data_dict).encode('utf-8')
-
         try:
-            req = urllib.request.Request(url, data=data, headers=headers)
-            with urllib.request.urlopen(req, timeout=30) as response:
-                result = json.loads(response.read().decode('utf-8'))
+            text = call_ai_provider(config, prompt)
 
-                if provider in ["openai", "deepseek"]:
-                    text = result.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
-                else:
-                    text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '').strip()
-
-                if text.startswith("MALICIOUS:"):
-                    finding = Finding(
-                        rule_id="AI-HEURISTIC-001",
-                        package_name="unknown",
-                        package_version="unknown",
-                        phase=Phase.pkgbuild_static,
-                        source=Source.ai_review,
-                        severity=Severity.HIGH,
-                        confidence=Confidence.MEDIUM,
-                        evidence_quality=EvidenceQuality.ai_interpretation,
-                        file_path=str(pkg_path if isinstance(pkg_path, str) else "content"),
-                        explanation=text,
-                        recommendation="Review the script manually. The AI detected suspicious behavior.",
-                        blocks_installation=True,
-                        requires_manual_review=True
-                    )
-                    return AnalysisResult(False, "Malicious logic found", [finding])
-                elif text.startswith("BENIGN:"):
-                    return AnalysisResult(True, "Clean", [])
-                else:
-                    finding = Finding(
-                        rule_id="AI-HEURISTIC-002",
-                        package_name="unknown",
-                        package_version="unknown",
-                        phase=Phase.pkgbuild_static,
-                        source=Source.ai_review,
-                        severity=Severity.CRITICAL,
-                        confidence=Confidence.CONFIRMED,
-                        evidence_quality=EvidenceQuality.strong_heuristic,
-                        file_path=str(pkg_path if isinstance(pkg_path, str) else "content"),
-                        explanation=f"Output format violation (Possible prompt injection). Raw output: {text[:100]}...",
-                        recommendation="DO NOT INSTALL. Possible AI manipulation detected.",
-                        blocks_installation=True,
-                        requires_manual_review=False
-                    )
-                    return AnalysisResult(False, "Prompt injection detected", [finding])
+            if text.startswith("MALICIOUS:"):
+                finding = Finding(
+                    rule_id="AI-HEURISTIC-001",
+                    package_name="unknown",
+                    package_version="unknown",
+                    phase=Phase.pkgbuild_static,
+                    source=Source.ai_review,
+                    severity=Severity.HIGH,
+                    confidence=Confidence.MEDIUM,
+                    evidence_quality=EvidenceQuality.ai_interpretation,
+                    file_path=str(pkg_path if isinstance(pkg_path, str) else "content"),
+                    explanation=text,
+                    recommendation="Review the script manually. The AI detected suspicious behavior.",
+                    blocks_installation=True,
+                    requires_manual_review=True
+                )
+                return AnalysisResult(False, "Malicious logic found", [finding])
+            elif text.startswith("BENIGN:"):
+                return AnalysisResult(True, "Clean", [])
+            else:
+                finding = Finding(
+                    rule_id="AI-HEURISTIC-002",
+                    package_name="unknown",
+                    package_version="unknown",
+                    phase=Phase.pkgbuild_static,
+                    source=Source.ai_review,
+                    severity=Severity.CRITICAL,
+                    confidence=Confidence.CONFIRMED,
+                    evidence_quality=EvidenceQuality.strong_heuristic,
+                    file_path=str(pkg_path if isinstance(pkg_path, str) else "content"),
+                    explanation=f"Output format violation (Possible prompt injection). Raw output: {text[:100]}...",
+                    recommendation="DO NOT INSTALL. Possible AI manipulation detected.",
+                    blocks_installation=True,
+                    requires_manual_review=False
+                )
+                return AnalysisResult(False, "Prompt injection detected", [finding])
 
         except urllib.error.URLError as e:
             if isinstance(e.reason, socket.timeout):
@@ -108,6 +90,9 @@ CRITICAL INSTRUCTIONS:
                 finding = Finding("AI-TIMEOUT", "unknown", "unknown", Phase.pkgbuild_static, Source.ai_review, Severity.MEDIUM, Confidence.MEDIUM, EvidenceQuality.weak_heuristic, str(pkg_path), "AI API timeout (Possible DoS)", "Retry later", True, True)
                 return AnalysisResult(False, "AI API timeout", [finding])
             return AnalysisResult(True, f"AI Network Error: {e}", [])
+        except AIProviderError as e:
+            print(f"[AuraScan] WARNING: {e}. Skipping AI reasoning.", file=sys.stderr)
+            return AnalysisResult(True, f"AI Error: {e}", [])
         except Exception as e:
             print(f"[AuraScan] ERROR communicating with AI: {e}", file=sys.stderr)
             return AnalysisResult(True, f"AI Error: {e}", [])

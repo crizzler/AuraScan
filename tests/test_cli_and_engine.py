@@ -7,6 +7,7 @@ from aurascan.core.cache import ScanCache
 from aurascan.core.engine import AuraScanEngine
 from aurascan.core.models import AnalysisResult, Confidence, EvidenceQuality, Finding, Phase, ScanReport, Severity, Source
 from aurascan.core.update_policy import UpdateScanPolicy
+import aurascan.cli as cli
 
 
 class NoopAnalyzer:
@@ -119,6 +120,39 @@ def test_allow_user_asserted_update_context_flag_is_parsed_correctly():
     ])
 
     assert args.allow_user_asserted_update_context is True
+
+
+def test_setup_commands_are_mentioned_in_help():
+    help_text = build_parser().format_help()
+
+    assert "aurascan init" in help_text
+    assert "aurascan doctor" in help_text
+
+
+def test_init_subcommand_dispatches_before_scan_parser(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "load_env", lambda: None)
+    monkeypatch.setattr(cli, "run_init", lambda argv: calls.append(argv) or 0)
+
+    try:
+        cli.main(["init", "--disable-ai"])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    assert calls == [["--disable-ai"]]
+
+
+def test_doctor_subcommand_dispatches_before_scan_parser(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "load_env", lambda: None)
+    monkeypatch.setattr(cli, "run_doctor", lambda argv: calls.append(argv) or 0)
+
+    try:
+        cli.main(["doctor", "--json"])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    assert calls == [["--json"]]
 
 
 def test_default_scan_does_not_enable_deep_static():

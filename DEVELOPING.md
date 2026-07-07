@@ -84,6 +84,28 @@ fallback presenter wording.
 useful before release tuning, while the default audit remains advisory so
 low-risk fallback notes do not block routine development.
 
+## First-run setup and doctor
+
+`aurascan init` is the interactive setup path for user-level configuration. It
+writes only `~/.config/aurascan/.env`, creates the config directory with `0700`,
+and writes the env file with `0600`. Do not add command-line API key flags;
+secrets must be entered through hidden input or preexisting environment/config.
+
+Wizard-created configs must set `AURASCAN_AI_ENABLED` explicitly. Local-only
+setup writes `AURASCAN_AI_ENABLED=0`. Network AI setup may write
+`AURASCAN_AI_PROVIDER`, `AURASCAN_AI_MODEL`, and one provider-specific key such
+as `AURASCAN_OPENAI_API_KEY`. Legacy `AURASCAN_AI_KEY` remains supported so
+existing users do not lose behavior.
+
+`aurascan doctor` is diagnostic. It must not contact AI providers unless
+`--check-ai` is supplied, and it must never print secret values. Missing
+optional tools should be warnings unless the checked workflow cannot proceed.
+
+Manual hook setup from `aurascan init` is allowed only for the local admin hook
+path `/etc/pacman.d/hooks/aurascan.hook`. The installer must refuse hook writes
+unless `/usr/bin/aurascan` exists and the template is release-safe. Packaged
+installers should still own `/usr/share/libalpm/hooks/aurascan.hook`.
+
 ## Curated Fixture Pack
 
 The curated fixture pack lives under `tests/fixtures/curated_packages/`.

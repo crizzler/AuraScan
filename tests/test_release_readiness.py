@@ -45,6 +45,10 @@ def test_readme_contains_release_safety_boundaries():
         "\"no new dependencies\" is not enough",
         "--scan-context auto",
         "metadata-only tuning is opt-in",
+        "aurascan init",
+        "aurascan doctor",
+        "aurascan_ai_enabled",
+        "provider-specific keys",
     ]
     for phrase in required_phrases:
         assert phrase in readme

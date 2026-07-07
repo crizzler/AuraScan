@@ -34,10 +34,12 @@ Then verify the local setup:
 python -m aurascan doctor
 ```
 
-For a packaged Arch/CachyOS install, the intended first-use flow is:
+AuraScan is not currently published to the AUR or official Arch/CachyOS
+repositories. Once you build a local Arch package from `packaging/arch/`, or
+publish one later, the intended first-use flow is:
 
 ```bash
-sudo pacman -S aurascan && aurascan init
+sudo pacman -U ./aurascan-*.pkg.tar.zst && aurascan init
 aurascan doctor
 ```
 

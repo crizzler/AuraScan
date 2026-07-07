@@ -1,0 +1,14 @@
+{
+  "scenario": "systemd_unit_install",
+  "category": "suspicious_defanged",
+  "scan_modes": ["fast"],
+  "package_name": "curated-systemd-unit-install",
+  "package_version": "1.0",
+  "expected_rule_ids": ["SYS-SYSTEMD-UNIT-001"],
+  "expected_absent_rule_ids": ["SYS-SYSTEMD-AUTO-001"],
+  "expected_phases": ["pkgbuild_static"],
+  "expected_min_severity": "MEDIUM",
+  "expected_action": "manual_review",
+  "expected_manual_review": true,
+  "expected_terminal_contains": ["Package installs a systemd service file", "Manual review recommended"]
+}

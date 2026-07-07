@@ -1,0 +1,17 @@
+{
+  "scenario": "source_setup_py",
+  "category": "deep_static_source_content",
+  "scan_modes": ["deep_static"],
+  "package_name": "curated-deep-source-setup-py",
+  "package_version": "1.0",
+  "archive_scenario": "source_setup_py",
+  "expected_rule_ids": ["SOURCE-CHECKSUM-MATCH", "DEEPSTATIC-SETUPPY-SUSPICIOUS"],
+  "expected_phases": ["unpacked_source_scan"],
+  "expected_min_severity": "HIGH",
+  "expected_action": "manual_review",
+  "expected_hard_blocker": false,
+  "expected_manual_review": true,
+  "expected_deep_static_required": true,
+  "expected_no_network": true,
+  "expected_terminal_contains": ["Risk Score", "Recommended Action"]
+}

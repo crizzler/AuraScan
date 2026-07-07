@@ -1,0 +1,14 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-benign-service-packaging
+pkgver=1.0
+pkgrel=1
+pkgdesc="Benign-ish service file packaging fixture without auto-enable"
+arch=("x86_64")
+url="https://example.invalid/curated-benign-service-packaging"
+license=("MIT")
+source=("https://example.invalid/curated-benign-service-packaging-1.0.tar.gz")
+sha256sums=("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+
+package() {
+  install -Dm644 curated-benign.service "$pkgdir/usr/lib/systemd/system/curated-benign.service"
+}

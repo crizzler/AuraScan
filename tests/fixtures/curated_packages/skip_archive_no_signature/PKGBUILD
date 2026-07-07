@@ -1,0 +1,14 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-skip-archive
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged SKIP archive fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-skip-archive"
+license=("MIT")
+source=("https://example.invalid/curated-skip-archive-1.0.tar.gz")
+sha256sums=("SKIP")
+
+build() {
+  echo "defanged build step"
+}

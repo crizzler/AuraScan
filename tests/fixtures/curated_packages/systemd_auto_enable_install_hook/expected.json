@@ -1,0 +1,16 @@
+{
+  "scenario": "systemd_auto_enable_install_hook",
+  "category": "suspicious_defanged",
+  "scan_modes": ["fast", "wrapper"],
+  "package_name": "curated-systemd-auto-enable",
+  "package_version": "1.0",
+  "expected_rule_ids": ["SYS-SYSTEMD-AUTO-001"],
+  "expected_phases": ["install_hook_static"],
+  "expected_min_severity": "HIGH",
+  "expected_action": "manual_review",
+  "expected_manual_review": true,
+  "expected_manual_review_eligible": true,
+  "expected_makepkg_invoked": false,
+  "expected_wrapper_action": "manual_review_required",
+  "expected_terminal_contains": ["Package may enable a system service", "Manual review recommended"]
+}

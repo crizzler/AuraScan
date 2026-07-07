@@ -1,0 +1,16 @@
+{
+  "scenario": "eval_network_decode_combo",
+  "category": "malicious_defanged",
+  "scan_modes": ["fast", "wrapper"],
+  "package_name": "curated-eval-network-decode-combo",
+  "package_version": "1.0",
+  "expected_rule_ids": ["EXEC-EVAL-NET-001"],
+  "expected_phases": ["pkgbuild_static"],
+  "expected_min_severity": "CRITICAL",
+  "expected_action": "block",
+  "expected_manual_review": false,
+  "expected_hard_blocker": true,
+  "expected_makepkg_invoked": false,
+  "expected_wrapper_action": "scan_blocked",
+  "expected_terminal_contains": ["Package uses dynamic shell execution", "Recommended Action"]
+}

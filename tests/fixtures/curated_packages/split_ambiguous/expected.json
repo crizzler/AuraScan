@@ -1,0 +1,11 @@
+{
+  "scenario": "split_ambiguous",
+  "category": "context",
+  "scan_modes": ["context"],
+  "package_name": "curated-split",
+  "package_version": "1.1",
+  "expected_rule_ids": [],
+  "expected_action": "allow",
+  "expected_fast_path_allowed": false,
+  "expected_context_error": "ambiguous_split_package_mapping"
+}

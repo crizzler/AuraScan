@@ -1,0 +1,9 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-history-host
+pkgver=1.1
+pkgrel=1
+source=("https://mirror.example.invalid/fork/curated-history-host-1.1.tar.gz")
+sha256sums=("7777777777777777777777777777777777777777777777777777777777777777")
+build() {
+  echo "defanged build step"
+}

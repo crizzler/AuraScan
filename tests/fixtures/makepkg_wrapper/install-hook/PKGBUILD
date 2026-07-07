@@ -1,0 +1,11 @@
+# Maintainer: Fixture <fixture@example.invalid>
+pkgname=aurascan-wrapper-install-hook
+pkgver=1.0
+pkgrel=1
+install=aurascan-wrapper-install-hook.install
+source=("https://example.invalid/aurascan-wrapper-install-hook-1.0.tar.gz")
+sha256sums=("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+
+build() {
+  echo "install hook fixture"
+}

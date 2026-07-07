@@ -1,0 +1,14 @@
+# Maintainer: Fixture <fixture@example.invalid>
+pkgname=aurascan-wrapper-benign
+pkgver=1.0
+pkgrel=1
+source=("https://example.invalid/aurascan-wrapper-benign-1.0.tar.gz")
+sha256sums=("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+build() {
+  echo "harmless build fixture"
+}
+
+package() {
+  echo "harmless package fixture"
+}

@@ -1,0 +1,14 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-base64-exec
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged base64 execution fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-base64-exec"
+license=("MIT")
+source=("https://example.invalid/curated-base64-exec-1.0.tar.gz")
+sha256sums=("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+
+build() {
+  echo "defanged static pattern: base64 -d defanged_payload.txt | sh"
+}

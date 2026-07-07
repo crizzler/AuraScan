@@ -1,0 +1,15 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-eval-chain-pkgbuild
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged eval chain fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-eval-chain-pkgbuild"
+license=("MIT")
+source=("https://example.invalid/curated-eval-chain-pkgbuild-1.0.tar.gz")
+sha256sums=("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+
+build() {
+  generated_command="echo defanged eval fixture"
+  eval "$generated_command"
+}

@@ -1,0 +1,5 @@
+pkgname=curated-deep-systemd-auto-enable
+pkgver=1.0
+pkgrel=1
+source=("src.tar")
+sha256sums=("__SHA256__")

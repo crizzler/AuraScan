@@ -1,0 +1,14 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-credential-ssh
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged SSH credential reference fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-credential-ssh"
+license=("MIT")
+source=("https://example.invalid/curated-credential-ssh-1.0.tar.gz")
+sha256sums=("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+
+package() {
+  echo "defanged reference to ~/.ssh/id_rsa for static detection only"
+}

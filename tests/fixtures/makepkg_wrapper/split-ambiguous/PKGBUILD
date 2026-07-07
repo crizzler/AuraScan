@@ -1,0 +1,10 @@
+# Maintainer: Fixture <fixture@example.invalid>
+pkgname=(aurascan-wrapper-split aurascan-wrapper-split-libs)
+pkgver=1.1
+pkgrel=1
+source=("https://example.invalid/aurascan-wrapper-split-1.1.tar.gz")
+sha256sums=("5555555555555555555555555555555555555555555555555555555555555555")
+
+build() {
+  echo "ambiguous split fixture"
+}

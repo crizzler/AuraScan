@@ -1,0 +1,16 @@
+{
+  "scenario": "credential_env_manual_review",
+  "category": "suspicious_defanged",
+  "scan_modes": ["fast", "wrapper"],
+  "package_name": "curated-credential-env",
+  "package_version": "1.0",
+  "expected_rule_ids": ["CRED-ENV-001"],
+  "expected_phases": ["pkgbuild_static"],
+  "expected_min_severity": "HIGH",
+  "expected_action": "manual_review",
+  "expected_manual_review": true,
+  "expected_manual_review_eligible": true,
+  "expected_makepkg_invoked": false,
+  "expected_wrapper_action": "manual_review_required",
+  "expected_terminal_contains": ["Manual review recommended"]
+}

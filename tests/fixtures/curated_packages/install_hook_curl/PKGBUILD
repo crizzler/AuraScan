@@ -1,0 +1,15 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-install-hook-curl
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged install hook curl pipe shell fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-install-hook-curl"
+license=("MIT")
+install=curated-install-hook-curl.install
+source=("https://example.invalid/curated-install-hook-curl-1.0.tar.gz")
+sha256sums=("2222222222222222222222222222222222222222222222222222222222222222")
+
+package() {
+  echo "defanged package step"
+}

@@ -1,0 +1,18 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-simple-benign
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged simple benign fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-simple-benign"
+license=("MIT")
+source=("https://example.invalid/curated-simple-benign-1.0.tar.gz")
+sha256sums=("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+build() {
+  echo "defanged build step"
+}
+
+package() {
+  echo "defanged package step"
+}

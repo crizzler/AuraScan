@@ -1,0 +1,23 @@
+{
+  "scenario": "history_combined_supply_chain",
+  "category": "history",
+  "scan_modes": ["history"],
+  "package_name": "curated-history-combined",
+  "installed_version": "1.0",
+  "package_version": "1.1",
+  "expected_rule_ids": [
+    "HIST-MAINTAINER-CHANGED",
+    "HIST-SOURCE-HOST-CHANGED",
+    "HIST-CHECKSUM-WEAKENED",
+    "HIST-PGP-REMOVED",
+    "HIST-DEPENDS-ADDED",
+    "HIST-BUILD-NEW-NETWORK",
+    "HIST-COMBINED-SUSPICIOUS-CHANGE"
+  ],
+  "expected_min_severity": "HIGH",
+  "expected_action": "manual_review",
+  "expected_fast_path_allowed": false,
+  "expected_fast_path_action": "use_full_scan",
+  "expected_fast_path_reason": "source_host_changed",
+  "expected_terminal_contains": ["multiple supply-chain risk signals"]
+}

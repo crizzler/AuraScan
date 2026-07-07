@@ -1,0 +1,12 @@
+{
+  "scenario": "benign_git_commit",
+  "category": "benign",
+  "scan_modes": ["fast"],
+  "package_name": "curated-git-commit",
+  "package_version": "1.0",
+  "expected_rule_ids": ["SOURCE-META-SKIP-GIT-COMMIT"],
+  "expected_min_severity": "LOW",
+  "expected_action": "allow",
+  "expected_manual_review": false,
+  "expected_terminal_contains": ["Risk Score: LOW"]
+}

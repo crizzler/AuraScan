@@ -1,0 +1,12 @@
+# Maintainer: Fixture <fixture@example.invalid>
+pkgname=aurascan-wrapper-suspicious-update
+pkgver=1.0
+pkgrel=1
+source=("https://example.invalid/releases/aurascan-wrapper-suspicious-update-1.0.tar.gz")
+sha256sums=("3333333333333333333333333333333333333333333333333333333333333333")
+validpgpkeys=("0123456789ABCDEF0123456789ABCDEF01234567")
+depends=("glibc")
+
+build() {
+  echo "suspicious previous build"
+}

@@ -1,0 +1,3 @@
+post_install() {
+  echo "defanged post-install message"
+}

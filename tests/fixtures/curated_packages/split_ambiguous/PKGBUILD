@@ -1,0 +1,18 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=("curated-split" "curated-split-libs")
+pkgver=1.1
+pkgrel=1
+pkgdesc="Defanged ambiguous split package fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-split"
+license=("MIT")
+source=("https://example.invalid/curated-split-1.1.tar.gz")
+sha256sums=("3333333333333333333333333333333333333333333333333333333333333333")
+
+package_curated-split() {
+  echo "defanged package step"
+}
+
+package_curated-split-libs() {
+  echo "defanged package libs step"
+}

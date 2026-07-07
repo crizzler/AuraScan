@@ -1,0 +1,12 @@
+{
+  "scenario": "benign_install_hook",
+  "category": "benign",
+  "scan_modes": ["wrapper"],
+  "package_name": "curated-benign-install-hook",
+  "package_version": "1.0",
+  "expected_rule_ids": [],
+  "expected_min_severity": "LOW",
+  "expected_action": "allow",
+  "expected_makepkg_invoked": true,
+  "expected_wrapper_action": "makepkg_invoked"
+}

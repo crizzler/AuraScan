@@ -1,0 +1,14 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-systemd-unit-install
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged systemd unit install fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-systemd-unit-install"
+license=("MIT")
+source=("https://example.invalid/curated-systemd-unit-install-1.0.tar.gz")
+sha256sums=("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+
+package() {
+  install -Dm644 curated-systemd-unit-install.service "$pkgdir/usr/lib/systemd/system/curated-systemd-unit-install.service"
+}

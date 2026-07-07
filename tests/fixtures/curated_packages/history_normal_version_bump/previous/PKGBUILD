@@ -1,0 +1,9 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-history-normal
+pkgver=1.0
+pkgrel=1
+source=("https://example.invalid/curated-history-normal-1.0.tar.gz")
+sha256sums=("4444444444444444444444444444444444444444444444444444444444444444")
+build() {
+  echo "defanged build step"
+}

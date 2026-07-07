@@ -1,0 +1,19 @@
+{
+  "scenario": "pgp_invalid_signature",
+  "category": "deep_static_pgp",
+  "scan_modes": ["deep_static"],
+  "package_name": "curated-deep-pgp-invalid-signature",
+  "package_version": "1.0",
+  "archive_scenario": "pgp_invalid_signature",
+  "pgp_fixture": "invalid",
+  "expected_rule_ids": ["SOURCE-CHECKSUM-MATCH", "SOURCE-SIGNATURE-DETECTED", "SOURCE-VALIDPGPKEYS-DETECTED", "SIGNATURE-INVALID"],
+  "expected_absent_rule_ids": ["SIGNATURE-VERIFIED"],
+  "expected_min_severity": "CRITICAL",
+  "expected_action": "block",
+  "expected_hard_blocker": true,
+  "expected_manual_review": false,
+  "expected_deep_static_required": true,
+  "expected_no_user_keyring": true,
+  "expected_no_network": true,
+  "expected_terminal_contains": ["Risk Score", "Recommended Action"]
+}

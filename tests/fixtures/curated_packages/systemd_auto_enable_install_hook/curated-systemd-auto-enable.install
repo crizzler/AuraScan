@@ -1,0 +1,3 @@
+post_install() {
+  systemctl enable curated-systemd-auto-enable.service
+}

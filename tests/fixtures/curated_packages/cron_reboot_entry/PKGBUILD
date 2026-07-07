@@ -1,0 +1,15 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-cron-reboot-entry
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged cron reboot fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-cron-reboot-entry"
+license=("MIT")
+install=curated-cron-reboot-entry.install
+source=("https://example.invalid/curated-cron-reboot-entry-1.0.tar.gz")
+sha256sums=("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+
+package() {
+  echo "defanged package body"
+}

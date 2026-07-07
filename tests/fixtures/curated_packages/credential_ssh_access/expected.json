@@ -1,0 +1,14 @@
+{
+  "scenario": "credential_ssh_access",
+  "category": "malicious_defanged",
+  "scan_modes": ["fast", "wrapper"],
+  "package_name": "curated-credential-ssh",
+  "package_version": "1.0",
+  "expected_rule_ids": ["CRED-SSH-001"],
+  "expected_phases": ["pkgbuild_static"],
+  "expected_min_severity": "CRITICAL",
+  "expected_action": "block",
+  "expected_hard_blocker": true,
+  "expected_makepkg_invoked": false,
+  "expected_wrapper_action": "scan_blocked"
+}

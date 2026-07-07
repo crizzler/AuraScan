@@ -1,0 +1,17 @@
+{
+  "scenario": "archive_absolute_path",
+  "category": "deep_static_archive",
+  "scan_modes": ["deep_static"],
+  "package_name": "curated-deep-archive-absolute-path",
+  "package_version": "1.0",
+  "archive_scenario": "archive_absolute_path",
+  "expected_rule_ids": ["ARCHIVE-PATH-TRAVERSAL"],
+  "expected_phases": ["source_archive_scan"],
+  "expected_min_severity": "CRITICAL",
+  "expected_action": "block",
+  "expected_hard_blocker": true,
+  "expected_manual_review": true,
+  "expected_deep_static_required": true,
+  "expected_no_network": true,
+  "expected_terminal_contains": ["Risk Score", "Recommended Action"]
+}

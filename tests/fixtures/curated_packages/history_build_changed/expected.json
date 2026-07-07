@@ -1,0 +1,13 @@
+{
+  "scenario": "history_build_changed",
+  "category": "history",
+  "scan_modes": ["history"],
+  "package_name": "curated-history-build",
+  "installed_version": "1.0",
+  "package_version": "1.1",
+  "expected_rule_ids": ["HIST-BUILD-CHANGED"],
+  "expected_min_severity": "MEDIUM",
+  "expected_action": "manual_review",
+  "expected_fast_path_allowed": false,
+  "expected_fast_path_action": "use_full_scan"
+}

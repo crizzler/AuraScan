@@ -1,0 +1,9 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-history-install
+pkgver=1.1
+pkgrel=1
+source=("https://example.invalid/curated-history-install-1.1.tar.gz")
+sha256sums=("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+build() {
+  echo "defanged build step"
+}

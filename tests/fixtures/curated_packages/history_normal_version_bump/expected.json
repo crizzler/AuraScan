@@ -1,0 +1,11 @@
+{
+  "scenario": "history_normal_version_bump",
+  "category": "history",
+  "scan_modes": ["history"],
+  "package_name": "curated-history-normal",
+  "installed_version": "1.0",
+  "package_version": "1.1",
+  "expected_rule_ids": [],
+  "expected_fast_path_allowed": true,
+  "expected_fast_path_action": "use_smart_fast_path"
+}

@@ -1,0 +1,18 @@
+{
+  "scenario": "archive_oversized",
+  "category": "deep_static_archive",
+  "scan_modes": ["deep_static"],
+  "package_name": "curated-deep-archive-oversized",
+  "package_version": "1.0",
+  "archive_scenario": "archive_oversized",
+  "extractor_limits": {"max_total_size": 32},
+  "expected_rule_ids": ["ARCHIVE-OVERSIZED"],
+  "expected_phases": ["source_archive_scan"],
+  "expected_min_severity": "HIGH",
+  "expected_action": "block",
+  "expected_hard_blocker": true,
+  "expected_manual_review": true,
+  "expected_deep_static_required": true,
+  "expected_no_network": true,
+  "expected_terminal_contains": ["Risk Score", "Recommended Action"]
+}

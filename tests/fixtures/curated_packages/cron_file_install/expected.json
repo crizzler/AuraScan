@@ -1,0 +1,13 @@
+{
+  "scenario": "cron_file_install",
+  "category": "suspicious_defanged",
+  "scan_modes": ["fast"],
+  "package_name": "curated-cron-file-install",
+  "package_version": "1.0",
+  "expected_rule_ids": ["SYS-CRON-FILE-001"],
+  "expected_phases": ["pkgbuild_static"],
+  "expected_min_severity": "HIGH",
+  "expected_action": "manual_review",
+  "expected_manual_review": true,
+  "expected_terminal_contains": ["Package may add a scheduled background task", "Manual review recommended"]
+}

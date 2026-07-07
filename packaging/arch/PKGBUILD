@@ -1,0 +1,42 @@
+# Maintainer: AuraScan maintainers
+#
+# Release-packaging skeleton. Update source=, sha256sums=, url=, license=,
+# and versioning before publishing.
+
+pkgname=aurascan
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Security-focused package scanner and auditor for Arch/CachyOS/AUR workflows"
+arch=('any')
+url="https://example.invalid/aurascan"
+license=('MIT')
+depends=('python')
+makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel')
+checkdepends=('python-pytest')
+optdepends=(
+  'clamav: AV signature scanning through clamscan'
+  'gnupg: explicit deep-static signature verification'
+  'pacman: local package database and vercmp support'
+  'base-devel: makepkg wrapper workflows'
+)
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  python -m pytest -q
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 packaging/arch/aurascan.hook "$pkgdir/usr/share/libalpm/hooks/aurascan.hook"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 DEVELOPING.md "$pkgdir/usr/share/doc/$pkgname/DEVELOPING.md"
+  install -Dm644 docs/RELEASE_CHECKLIST.md "$pkgdir/usr/share/doc/$pkgname/RELEASE_CHECKLIST.md"
+}

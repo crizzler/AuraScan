@@ -1,0 +1,15 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-systemd-auto-enable
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged systemd auto-enable install hook fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-systemd-auto-enable"
+license=("MIT")
+install=curated-systemd-auto-enable.install
+source=("https://example.invalid/curated-systemd-auto-enable-1.0.tar.gz")
+sha256sums=("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+
+package() {
+  echo "defanged package body"
+}

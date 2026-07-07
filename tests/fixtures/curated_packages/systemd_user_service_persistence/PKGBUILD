@@ -1,0 +1,14 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-systemd-user-service
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged systemd user service persistence fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-systemd-user-service"
+license=("MIT")
+source=("https://example.invalid/curated-systemd-user-service-1.0.tar.gz")
+sha256sums=("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+
+package() {
+  install -Dm644 curated-user.service "$HOME/.config/systemd/user/curated-user.service"
+}

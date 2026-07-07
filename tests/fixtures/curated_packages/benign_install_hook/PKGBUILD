@@ -1,0 +1,15 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-benign-install-hook
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged benign install hook fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-benign-install-hook"
+license=("MIT")
+install=curated-benign-install-hook.install
+source=("https://example.invalid/curated-benign-install-hook-1.0.tar.gz")
+sha256sums=("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+
+package() {
+  echo "defanged package step"
+}

@@ -1,0 +1,15 @@
+{
+  "scenario": "weak_checksum",
+  "category": "suspicious_defanged",
+  "scan_modes": ["fast", "wrapper"],
+  "package_name": "curated-weak-checksum",
+  "package_version": "1.0",
+  "expected_rule_ids": ["SOURCE-META-WEAK-CHECKSUM"],
+  "expected_phases": ["pkgbuild_static"],
+  "expected_min_severity": "MEDIUM",
+  "expected_action": "manual_review",
+  "expected_manual_review": true,
+  "expected_manual_review_eligible": true,
+  "expected_makepkg_invoked": false,
+  "expected_wrapper_action": "manual_review_required"
+}

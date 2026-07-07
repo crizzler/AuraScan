@@ -1,0 +1,15 @@
+{
+  "scenario": "signature_metadata",
+  "category": "benign",
+  "scan_modes": ["fast"],
+  "package_name": "curated-signature-metadata",
+  "package_version": "1.0",
+  "expected_rule_ids": [
+    "SOURCE-META-SIGNATURE-PRESENT",
+    "SOURCE-META-SKIP-ARCHIVE-WITH-SIGNATURE"
+  ],
+  "expected_min_severity": "LOW",
+  "expected_action": "allow",
+  "expected_manual_review": false,
+  "expected_terminal_contains": ["Risk Score: LOW"]
+}

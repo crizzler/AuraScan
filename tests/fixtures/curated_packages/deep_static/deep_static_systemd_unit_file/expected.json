@@ -1,0 +1,19 @@
+{
+  "scenario": "deep_static_systemd_unit_file",
+  "category": "deep_static_source_content",
+  "scan_modes": ["deep_static"],
+  "package_name": "curated-deep-systemd-unit-file",
+  "package_version": "1.0",
+  "archive_scenario": "deep_static_systemd_unit_file",
+  "expected_rule_ids": ["SOURCE-CHECKSUM-MATCH", "DEEPSTATIC-SYSTEMD-UNIT-001"],
+  "expected_absent_rule_ids": ["DEEPSTATIC-SYSTEMD-AUTO-001", "DEEPSTATIC-SYSTEMD-USER-001", "DEEPSTATIC-SYSTEMD-PERSISTENCE"],
+  "expected_phases": ["unpacked_source_scan"],
+  "expected_min_severity": "MEDIUM",
+  "expected_action": "manual_review",
+  "expected_hard_blocker": false,
+  "expected_manual_review": true,
+  "expected_not_critical": true,
+  "expected_deep_static_required": true,
+  "expected_no_network": true,
+  "expected_terminal_contains": ["Source includes a systemd service file", "Manual review recommended"]
+}

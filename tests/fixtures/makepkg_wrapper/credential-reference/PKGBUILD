@@ -1,0 +1,11 @@
+# Maintainer: Fixture <fixture@example.invalid>
+pkgname=aurascan-wrapper-credential-reference
+pkgver=1.0
+pkgrel=1
+source=("https://example.invalid/aurascan-wrapper-credential-reference-1.0.tar.gz")
+sha256sums=("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+
+build() {
+  # DEFANGED FIXTURE ONLY: cat ~/.ssh/id_rsa
+  echo "this fixture must be blocked before makepkg can run"
+}

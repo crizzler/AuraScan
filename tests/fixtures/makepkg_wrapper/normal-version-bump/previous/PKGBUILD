@@ -1,0 +1,12 @@
+# Maintainer: Fixture <fixture@example.invalid>
+pkgname=aurascan-wrapper-normal-bump
+pkgver=1.0
+pkgrel=1
+source=("https://example.invalid/releases/aurascan-wrapper-normal-bump-1.0.tar.gz")
+sha256sums=("1111111111111111111111111111111111111111111111111111111111111111")
+validpgpkeys=("0123456789ABCDEF0123456789ABCDEF01234567")
+depends=("glibc")
+
+build() {
+  echo "normal build"
+}

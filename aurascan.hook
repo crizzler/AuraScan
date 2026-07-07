@@ -1,0 +1,11 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = *
+
+[Action]
+Description = Auditing package archives with AuraScan...
+When = PreTransaction
+Exec = /usr/bin/aurascan
+NeedsTargets

@@ -1,0 +1,15 @@
+{
+  "scenario": "simple_benign",
+  "category": "benign",
+  "scan_modes": ["fast", "wrapper"],
+  "package_name": "curated-simple-benign",
+  "package_version": "1.0",
+  "expected_rule_ids": [],
+  "expected_absent_rule_ids": ["NET-EXEC-001", "CRED-SSH-001"],
+  "expected_min_severity": "LOW",
+  "expected_action": "allow",
+  "expected_manual_review": false,
+  "expected_makepkg_invoked": true,
+  "expected_wrapper_action": "makepkg_invoked",
+  "expected_terminal_contains": ["Risk Score: LOW", "Recommended Action"]
+}

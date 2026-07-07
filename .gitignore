@@ -1,0 +1,62 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Local runtime state
+.cache/
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+review_decisions.db
+scancache.db
+history.db
+
+# Local scratch/demo files from manual scanner experiments
+/PKGBUILD.*
+/test_pkgbuild*
+
+# Generated key/signature material
+*.pem
+*.key
+*.kbx
+*.gpg
+*.asc
+*.sig
+.gnupg/
+keyring/
+keyrings/
+pgp-keys/
+
+# Generated tuning reports
+tools/reports/*
+!tools/reports/.gitignore
+!tools/reports/README.md
+
+# Editor and OS junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

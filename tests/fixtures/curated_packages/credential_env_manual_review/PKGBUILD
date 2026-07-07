@@ -1,0 +1,14 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-credential-env
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged env credential reference fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-credential-env"
+license=("MIT")
+source=("https://example.invalid/curated-credential-env-1.0.tar.gz")
+sha256sums=("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+
+package() {
+  echo "defanged reference to ~/.env for manual-review static detection only"
+}

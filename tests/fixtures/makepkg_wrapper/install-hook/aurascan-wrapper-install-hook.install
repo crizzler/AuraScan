@@ -1,0 +1,4 @@
+post_install() {
+  # DEFANGED FIXTURE ONLY: chmod +s /usr/bin/aurascan-wrapper-install-hook
+  echo "this fixture must be scanned before makepkg install flow"
+}

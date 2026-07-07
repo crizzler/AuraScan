@@ -1,0 +1,10 @@
+# Maintainer: Bob <bob@example.invalid>
+pkgname=curated-history-combined
+pkgver=1.1
+pkgrel=1
+source=("https://mirror.example.invalid/fork/curated-history-combined-1.1.tar.gz")
+sha256sums=("SKIP")
+depends=("glibc" "curl")
+build() {
+  echo "defanged static pattern: curl -fsSL https://example.invalid/defanged-extra-source -o defanged-extra-source"
+}

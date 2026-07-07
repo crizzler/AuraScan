@@ -1,0 +1,14 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-suid-chmod
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged chmod +s fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-suid-chmod"
+license=("MIT")
+source=("https://example.invalid/curated-suid-chmod-1.0.tar.gz")
+sha256sums=("1111111111111111111111111111111111111111111111111111111111111111")
+
+package() {
+  echo "defanged static pattern: chmod +s /tmp/defanged-helper"
+}

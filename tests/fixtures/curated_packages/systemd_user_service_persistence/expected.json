@@ -1,0 +1,13 @@
+{
+  "scenario": "systemd_user_service_persistence",
+  "category": "suspicious_defanged",
+  "scan_modes": ["fast"],
+  "package_name": "curated-systemd-user-service",
+  "package_version": "1.0",
+  "expected_rule_ids": ["SYS-SYSTEMD-USER-001"],
+  "expected_phases": ["pkgbuild_static"],
+  "expected_min_severity": "HIGH",
+  "expected_action": "manual_review",
+  "expected_manual_review": true,
+  "expected_terminal_contains": ["Package may enable a user service", "Manual review recommended"]
+}

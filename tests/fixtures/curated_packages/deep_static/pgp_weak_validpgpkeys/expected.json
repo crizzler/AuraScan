@@ -1,0 +1,19 @@
+{
+  "scenario": "pgp_weak_validpgpkeys",
+  "category": "deep_static_pgp",
+  "scan_modes": ["deep_static"],
+  "package_name": "curated-deep-pgp-weak-validpgpkeys",
+  "package_version": "1.0",
+  "archive_scenario": "pgp_weak_validpgpkeys",
+  "pgp_fixture": "weak_validpgpkeys",
+  "expected_rule_ids": ["SOURCE-CHECKSUM-MATCH", "SOURCE-SIGNATURE-DETECTED", "SOURCE-VALIDPGPKEY-WEAK"],
+  "expected_absent_rule_ids": ["SIGNATURE-VERIFIED", "KEY_UNAVAILABLE"],
+  "expected_min_severity": "MEDIUM",
+  "expected_action": "manual_review",
+  "expected_hard_blocker": false,
+  "expected_manual_review": true,
+  "expected_deep_static_required": true,
+  "expected_no_user_keyring": true,
+  "expected_no_network": true,
+  "expected_terminal_contains": ["Risk Score", "Recommended Action"]
+}

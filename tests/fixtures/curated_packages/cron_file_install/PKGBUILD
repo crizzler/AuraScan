@@ -1,0 +1,14 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-cron-file-install
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged cron file install fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-cron-file-install"
+license=("MIT")
+source=("https://example.invalid/curated-cron-file-install-1.0.tar.gz")
+sha256sums=("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+
+package() {
+  install -Dm644 curated.cron "$pkgdir/etc/cron.d/curated-cron-file-install"
+}

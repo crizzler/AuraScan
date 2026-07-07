@@ -1,0 +1,17 @@
+# Development-only pacman hook example.
+#
+# Do not install this file on a normal system and do not package it for users.
+# Replace /path/to/AuraScan with a local checkout only when manually testing
+# hook behavior from source.
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = *
+
+[Action]
+Description = Auditing package archives with AuraScan from a development checkout...
+When = PreTransaction
+Exec = /usr/bin/bash -c 'PYTHONPATH="/path/to/AuraScan" python3 -m aurascan.cli'
+NeedsTargets

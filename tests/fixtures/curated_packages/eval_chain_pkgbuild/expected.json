@@ -1,0 +1,14 @@
+{
+  "scenario": "eval_chain_pkgbuild",
+  "category": "suspicious_defanged",
+  "scan_modes": ["fast"],
+  "package_name": "curated-eval-chain-pkgbuild",
+  "package_version": "1.0",
+  "expected_rule_ids": ["EXEC-EVAL-001"],
+  "expected_absent_rule_ids": ["EXEC-EVAL-NET-001"],
+  "expected_phases": ["pkgbuild_static"],
+  "expected_min_severity": "HIGH",
+  "expected_action": "manual_review",
+  "expected_manual_review": true,
+  "expected_terminal_contains": ["Package uses dynamic shell execution", "Manual review recommended"]
+}

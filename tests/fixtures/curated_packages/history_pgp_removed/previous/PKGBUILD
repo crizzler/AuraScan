@@ -1,0 +1,10 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-history-pgp
+pkgver=1.0
+pkgrel=1
+source=("https://example.invalid/curated-history-pgp-1.0.tar.gz")
+sha256sums=("9999999999999999999999999999999999999999999999999999999999999999")
+validpgpkeys=("0123456789ABCDEF0123456789ABCDEF01234567")
+build() {
+  echo "defanged build step"
+}

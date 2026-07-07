@@ -1,0 +1,18 @@
+{
+  "scenario": "archive_too_many_files",
+  "category": "deep_static_archive",
+  "scan_modes": ["deep_static"],
+  "package_name": "curated-deep-archive-too-many-files",
+  "package_version": "1.0",
+  "archive_scenario": "archive_too_many_files",
+  "extractor_limits": {"max_files": 3},
+  "expected_rule_ids": ["ARCHIVE-TOO-MANY-FILES"],
+  "expected_phases": ["source_archive_scan"],
+  "expected_min_severity": "HIGH",
+  "expected_action": "block",
+  "expected_hard_blocker": true,
+  "expected_manual_review": true,
+  "expected_deep_static_required": true,
+  "expected_no_network": true,
+  "expected_terminal_contains": ["Risk Score", "Recommended Action"]
+}

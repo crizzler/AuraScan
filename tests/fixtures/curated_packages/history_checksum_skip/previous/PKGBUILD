@@ -1,0 +1,9 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-history-checksum
+pkgver=1.0
+pkgrel=1
+source=("https://example.invalid/curated-history-checksum-1.0.tar.gz")
+sha256sums=("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+build() {
+  echo "defanged build step"
+}

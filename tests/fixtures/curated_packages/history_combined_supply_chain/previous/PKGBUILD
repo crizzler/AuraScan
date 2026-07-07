@@ -1,0 +1,11 @@
+# Maintainer: Alice <alice@example.invalid>
+pkgname=curated-history-combined
+pkgver=1.0
+pkgrel=1
+source=("https://example.invalid/curated-history-combined-1.0.tar.gz")
+sha256sums=("8888888888888888888888888888888888888888888888888888888888888888")
+validpgpkeys=("0123456789ABCDEF0123456789ABCDEF01234567")
+depends=("glibc")
+build() {
+  echo "defanged build step"
+}

@@ -1,0 +1,6 @@
+pkgname=curated-deep-pgp-key-unavailable
+pkgver=1.0
+pkgrel=1
+source=("src.tar" "src.tar.sig")
+sha256sums=("__SHA256__" "SKIP")
+validpgpkeys=("__VALID_FINGERPRINT__")

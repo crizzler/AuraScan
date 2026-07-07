@@ -1,0 +1,14 @@
+{
+  "scenario": "history_source_host_changed",
+  "category": "history",
+  "scan_modes": ["history"],
+  "package_name": "curated-history-host",
+  "installed_version": "1.0",
+  "package_version": "1.1",
+  "expected_rule_ids": ["HIST-SOURCE-HOST-CHANGED"],
+  "expected_min_severity": "HIGH",
+  "expected_action": "manual_review",
+  "expected_fast_path_allowed": false,
+  "expected_fast_path_action": "use_full_scan",
+  "expected_fast_path_reason": "source_host_changed"
+}

@@ -1,0 +1,17 @@
+{
+  "scenario": "cron_docs_no_warning",
+  "category": "deep_static_source_content",
+  "scan_modes": ["deep_static"],
+  "package_name": "curated-deep-cron-docs-no-warning",
+  "package_version": "1.0",
+  "archive_scenario": "cron_docs_no_warning",
+  "expected_rule_ids": ["SOURCE-CHECKSUM-MATCH"],
+  "expected_absent_rule_ids": ["DEEPSTATIC-CRON-PERSISTENCE"],
+  "expected_min_severity": "LOW",
+  "expected_action": "allow",
+  "expected_hard_blocker": false,
+  "expected_manual_review": false,
+  "expected_deep_static_required": true,
+  "expected_no_network": true,
+  "expected_terminal_contains": ["Risk Score"]
+}

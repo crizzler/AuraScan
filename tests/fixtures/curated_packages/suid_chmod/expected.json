@@ -1,0 +1,14 @@
+{
+  "scenario": "suid_chmod",
+  "category": "malicious_defanged",
+  "scan_modes": ["fast", "wrapper"],
+  "package_name": "curated-suid-chmod",
+  "package_version": "1.0",
+  "expected_rule_ids": ["SYS-CHMOD-001"],
+  "expected_phases": ["pkgbuild_static"],
+  "expected_min_severity": "HIGH",
+  "expected_action": "block",
+  "expected_hard_blocker": true,
+  "expected_makepkg_invoked": false,
+  "expected_wrapper_action": "scan_blocked"
+}

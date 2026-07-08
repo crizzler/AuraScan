@@ -94,11 +94,11 @@ This installs the `aurascan` and `aurascan-makepkg` console scripts into the
 active environment. It does not install pacman hooks and does not run the
 wizard.
 
-The Arch packaging skeleton lives under `packaging/arch/`. It is a starting
-point for an Arch or AUR package that installs `/usr/bin/aurascan`,
+The Arch/AUR packaging recipe lives under `packaging/arch/`. It installs
+`/usr/bin/aurascan`,
 `/usr/bin/aurascan-makepkg`, the pacman hook template, and a non-interactive
 post-install message that points users to `aurascan init` and `aurascan doctor`.
-Review and finalize that package recipe before publishing it.
+Review it before publishing or installing it on a real system.
 
 ## What It Checks
 

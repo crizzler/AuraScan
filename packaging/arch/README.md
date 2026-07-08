@@ -1,11 +1,11 @@
 # Arch Packaging Notes
 
-This directory is a release-packaging skeleton for AuraScan. It is not a claim
-that the package is ready for the official repositories or the AUR as-is.
+This directory contains the Arch/AUR packaging recipe for AuraScan. It is still
+review-oriented packaging, not a claim that the package is accepted into the
+official repositories or the AUR.
 
-Before publishing to the AUR, replace `sha256sums=('SKIP')` in `PKGBUILD` with
-the checksum generated from the public GitHub release/tag source archive, then
-generate `.SRCINFO` from the final PKGBUILD:
+Before publishing to the AUR, verify the checksum against the public GitHub
+release/tag source archive, then regenerate `.SRCINFO` from the final PKGBUILD:
 
 ```bash
 updpkgsums

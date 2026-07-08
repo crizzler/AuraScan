@@ -64,6 +64,7 @@ candidate.
 ## Packaging Metadata
 
 - `pyproject.toml` version is correct for the release.
+- GitHub release notes exist under `docs/releases/` for the release.
 - `aurascan` console script points to `aurascan.cli:main`.
 - `aurascan-makepkg` console script points to `aurascan.makepkg_wrapper:main`.
 - Runtime dependencies remain minimal and documented.
@@ -98,8 +99,22 @@ candidate.
 - Generated report hygiene is documented.
 - MIT license is present.
 - README is up to date for the release.
+- GitHub repository description and topics are up to date for discovery.
+- Announcement/community-post draft is up to date when the release introduces
+  user-visible workflow changes.
 - `pyproject.toml` metadata is reviewed.
 - No developer-local absolute paths remain in release files.
+
+## Distribution And Discovery
+
+- GitHub release is published for the tag.
+- Release is marked as the latest release when appropriate.
+- Repository topics include Arch/CachyOS/AUR/pacman/security discovery terms.
+- AUR packaging source URL points at the public GitHub repo before publication.
+- AUR publication has a generated `.SRCINFO` and real checksums, or the package
+  remains clearly documented as a skeleton.
+- External posts link directly to the repo or release and state the developer
+  preview limits.
 
 ## Generated Reports
 

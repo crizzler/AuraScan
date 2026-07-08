@@ -17,8 +17,8 @@ def test_pyproject_console_scripts_are_registered():
     assert scripts["aurascan-makepkg"] == "aurascan.makepkg_wrapper:main"
     assert data["project"]["requires-python"] == ">=3.8"
     assert data["project"]["dependencies"] == []
-    assert data["project"]["license"]["text"] == "MIT"
-    assert "License :: OSI Approved :: MIT License" in data["project"]["classifiers"]
+    assert data["project"]["license"] == "MIT"
+    assert data["project"]["license-files"] == ["LICENSE"]
     assert "pytest>=8.0" in data["project"]["optional-dependencies"]["test"]
 
 

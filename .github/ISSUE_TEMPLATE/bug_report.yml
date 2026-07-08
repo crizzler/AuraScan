@@ -1,0 +1,54 @@
+name: Bug report
+description: Report a crash, wrong result, or confusing AuraScan behavior.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing AuraScan. Please avoid pasting API keys, private configs, or full secrets in reports.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: Paste the AuraScan command you ran.
+      render: bash
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      description: Include the smallest useful output, redacted if needed.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: AuraScan version or commit
+      placeholder: "v0.2.0 or git commit"
+  - type: dropdown
+    id: workflow
+    attributes:
+      label: Workflow
+      options:
+        - PKGBUILD scan
+        - Package archive scan
+        - makepkg wrapper
+        - pacman hook
+        - upgrade preflight
+        - config drift assistant
+        - setup wizard or doctor
+        - other
+  - type: textarea
+    id: system
+    attributes:
+      label: System context
+      description: Distro, kernel family, AUR helper, and Python version if relevant.
+      placeholder: "CachyOS, linux-cachyos, Shelly, Python 3.13"

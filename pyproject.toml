@@ -1,26 +1,44 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "aurascan"
-version = "0.1.0"
-description = "AI-supported package scanner and auditor for Arch Linux."
+version = "0.2.0"
+description = "AI-assisted safety layer for Arch/CachyOS package, AUR, and upgrade workflows."
 readme = "README.md"
 authors = [{name = "AuraScan Team"}]
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = []
 requires-python = ">=3.8"
+keywords = [
+    "arch-linux",
+    "cachyos",
+    "pacman",
+    "aur",
+    "pkgbuild",
+    "makepkg",
+    "linux-security",
+    "upgrade-preflight",
+    "config-drift",
+    "ai",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: System Administrators",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Topic :: Security",
     "Topic :: System :: Archiving :: Packaging",
 ]
+
+[project.urls]
+Homepage = "https://github.com/crizzler/AuraScan"
+Repository = "https://github.com/crizzler/AuraScan"
+Issues = "https://github.com/crizzler/AuraScan/issues"
+Releases = "https://github.com/crizzler/AuraScan/releases"
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
@@ -28,3 +46,6 @@ test = ["pytest>=8.0"]
 [project.scripts]
 aurascan = "aurascan.cli:main"
 aurascan-makepkg = "aurascan.makepkg_wrapper:main"
+
+[tool.setuptools.packages.find]
+include = ["aurascan*"]

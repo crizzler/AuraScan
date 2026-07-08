@@ -3,6 +3,22 @@
 This directory is a release-packaging skeleton for AuraScan. It is not a claim
 that the package is ready for the official repositories or the AUR as-is.
 
+Before publishing to the AUR, replace `sha256sums=('SKIP')` in `PKGBUILD` with
+the checksum generated from the public GitHub release/tag source archive, then
+generate `.SRCINFO` from the final PKGBUILD:
+
+```bash
+updpkgsums
+makepkg --printsrcinfo > .SRCINFO
+makepkg -Ccsr
+```
+
+The project URL is:
+
+```text
+https://github.com/crizzler/AuraScan
+```
+
 The release pacman hook is `packaging/arch/aurascan.hook`. It is intended to be
 installed by an Arch package to:
 

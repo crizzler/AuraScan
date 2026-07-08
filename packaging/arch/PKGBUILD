@@ -1,14 +1,13 @@
 # Maintainer: AuraScan maintainers
 #
-# Release-packaging skeleton. Update source=, sha256sums=, url=, license=,
-# and versioning before publishing.
+# Release-packaging skeleton. Replace sha256sums before publishing to the AUR.
 
 pkgname=aurascan
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
-pkgdesc="Security-focused package scanner and auditor for Arch/CachyOS/AUR workflows"
+pkgdesc="AI-assisted safety layer for Arch/CachyOS package, AUR, and upgrade workflows"
 arch=('any')
-url="https://example.invalid/aurascan"
+url="https://github.com/crizzler/AuraScan"
 license=('MIT')
 install=aurascan.install
 depends=('python')
@@ -17,10 +16,13 @@ checkdepends=('python-pytest')
 optdepends=(
   'clamav: AV signature scanning through clamscan'
   'gnupg: explicit deep-static signature verification'
-  'pacman: local package database and vercmp support'
+  'pacman: local package database, upgrade preflight, and vercmp support'
   'base-devel: makepkg wrapper workflows'
+  'paru: AUR update context for aurascan upgrade'
+  'yay: AUR update context for aurascan upgrade'
+  'shelly: CachyOS/Arch update handoff for aurascan upgrade'
 )
-source=("$pkgname-$pkgver.tar.gz")
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 build() {

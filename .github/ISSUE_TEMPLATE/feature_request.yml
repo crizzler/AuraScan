@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest a new AuraScan check, workflow, or UX improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user pain or safety gap should AuraScan solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the command, output, or rule you would like.
+    validations:
+      required: true
+  - type: dropdown
+    id: workflow
+    attributes:
+      label: Workflow area
+      options:
+        - PKGBUILD scan
+        - Package archive scan
+        - makepkg wrapper
+        - pacman hook
+        - upgrade preflight
+        - config drift assistant
+        - AI review
+        - packaging or installation
+        - other
+  - type: textarea
+    id: notes
+    attributes:
+      label: Extra context
+      description: Links, examples, or edge cases that would help.

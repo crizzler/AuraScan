@@ -1,9 +1,12 @@
 # AuraScan
 
-AuraScan is a security-focused package scanner for Arch, CachyOS, and AUR
-workflows. It is designed to catch the vast majority of obvious and moderately
-sophisticated malicious package behavior and to reduce risk during package
-installation.
+AI-assisted package safety for Arch Linux, CachyOS, pacman, AUR, PKGBUILD,
+makepkg, and upgrade workflows.
+
+AuraScan is a security-focused package scanner and upgrade preflight assistant
+for Arch, CachyOS, and AUR workflows. It is designed to catch obvious and
+moderately sophisticated malicious package behavior, explain risky package
+metadata clearly, and reduce breakage risk before routine upgrades.
 
 AuraScan does not prove that a package is safe. A clean report, a clean ClamAV
 result, or a valid source signature is not a guarantee. The goal is to find risk
@@ -19,10 +22,26 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
+## What You Can Try Now
+
+AuraScan currently provides four practical entry points:
+
+- `aurascan --pkgbuild ./PKGBUILD` reviews package build metadata before trust.
+- `aurascan-makepkg` scans before handing control to `makepkg`.
+- `aurascan upgrade --dry-run` previews an Arch/CachyOS upgrade and reports
+  pacman, AUR helper, kernel/module, config drift, and AI-raised risks.
+- `aurascan config-drift --dry-run` explains `.pacnew` and `.pacsave` files and
+  prepares safe fixes with backups.
+
 ## Quickstart
 
-For a development checkout, install AuraScan and launch the setup wizard with
-one shell command:
+For the latest public source checkpoint, use the GitHub releases page:
+
+```text
+https://github.com/crizzler/AuraScan/releases
+```
+
+For a development checkout, install AuraScan and launch the setup wizard:
 
 ```bash
 python -m pip install -e ".[test]" && python -m aurascan init
@@ -58,6 +77,11 @@ AuraScan adds a fast automated safety layer before build or install steps. It
 is not a replacement for judgment, but it reduces blind spots and gives risky
 package behavior a clear review path.
 
+For routine system maintenance, `aurascan upgrade` is meant to feel like a
+native upgrade front door: it previews the pending transaction, checks common
+Arch/CachyOS pitfalls, optionally asks AI to raise correlated risks, and then
+hands off to pacman, paru, yay, or Shelly.
+
 ## Installation
 
 For development:
@@ -71,7 +95,7 @@ active environment. It does not install pacman hooks and does not run the
 wizard.
 
 The Arch packaging skeleton lives under `packaging/arch/`. It is a starting
-point for an Arch package that installs `/usr/bin/aurascan`,
+point for an Arch or AUR package that installs `/usr/bin/aurascan`,
 `/usr/bin/aurascan-makepkg`, the pacman hook template, and a non-interactive
 post-install message that points users to `aurascan init` and `aurascan doctor`.
 Review and finalize that package recipe before publishing it.

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=AuraScan Updater
+Comment=Guarded package upgrades with AuraScan
+Exec=aurascan updater
+Icon=aurascan-updater
+Terminal=false
+Categories=System;Utility;
+Keywords=aurascan;upgrade;updates;pacman;aur;cachyos;

@@ -8,6 +8,7 @@ from aurascan.core.config import load_env
 from aurascan.core.config_drift import run_config_drift
 from aurascan.core.engine import AuraScanEngine
 from aurascan.core.upgrade_preflight import run_upgrade
+from aurascan.core.updater_tray import run_updater
 from aurascan.setup_wizard import run_doctor, run_init
 
 
@@ -24,6 +25,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  aurascan upgrade   Preflight a system upgrade, then hand off to pacman/paru/yay/shelly.\n\n"
             "Maintenance command:\n"
             "  aurascan config-drift   Resolve .pacnew/.pacsave configuration drift with backups.\n\n"
+            "Desktop command:\n"
+            "  aurascan updater   Run or configure the AuraScan Updater tray applet.\n\n"
             "Pacman hook mode: when no --pkg or --pkgbuild is supplied, AuraScan "
             "reads pacman NeedsTargets from stdin and scans package archives. This "
             "mode is conservative, does not prove update context for smart fast "
@@ -105,6 +108,8 @@ def main(argv=None):
         sys.exit(run_upgrade(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "config-drift":
         sys.exit(run_config_drift(raw_argv[1:]))
+    if raw_argv and raw_argv[0] == "updater":
+        sys.exit(run_updater(raw_argv[1:]))
 
     args = build_parser().parse_args(raw_argv)
     engine = AuraScanEngine(

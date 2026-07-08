@@ -1,6 +1,8 @@
 from io import StringIO
 import os
 from pathlib import Path
+import re
+import tomllib
 
 from aurascan.cli import (
     build_parser,
@@ -88,6 +90,42 @@ def test_arch_pkgbuild_references_advisory_install_script():
     assert "install=aurascan.install" in text
 
 
+def test_arch_package_metadata_targets_current_public_release():
+    pyproject = tomllib.loads(read_text("pyproject.toml"))
+    version = pyproject["project"]["version"]
+    pkgbuild = read_text("packaging/arch/PKGBUILD")
+    srcinfo = read_text("packaging/arch/.SRCINFO")
+    release_notes = ROOT / "docs" / "releases" / f"v{version}.md"
+
+    assert re.search(rf"^pkgver={re.escape(version)}$", pkgbuild, re.MULTILINE)
+    assert f"v$pkgver.tar.gz" in pkgbuild
+    assert f"pkgver = {version}" in srcinfo
+    assert f"aurascan-{version}.tar.gz::https://github.com/crizzler/AuraScan/archive/refs/tags/v{version}.tar.gz" in srcinfo
+    assert release_notes.exists()
+
+
+def test_arch_pkgbuild_installs_updater_assets():
+    text = read_text("packaging/arch/PKGBUILD")
+    srcinfo = read_text("packaging/arch/.SRCINFO")
+
+    assert "python-pyqt6: AuraScan Updater tray applet" in text
+    assert "aurascan/assets/aurascan-updater.desktop" in text
+    assert "aurascan/assets/aurascan-updater.svg" in text
+    assert "/usr/share/applications/aurascan-updater.desktop" in text
+    assert "/usr/share/icons/hicolor/scalable/apps/aurascan-updater.svg" in text
+    assert "python-pyqt6: AuraScan Updater tray applet" in srcinfo
+
+
+def test_updater_desktop_asset_is_release_safe():
+    text = read_text("aurascan/assets/aurascan-updater.desktop")
+
+    assert "Name=AuraScan Updater" in text
+    assert "Exec=aurascan updater" in text
+    assert "Icon=aurascan-updater" in text
+    assert "/home/" not in text
+    assert ".venv" not in text
+
+
 def test_arch_install_script_is_advisory_only():
     text = read_text("packaging/arch/aurascan.install")
     stripped_command_lines = []
@@ -159,6 +197,7 @@ def test_cli_help_mentions_pacman_hook_mode_boundary():
 
     assert "Pacman hook mode" in help_text
     assert "NeedsTargets" in help_text
+    assert "aurascan updater" in help_text
     assert "not a replacement for aurascan-makepkg" in normalized
 
 

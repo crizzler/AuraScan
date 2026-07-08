@@ -1,0 +1,1 @@
+# AuraScan packaged desktop assets.

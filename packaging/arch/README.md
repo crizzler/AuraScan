@@ -1,23 +1,29 @@
 # Arch Packaging Notes
 
-This directory contains the Arch/AUR packaging recipe for AuraScan. It is still
-review-oriented packaging, not a claim that the package is accepted into the
-official repositories or the AUR.
+This directory contains the Arch/AUR packaging recipe for AuraScan. It is the
+package-manager-owned install path for public release builds, not a claim that
+the package is accepted into the official repositories.
 
 Before publishing to the AUR, verify the checksum against the public GitHub
 release/tag source archive, then regenerate `.SRCINFO` from the final PKGBUILD:
 
 ```bash
 updpkgsums
-makepkg --printsrcinfo > .SRCINFO
-makepkg -Ccsr
+/usr/bin/makepkg --printsrcinfo > .SRCINFO
+/usr/bin/makepkg -Ccsr
 ```
 
-The project URL is:
+Use `/usr/bin/makepkg` here so a local `aurascan-makepkg` wrapper cannot write
+diagnostic output into `.SRCINFO`.
+
+The package source URL is the tagged GitHub release archive:
 
 ```text
-https://github.com/crizzler/AuraScan
+https://github.com/crizzler/AuraScan/archive/refs/tags/v${pkgver}.tar.gz
 ```
+
+The package version must match `pyproject.toml`, and `.SRCINFO` must be
+regenerated from the final PKGBUILD before publishing.
 
 The release pacman hook is `packaging/arch/aurascan.hook`. It is intended to be
 installed by an Arch package to:
@@ -66,6 +72,11 @@ Optional external tools:
 - `gpg`: explicit deep-static signature verification outside the default hook;
 - `makepkg`: wrapper workflows through `aurascan-makepkg`;
 - `pacman`/`vercmp`: local package DB context proof for explicit `--scan-context auto` flows.
+- `python-pyqt6`: optional AuraScan Updater tray applet.
+
+The package installs the reusable `aurascan-updater.desktop` launcher and icon.
+Per-user autostart remains controlled by the wizard or `aurascan updater
+--install-autostart`; package install must not enable it automatically.
 
 Current hook failure behavior:
 

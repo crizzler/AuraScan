@@ -53,12 +53,16 @@ Then verify the local setup:
 python -m aurascan doctor
 ```
 
-AuraScan is not currently published to the AUR or official Arch/CachyOS
-repositories. Once you build a local Arch package from `packaging/arch/`, or
-publish one later, the intended first-use flow is:
+AuraScan is not currently published to the official Arch/CachyOS repositories.
+The public Arch/AUR package recipe lives under `packaging/arch/` and tracks the
+latest tagged GitHub release with a fixed source checksum. Until an AUR package
+is published, build the package from this repository:
 
 ```bash
-sudo pacman -U ./aurascan-*.pkg.tar.zst && aurascan init
+git clone https://github.com/crizzler/AuraScan.git
+cd AuraScan/packaging/arch
+makepkg -si
+aurascan init
 aurascan doctor
 ```
 
@@ -94,11 +98,11 @@ This installs the `aurascan` and `aurascan-makepkg` console scripts into the
 active environment. It does not install pacman hooks and does not run the
 wizard.
 
-The Arch/AUR packaging recipe lives under `packaging/arch/`. It installs
-`/usr/bin/aurascan`,
-`/usr/bin/aurascan-makepkg`, the pacman hook template, and a non-interactive
-post-install message that points users to `aurascan init` and `aurascan doctor`.
-Review it before publishing or installing it on a real system.
+The Arch/AUR packaging recipe installs `/usr/bin/aurascan`,
+`/usr/bin/aurascan-makepkg`, the pacman hook template, the optional updater
+desktop/icon assets, and a non-interactive post-install message that points
+users to `aurascan init` and `aurascan doctor`. Review it before publishing or
+installing it on a real system.
 
 ## What It Checks
 
@@ -155,6 +159,7 @@ drift assistant policy:
 ```bash
 aurascan init --enable-upgrade-preflight --upgrade-aur-helper auto --enable-upgrade-ai
 aurascan init --enable-config-drift --config-drift-ai-diffs ask
+aurascan init --enable-updater-tray --install-updater-autostart
 aurascan init --disable-upgrade-preflight
 ```
 
@@ -256,6 +261,41 @@ Supported helper values are `auto`, `paru`, `yay`, `shelly`, and `none`.
 `aurascan upgrade --enable-preflight` can temporarily override a disabled
 preflight setting, while `--disable-preflight` disables it for that invocation
 and does not run the upgrade command.
+
+## AuraScan Updater Tray Icon
+
+`aurascan updater` runs the optional AuraScan Updater system-tray applet. It is
+an AuraScan-owned icon that can sit beside Cachy-Update and Shelly without
+replacing either launcher.
+
+```bash
+aurascan updater
+aurascan updater --status
+aurascan updater --install-autostart
+aurascan updater --remove-autostart
+aurascan updater --no-tray
+```
+
+The tray menu opens terminal-native AuraScan flows:
+
+- Run AuraScan Upgrade: `aurascan upgrade`
+- Dry-run Preflight: `aurascan upgrade --dry-run`
+- Config Drift Assistant: `aurascan config-drift`
+- AuraScan Doctor: `aurascan doctor`
+- AuraScan Settings: `aurascan init`
+
+Double-clicking the icon runs `aurascan upgrade` where the desktop environment
+delivers double-click activation. The right-click menu is the reliable fallback
+on desktops that handle tray activation differently.
+
+Autostart is per-user and reversible. The wizard can install
+`~/.config/autostart/aurascan-updater.desktop` and a matching application
+launcher under `~/.local/share/applications/`; it does not modify
+Cachy-Update, Shelly, or system desktop files. PyQt6 or PySide6 is required only
+for the tray applet, not for normal AuraScan scans.
+
+The config keys are `AURASCAN_UPDATER_TRAY_ENABLED`,
+`AURASCAN_UPDATER_AUTOSTART`, and `AURASCAN_UPDATER_TERMINAL`.
 
 ## Config Drift Assistant
 

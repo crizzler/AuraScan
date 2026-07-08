@@ -13,6 +13,7 @@ def test_pyproject_console_scripts_are_registered():
     data = tomllib.loads(read_text("pyproject.toml"))
 
     scripts = data["project"]["scripts"]
+    assert data["project"]["version"] == "0.3.0"
     assert scripts["aurascan"] == "aurascan.cli:main"
     assert scripts["aurascan-makepkg"] == "aurascan.makepkg_wrapper:main"
     assert data["project"]["requires-python"] == ">=3.8"
@@ -20,16 +21,20 @@ def test_pyproject_console_scripts_are_registered():
     assert data["project"]["license"] == "MIT"
     assert data["project"]["license-files"] == ["LICENSE"]
     assert "pytest>=8.0" in data["project"]["optional-dependencies"]["test"]
+    assert "PyQt6>=6.0" in data["project"]["optional-dependencies"]["updater"]
+    assert data["tool"]["setuptools"]["package-data"]["aurascan"] == ["assets/*"]
 
 
 def test_entry_point_targets_import():
     from aurascan.cli import main as cli_main
     from aurascan.__main__ import main as module_main
     from aurascan.makepkg_wrapper import main as wrapper_main
+    from aurascan.core.updater_tray import run_updater
 
     assert callable(cli_main)
     assert callable(module_main)
     assert callable(wrapper_main)
+    assert callable(run_updater)
 
 
 def test_readme_contains_release_safety_boundaries():
@@ -52,8 +57,9 @@ def test_readme_contains_release_safety_boundaries():
         "python -m aurascan init",
         "python -m aurascan doctor",
         "python -m pip install -e \".[test]\" && python -m aurascan init",
-        "not currently published to the aur or official arch/cachyos",
-        "sudo pacman -u ./aurascan-*.pkg.tar.zst && aurascan init",
+        "not currently published to the official arch/cachyos",
+        "the public arch/aur package recipe lives under `packaging/arch/`",
+        "makepkg -si",
         "does not auto-run the wizard",
         "aurascan_ai_enabled",
         "provider-specific keys",

@@ -1,7 +1,7 @@
 # Maintainer: AuraScan maintainers
 
 pkgname=aurascan
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="AI-assisted safety layer for Arch/CachyOS package, AUR, and upgrade workflows"
 arch=('any')
@@ -19,9 +19,10 @@ optdepends=(
   'paru: AUR update context for aurascan upgrade'
   'yay: AUR update context for aurascan upgrade'
   'shelly: CachyOS/Arch update handoff for aurascan upgrade'
+  'python-pyqt6: AuraScan Updater tray applet'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('05eaf0a61ce179d4110a6b42a1b5fe3f77beed7349ffb6c3fc30bd14c466c51a')
+sha256sums=('SKIP')
 
 build() {
   cd "$pkgname-$pkgver"
@@ -37,6 +38,8 @@ package() {
   cd "$pkgname-$pkgver"
   python -m installer --destdir="$pkgdir" dist/*.whl
   install -Dm644 packaging/arch/aurascan.hook "$pkgdir/usr/share/libalpm/hooks/aurascan.hook"
+  install -Dm644 aurascan/assets/aurascan-updater.desktop "$pkgdir/usr/share/applications/aurascan-updater.desktop"
+  install -Dm644 aurascan/assets/aurascan-updater.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/aurascan-updater.svg"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 DEVELOPING.md "$pkgdir/usr/share/doc/$pkgname/DEVELOPING.md"
   install -Dm644 docs/RELEASE_CHECKLIST.md "$pkgdir/usr/share/doc/$pkgname/RELEASE_CHECKLIST.md"

@@ -10,6 +10,7 @@ from aurascan.setup_wizard import (
     run_doctor,
     run_init,
 )
+from aurascan.core.updater_tray import UPDATER_AUTOSTART_ENV, UPDATER_TERMINAL_ENV, UPDATER_TRAY_ENABLED_ENV
 
 
 class FakeResponse:
@@ -107,6 +108,49 @@ def test_init_can_disable_config_drift_assistant(tmp_path):
     assert "Config drift assistant will be disabled" in stdout.getvalue()
 
 
+def test_init_can_install_updater_autostart(tmp_path):
+    env_path = tmp_path / ".config" / "aurascan" / ".env"
+    stdout = io.StringIO()
+
+    status = run_init(
+        ["--disable-ai", "--enable-updater-tray", "--install-updater-autostart", "--no-install-hook"],
+        stdout=stdout,
+        env_path=env_path,
+        updater_config_home=tmp_path / "config",
+        updater_data_home=tmp_path / "data",
+    )
+    text = env_path.read_text(encoding="utf-8")
+
+    assert status == 0
+    assert f"{UPDATER_TRAY_ENABLED_ENV}=1" in text
+    assert f"{UPDATER_AUTOSTART_ENV}=1" in text
+    assert f"{UPDATER_TERMINAL_ENV}=auto" in text
+    assert (tmp_path / "config" / "autostart" / "aurascan-updater.desktop").exists()
+    assert (tmp_path / "data" / "applications" / "aurascan-updater.desktop").exists()
+    assert "Configured AuraScan Updater tray defaults." in stdout.getvalue()
+    assert "Installed AuraScan Updater autostart" in stdout.getvalue()
+
+
+def test_init_can_remove_updater_autostart(tmp_path):
+    env_path = tmp_path / ".config" / "aurascan" / ".env"
+    config_home = tmp_path / "config"
+    autostart = config_home / "autostart" / "aurascan-updater.desktop"
+    autostart.parent.mkdir(parents=True)
+    autostart.write_text("fixture", encoding="utf-8")
+
+    status = run_init(
+        ["--disable-ai", "--remove-updater-autostart", "--no-install-hook"],
+        stdout=io.StringIO(),
+        env_path=env_path,
+        updater_config_home=config_home,
+        updater_data_home=tmp_path / "data",
+    )
+
+    assert status == 0
+    assert not autostart.exists()
+    assert f"{UPDATER_AUTOSTART_ENV}=0" in env_path.read_text(encoding="utf-8")
+
+
 def test_doctor_json_reports_missing_key_without_leaking_values(tmp_path):
     env_path = tmp_path / ".config" / "aurascan" / ".env"
     env_path.parent.mkdir(parents=True)
@@ -190,6 +234,80 @@ def test_doctor_reports_config_drift_config(tmp_path):
     by_name = {check.name: check for check in checks}
     assert by_name["config_drift"].status == "warn"
     assert "disabled" in by_name["config_drift"].message
+
+
+def test_doctor_reports_updater_status(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"{UPDATER_TRAY_ENABLED_ENV}=1\n{UPDATER_AUTOSTART_ENV}=1\n{UPDATER_TERMINAL_ENV}=konsole\n",
+        encoding="utf-8",
+    )
+    env_path.chmod(0o600)
+    config_home = tmp_path / "config"
+    data_home = tmp_path / "data"
+    autostart = config_home / "autostart" / "aurascan-updater.desktop"
+    autostart.parent.mkdir(parents=True)
+    autostart.write_text("fixture", encoding="utf-8")
+
+    checks = build_doctor_checks(
+        env_path=env_path,
+        env={},
+        executable_path=tmp_path / "usr" / "bin" / "aurascan",
+        local_hook_path=tmp_path / "local.hook",
+        packaged_hook_path=tmp_path / "packaged.hook",
+        updater_config_home=config_home,
+        updater_data_home=data_home,
+        which=lambda name: "/usr/bin/konsole" if name == "konsole" else None,
+        qt_binding_finder=lambda: "PyQt6",
+    )
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["updater_tray"].status == "ok"
+    assert by_name["updater_qt_binding"].status == "ok"
+    assert by_name["updater_terminal"].status == "ok"
+    assert by_name["updater_autostart"].status == "ok"
+
+
+def test_doctor_accepts_packaged_hook_without_local_override(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text("AURASCAN_AI_ENABLED=0\n", encoding="utf-8")
+    env_path.chmod(0o600)
+    packaged_hook = tmp_path / "usr" / "share" / "libalpm" / "hooks" / "aurascan.hook"
+    packaged_hook.parent.mkdir(parents=True)
+    packaged_hook.write_text("Exec = /usr/bin/aurascan\nNeedsTargets\n", encoding="utf-8")
+
+    checks = build_doctor_checks(
+        env_path=env_path,
+        env={},
+        executable_path=tmp_path / "usr" / "bin" / "aurascan",
+        local_hook_path=tmp_path / "etc" / "pacman.d" / "hooks" / "aurascan.hook",
+        packaged_hook_path=packaged_hook,
+    )
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["local_pacman_hook"].status == "ok"
+    assert by_name["packaged_pacman_hook"].status == "ok"
+
+
+def test_doctor_accepts_local_hook_without_packaged_hook(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text("AURASCAN_AI_ENABLED=0\n", encoding="utf-8")
+    env_path.chmod(0o600)
+    local_hook = tmp_path / "etc" / "pacman.d" / "hooks" / "aurascan.hook"
+    local_hook.parent.mkdir(parents=True)
+    local_hook.write_text("Exec = /usr/bin/aurascan\nNeedsTargets\n", encoding="utf-8")
+
+    checks = build_doctor_checks(
+        env_path=env_path,
+        env={},
+        executable_path=tmp_path / "usr" / "bin" / "aurascan",
+        local_hook_path=local_hook,
+        packaged_hook_path=tmp_path / "usr" / "share" / "libalpm" / "hooks" / "aurascan.hook",
+    )
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["local_pacman_hook"].status == "ok"
+    assert by_name["packaged_pacman_hook"].status == "ok"
 
 
 def test_doctor_reports_bad_permissions_and_unsupported_provider(tmp_path):

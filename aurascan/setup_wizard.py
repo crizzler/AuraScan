@@ -35,6 +35,16 @@ from aurascan.core.upgrade_preflight import (
     UPGRADE_PREFLIGHT_ENABLED_ENV,
     resolve_upgrade_config,
 )
+from aurascan.core.updater_tray import (
+    UPDATER_AUTOSTART_ENV,
+    UPDATER_TERMINAL_ENV,
+    UPDATER_TRAY_ENABLED_ENV,
+    build_updater_status,
+    install_updater_autostart,
+    remove_updater_autostart,
+    resolve_updater_config,
+    updater_desktop_paths,
+)
 
 LOCAL_HOOK_PATH = Path("/etc/pacman.d/hooks/aurascan.hook")
 PACKAGED_HOOK_PATH = Path("/usr/share/libalpm/hooks/aurascan.hook")
@@ -85,6 +95,12 @@ def build_init_parser() -> argparse.ArgumentParser:
     config_drift.add_argument("--enable-config-drift", action="store_true", help="enable the config drift assistant for upgrades")
     config_drift.add_argument("--disable-config-drift", action="store_true", help="disable the config drift assistant for upgrades")
     parser.add_argument("--config-drift-ai-diffs", choices=sorted(CONFIG_DRIFT_AI_DIFFS_VALUES), help="AI diff sharing policy for the config drift assistant")
+    updater = parser.add_mutually_exclusive_group()
+    updater.add_argument("--enable-updater-tray", action="store_true", help="enable the AuraScan Updater tray icon")
+    updater.add_argument("--disable-updater-tray", action="store_true", help="disable the AuraScan Updater tray icon")
+    updater_autostart = parser.add_mutually_exclusive_group()
+    updater_autostart.add_argument("--install-updater-autostart", action="store_true", help="install per-user AuraScan Updater autostart")
+    updater_autostart.add_argument("--remove-updater-autostart", action="store_true", help="remove per-user AuraScan Updater autostart")
     hook = parser.add_mutually_exclusive_group()
     hook.add_argument("--install-hook", action="store_true", help="offer sudo install of the local pacman hook")
     hook.add_argument("--no-install-hook", action="store_true", help="skip pacman hook setup")
@@ -114,6 +130,8 @@ def run_init(
     executable_path: Path = INSTALLED_AURASCAN,
     hook_path: Path = LOCAL_HOOK_PATH,
     template_path: Path = TEMPLATE_HOOK_PATH,
+    updater_config_home: Optional[Path] = None,
+    updater_data_home: Optional[Path] = None,
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -246,8 +264,65 @@ def run_init(
         else:
             print("Config drift assistant will be disabled unless you enable it later.", file=stdout)
 
+    configure_updater = (
+        args.enable_updater_tray
+        or args.disable_updater_tray
+        or args.install_updater_autostart
+        or args.remove_updater_autostart
+    )
+    should_prompt_updater = should_prompt_upgrade
+    updater_autostart_action = ""
+    if configure_updater or should_prompt_updater:
+        existing_updater = resolve_updater_config(existing)
+        updater_enabled = existing_updater.tray_enabled if not existing_updater.error else False
+        updater_autostart_enabled = existing_updater.autostart_enabled if not existing_updater.error else False
+        updater_terminal = existing_updater.terminal if not existing_updater.error else "auto"
+
+        if args.enable_updater_tray or args.install_updater_autostart:
+            updater_enabled = True
+        elif args.disable_updater_tray:
+            updater_enabled = False
+        elif should_prompt_updater:
+            updater_enabled = _prompt_yes_no(
+                "Enable AuraScan Updater tray icon at login?",
+                input_func,
+                default=updater_enabled,
+            )
+
+        if args.install_updater_autostart:
+            updater_autostart_enabled = True
+            updater_autostart_action = "install"
+        elif args.remove_updater_autostart:
+            updater_autostart_enabled = False
+            updater_autostart_action = "remove"
+            if not args.enable_updater_tray:
+                updater_enabled = False
+        elif should_prompt_updater and updater_enabled:
+            updater_autostart_enabled = True
+            updater_autostart_action = "install"
+        elif should_prompt_updater and not updater_enabled and updater_autostart_enabled:
+            updater_autostart_enabled = False
+            updater_autostart_action = "remove"
+
+        updates[UPDATER_TRAY_ENABLED_ENV] = "1" if updater_enabled else "0"
+        updates[UPDATER_AUTOSTART_ENV] = "1" if updater_autostart_enabled else "0"
+        updates[UPDATER_TERMINAL_ENV] = updater_terminal or "auto"
+        print("Configured AuraScan Updater tray defaults.", file=stdout)
+
     write_user_env(updates, path=target_env)
     print(f"Wrote user config: {target_env}", file=stdout)
+
+    updater_paths = updater_desktop_paths(config_home=updater_config_home, data_home=updater_data_home)
+    if updater_autostart_action == "install":
+        updater_result = install_updater_autostart(paths=updater_paths)
+        print(updater_result.message, file=stdout if updater_result.ok else stderr)
+        if not updater_result.ok:
+            return 1
+    elif updater_autostart_action == "remove":
+        updater_result = remove_updater_autostart(paths=updater_paths)
+        print(updater_result.message, file=stdout if updater_result.ok else stderr)
+        if not updater_result.ok:
+            return 1
 
     if args.check_ai:
         check_env = dict(os.environ)
@@ -283,6 +358,10 @@ def run_doctor(
     executable_path: Path = INSTALLED_AURASCAN,
     local_hook_path: Path = LOCAL_HOOK_PATH,
     packaged_hook_path: Path = PACKAGED_HOOK_PATH,
+    updater_config_home: Optional[Path] = None,
+    updater_data_home: Optional[Path] = None,
+    which: Callable[[str], Optional[str]] = shutil.which,
+    qt_binding_finder: Optional[Callable[[], str]] = None,
 ) -> int:
     stdout = stdout or sys.stdout
     args = build_doctor_parser().parse_args(argv)
@@ -294,6 +373,10 @@ def run_doctor(
         executable_path=executable_path,
         local_hook_path=local_hook_path,
         packaged_hook_path=packaged_hook_path,
+        updater_config_home=updater_config_home,
+        updater_data_home=updater_data_home,
+        which=which,
+        qt_binding_finder=qt_binding_finder,
     )
     has_error = any(check.status == "error" for check in checks)
     if args.json_mode:
@@ -317,6 +400,10 @@ def build_doctor_checks(
     executable_path: Path = INSTALLED_AURASCAN,
     local_hook_path: Path = LOCAL_HOOK_PATH,
     packaged_hook_path: Path = PACKAGED_HOOK_PATH,
+    updater_config_home: Optional[Path] = None,
+    updater_data_home: Optional[Path] = None,
+    which: Callable[[str], Optional[str]] = shutil.which,
+    qt_binding_finder: Optional[Callable[[], str]] = None,
 ) -> List[DoctorCheck]:
     checks: List[DoctorCheck] = []
     file_values = _safe_read_env(env_path)
@@ -368,7 +455,7 @@ def build_doctor_checks(
                 "ai_review_enabled": upgrade_config.ai_enabled,
             },
         ))
-        if upgrade_config.aur_helper in {"paru", "yay", "shelly"} and not shutil.which(upgrade_config.aur_helper):
+        if upgrade_config.aur_helper in {"paru", "yay", "shelly"} and not which(upgrade_config.aur_helper):
             checks.append(DoctorCheck(
                 "upgrade_aur_helper",
                 "warn",
@@ -391,8 +478,40 @@ def build_doctor_checks(
     else:
         checks.append(DoctorCheck("config_drift", "warn", "Config drift assistant is disabled", {"enabled": False}))
 
+    updater_status = build_updater_status(
+        env=effective_env,
+        paths=updater_desktop_paths(config_home=updater_config_home, data_home=updater_data_home),
+        which=which,
+        qt_binding_finder=qt_binding_finder,
+    )
+    if updater_status.config.error:
+        checks.append(DoctorCheck("updater_tray", "error", updater_status.config.error))
+    elif updater_status.config.tray_enabled:
+        checks.append(DoctorCheck(
+            "updater_tray",
+            "ok",
+            "AuraScan Updater tray icon is enabled",
+            {"enabled": True, "autostart_enabled": updater_status.config.autostart_enabled},
+        ))
+    else:
+        checks.append(DoctorCheck("updater_tray", "warn", "AuraScan Updater tray icon is disabled", {"enabled": False}))
+    if updater_status.qt_binding:
+        checks.append(DoctorCheck("updater_qt_binding", "ok", f"Updater Qt binding found: {updater_status.qt_binding}"))
+    else:
+        checks.append(DoctorCheck("updater_qt_binding", "warn", "PyQt6/PySide6 not found; AuraScan Updater tray applet cannot start"))
+    if updater_status.terminal:
+        checks.append(DoctorCheck("updater_terminal", "ok", f"Updater terminal found: {updater_status.terminal}", {"path": updater_status.terminal_path}))
+    else:
+        checks.append(DoctorCheck("updater_terminal", "warn", "No supported terminal found for AuraScan Updater"))
+    if updater_status.autostart_installed:
+        checks.append(DoctorCheck("updater_autostart", "ok", f"Updater autostart installed at {updater_status.paths.autostart_desktop}"))
+    elif updater_status.config.autostart_enabled:
+        checks.append(DoctorCheck("updater_autostart", "warn", f"Updater autostart is enabled in config but missing at {updater_status.paths.autostart_desktop}"))
+    else:
+        checks.append(DoctorCheck("updater_autostart", "warn", "Updater autostart is not installed", {"installed": False}))
+
     for tool in ("clamscan", "bsdtar", "gpg", "makepkg", "pacman", "vercmp"):
-        found = shutil.which(tool)
+        found = which(tool)
         status = "ok" if found else "warn"
         message = f"{tool} found at {found}" if found else f"{tool} not found; related checks will be skipped when optional"
         checks.append(DoctorCheck(f"tool_{tool}", status, message))
@@ -530,14 +649,30 @@ def _check_executable(path: Path) -> DoctorCheck:
 
 def _hook_checks(*, local_hook_path: Path = LOCAL_HOOK_PATH, packaged_hook_path: Path = PACKAGED_HOOK_PATH) -> List[DoctorCheck]:
     checks = []
-    for name, path in (("local_pacman_hook", local_hook_path), ("packaged_pacman_hook", packaged_hook_path)):
-        if not path.exists():
-            checks.append(DoctorCheck(name, "warn", f"{path} is not installed"))
-            continue
-        if is_release_safe_hook_template(path):
-            checks.append(DoctorCheck(name, "ok", f"{path} is installed and release-safe"))
+    local_exists = local_hook_path.exists()
+    packaged_exists = packaged_hook_path.exists()
+    local_safe = local_exists and is_release_safe_hook_template(local_hook_path)
+    packaged_safe = packaged_exists and is_release_safe_hook_template(packaged_hook_path)
+
+    if local_exists:
+        if local_safe:
+            checks.append(DoctorCheck("local_pacman_hook", "ok", f"{local_hook_path} is installed and release-safe"))
         else:
-            checks.append(DoctorCheck(name, "error", f"{path} is installed but does not match AuraScan release-safety rules"))
+            checks.append(DoctorCheck("local_pacman_hook", "error", f"{local_hook_path} is installed but does not match AuraScan release-safety rules"))
+    elif packaged_safe:
+        checks.append(DoctorCheck("local_pacman_hook", "ok", f"No local pacman hook override at {local_hook_path}; packaged hook is release-safe"))
+    else:
+        checks.append(DoctorCheck("local_pacman_hook", "warn", f"{local_hook_path} is not installed"))
+
+    if packaged_exists:
+        if packaged_safe:
+            checks.append(DoctorCheck("packaged_pacman_hook", "ok", f"{packaged_hook_path} is installed and release-safe"))
+        else:
+            checks.append(DoctorCheck("packaged_pacman_hook", "error", f"{packaged_hook_path} is installed but does not match AuraScan release-safety rules"))
+    elif local_safe:
+        checks.append(DoctorCheck("packaged_pacman_hook", "ok", f"{packaged_hook_path} is not installed; local hook is release-safe"))
+    else:
+        checks.append(DoctorCheck("packaged_pacman_hook", "warn", f"{packaged_hook_path} is not installed"))
     return checks
 
 

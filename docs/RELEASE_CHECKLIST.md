@@ -73,6 +73,8 @@ candidate.
   optional or workflow-specific where appropriate.
 - If a pacman hook is packaged, the installed hook path and `Exec` command are
   checked for the target package format.
+- If the AuraScan Updater tray applet is packaged, the desktop file and icon
+  are installed without enabling per-user autostart automatically.
 - Package data or package files include the hook template only when intended.
 - Root-level development hooks are not accidentally packaged.
 

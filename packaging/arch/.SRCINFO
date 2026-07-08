@@ -1,6 +1,6 @@
 pkgbase = aurascan
 	pkgdesc = AI-assisted safety layer for Arch/CachyOS package, AUR, and upgrade workflows
-	pkgver = 0.2.0
+	pkgver = 0.3.0
 	pkgrel = 1
 	url = https://github.com/crizzler/AuraScan
 	install = aurascan.install
@@ -19,7 +19,8 @@ pkgbase = aurascan
 	optdepends = paru: AUR update context for aurascan upgrade
 	optdepends = yay: AUR update context for aurascan upgrade
 	optdepends = shelly: CachyOS/Arch update handoff for aurascan upgrade
-	source = aurascan-0.2.0.tar.gz::https://github.com/crizzler/AuraScan/archive/refs/tags/v0.2.0.tar.gz
-	sha256sums = 05eaf0a61ce179d4110a6b42a1b5fe3f77beed7349ffb6c3fc30bd14c466c51a
+	optdepends = python-pyqt6: AuraScan Updater tray applet
+	source = aurascan-0.3.0.tar.gz::https://github.com/crizzler/AuraScan/archive/refs/tags/v0.3.0.tar.gz
+	sha256sums = SKIP
 
 pkgname = aurascan

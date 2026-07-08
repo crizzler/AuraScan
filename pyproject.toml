@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aurascan"
-version = "0.2.0"
+version = "0.3.0"
 description = "AI-assisted safety layer for Arch/CachyOS package, AUR, and upgrade workflows."
 readme = "README.md"
 authors = [{name = "AuraScan Team"}]
@@ -23,6 +23,7 @@ keywords = [
     "upgrade-preflight",
     "config-drift",
     "ai",
+    "system-tray",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -42,6 +43,7 @@ Releases = "https://github.com/crizzler/AuraScan/releases"
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
+updater = ["PyQt6>=6.0"]
 
 [project.scripts]
 aurascan = "aurascan.cli:main"
@@ -49,3 +51,6 @@ aurascan-makepkg = "aurascan.makepkg_wrapper:main"
 
 [tool.setuptools.packages.find]
 include = ["aurascan*"]
+
+[tool.setuptools.package-data]
+aurascan = ["assets/*"]

@@ -508,6 +508,7 @@ def has_presenter_template(rule_id: str) -> bool:
     return (
         rule_id.startswith("CLAMAV-")
         or rule_id.startswith("AI-")
+        or rule_id.startswith("UPG-")
         or rule_id in EXACT_TEMPLATES
         or rule_id in DETERMINISTIC_TITLES
         or (rule_id.endswith("-ADDED") and "DEPENDS" in rule_id)
@@ -517,7 +518,7 @@ def has_presenter_template(rule_id: str) -> bool:
 
 
 def known_presenter_template_rules() -> List[str]:
-    return sorted(set(EXACT_TEMPLATES) | set(DETERMINISTIC_TITLES) | {"CLAMAV-*", "AI-*", "HIST-*-CHANGED", "HIST-*-NEW-NETWORK", "HIST-*DEPENDS*-ADDED"})
+    return sorted(set(EXACT_TEMPLATES) | set(DETERMINISTIC_TITLES) | {"CLAMAV-*", "AI-*", "UPG-*", "HIST-*-CHANGED", "HIST-*-NEW-NETWORK", "HIST-*DEPENDS*-ADDED"})
 
 
 @dataclass

@@ -1,29 +1,51 @@
 import os
+import pwd
 import re
 import sys
 import tempfile
 from pathlib import Path
-from typing import Dict, Iterable, Mapping, Optional
+from typing import Dict, Iterable, List, Mapping, Optional
 
 MAX_SCRIPT_SIZE = 5 * 1024 * 1024  # 5 MB
+SYSTEM_ENV_PATH = Path("/etc/aurascan/.env")
 
 ENV_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
 SECRET_KEY_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
 
 
-def user_config_dir() -> Path:
-    return Path.home() / ".config" / "aurascan"
+def user_config_dir(home: Optional[Path] = None) -> Path:
+    return (home or Path.home()) / ".config" / "aurascan"
 
 
 def user_env_path() -> Path:
     return user_config_dir() / ".env"
 
 
-def env_paths() -> Iterable[Path]:
-    return [
-        Path("/etc/aurascan/.env"),
+def env_paths(env: Optional[Mapping[str, str]] = None) -> Iterable[Path]:
+    paths: List[Path] = [
+        SYSTEM_ENV_PATH,
         user_env_path(),
     ]
+    invoking_user_path = invoking_user_env_path(env)
+    if invoking_user_path is not None and invoking_user_path not in paths:
+        paths.append(invoking_user_path)
+    return paths
+
+
+def invoking_user_env_path(env: Optional[Mapping[str, str]] = None) -> Optional[Path]:
+    if os.geteuid() != 0:
+        return None
+    source = env if env is not None else os.environ
+    username = source.get("SUDO_USER", "").strip() or source.get("DOAS_USER", "").strip()
+    if not username or username == "root":
+        return None
+    try:
+        user_home = Path(pwd.getpwnam(username).pw_dir)
+    except KeyError:
+        return None
+    if not user_home.is_absolute():
+        return None
+    return user_config_dir(user_home) / ".env"
 
 
 def parse_env_lines(lines: Iterable[str]) -> Dict[str, str]:

@@ -128,6 +128,8 @@ def test_setup_commands_are_mentioned_in_help():
 
     assert "aurascan init" in help_text
     assert "aurascan doctor" in help_text
+    assert "aurascan upgrade" in help_text
+    assert "aurascan config-drift" in help_text
 
 
 def test_init_subcommand_dispatches_before_scan_parser(monkeypatch):
@@ -154,6 +156,19 @@ def test_doctor_subcommand_dispatches_before_scan_parser(monkeypatch):
         assert exc.code == 0
 
     assert calls == [["--json"]]
+
+
+def test_config_drift_subcommand_dispatches_before_scan_parser(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "load_env", lambda: None)
+    monkeypatch.setattr(cli, "run_config_drift", lambda argv: calls.append(argv) or 0)
+
+    try:
+        cli.main(["config-drift", "--dry-run"])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    assert calls == [["--dry-run"]]
 
 
 def test_python_module_entrypoint_delegates_to_cli(monkeypatch):

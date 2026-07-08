@@ -61,6 +61,52 @@ def test_init_can_write_disabled_local_only_config(tmp_path):
     assert "local-only" not in stdout.getvalue().lower()
 
 
+def test_init_can_write_upgrade_preflight_defaults(tmp_path):
+    env_path = tmp_path / ".config" / "aurascan" / ".env"
+    stdout = io.StringIO()
+
+    status = run_init(
+        [
+            "--disable-ai",
+            "--enable-upgrade-preflight",
+            "--upgrade-aur-helper",
+            "yay",
+            "--disable-upgrade-ai",
+            "--enable-config-drift",
+            "--config-drift-ai-diffs",
+            "never",
+            "--no-install-hook",
+        ],
+        stdout=stdout,
+        env_path=env_path,
+    )
+    text = env_path.read_text(encoding="utf-8")
+
+    assert status == 0
+    assert "AURASCAN_UPGRADE_PREFLIGHT_ENABLED=1" in text
+    assert "AURASCAN_UPGRADE_AUR_HELPER=yay" in text
+    assert "AURASCAN_UPGRADE_PREFLIGHT_AI=0" in text
+    assert "AURASCAN_CONFIG_DRIFT_ENABLED=1" in text
+    assert "AURASCAN_CONFIG_DRIFT_AI_DIFFS=never" in text
+    assert "Configured upgrade preflight defaults." in stdout.getvalue()
+    assert "Configured config drift assistant defaults." in stdout.getvalue()
+
+
+def test_init_can_disable_config_drift_assistant(tmp_path):
+    env_path = tmp_path / ".config" / "aurascan" / ".env"
+    stdout = io.StringIO()
+
+    status = run_init(
+        ["--disable-ai", "--disable-config-drift", "--no-install-hook"],
+        stdout=stdout,
+        env_path=env_path,
+    )
+
+    assert status == 0
+    assert "AURASCAN_CONFIG_DRIFT_ENABLED=0" in env_path.read_text(encoding="utf-8")
+    assert "Config drift assistant will be disabled" in stdout.getvalue()
+
+
 def test_doctor_json_reports_missing_key_without_leaking_values(tmp_path):
     env_path = tmp_path / ".config" / "aurascan" / ".env"
     env_path.parent.mkdir(parents=True)
@@ -100,6 +146,50 @@ def test_doctor_reports_missing_config_as_warning(tmp_path):
     by_name = {check.name: check for check in checks}
     assert by_name["config_file"].status == "warn"
     assert by_name["ai_enabled"].status == "warn"
+    assert by_name["upgrade_preflight"].status == "ok"
+    assert by_name["config_drift"].status == "ok"
+
+
+def test_doctor_reports_upgrade_preflight_config(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "AURASCAN_UPGRADE_PREFLIGHT_ENABLED=0\nAURASCAN_UPGRADE_AUR_HELPER=yay\n",
+        encoding="utf-8",
+    )
+    env_path.chmod(0o600)
+
+    checks = build_doctor_checks(
+        env_path=env_path,
+        env={},
+        executable_path=tmp_path / "usr" / "bin" / "aurascan",
+        local_hook_path=tmp_path / "local.hook",
+        packaged_hook_path=tmp_path / "packaged.hook",
+    )
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["upgrade_preflight"].status == "warn"
+    assert "disabled" in by_name["upgrade_preflight"].message
+
+
+def test_doctor_reports_config_drift_config(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "AURASCAN_CONFIG_DRIFT_ENABLED=0\nAURASCAN_CONFIG_DRIFT_AI_DIFFS=never\n",
+        encoding="utf-8",
+    )
+    env_path.chmod(0o600)
+
+    checks = build_doctor_checks(
+        env_path=env_path,
+        env={},
+        executable_path=tmp_path / "usr" / "bin" / "aurascan",
+        local_hook_path=tmp_path / "local.hook",
+        packaged_hook_path=tmp_path / "packaged.hook",
+    )
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["config_drift"].status == "warn"
+    assert "disabled" in by_name["config_drift"].message
 
 
 def test_doctor_reports_bad_permissions_and_unsupported_provider(tmp_path):

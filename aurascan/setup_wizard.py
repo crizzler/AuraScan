@@ -22,6 +22,19 @@ from aurascan.core.ai_provider import (
     resolve_ai_config,
 )
 from aurascan.core.config import file_mode, read_env_file, user_env_path, write_user_env
+from aurascan.core.config_drift import (
+    CONFIG_DRIFT_AI_DIFFS_ENV,
+    CONFIG_DRIFT_AI_DIFFS_VALUES,
+    CONFIG_DRIFT_ENABLED_ENV,
+    resolve_config_drift_config,
+)
+from aurascan.core.upgrade_preflight import (
+    UPGRADE_AUR_HELPERS,
+    UPGRADE_PREFLIGHT_AI_ENV,
+    UPGRADE_PREFLIGHT_AUR_HELPER_ENV,
+    UPGRADE_PREFLIGHT_ENABLED_ENV,
+    resolve_upgrade_config,
+)
 
 LOCAL_HOOK_PATH = Path("/etc/pacman.d/hooks/aurascan.hook")
 PACKAGED_HOOK_PATH = Path("/usr/share/libalpm/hooks/aurascan.hook")
@@ -61,6 +74,17 @@ def build_init_parser() -> argparse.ArgumentParser:
     ai.add_argument("--enable-ai", action="store_true", help="enable configured network AI analysis")
     ai.add_argument("--disable-ai", action="store_true", help="write config that keeps network AI disabled")
     parser.add_argument("--check-ai", action="store_true", help="run one harmless provider connectivity check")
+    upgrade = parser.add_mutually_exclusive_group()
+    upgrade.add_argument("--enable-upgrade-preflight", action="store_true", help="enable aurascan upgrade preflight defaults")
+    upgrade.add_argument("--disable-upgrade-preflight", action="store_true", help="disable aurascan upgrade preflight defaults")
+    parser.add_argument("--upgrade-aur-helper", choices=sorted(UPGRADE_AUR_HELPERS), help="default AUR helper for aurascan upgrade")
+    upgrade_ai = parser.add_mutually_exclusive_group()
+    upgrade_ai.add_argument("--enable-upgrade-ai", action="store_true", help="allow AI risk review during upgrade preflight when AI is configured")
+    upgrade_ai.add_argument("--disable-upgrade-ai", action="store_true", help="disable AI risk review during upgrade preflight")
+    config_drift = parser.add_mutually_exclusive_group()
+    config_drift.add_argument("--enable-config-drift", action="store_true", help="enable the config drift assistant for upgrades")
+    config_drift.add_argument("--disable-config-drift", action="store_true", help="disable the config drift assistant for upgrades")
+    parser.add_argument("--config-drift-ai-diffs", choices=sorted(CONFIG_DRIFT_AI_DIFFS_VALUES), help="AI diff sharing policy for the config drift assistant")
     hook = parser.add_mutually_exclusive_group()
     hook.add_argument("--install-hook", action="store_true", help="offer sudo install of the local pacman hook")
     hook.add_argument("--no-install-hook", action="store_true", help="skip pacman hook setup")
@@ -139,6 +163,88 @@ def run_init(
             print(f"Configured {spec.label}. API key saved without printing it.", file=stdout)
             if not enabled:
                 print("Network AI analysis is configured but disabled.", file=stdout)
+
+    configure_upgrade = (
+        args.enable_upgrade_preflight
+        or args.disable_upgrade_preflight
+        or args.upgrade_aur_helper is not None
+        or args.enable_upgrade_ai
+        or args.disable_upgrade_ai
+    )
+    should_prompt_upgrade = not configure_upgrade and not (
+        args.provider
+        or args.enable_ai
+        or args.disable_ai
+        or args.install_hook
+        or args.no_install_hook
+    )
+    if configure_upgrade or should_prompt_upgrade:
+        existing_upgrade = resolve_upgrade_config(existing)
+        upgrade_enabled = existing_upgrade.preflight_enabled if not existing_upgrade.error else True
+        if args.enable_upgrade_preflight:
+            upgrade_enabled = True
+        elif args.disable_upgrade_preflight:
+            upgrade_enabled = False
+        elif should_prompt_upgrade:
+            upgrade_enabled = _prompt_yes_no(
+                "Enable upgrade preflight for aurascan upgrade?",
+                input_func,
+                default=upgrade_enabled,
+            )
+        updates[UPGRADE_PREFLIGHT_ENABLED_ENV] = "1" if upgrade_enabled else "0"
+
+        if upgrade_enabled:
+            helper_default = existing_upgrade.aur_helper if not existing_upgrade.error else "auto"
+            helper = args.upgrade_aur_helper or (
+                _prompt_upgrade_helper(input_func, helper_default, stdout) if should_prompt_upgrade else helper_default
+            )
+            updates[UPGRADE_PREFLIGHT_AUR_HELPER_ENV] = helper
+
+            upgrade_ai_enabled = existing_upgrade.ai_enabled if not existing_upgrade.error else True
+            if args.enable_upgrade_ai:
+                upgrade_ai_enabled = True
+            elif args.disable_upgrade_ai:
+                upgrade_ai_enabled = False
+            elif should_prompt_upgrade:
+                upgrade_ai_enabled = _prompt_yes_no(
+                    "Allow AI risk review during upgrade preflight when network AI is enabled?",
+                    input_func,
+                    default=upgrade_ai_enabled,
+                )
+            updates[UPGRADE_PREFLIGHT_AI_ENV] = "1" if upgrade_ai_enabled else "0"
+            print("Configured upgrade preflight defaults.", file=stdout)
+        else:
+            print("Upgrade preflight will be disabled unless you enable it later.", file=stdout)
+
+    configure_config_drift = (
+        args.enable_config_drift
+        or args.disable_config_drift
+        or args.config_drift_ai_diffs is not None
+    )
+    should_prompt_config_drift = should_prompt_upgrade and updates.get(UPGRADE_PREFLIGHT_ENABLED_ENV, "1") == "1"
+    if configure_config_drift or should_prompt_config_drift:
+        existing_drift = resolve_config_drift_config(existing)
+        drift_enabled = existing_drift.enabled if not existing_drift.error else True
+        if args.enable_config_drift:
+            drift_enabled = True
+        elif args.disable_config_drift:
+            drift_enabled = False
+        elif should_prompt_config_drift:
+            drift_enabled = _prompt_yes_no(
+                "Enable config drift assistant for .pacnew/.pacsave files during upgrades?",
+                input_func,
+                default=drift_enabled,
+            )
+        updates[CONFIG_DRIFT_ENABLED_ENV] = "1" if drift_enabled else "0"
+        if drift_enabled:
+            ai_diff_policy = existing_drift.ai_diffs if not existing_drift.error else "ask"
+            ai_diff_policy = args.config_drift_ai_diffs or (
+                _prompt_config_drift_ai_diffs(input_func, ai_diff_policy, stdout) if should_prompt_config_drift else ai_diff_policy
+            )
+            updates[CONFIG_DRIFT_AI_DIFFS_ENV] = ai_diff_policy
+            print("Configured config drift assistant defaults.", file=stdout)
+        else:
+            print("Config drift assistant will be disabled unless you enable it later.", file=stdout)
 
     write_user_env(updates, path=target_env)
     print(f"Wrote user config: {target_env}", file=stdout)
@@ -248,6 +354,43 @@ def build_doctor_checks(
     if check_ai:
         checks.append(_check_ai_connectivity(effective_env, urlopen=urlopen))
 
+    upgrade_config = resolve_upgrade_config(effective_env)
+    if upgrade_config.error:
+        checks.append(DoctorCheck("upgrade_preflight", "error", upgrade_config.error))
+    elif upgrade_config.preflight_enabled:
+        checks.append(DoctorCheck(
+            "upgrade_preflight",
+            "ok",
+            "Upgrade preflight is enabled",
+            {
+                "enabled": True,
+                "aur_helper": upgrade_config.aur_helper,
+                "ai_review_enabled": upgrade_config.ai_enabled,
+            },
+        ))
+        if upgrade_config.aur_helper in {"paru", "yay", "shelly"} and not shutil.which(upgrade_config.aur_helper):
+            checks.append(DoctorCheck(
+                "upgrade_aur_helper",
+                "warn",
+                f"Configured AUR helper {upgrade_config.aur_helper} was not found in PATH",
+                {"aur_helper": upgrade_config.aur_helper},
+            ))
+    else:
+        checks.append(DoctorCheck("upgrade_preflight", "warn", "Upgrade preflight is disabled", {"enabled": False}))
+
+    drift_config = resolve_config_drift_config(effective_env)
+    if drift_config.error:
+        checks.append(DoctorCheck("config_drift", "error", drift_config.error))
+    elif drift_config.enabled:
+        checks.append(DoctorCheck(
+            "config_drift",
+            "ok",
+            "Config drift assistant is enabled",
+            {"enabled": True, "ai_diff_policy": drift_config.ai_diffs},
+        ))
+    else:
+        checks.append(DoctorCheck("config_drift", "warn", "Config drift assistant is disabled", {"enabled": False}))
+
     for tool in ("clamscan", "bsdtar", "gpg", "makepkg", "pacman", "vercmp"):
         found = shutil.which(tool)
         status = "ok" if found else "warn"
@@ -305,6 +448,42 @@ def _prompt_provider(input_func: Callable[[str], str], default: str, stdout) -> 
         if answer.isdigit() and 1 <= int(answer) <= len(choices):
             return choices[int(answer) - 1]
         print("Please choose a listed provider.", file=stdout)
+
+
+def _prompt_upgrade_helper(input_func: Callable[[str], str], default: str, stdout) -> str:
+    choices = ["auto", "paru", "yay", "shelly", "none"]
+    default = default if default in choices else "auto"
+    print("Upgrade preflight AUR helper defaults:", file=stdout)
+    for index, helper in enumerate(choices, start=1):
+        marker = " default" if helper == default else ""
+        print(f"  {index}. {helper}{marker}", file=stdout)
+    while True:
+        answer = input_func(f"Upgrade AUR helper [{default}]: ").strip().lower()
+        if not answer:
+            return default
+        if answer in choices:
+            return answer
+        if answer.isdigit() and 1 <= int(answer) <= len(choices):
+            return choices[int(answer) - 1]
+        print("Please choose a listed helper.", file=stdout)
+
+
+def _prompt_config_drift_ai_diffs(input_func: Callable[[str], str], default: str, stdout) -> str:
+    choices = ["ask", "never", "always"]
+    default = default if default in choices else "ask"
+    print("Config drift AI diff sharing defaults:", file=stdout)
+    for index, policy in enumerate(choices, start=1):
+        marker = " default" if policy == default else ""
+        print(f"  {index}. {policy}{marker}", file=stdout)
+    while True:
+        answer = input_func(f"Config drift AI diffs [{default}]: ").strip().lower()
+        if not answer:
+            return default
+        if answer in choices:
+            return answer
+        if answer.isdigit() and 1 <= int(answer) <= len(choices):
+            return choices[int(answer) - 1]
+        print("Please choose a listed policy.", file=stdout)
 
 
 def _prompt_yes_no(prompt: str, input_func: Callable[[str], str], *, default: bool) -> bool:

@@ -123,11 +123,27 @@ python -m aurascan doctor
 `/etc/pacman.d/hooks/aurascan.hook`. API keys are prompted with hidden input
 and the user config file is written with restrictive permissions.
 
+`aurascan init` can also configure upgrade preflight defaults. Upgrade
+preflight is enabled by default even without an explicit setting, but the
+wizard can record your preferred default helper, AI-review behavior, and config
+drift assistant policy:
+
+```bash
+aurascan init --enable-upgrade-preflight --upgrade-aur-helper auto --enable-upgrade-ai
+aurascan init --enable-config-drift --config-drift-ai-diffs ask
+aurascan init --disable-upgrade-preflight
+```
+
 Network AI analysis is explicit in wizard-created configs. If you choose
 local-only mode, AuraScan writes `AURASCAN_AI_ENABLED=0` and keeps normal scans
 local. `aurascan doctor` checks the selected provider, key presence, optional
 tools, hook status, and config permissions. It does not contact the provider
 unless `--check-ai` is supplied.
+
+When AuraScan is launched by a root pacman hook through `sudo`, it also checks
+the invoking user's `~/.config/aurascan/.env` when `SUDO_USER` is available.
+For root shells, unattended system updates, or hook contexts without an
+invoking user, put system-wide AI settings in `/etc/aurascan/.env`.
 
 Scan a PKGBUILD:
 
@@ -153,6 +169,104 @@ Run explicit source acquisition and deep static inspection:
 aurascan --deep-static --pkgbuild ./PKGBUILD
 aurascan --deep-static --offline --no-auto-key-fetch --pkgbuild ./PKGBUILD
 ```
+
+## Upgrade Preflight
+
+`aurascan upgrade` is an optional first-class upgrade front door for Arch and
+CachyOS systems. It previews the pending upgrade, checks local breakage risks,
+then hands off to pacman or a supported AUR helper when it is reasonable to
+continue.
+
+```bash
+aurascan upgrade
+aurascan upgrade --dry-run
+aurascan upgrade --verbose
+aurascan upgrade --json
+aurascan upgrade --aur-helper shelly
+aurascan upgrade --no-ai
+aurascan upgrade --no-config-drift
+```
+
+The repo-package preview uses pacman, and the final repo-only handoff is:
+
+```bash
+sudo pacman -Syu
+```
+
+When `paru`, `yay`, or `shelly` is selected or auto-detected, AuraScan also
+queries AUR updates and hands off to that helper. `paru` and `yay` use `-Syu`;
+Shelly uses `shelly upgrade-all --no-flatpak --no-appimage` so the handoff
+matches AuraScan's repo/AUR preflight scope. If no supported helper is
+available, AuraScan still warns about installed foreign packages that may need
+rebuilds after library, kernel, compiler, Python, Qt, or Electron updates.
+
+Upgrade preflight is not a safety guarantee. It checks for practical pitfalls
+such as low `/boot` or root space, kernel/module mismatch risk, CachyOS kernel
+movement, initramfs or bootloader-sensitive updates, ignored packages that can
+create partial upgrades, replacements/conflicts, AUR rebuild risk, local
+foreign-package dependency/conflict metadata, and pending `.pacnew`/`.pacsave`
+config drift. A clean preflight means AuraScan did not find these signals;
+pacman, hooks, packages, or local configuration can still fail.
+
+If HIGH or CRITICAL preflight risk is found, AuraScan asks for one extra
+confirmation before running the package-manager command:
+
+```text
+AuraScan found upgrade risks. Continue anyway? [y/N]
+```
+
+This is not a hard-blocker bypass model. AuraScan does not force system
+maintenance to stop; it gives you a clear checkpoint before continuing. Pacman
+or the AUR helper will still show its normal confirmation and may still fail.
+
+AI review is optional and raise-only. When AI is configured and not disabled
+with `--no-ai`, AuraScan sends a redacted structured summary of package names,
+versions, deterministic findings, and selected local system facts. It does not
+send API keys, environment variables, full command output, or file contents.
+AI may raise a preflight risk or add an advisory `UPG-AI-RISK`, but it cannot
+lower deterministic risk, mark an upgrade safe, or hard-block by itself.
+
+The config keys are `AURASCAN_UPGRADE_PREFLIGHT_ENABLED`,
+`AURASCAN_UPGRADE_AUR_HELPER`, and `AURASCAN_UPGRADE_PREFLIGHT_AI`.
+Supported helper values are `auto`, `paru`, `yay`, `shelly`, and `none`.
+`aurascan upgrade --enable-preflight` can temporarily override a disabled
+preflight setting, while `--disable-preflight` disables it for that invocation
+and does not run the upgrade command.
+
+## Config Drift Assistant
+
+`aurascan config-drift` finds `.pacnew` and `.pacsave` files, explains what
+they mean, prepares safe fixes, and creates backups before every write.
+
+```bash
+aurascan config-drift
+aurascan config-drift --dry-run
+aurascan config-drift --json
+aurascan config-drift --yes
+aurascan config-drift --ai-diffs
+```
+
+`aurascan upgrade` runs the assistant before the package-manager handoff and
+again after it exits, unless disabled with `--no-config-drift` or config. The
+assistant auto-plans low-risk fixes such as duplicate `.pacnew` files,
+missing-target installs, comments-only changes, and mirrorlist-style updates.
+Sensitive files such as `pacman.conf`, bootloader/initramfs config, sudo/PAM,
+networking, users/groups, SSH, systemd, and security policy are treated with
+extra caution.
+
+Before applying any fix, AuraScan backs up the active config and drift file
+under `/var/lib/aurascan/config-drift/<run-id>/` with a JSON manifest. `.pacsave`
+files are explained but not restored or deleted automatically in v1.
+
+AI diff review is optional and opt-in. Network AI sees config diffs only when
+`--ai-diffs` is passed or `AURASCAN_CONFIG_DRIFT_AI_DIFFS=always` is configured.
+Diffs are bounded and redacted first, but AuraScan still treats AI as advisory:
+AI cannot bypass backups, deterministic file classification, or sensitive-file
+confirmation rules.
+
+The config keys are `AURASCAN_CONFIG_DRIFT_ENABLED` and
+`AURASCAN_CONFIG_DRIFT_AI_DIFFS`, where AI diff policy is `ask`, `never`, or
+`always`.
 
 ## makepkg Wrapper
 
@@ -272,8 +386,9 @@ participate in smart or new-only decisions only with
 Default scans are local unless network AI analysis has been explicitly enabled
 or a legacy `AURASCAN_AI_KEY` environment variable is present. The first-run
 wizard writes an explicit `AURASCAN_AI_ENABLED` value so the user's choice is
-clear. When enabled, AI analysis may send package metadata, PKGBUILD text, and
-install-script text to the configured provider.
+clear. When enabled, package AI analysis may send package metadata, PKGBUILD
+text, and install-script text to the configured provider. Config drift diff
+review has an additional opt-in gate and sends only redacted bounded diffs.
 
 Supported AI provider IDs are `openai`, `anthropic`, `deepseek`, `gemini`, and
 `openrouter`. Provider-specific keys use `AURASCAN_OPENAI_API_KEY`,

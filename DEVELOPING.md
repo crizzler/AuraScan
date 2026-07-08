@@ -97,9 +97,15 @@ setup writes `AURASCAN_AI_ENABLED=0`. Network AI setup may write
 as `AURASCAN_OPENAI_API_KEY`. Legacy `AURASCAN_AI_KEY` remains supported so
 existing users do not lose behavior.
 
+When AuraScan runs as root from a sudo-launched pacman hook, config loading may
+also read the invoking user's `~/.config/aurascan/.env` from `SUDO_USER`.
+Unattended or direct-root hook contexts should use `/etc/aurascan/.env`.
+
 `aurascan doctor` is diagnostic. It must not contact AI providers unless
 `--check-ai` is supplied, and it must never print secret values. Missing
 optional tools should be warnings unless the checked workflow cannot proceed.
+Doctor should report upgrade preflight and config drift assistant config state,
+including invalid env values, without reading or printing config file contents.
 
 Manual hook setup from `aurascan init` is allowed only for the local admin hook
 path `/etc/pacman.d/hooks/aurascan.hook`. The installer must refuse hook writes
@@ -263,6 +269,73 @@ or new-only update decisions only when paired with
 user asserted. This is different from `--scan-context auto`, which can produce
 verified local database authority only when local evidence is complete. Skipped
 `new-only` updates must not become trusted baselines.
+
+## upgrade preflight
+
+`aurascan upgrade` is an upgrade-risk advisor and package-manager front door,
+not a package malware scan and not a guarantee that an upgrade will work. Keep
+it separate from `AuraScanEngine` and the pacman archive hook: the hook remains
+a last-minute package archive scanner, while upgrade preflight reasons about
+transaction and local system breakage risk.
+
+The default handoff is `sudo pacman -Syu`. Supported helper execution is limited
+to `paru -Syu`, `yay -Syu`, and
+`shelly upgrade-all --no-flatpak --no-appimage`; generic helper commands are out
+of scope until they can be validated safely. Repo package previews should come
+from pacman's `--print --print-format` path. AUR update context may come from
+helper `-Qua` or Shelly's `check-updates --aur --json`, but v1 must not run
+makepkg, build AUR packages, inspect AUR sources, or execute package code during
+preflight.
+
+Upgrade preflight is enabled by default. The wizard may write
+`AURASCAN_UPGRADE_PREFLIGHT_ENABLED`, `AURASCAN_UPGRADE_AUR_HELPER`, and
+`AURASCAN_UPGRADE_PREFLIGHT_AI` to user config. If preflight is disabled,
+`aurascan upgrade` must not silently run a raw package-manager upgrade; it
+should report that preflight did not run and exit without invoking pacman or a
+helper. `--enable-preflight` may override a disabled config for one invocation.
+
+Preflight findings are advisory. HIGH or CRITICAL risk requires AuraScan's
+extra confirmation prompt unless `--yes` is used, but this is not a hard-blocker
+system. If the user continues, pacman or the helper still owns the actual
+transaction and its normal confirmation/failure behavior.
+
+AI upgrade review is raise-only. It may add `UPG-AI-RISK` or raise an existing
+preflight finding up to HIGH, but it must not lower deterministic findings,
+mark an upgrade safe, suppress findings, or hard-block by itself. The prompt
+must use a redacted structured summary only: package names, versions,
+deterministic finding summaries, and selected local system facts. Do not send
+environment variables, API keys, arbitrary command output, or file contents.
+
+## config drift assistant
+
+`aurascan config-drift` handles `.pacnew` and `.pacsave` maintenance as a
+system-maintenance helper, not as a package security scan. It should stay
+usable as a standalone command and as part of `aurascan upgrade`.
+
+The assistant is enabled by default when upgrade preflight is enabled. The
+wizard may write `AURASCAN_CONFIG_DRIFT_ENABLED` and
+`AURASCAN_CONFIG_DRIFT_AI_DIFFS`. AI diff policy values are `ask`, `never`, and
+`always`; the default is `ask`, which means no network AI receives config diffs
+unless the user opts in for that run.
+
+Config drift applies must be backup-first. Before any write or `.pacnew`
+removal, copy the target and drift file to
+`/var/lib/aurascan/config-drift/<run-id>/` or the test-provided backup root and
+write a manifest with paths, action, ownership/mode where available, and
+checksums. Remove `.pacnew` only after the target write succeeds. `.pacsave`
+auto-restore/delete is out of scope for v1.
+
+Deterministic local planning owns authority. AI may add explanations, but it
+must not bypass backups, path sensitivity classification, validators, or
+confirmation behavior. Sensitive paths include package-manager config,
+bootloader/initramfs config, sudo/PAM, networking, users/groups, SSH, systemd,
+and security policy. Nontrivial sensitive merges should remain manual unless a
+future deterministic merge validator can prove the exact candidate.
+
+Network AI config-diff prompts must use bounded redacted diffs only. Redact
+secrets, tokens, keys, passwords, private-key blocks, credential URLs, and
+similar auth material before request construction. Invalid AI JSON is
+non-blocking and must not change planned actions.
 
 ## makepkg wrapper
 

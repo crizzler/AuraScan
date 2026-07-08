@@ -1,11 +1,13 @@
 import json
 import socket
 import urllib.error
+from types import SimpleNamespace
 
 import pytest
 
 from aurascan.analyzers.ai_static import AIStaticAnalyzer
 from aurascan.core import ai_provider
+from aurascan.core import config as config_module
 from aurascan.core.config import read_env_file, redact_env, write_user_env
 
 
@@ -72,6 +74,45 @@ def test_write_user_env_preserves_comments_sets_permissions_and_redacts(tmp_path
     assert oct(env_path.parent.stat().st_mode & 0o777) == "0o700"
     assert read_env_file(env_path)["AURASCAN_OPENAI_API_KEY"] == "fixture-only-value"
     assert redact_env(read_env_file(env_path))["AURASCAN_OPENAI_API_KEY"] == "<redacted>"
+
+
+def test_load_env_includes_invoking_user_config_for_root_hooks(monkeypatch, tmp_path):
+    root_home = tmp_path / "root"
+    user_home = tmp_path / "home" / "alice"
+    env_path = user_home / ".config" / "aurascan" / ".env"
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text(
+        "AURASCAN_AI_PROVIDER=deepseek\nAURASCAN_AI_KEY=fixture-only-value\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_module, "SYSTEM_ENV_PATH", tmp_path / "etc" / "aurascan" / ".env")
+    monkeypatch.setattr(config_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(config_module.pwd, "getpwnam", lambda username: SimpleNamespace(pw_dir=str(user_home)))
+    monkeypatch.setenv("HOME", str(root_home))
+    monkeypatch.setenv("SUDO_USER", "alice")
+    for key in [
+        "AURASCAN_AI_KEY",
+        "AURASCAN_AI_ENABLED",
+        "AURASCAN_AI_PROVIDER",
+        "AURASCAN_AI_MODEL",
+    ]:
+        monkeypatch.delenv(key, raising=False)
+
+    config_module.load_env()
+
+    config = ai_provider.resolve_ai_config()
+    assert config.provider == "deepseek"
+    assert config.enabled is True
+    assert config.api_key_present is True
+
+
+def test_invoking_user_config_is_ignored_when_not_root(monkeypatch, tmp_path):
+    user_home = tmp_path / "home" / "alice"
+    monkeypatch.setattr(config_module.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(config_module.pwd, "getpwnam", lambda username: SimpleNamespace(pw_dir=str(user_home)))
+    monkeypatch.setenv("SUDO_USER", "alice")
+
+    assert config_module.invoking_user_env_path() is None
 
 
 def test_ai_enabled_zero_skips_even_when_key_exists(monkeypatch):

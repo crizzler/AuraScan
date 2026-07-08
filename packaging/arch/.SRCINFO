@@ -21,6 +21,6 @@ pkgbase = aurascan
 	optdepends = shelly: CachyOS/Arch update handoff for aurascan upgrade
 	optdepends = python-pyqt6: AuraScan Updater tray applet
 	source = aurascan-0.3.0.tar.gz::https://github.com/crizzler/AuraScan/archive/refs/tags/v0.3.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 8357f4cedeaa85d21a45272311abfa89749b765bab6bcf334fe7fe60a56c68b2
 
 pkgname = aurascan

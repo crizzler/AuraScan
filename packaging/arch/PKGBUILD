@@ -22,21 +22,21 @@ optdepends=(
   'python-pyqt6: AuraScan Updater tray applet'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('8357f4cedeaa85d21a45272311abfa89749b765bab6bcf334fe7fe60a56c68b2')
 
 build() {
-  cd "$pkgname-$pkgver"
+  cd "AuraScan-$pkgver"
   python -m build --wheel --no-isolation
 }
 
 check() {
-  cd "$pkgname-$pkgver"
+  cd "AuraScan-$pkgver"
   python -m pytest -q
 }
 
 package() {
-  cd "$pkgname-$pkgver"
-  python -m installer --destdir="$pkgdir" dist/*.whl
+  cd "AuraScan-$pkgver"
+  python -m installer --destdir="$pkgdir" --prefix=/usr dist/*.whl
   install -Dm644 packaging/arch/aurascan.hook "$pkgdir/usr/share/libalpm/hooks/aurascan.hook"
   install -Dm644 aurascan/assets/aurascan-updater.desktop "$pkgdir/usr/share/applications/aurascan-updater.desktop"
   install -Dm644 aurascan/assets/aurascan-updater.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/aurascan-updater.svg"

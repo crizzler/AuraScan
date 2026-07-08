@@ -99,8 +99,13 @@ def test_arch_package_metadata_targets_current_public_release():
 
     assert re.search(rf"^pkgver={re.escape(version)}$", pkgbuild, re.MULTILINE)
     assert f"v$pkgver.tar.gz" in pkgbuild
+    assert 'sha256sums=(\'SKIP\')' not in pkgbuild
+    assert 'cd "AuraScan-$pkgver"' in pkgbuild
+    assert 'cd "$pkgname-$pkgver"' not in pkgbuild
+    assert 'python -m installer --destdir="$pkgdir" --prefix=/usr dist/*.whl' in pkgbuild
     assert f"pkgver = {version}" in srcinfo
     assert f"aurascan-{version}.tar.gz::https://github.com/crizzler/AuraScan/archive/refs/tags/v{version}.tar.gz" in srcinfo
+    assert "sha256sums = SKIP" not in srcinfo
     assert release_notes.exists()
 
 

@@ -19,6 +19,10 @@ build/
 dist/
 *.egg-info/
 *.egg
+packaging/arch/pkg/
+packaging/arch/src/
+packaging/arch/*.pkg.tar.*
+packaging/arch/*.tar.gz
 
 # Local runtime state
 .cache/

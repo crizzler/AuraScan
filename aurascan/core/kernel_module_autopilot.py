@@ -191,7 +191,7 @@ def issues_to_findings(check: KernelModuleCheck) -> List[object]:
             "severity": issue.severity,
             "title": _issue_title(issue),
             "summary": issue.summary,
-            "why": "Kernel modules must match the kernel that will boot after the upgrade.",
+            "why": _issue_why(issue),
             "action": issue.action,
             "evidence": issue.evidence,
         })
@@ -351,12 +351,17 @@ def _check_prebuilt_modules(
     target_kernels: Sequence[str],
     package_facts: Mapping[str, PackageFacts],
 ) -> None:
+    candidate_kernels = sorted(set(check.installed_kernel_packages) | set(target_kernels), key=len, reverse=True)
+    modules_by_kernel: Dict[str, List[str]] = {kernel: [] for kernel in candidate_kernels}
+    for name in installed_packages:
+        if not any(marker in name for marker in ("nvidia", "virtualbox", "zfs", "v4l2loopback", "broadcom")):
+            continue
+        module_kernel = _kernel_for_prebuilt_module(name, candidate_kernels)
+        if module_kernel:
+            modules_by_kernel.setdefault(module_kernel, []).append(name)
+
     for kernel in target_kernels:
-        installed_prebuilt = sorted(
-            name
-            for name in installed_packages
-            if name.startswith(f"{kernel}-") and any(marker in name for marker in ("nvidia", "virtualbox", "zfs", "v4l2loopback", "broadcom"))
-        )
+        installed_prebuilt = sorted(modules_by_kernel.get(kernel, []))
         for module_package in installed_prebuilt:
             pending = module_package in pending_names
             pending_pkg = repo_by_name.get(module_package)
@@ -405,6 +410,13 @@ def _check_prebuilt_modules(
         ))
 
 
+def _kernel_for_prebuilt_module(module_package: str, candidate_kernels: Sequence[str]) -> str:
+    for kernel in candidate_kernels:
+        if module_package.startswith(f"{kernel}-"):
+            return kernel
+    return ""
+
+
 def _pending_dependency_matches_kernel(pending_pkg: object, kernel: str, kernel_version: str) -> bool:
     if pending_pkg is None or not kernel_version:
         return False
@@ -449,11 +461,19 @@ def _check_dkms(check: KernelModuleCheck, module_families: Sequence[str], *, run
 
 def _check_fallback_kernel(check: KernelModuleCheck, installed_kernels: Sequence[str], target_kernels: Sequence[str], removed_names: set) -> None:
     available = sorted(kernel for kernel in installed_kernels if kernel not in removed_names)
-    fallback = sorted(kernel for kernel in available if kernel not in set(target_kernels))
+    target_set = set(target_kernels)
+    if check.running_kernel_package:
+        fallback = sorted(kernel for kernel in available if kernel != check.running_kernel_package)
+    else:
+        fallback = available if len(available) > 1 else []
+    unchanged_fallback = sorted(kernel for kernel in fallback if kernel not in target_set)
+    upgraded_fallback = sorted(kernel for kernel in fallback if kernel in target_set)
     check.fallback_kernel = {
         "available": bool(fallback),
         "installed_kernel_packages": list(installed_kernels),
         "fallback_kernel_packages": fallback,
+        "unchanged_fallback_kernel_packages": unchanged_fallback,
+        "upgraded_fallback_kernel_packages": upgraded_fallback,
     }
     if target_kernels and not fallback:
         check.unfixable_issues.append(KernelModuleIssue(
@@ -498,6 +518,14 @@ def _issue_title(issue: KernelModuleIssue) -> str:
     if issue.kind == "dkms_failed":
         return "DKMS module status needs repair."
     return "Kernel module compatibility could not be verified."
+
+
+def _issue_why(issue: KernelModuleIssue) -> str:
+    if issue.kind == "fallback_kernel_missing":
+        return "A separate installed kernel gives the user an easier recovery boot path if the upgraded kernel has a driver or boot problem."
+    if issue.kind == "dkms_failed":
+        return "Failed DKMS builds can leave external kernel modules unavailable after reboot."
+    return "Kernel modules must match the kernel that will boot after the upgrade."
 
 
 def _package_fact_map(items: Iterable[object]) -> Dict[str, PackageFacts]:

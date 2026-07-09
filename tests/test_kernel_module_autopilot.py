@@ -81,6 +81,33 @@ def test_cachyos_nvidia_pairing_passes_when_module_package_matches(tmp_path):
     assert "verified nvidia module coverage" in check.summary
 
 
+def test_cachyos_lts_nvidia_does_not_match_plain_cachyos_kernel(tmp_path):
+    write_module(tmp_path, "7.1.3-1-cachyos", "linux-cachyos")
+    write_module(tmp_path, "6.18.38-1-cachyos-lts", "linux-cachyos-lts")
+    plan = UpgradePlan(repo_packages=[
+        UpgradePackage("linux-cachyos", "7.1.4-1"),
+        UpgradePackage("linux-cachyos-nvidia-open", "7.1.4-1", depends=["linux-cachyos=7.1.4-1"]),
+        UpgradePackage("linux-cachyos-lts-nvidia-open", "6.18.38-1", depends=["linux-cachyos-lts=6.18.38-1"]),
+    ])
+
+    check = build_kernel_module_check(
+        plan,
+        snapshot(installed_packages=[
+            "linux-cachyos",
+            "linux-cachyos-nvidia-open",
+            "linux-cachyos-lts",
+            "linux-cachyos-lts-nvidia-open",
+            "nvidia-utils",
+        ]),
+        modules_root=tmp_path,
+        runner=FakeRunner(),
+    )
+
+    assert [item["module_package"] for item in check.prebuilt_module_status] == ["linux-cachyos-nvidia-open"]
+    assert check.unfixable_issues == []
+    assert check.status == "ok"
+
+
 def test_missing_cachyos_nvidia_pair_produces_fixable_issue(tmp_path):
     write_module(tmp_path, "7.1.3-1-cachyos", "linux-cachyos")
     plan = UpgradePlan(repo_packages=[UpgradePackage("linux-cachyos", "7.1.4-1")])
@@ -124,9 +151,18 @@ def test_dkms_missing_headers_is_fixable_and_failed_status_is_not(tmp_path):
 
 def test_fallback_kernel_detection_records_present_and_missing(tmp_path):
     plan = UpgradePlan(repo_packages=[UpgradePackage("linux-cachyos", "7.1.4-1")])
+    both_kernels_upgrading = UpgradePlan(repo_packages=[
+        UpgradePackage("linux-cachyos", "7.1.4-1"),
+        UpgradePackage("linux-cachyos-lts", "6.18.39-1"),
+    ])
     with_fallback = build_kernel_module_check(plan, snapshot(installed_packages=["linux-cachyos", "linux-cachyos-lts"]), modules_root=tmp_path, runner=FakeRunner())
+    upgraded_fallback = build_kernel_module_check(both_kernels_upgrading, snapshot(installed_packages=["linux-cachyos", "linux-cachyos-lts"]), modules_root=tmp_path, runner=FakeRunner())
     without_fallback = build_kernel_module_check(plan, snapshot(installed_packages=["linux-cachyos"]), modules_root=tmp_path, runner=FakeRunner())
 
     assert with_fallback.fallback_kernel["available"] is True
+    assert with_fallback.fallback_kernel["fallback_kernel_packages"] == ["linux-cachyos-lts"]
+    assert upgraded_fallback.fallback_kernel["available"] is True
+    assert upgraded_fallback.fallback_kernel["upgraded_fallback_kernel_packages"] == ["linux-cachyos-lts"]
+    assert not any(issue.kind == "fallback_kernel_missing" for issue in upgraded_fallback.unfixable_issues)
     assert without_fallback.fallback_kernel["available"] is False
     assert any(issue.kind == "fallback_kernel_missing" for issue in without_fallback.unfixable_issues)

@@ -9,6 +9,7 @@ from aurascan.core.upgrade_preflight import (
     EXIT_PREFLIGHT_UNAVAILABLE,
     EXIT_PREFLIGHT_DISABLED,
     EXIT_UPGRADE_COMMAND_FAILED_TO_START,
+    EXIT_UPGRADE_VERIFICATION_FAILED,
     EXIT_USER_DECLINED,
     ForeignPackageInfo,
     PACMAN_PRINT_FORMAT,
@@ -33,6 +34,7 @@ from aurascan.core.upgrade_preflight import (
     options_from_args,
     resolve_aur_helper,
     run_upgrade,
+    verify_upgrade_handoff,
 )
 
 
@@ -68,6 +70,10 @@ def completed(stdout="", stderr="", returncode=0):
 
 def preview_cmd():
     return ["sudo", "pacman", "-Syu", "--print", "--print-format", PACMAN_PRINT_FORMAT]
+
+
+def installed_q_cmd(*names):
+    return tuple(["pacman", "-Q", *names])
 
 
 def base_snapshot(**overrides):
@@ -280,6 +286,7 @@ def test_deterministic_rules_cover_system_breakage_risks():
     snapshot = base_snapshot(
         boot_free_mib=128,
         root_free_mib=1024,
+        installed_packages=["linux-cachyos", "nvidia-dkms", "glibc", "glibc-old"],
         dkms_packages=["nvidia-dkms"],
         nvidia_packages=["nvidia-utils"],
         ignored_packages=["linux-cachyos"],
@@ -313,6 +320,39 @@ def test_no_kernel_module_autopilot_keeps_legacy_module_warning():
     rule_ids = {finding.rule_id for finding in analyze_upgrade_risks(plan, snap, kernel_module_autopilot_enabled=False)}
 
     assert "UPG-KERNEL-MODULES" in rule_ids
+
+
+def test_replacement_metadata_only_does_not_create_high_risk_false_alarm():
+    plan = UpgradePlan(
+        repo_packages=[
+            UpgradePackage("nvidia-utils", "610.43.03-1", replaces=["nvidia-libgl"]),
+            UpgradePackage("linux-cachyos", "7.1.3-2", replaces=["linux-cachyos-lto"]),
+        ],
+        replacements=["nvidia-libgl", "linux-cachyos-lto"],
+        final_command=["sudo", "pacman", "-Syu"],
+    )
+    report = UpgradePreflightReport(plan=plan, snapshot=base_snapshot(installed_packages=["linux-cachyos", "nvidia-utils"]))
+
+    findings = analyze_upgrade_risks(plan, report.snapshot)
+    report.findings = findings
+
+    assert "UPG-TRANSACTION-REPLACES" not in {finding.rule_id for finding in findings}
+    assert report.transaction_change_count() == 0
+    assert "Removals/Replacements: 0" in report.render_terminal(use_color=False)
+
+
+def test_installed_replacement_target_is_reported_without_always_forcing_high():
+    plan = UpgradePlan(
+        repo_packages=[UpgradePackage("demo-new", "2-1", replaces=["demo-old"])],
+        replacements=["demo-old"],
+        final_command=["sudo", "pacman", "-Syu"],
+    )
+
+    findings = analyze_upgrade_risks(plan, base_snapshot(installed_packages=["linux-cachyos", "demo-old"]))
+
+    replacement = next(finding for finding in findings if finding.rule_id == "UPG-TRANSACTION-REPLACES")
+    assert replacement.severity == Severity.MEDIUM
+    assert "installed replacement targets=demo-old" in replacement.evidence
 
 
 def test_foreign_dependency_check_reports_concrete_missing_deps_and_conflicts():
@@ -374,6 +414,21 @@ def test_ai_raise_only_caps_critical_and_never_lowers():
     assert report.findings[0].severity == Severity.HIGH
     assert report.findings[1].rule_id == "UPG-AI-RISK"
     assert report.highest_severity == Severity.HIGH
+
+
+def test_terminal_renders_high_severity_findings_before_medium_notices():
+    report = UpgradePreflightReport(
+        plan=UpgradePlan(final_command=["sudo", "pacman", "-Syu"]),
+        snapshot=base_snapshot(),
+        findings=[
+            UpgradeFinding("UPG-KERNEL-REBOOT", Severity.MEDIUM, "Medium notice", "summary", "why", "action"),
+            UpgradeFinding("UPG-TRANSACTION-REPLACES", Severity.HIGH, "High risk", "summary", "why", "action"),
+        ],
+    )
+
+    rendered = report.render_terminal(use_color=False)
+
+    assert rendered.index("1. High risk [HIGH]") < rendered.index("2. Medium notice [MEDIUM]")
 
 
 def test_ai_vague_foreign_raise_is_ignored_when_local_helper_checks_pass():
@@ -515,6 +570,7 @@ def test_upgrade_yes_runs_final_command():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
         ("sudo", "pacman", "-Syu"): completed(returncode=0),
+        installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
     })
 
     status = run_upgrade(
@@ -532,6 +588,7 @@ def test_upgrade_yes_runs_config_drift_before_and_after_when_root_is_explicit():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
         ("sudo", "pacman", "-Syu"): completed(returncode=0),
+        installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
     })
     calls = []
 
@@ -579,6 +636,10 @@ def test_kernel_module_autopilot_accepts_fix_and_reruns_preflight():
             super().__init__({
                 ("sudo", "pacman", "-S", "--needed", "linux-cachyos-nvidia-open"): completed(returncode=0),
                 ("sudo", "pacman", "-Syu"): completed(returncode=0),
+                installed_q_cmd("linux-cachyos", "linux-cachyos-nvidia-open"): completed(
+                    "linux-cachyos 7.1.4-1\n"
+                    "linux-cachyos-nvidia-open 7.1.4-1\n"
+                ),
             })
             self.preview_count = 0
 
@@ -639,6 +700,7 @@ def test_upgrade_success_runs_kernel_module_aftercare():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
         ("sudo", "pacman", "-Syu"): completed(returncode=0),
+        installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
     })
     stdout = io.StringIO()
 
@@ -653,10 +715,51 @@ def test_upgrade_success_runs_kernel_module_aftercare():
     assert "Kernel/module aftercare" in stdout.getvalue()
 
 
+def test_upgrade_reported_success_but_versions_not_updated_skips_aftercare():
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("clamav\t1.5.3-1\textra\t1\t\t\t\n"),
+        ("sudo", "pacman", "-Syu"): completed(returncode=0),
+        installed_q_cmd("clamav"): completed("clamav 1.5.2-2\n"),
+    })
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    status = run_upgrade(
+        ["--yes", "--no-ai", "--aur-helper", "none"],
+        runner=runner,
+        snapshot=base_snapshot(installed_packages=["clamav"]),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert status == EXIT_UPGRADE_VERIFICATION_FAILED
+    assert "Kernel/module aftercare" not in stdout.getvalue()
+    assert "planned package versions were not installed" in stderr.getvalue()
+    assert "clamav expected 1.5.3-1, found 1.5.2-2" in stderr.getvalue()
+
+
+def test_verify_upgrade_handoff_reports_uninstalled_or_old_packages():
+    plan = UpgradePlan(repo_packages=[
+        UpgradePackage("clamav", "1.5.3-1"),
+        UpgradePackage("linux-cachyos", "7.1.3-2"),
+    ])
+    runner = FakeRunner({
+        installed_q_cmd("clamav", "linux-cachyos"): completed("clamav 1.5.2-2\n"),
+    })
+
+    missing = verify_upgrade_handoff(plan, runner=runner)
+
+    assert missing == [
+        "clamav expected 1.5.3-1, found 1.5.2-2",
+        "linux-cachyos expected 7.1.3-2, found (not installed)",
+    ]
+
+
 def test_upgrade_json_mode_does_not_emit_config_drift_output_even_with_yes():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
         ("sudo", "pacman", "-Syu"): completed(returncode=0),
+        installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
     })
     stdout = io.StringIO()
     calls = []

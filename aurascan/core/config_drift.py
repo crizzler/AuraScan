@@ -31,6 +31,9 @@ LOW_RISK_NAMES = {
     "cachyos-v3-mirrorlist",
     "cachyos-v4-mirrorlist",
 }
+PACMAN_CONF_SAFE_BOOLEAN_OPTIONS = {
+    "CheckSpace",
+}
 SENSITIVE_PATTERNS = (
     re.compile(r"(^|/)pacman\.conf$"),
     re.compile(r"(^|/)sudoers($|/)"),
@@ -173,6 +176,16 @@ class ConfigDriftReport:
     def requires_confirmation(self) -> bool:
         return any(action.requires_confirmation and action.applies for action in self.actions)
 
+    @property
+    def apply_prompt_default_yes(self) -> bool:
+        return bool(
+            self.apply_actions
+            and not self.manual_actions
+            and not self.errors
+            and not self.scan_truncated
+            and all(action.applies for action in self.actions)
+        )
+
     def to_dict(self, *, include_preview: bool = False) -> Dict[str, object]:
         return {
             "schema_version": self.schema_version,
@@ -224,7 +237,7 @@ class ConfigDriftReport:
             lines.append("")
         if lines and lines[-1] == "":
             lines.pop()
-        if self.ai_review:
+        if self.ai_review and str(self.ai_review.get("status") or "") not in {"disabled", "not_run"}:
             status = str(self.ai_review.get("status") or "unknown")
             provider = str(self.ai_review.get("provider") or "")
             label = f"AI diff review: {status}" + (f" ({provider})" if provider else "")
@@ -320,8 +333,11 @@ def run_config_drift(
     if not options.json_output:
         _emit_config_report(report, options, stdout)
     if not options.yes:
-        answer = input_func("AuraScan prepared config drift fixes. Apply now? [y/N] ").strip().lower()
-        if answer not in {"y", "yes"}:
+        default_yes = report.apply_prompt_default_yes
+        suffix = "[Y/n]" if default_yes else "[y/N]"
+        answer = input_func(f"AuraScan prepared config drift fixes. Apply now? {suffix} ").strip().lower()
+        declined = answer in {"n", "no"} if default_yes else answer not in {"y", "yes"}
+        if declined:
             print("[AuraScan] Config drift fixes were not applied.", file=stderr)
             return EXIT_CONFIG_DRIFT_USER_DECLINED
 
@@ -520,6 +536,30 @@ def plan_config_drift_action(item: ConfigDriftFile) -> ConfigDriftAction:
             requires_confirmation=item.sensitive,
             remove_drift=True,
         )
+    if not meaningful_lines(drift_text):
+        return ConfigDriftAction(
+            drift_file=item,
+            action="preserve_active_remove_packaged_comments",
+            summary="The packaged .pacnew contains only comments or blank lines while the active config contains real local settings, so AuraScan can keep the active file and remove the drift after backing it up.",
+            applies=True,
+            requires_confirmation=item.sensitive,
+            remove_drift=True,
+        )
+    pacman_candidate = plan_pacman_conf_candidate(item, target_text, drift_text)
+    if pacman_candidate is not None:
+        return ConfigDriftAction(
+            drift_file=item,
+            action="merge_pacman_conf_safe_options" if pacman_candidate != target_text else "preserve_pacman_conf_local_policy",
+            summary=(
+                "AuraScan can preserve the active CachyOS repository and local pacman settings while merging safe packaged pacman.conf defaults."
+                if pacman_candidate != target_text
+                else "AuraScan can preserve the active CachyOS pacman.conf because the packaged baseline would remove local repository policy."
+            ),
+            candidate_text=pacman_candidate if pacman_candidate != target_text else "",
+            applies=True,
+            requires_confirmation=True,
+            remove_drift=True,
+        )
     return ConfigDriftAction(
         drift_file=item,
         action="manual_merge_required",
@@ -601,7 +641,7 @@ def restore_backup_entry(entry: Mapping[str, object]) -> None:
 def apply_one_action(action: ConfigDriftAction) -> None:
     target = action.drift_file.target_path
     drift = action.drift_file.path
-    if action.action == "remove_identical_drift":
+    if action.action == "remove_identical_drift" or (action.remove_drift and not action.candidate_text):
         drift.unlink()
         return
     if not action.candidate_text:
@@ -766,6 +806,72 @@ def meaningful_lines(text: str) -> List[str]:
             continue
         result.append(stripped)
     return result
+
+
+def plan_pacman_conf_candidate(item: ConfigDriftFile, target_text: str, drift_text: str) -> Optional[str]:
+    if item.target_path.name != "pacman.conf":
+        return None
+    if not has_cachyos_pacman_policy(target_text):
+        return None
+    active_options = enabled_pacman_options(target_text)
+    packaged_options = enabled_pacman_options(drift_text)
+    candidate = target_text
+    for option in sorted(PACMAN_CONF_SAFE_BOOLEAN_OPTIONS):
+        if option in packaged_options and option not in active_options:
+            candidate = enable_pacman_boolean_option(candidate, option)
+    return candidate
+
+
+def has_cachyos_pacman_policy(text: str) -> bool:
+    for line in meaningful_lines(text):
+        lowered = line.lower()
+        if lowered.startswith("[cachyos") or "cachyos-mirrorlist" in lowered:
+            return True
+    return False
+
+
+def enabled_pacman_options(text: str) -> Dict[str, str]:
+    options: Dict[str, str] = {}
+    section = ""
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped.strip("[]").strip().lower()
+            continue
+        if section != "options":
+            continue
+        key = re.split(r"\s|=", stripped, maxsplit=1)[0].strip()
+        if key:
+            options[key] = stripped
+    return options
+
+
+def enable_pacman_boolean_option(text: str, option: str) -> str:
+    lines = text.splitlines(keepends=True)
+    in_options = False
+    insert_at: Optional[int] = None
+    commented = re.compile(rf"^(\s*)#\s*{re.escape(option)}\s*$")
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_options:
+                insert_at = index
+                break
+            in_options = stripped.strip("[]").strip().lower() == "options"
+            continue
+        if not in_options:
+            continue
+        newline = "\n" if line.endswith("\n") else ""
+        match = commented.match(line.rstrip("\n"))
+        if match:
+            lines[index] = f"{match.group(1)}{option}{newline}"
+            return "".join(lines)
+    if insert_at is None:
+        insert_at = len(lines)
+    lines.insert(insert_at, f"{option}\n")
+    return "".join(lines)
 
 
 def sha256_text(text: str) -> str:

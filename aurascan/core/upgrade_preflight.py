@@ -31,6 +31,7 @@ UPGRADE_PREFLIGHT_SCHEMA_VERSION = "1.1"
 EXIT_PREFLIGHT_UNAVAILABLE = 20
 EXIT_USER_DECLINED = 21
 EXIT_PREFLIGHT_DISABLED = 22
+EXIT_UPGRADE_VERIFICATION_FAILED = 23
 EXIT_UPGRADE_COMMAND_FAILED_TO_START = 127
 PACMAN_PRINT_FORMAT = "%n\t%v\t%r\t%s\t%D\t%H\t%R"
 HIGH_RISK = {Severity.HIGH, Severity.CRITICAL}
@@ -290,6 +291,14 @@ class UpgradePreflightReport:
             return "No upgrade preflight findings were produced; this is not proof the upgrade is safe."
         return "highest preflight severity: " + self.highest_severity.value
 
+    def transaction_change_count(self) -> int:
+        return len(self.plan.removals) + len(applicable_replacements(self.plan, self.snapshot))
+
+    def terminal_findings(self) -> List[UpgradeFinding]:
+        indexed = list(enumerate(self.findings))
+        indexed.sort(key=lambda item: (-SEVERITY_ORDER.index(item[1].severity), item[0]))
+        return [finding for _, finding in indexed]
+
     def to_dict(self) -> Dict[str, object]:
         return {
             "schema_version": self.schema_version,
@@ -316,7 +325,7 @@ class UpgradePreflightReport:
         lines = [
             "\n[AuraScan] Upgrade Preflight",
             "=" * 50,
-            f"Repo upgrades: {len(self.plan.repo_packages)} | AUR upgrades: {len(self.plan.aur_packages)} | Removals/Replacements: {len(self.plan.removals) + len(self.plan.replacements)}",
+            f"Repo upgrades: {len(self.plan.repo_packages)} | AUR upgrades: {len(self.plan.aur_packages)} | Removals/Replacements: {self.transaction_change_count()}",
             f"Risk: {color}{self.highest_severity.value}{reset} | Action: {color}{self.action.upper()}{reset} | Helper: {self.plan.selected_helper}",
             f"Planned command: {' '.join(self.plan.final_command) if self.plan.final_command else '(none)'}",
             "-" * 50,
@@ -329,7 +338,8 @@ class UpgradePreflightReport:
         elif not self.findings:
             lines.append("[INFO] No upgrade preflight findings were produced. This is not proof the upgrade is safe.")
 
-        visible = self.findings if verbose else self.findings[:3]
+        terminal_findings = self.terminal_findings()
+        visible = terminal_findings if verbose else terminal_findings[:3]
         if visible:
             lines.append("Upgrade risks:")
             for index, finding in enumerate(visible, start=1):
@@ -345,7 +355,7 @@ class UpgradePreflightReport:
             if lines[-1] == "":
                 lines.pop()
 
-        hidden = len(self.findings) - len(visible)
+        hidden = len(terminal_findings) - len(visible)
         if hidden > 0:
             note = "additional upgrade risk hidden" if hidden == 1 else "additional upgrade risks hidden"
             lines.append(f"{hidden} {note}. Use --verbose to show all.")
@@ -574,9 +584,49 @@ def run_upgrade(
         return EXIT_UPGRADE_COMMAND_FAILED_TO_START
     result_code = int(getattr(result, "returncode", 0))
     if result_code == 0:
+        verification = verify_upgrade_handoff(report.plan, runner=runner)
+        if verification:
+            print("[AuraScan] Upgrade command reported success, but planned package versions were not installed.", file=stderr)
+            for item in verification[:12]:
+                print(f"[AuraScan] Not upgraded: {item}", file=stderr)
+            if len(verification) > 12:
+                print(f"[AuraScan] {len(verification) - 12} additional planned packages did not verify.", file=stderr)
+            print("[AuraScan] Skipping post-upgrade aftercare because the package transaction did not verify.", file=stderr)
+            return EXIT_UPGRADE_VERIFICATION_FAILED
         run_upgrade_kernel_module_aftercare(options, plan=report.plan, runner=runner, stdout=stdout, stderr=stderr, snapshot=snapshot, modules_root=modules_root)
         run_upgrade_config_drift("after", options, input_func=input_func, stdout=stdout, stderr=stderr, root=config_drift_root, snapshot=snapshot, runner=config_drift_runner)
     return result_code
+
+
+def verify_upgrade_handoff(plan: UpgradePlan, *, runner: Callable = subprocess.run) -> List[str]:
+    expected = {pkg.name: pkg.new_version for pkg in plan.repo_packages if pkg.name and pkg.new_version}
+    if not expected:
+        return []
+    installed = installed_package_versions(expected.keys(), runner=runner)
+    missing: List[str] = []
+    for name, version in expected.items():
+        installed_version = installed.get(name, "")
+        if installed_version != version:
+            found = installed_version or "(not installed)"
+            missing.append(f"{name} expected {version}, found {found}")
+    return missing
+
+
+def installed_package_versions(packages: Iterable[str], *, runner: Callable = subprocess.run) -> Dict[str, str]:
+    names = sorted({name for name in packages if name})
+    if not names:
+        return {}
+    try:
+        result = runner(["pacman", "-Q"] + names, capture_output=True, text=True, check=False)
+    except OSError:
+        return {}
+    versions: Dict[str, str] = {}
+    output = str(getattr(result, "stdout", "") or "")
+    for raw in output.splitlines():
+        parts = raw.strip().split(maxsplit=1)
+        if len(parts) == 2:
+            versions[parts[0]] = parts[1]
+    return versions
 
 
 def run_kernel_module_autopilot_fixes(
@@ -1048,15 +1098,19 @@ def analyze_upgrade_risks(
             f"IgnorePkg={', '.join(snapshot.ignored_packages) or '(none)'}; IgnoreGroup={', '.join(snapshot.ignored_groups) or '(none)'}",
         ))
 
-    if plan.replacements or plan.removals:
+    replacement_targets = applicable_replacements(plan, snapshot)
+    if plan.removals or replacement_targets:
+        sensitive_changes = [name for name in plan.removals + replacement_targets if is_sensitive_transaction_change(name)]
+        severity = Severity.HIGH if plan.removals or sensitive_changes else Severity.MEDIUM
+        metadata_only = sorted(set(plan.replacements) - set(replacement_targets))
         findings.append(_finding(
             "UPG-TRANSACTION-REPLACES",
-            Severity.HIGH,
+            severity,
             "Upgrade includes replacements or removals.",
-            "The package-manager preview contains package replacements or removals.",
-            "Replaces/removals can change core components or remove files that local packages still expect.",
-            "Review the transaction carefully before accepting pacman's confirmation prompt.",
-            f"replacements={', '.join(plan.replacements) or '(none)'}; removals={', '.join(plan.removals) or '(none)'}",
+            "The package-manager preview contains installed replacement targets or removals.",
+            "Installed replacements/removals can change package names or remove files that local packages still expect.",
+            "Review the concrete replacement/removal list before accepting pacman's confirmation prompt.",
+            f"installed replacement targets={', '.join(replacement_targets) or '(none)'}; removals={', '.join(plan.removals) or '(none)'}; metadata-only replaces={', '.join(metadata_only[:16]) or '(none)'}",
         ))
 
     if plan.conflicts:
@@ -1176,10 +1230,16 @@ def apply_ai_upgrade_review(
 
 
 def build_upgrade_ai_prompt(report: UpgradePreflightReport) -> str:
+    replacement_targets = applicable_replacements(report.plan, report.snapshot)
     payload = {
         "repo_packages": [{"name": pkg.name, "new_version": pkg.new_version, "repo": pkg.repo} for pkg in report.plan.repo_packages],
         "aur_packages": [{"name": pkg.name, "old_version": pkg.old_version, "new_version": pkg.new_version} for pkg in report.plan.aur_packages],
         "selected_helper": report.plan.selected_helper,
+        "transaction_changes": {
+            "removals": list(report.plan.removals),
+            "installed_replacement_targets": replacement_targets,
+            "metadata_only_replaces": sorted(set(report.plan.replacements) - set(replacement_targets))[:30],
+        },
         "system_facts": {
             "running_kernel": report.snapshot.running_kernel,
             "root_free_mib": report.snapshot.root_free_mib,
@@ -1215,6 +1275,8 @@ def build_upgrade_ai_prompt(report: UpgradePreflightReport) -> str:
         "You may only suggest risk raises, never risk reductions. Do not suggest hard blocking.\n"
         "Do not create package commands or package-fix plans; AuraScan's deterministic kernel/module autopilot owns those decisions.\n"
         "Do not tell the user to manually verify kernel/module compatibility when kernel_module_check status is ok.\n"
+        "Do not raise fallback-kernel risk when kernel_module_check.fallback_kernel.available is true.\n"
+        "Do not raise replacement/removal risk solely from transaction_changes.metadata_only_replaces; those are package metadata, not installed removals.\n"
         "Do not raise risk merely because foreign/AUR packages exist when AuraScan's foreign package dependency check reports no issues and the helper query succeeded.\n"
         "Avoid telling the user to manually verify compatibility unless AuraScan found a concrete issue or a named check could not run.\n"
         "For .pacnew/.pacsave config drift, do not recommend rebooting or restarting services merely because files exist; recommend merging config and restarting only affected services when config actually changes.\n"
@@ -1296,6 +1358,15 @@ def is_kernel_package(name: str) -> bool:
 
 def is_boot_sensitive_package(name: str) -> bool:
     return name in INITRAMFS_BOOT_PACKAGES or name.startswith("systemd-boot")
+
+
+def applicable_replacements(plan: UpgradePlan, snapshot: SystemSnapshot) -> List[str]:
+    installed = set(snapshot.installed_packages)
+    return sorted(name for name in set(plan.replacements) if name in installed)
+
+
+def is_sensitive_transaction_change(name: str) -> bool:
+    return is_kernel_package(name) or is_boot_sensitive_package(name) or name in ABI_SENSITIVE_PACKAGES
 
 
 def expected_running_kernel_package(running_kernel: str) -> str:

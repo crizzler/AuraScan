@@ -41,6 +41,7 @@ SEVERITY_ORDER = [Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICA
 UPGRADE_PREFLIGHT_ENABLED_ENV = "AURASCAN_UPGRADE_PREFLIGHT_ENABLED"
 UPGRADE_PREFLIGHT_AUR_HELPER_ENV = "AURASCAN_UPGRADE_AUR_HELPER"
 UPGRADE_PREFLIGHT_AI_ENV = "AURASCAN_UPGRADE_PREFLIGHT_AI"
+UPGRADE_TRUSTED_HANDOFF_ENV = "AURASCAN_UPGRADE_TRUSTED_HANDOFF"
 UPGRADE_AUR_HELPERS = {"auto", "paru", "yay", "shelly", "none"}
 REPOSITORY_HEALTH_BACKUP_ROOT = Path("/var/lib/aurascan/repo-health")
 
@@ -489,6 +490,7 @@ class UpgradeConfig:
     aur_helper: str = "auto"
     ai_enabled: bool = True
     kernel_module_autopilot_enabled: bool = True
+    trusted_handoff_enabled: bool = True
     error: str = ""
 
 
@@ -504,6 +506,7 @@ class UpgradeOptions:
     config_drift_enabled: bool = True
     config_drift_ai_diffs: bool = False
     kernel_module_autopilot_enabled: bool = True
+    trusted_handoff_enabled: bool = True
     config_error: str = ""
     config_drift_error: str = ""
 
@@ -520,6 +523,7 @@ def build_upgrade_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-ai", action="store_true", help="disable AI upgrade risk review for this run")
     parser.add_argument("--no-config-drift", action="store_true", help="skip the config drift assistant before and after the upgrade")
     parser.add_argument("--no-kernel-module-autopilot", action="store_true", help="skip deterministic kernel/module compatibility autopilot checks")
+    parser.add_argument("--no-trusted-handoff", action="store_true", help="keep the package manager's own confirmation prompt even after a passing AuraScan preflight")
     parser.add_argument("--config-drift-ai-diffs", action="store_true", help="allow config drift assistant AI to inspect redacted bounded diffs")
     preflight = parser.add_mutually_exclusive_group()
     preflight.add_argument("--enable-preflight", action="store_true", help="run upgrade preflight even if disabled in config")
@@ -551,6 +555,13 @@ def resolve_upgrade_config(env: Optional[Mapping[str, str]] = None) -> UpgradeCo
     if autopilot_enabled is None:
         autopilot_enabled = True
 
+    handoff_raw = source.get(UPGRADE_TRUSTED_HANDOFF_ENV)
+    handoff_enabled = parse_config_bool(handoff_raw)
+    if handoff_raw is not None and handoff_enabled is None:
+        return UpgradeConfig(error=f"invalid {UPGRADE_TRUSTED_HANDOFF_ENV} value")
+    if handoff_enabled is None:
+        handoff_enabled = True
+
     aur_helper = source.get(UPGRADE_PREFLIGHT_AUR_HELPER_ENV, "auto").strip().lower() or "auto"
     if aur_helper not in UPGRADE_AUR_HELPERS:
         return UpgradeConfig(error=f"invalid {UPGRADE_PREFLIGHT_AUR_HELPER_ENV} value")
@@ -560,6 +571,7 @@ def resolve_upgrade_config(env: Optional[Mapping[str, str]] = None) -> UpgradeCo
         aur_helper=aur_helper,
         ai_enabled=bool(ai_enabled),
         kernel_module_autopilot_enabled=bool(autopilot_enabled),
+        trusted_handoff_enabled=bool(handoff_enabled),
     )
 
 
@@ -575,6 +587,7 @@ def options_from_args(args: argparse.Namespace, env: Optional[Mapping[str, str]]
     config_drift_enabled = bool(preflight_enabled and drift_config.enabled and not getattr(args, "no_config_drift", False))
     config_drift_ai_diffs = bool(getattr(args, "config_drift_ai_diffs", False) or drift_config.ai_diffs == "always")
     kernel_module_autopilot_enabled = bool(config.kernel_module_autopilot_enabled and not getattr(args, "no_kernel_module_autopilot", False))
+    trusted_handoff_enabled = bool(config.trusted_handoff_enabled and not getattr(args, "no_trusted_handoff", False))
     return UpgradeOptions(
         dry_run=bool(args.dry_run),
         json_output=bool(args.json_output),
@@ -586,6 +599,7 @@ def options_from_args(args: argparse.Namespace, env: Optional[Mapping[str, str]]
         config_drift_enabled=config_drift_enabled,
         config_drift_ai_diffs=config_drift_ai_diffs,
         kernel_module_autopilot_enabled=kernel_module_autopilot_enabled,
+        trusted_handoff_enabled=trusted_handoff_enabled,
         config_error=config.error,
         config_drift_error=drift_config.error,
     )
@@ -644,6 +658,8 @@ def run_upgrade(
         if repaired:
             report = run_upgrade_preflight(options, runner=runner, which=which, snapshot=snapshot, urlopen=urlopen, modules_root=modules_root, pacman_conf_path=pacman_conf_path)
 
+    apply_trusted_handoff(report, options)
+
     if options.json_output:
         print(report.to_json(), file=stdout)
     else:
@@ -679,6 +695,7 @@ def run_upgrade(
             return EXIT_USER_DECLINED
 
     run_upgrade_config_drift("before", options, input_func=input_func, stdout=stdout, stderr=stderr, root=config_drift_root, snapshot=snapshot, runner=config_drift_runner)
+    print_trusted_handoff_note(report, options, stdout=stdout)
     try:
         result = runner(report.plan.final_command, check=False)
     except OSError as exc:
@@ -731,6 +748,35 @@ def installed_package_versions(packages: Iterable[str], *, runner: Callable = su
     return versions
 
 
+def apply_trusted_handoff(report: UpgradePreflightReport, options: UpgradeOptions) -> bool:
+    command = trusted_handoff_command(report, options)
+    changed = command != report.plan.final_command
+    report.plan.final_command = command
+    return changed
+
+
+def trusted_handoff_command(report: UpgradePreflightReport, options: UpgradeOptions) -> List[str]:
+    command = helper_upgrade_command(report.plan.selected_helper)
+    if not should_use_trusted_handoff(report, options):
+        return command
+    if report.plan.selected_helper == "shelly":
+        return command + ["--no-confirm"]
+    return command
+
+
+def should_use_trusted_handoff(report: UpgradePreflightReport, options: UpgradeOptions) -> bool:
+    if not options.trusted_handoff_enabled or not report.plan.available:
+        return False
+    if report.requires_confirmation:
+        return False
+    return report.plan.selected_helper == "shelly"
+
+
+def print_trusted_handoff_note(report: UpgradePreflightReport, options: UpgradeOptions, *, stdout) -> None:
+    if should_use_trusted_handoff(report, options):
+        print("[AuraScan] Preflight passed; using Shelly --no-confirm so the approved upgrade continues without a second default-no prompt.", file=stdout)
+
+
 def run_kernel_module_autopilot_fixes(
     report: UpgradePreflightReport,
     options: UpgradeOptions,
@@ -771,6 +817,8 @@ def run_kernel_module_autopilot_fixes(
         report.findings = refreshed.findings
         report.ai_review = refreshed.ai_review
         report.kernel_module_check = refreshed.kernel_module_check
+        report.repository_health = refreshed.repository_health
+        apply_trusted_handoff(report, options)
         print(report.render_terminal(verbose=options.verbose), file=stdout)
     else:
         print("[AuraScan] Kernel/module fix skipped. Keeping preflight risk for confirmation.", file=stderr)

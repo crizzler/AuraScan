@@ -228,6 +228,17 @@ def test_upgrade_options_read_config_drift_ai_diff_setting():
     assert options.config_drift_ai_diffs is True
 
 
+def test_upgrade_options_trusted_handoff_defaults_on_and_can_be_disabled():
+    args = build_upgrade_parser().parse_args([])
+    options = options_from_args(args, {"AURASCAN_UPGRADE_TRUSTED_HANDOFF": "1"})
+
+    assert options.trusted_handoff_enabled is True
+
+    disabled = options_from_args(build_upgrade_parser().parse_args(["--no-trusted-handoff"]))
+
+    assert disabled.trusted_handoff_enabled is False
+
+
 def test_build_upgrade_plan_uses_helper_and_parses_aur_updates():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
@@ -646,6 +657,71 @@ def test_upgrade_yes_runs_final_command():
 
     assert status == 0
     assert ["sudo", "pacman", "-Syu"] in runner.calls
+
+
+def test_shelly_passing_preflight_uses_trusted_handoff_no_confirm():
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+        ("shelly", "check-updates", "--aur", "--json"): completed('{"Packages":[],"Aur":[]}\n'),
+        ("shelly", "upgrade-all", "--no-flatpak", "--no-appimage", "--no-confirm"): completed(returncode=0),
+        installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
+    })
+    stdout = io.StringIO()
+
+    status = run_upgrade(
+        ["--no-ai", "--aur-helper", "shelly"],
+        runner=runner,
+        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
+        snapshot=base_snapshot(),
+        stdout=stdout,
+    )
+
+    assert status == 0
+    assert ["shelly", "upgrade-all", "--no-flatpak", "--no-appimage", "--no-confirm"] in runner.calls
+    assert "Planned command: shelly upgrade-all --no-flatpak --no-appimage --no-confirm" in stdout.getvalue()
+    assert "second default-no prompt" in stdout.getvalue()
+
+
+def test_shelly_high_risk_preflight_keeps_helper_confirmation():
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+        ("shelly", "check-updates", "--aur", "--json"): completed('{"Packages":[],"Aur":[]}\n'),
+        ("shelly", "upgrade-all", "--no-flatpak", "--no-appimage"): completed(returncode=0),
+        installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
+    })
+
+    status = run_upgrade(
+        ["--yes", "--no-ai", "--aur-helper", "shelly"],
+        runner=runner,
+        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
+        snapshot=base_snapshot(ignored_packages=["glibc"]),
+        stdout=io.StringIO(),
+    )
+
+    assert status == 0
+    assert ["shelly", "upgrade-all", "--no-flatpak", "--no-appimage"] in runner.calls
+    assert ["shelly", "upgrade-all", "--no-flatpak", "--no-appimage", "--no-confirm"] not in runner.calls
+
+
+def test_shelly_trusted_handoff_can_be_disabled():
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+        ("shelly", "check-updates", "--aur", "--json"): completed('{"Packages":[],"Aur":[]}\n'),
+        ("shelly", "upgrade-all", "--no-flatpak", "--no-appimage"): completed(returncode=0),
+        installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
+    })
+
+    status = run_upgrade(
+        ["--no-ai", "--aur-helper", "shelly", "--no-trusted-handoff"],
+        runner=runner,
+        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
+        snapshot=base_snapshot(),
+        stdout=io.StringIO(),
+    )
+
+    assert status == 0
+    assert ["shelly", "upgrade-all", "--no-flatpak", "--no-appimage"] in runner.calls
+    assert ["shelly", "upgrade-all", "--no-flatpak", "--no-appimage", "--no-confirm"] not in runner.calls
 
 
 def test_upgrade_yes_runs_config_drift_before_and_after_when_root_is_explicit():

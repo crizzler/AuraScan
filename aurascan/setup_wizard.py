@@ -28,6 +28,11 @@ from aurascan.core.config_drift import (
     CONFIG_DRIFT_ENABLED_ENV,
     resolve_config_drift_config,
 )
+from aurascan.core.kernel_module_autopilot import (
+    KERNEL_MODULE_AUTOPILOT_ENV,
+    detect_module_families,
+    is_kernel_base_package,
+)
 from aurascan.core.upgrade_preflight import (
     UPGRADE_AUR_HELPERS,
     UPGRADE_PREFLIGHT_AI_ENV,
@@ -95,6 +100,9 @@ def build_init_parser() -> argparse.ArgumentParser:
     config_drift.add_argument("--enable-config-drift", action="store_true", help="enable the config drift assistant for upgrades")
     config_drift.add_argument("--disable-config-drift", action="store_true", help="disable the config drift assistant for upgrades")
     parser.add_argument("--config-drift-ai-diffs", choices=sorted(CONFIG_DRIFT_AI_DIFFS_VALUES), help="AI diff sharing policy for the config drift assistant")
+    kernel_module_autopilot = parser.add_mutually_exclusive_group()
+    kernel_module_autopilot.add_argument("--enable-kernel-module-autopilot", action="store_true", help="enable kernel/module autopilot during upgrades")
+    kernel_module_autopilot.add_argument("--disable-kernel-module-autopilot", action="store_true", help="disable kernel/module autopilot during upgrades")
     updater = parser.add_mutually_exclusive_group()
     updater.add_argument("--enable-updater-tray", action="store_true", help="enable the AuraScan Updater tray icon")
     updater.add_argument("--disable-updater-tray", action="store_true", help="disable the AuraScan Updater tray icon")
@@ -188,6 +196,8 @@ def run_init(
         or args.upgrade_aur_helper is not None
         or args.enable_upgrade_ai
         or args.disable_upgrade_ai
+        or args.enable_kernel_module_autopilot
+        or args.disable_kernel_module_autopilot
     )
     should_prompt_upgrade = not configure_upgrade and not (
         args.provider
@@ -199,7 +209,7 @@ def run_init(
     if configure_upgrade or should_prompt_upgrade:
         existing_upgrade = resolve_upgrade_config(existing)
         upgrade_enabled = existing_upgrade.preflight_enabled if not existing_upgrade.error else True
-        if args.enable_upgrade_preflight:
+        if args.enable_upgrade_preflight or args.enable_kernel_module_autopilot:
             upgrade_enabled = True
         elif args.disable_upgrade_preflight:
             upgrade_enabled = False
@@ -230,6 +240,18 @@ def run_init(
                     default=upgrade_ai_enabled,
                 )
             updates[UPGRADE_PREFLIGHT_AI_ENV] = "1" if upgrade_ai_enabled else "0"
+            autopilot_enabled = existing_upgrade.kernel_module_autopilot_enabled if not existing_upgrade.error else True
+            if args.enable_kernel_module_autopilot:
+                autopilot_enabled = True
+            elif args.disable_kernel_module_autopilot:
+                autopilot_enabled = False
+            elif should_prompt_upgrade:
+                autopilot_enabled = _prompt_yes_no(
+                    "Enable kernel/module autopilot during upgrades?",
+                    input_func,
+                    default=autopilot_enabled,
+                )
+            updates[KERNEL_MODULE_AUTOPILOT_ENV] = "1" if autopilot_enabled else "0"
             print("Configured upgrade preflight defaults.", file=stdout)
         else:
             print("Upgrade preflight will be disabled unless you enable it later.", file=stdout)
@@ -362,6 +384,7 @@ def run_doctor(
     updater_data_home: Optional[Path] = None,
     which: Callable[[str], Optional[str]] = shutil.which,
     qt_binding_finder: Optional[Callable[[], str]] = None,
+    runner: Callable = subprocess.run,
 ) -> int:
     stdout = stdout or sys.stdout
     args = build_doctor_parser().parse_args(argv)
@@ -377,6 +400,7 @@ def run_doctor(
         updater_data_home=updater_data_home,
         which=which,
         qt_binding_finder=qt_binding_finder,
+        runner=runner,
     )
     has_error = any(check.status == "error" for check in checks)
     if args.json_mode:
@@ -404,6 +428,7 @@ def build_doctor_checks(
     updater_data_home: Optional[Path] = None,
     which: Callable[[str], Optional[str]] = shutil.which,
     qt_binding_finder: Optional[Callable[[], str]] = None,
+    runner: Callable = subprocess.run,
 ) -> List[DoctorCheck]:
     checks: List[DoctorCheck] = []
     file_values = _safe_read_env(env_path)
@@ -453,6 +478,7 @@ def build_doctor_checks(
                 "enabled": True,
                 "aur_helper": upgrade_config.aur_helper,
                 "ai_review_enabled": upgrade_config.ai_enabled,
+                "kernel_module_autopilot_enabled": upgrade_config.kernel_module_autopilot_enabled,
             },
         ))
         if upgrade_config.aur_helper in {"paru", "yay", "shelly"} and not which(upgrade_config.aur_helper):
@@ -464,6 +490,37 @@ def build_doctor_checks(
             ))
     else:
         checks.append(DoctorCheck("upgrade_preflight", "warn", "Upgrade preflight is disabled", {"enabled": False}))
+
+    installed_packages = _doctor_command_lines(runner, ["pacman", "-Qq"]) if which("pacman") else []
+    installed_kernels = sorted(name for name in installed_packages if is_kernel_base_package(name))
+    module_families = detect_module_families(installed_packages)
+    dkms_available = bool(which("dkms"))
+    post_upgrade_ready = bool(which("pacman") and Path("/usr/lib/modules").exists())
+    if upgrade_config.error:
+        checks.append(DoctorCheck("kernel_module_autopilot", "error", upgrade_config.error))
+    elif upgrade_config.kernel_module_autopilot_enabled and upgrade_config.preflight_enabled:
+        checks.append(DoctorCheck(
+            "kernel_module_autopilot",
+            "ok",
+            "Kernel/module autopilot is enabled",
+            {
+                "enabled": True,
+                "installed_kernels": installed_kernels,
+                "module_families": module_families,
+                "dkms_available": dkms_available,
+                "post_upgrade_aftercare_ready": post_upgrade_ready,
+            },
+        ))
+    else:
+        checks.append(DoctorCheck("kernel_module_autopilot", "warn", "Kernel/module autopilot is disabled", {"enabled": False}))
+    if "dkms" in module_families and dkms_available:
+        checks.append(DoctorCheck("kernel_module_dkms", "ok", "DKMS command is available for kernel/module autopilot"))
+    elif "dkms" in module_families:
+        checks.append(DoctorCheck("kernel_module_dkms", "warn", "DKMS packages are installed but dkms command was not found"))
+    elif dkms_available:
+        checks.append(DoctorCheck("kernel_module_dkms", "ok", "DKMS command is available; no DKMS module packages detected"))
+    else:
+        checks.append(DoctorCheck("kernel_module_dkms", "ok", "No DKMS module packages detected"))
 
     drift_config = resolve_config_drift_config(effective_env)
     if drift_config.error:
@@ -620,6 +677,16 @@ def _safe_read_env(path: Path) -> Dict[str, str]:
         return read_env_file(path)
     except OSError:
         return {}
+
+
+def _doctor_command_lines(runner: Callable, cmd: List[str]) -> List[str]:
+    try:
+        result = runner(list(cmd), capture_output=True, text=True, check=False)
+    except OSError:
+        return []
+    if int(getattr(result, "returncode", 0)) != 0:
+        return []
+    return [line.strip() for line in str(getattr(result, "stdout", "") or "").splitlines() if line.strip()]
 
 
 def _check_ai_connectivity(env: Mapping[str, str], *, urlopen: Optional[Callable] = None) -> DoctorCheck:

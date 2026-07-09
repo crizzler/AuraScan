@@ -214,6 +214,7 @@ aurascan upgrade --json
 aurascan upgrade --aur-helper shelly
 aurascan upgrade --no-ai
 aurascan upgrade --no-config-drift
+aurascan upgrade --no-kernel-module-autopilot
 ```
 
 The repo-package preview uses pacman, and the final repo-only handoff is:
@@ -230,12 +231,22 @@ available, AuraScan still warns about installed foreign packages that may need
 rebuilds after library, kernel, compiler, Python, Qt, or Electron updates.
 
 Upgrade preflight is not a safety guarantee. It checks for practical pitfalls
-such as low `/boot` or root space, kernel/module mismatch risk, CachyOS kernel
-movement, initramfs or bootloader-sensitive updates, ignored packages that can
-create partial upgrades, replacements/conflicts, AUR rebuild risk, local
-foreign-package dependency/conflict metadata, and pending `.pacnew`/`.pacsave`
-config drift. A clean preflight means AuraScan did not find these signals;
-pacman, hooks, packages, or local configuration can still fail.
+such as low `/boot` or root space, CachyOS kernel movement, initramfs or
+bootloader-sensitive updates, ignored packages that can create partial
+upgrades, replacements/conflicts, AUR rebuild risk, local foreign-package
+dependency/conflict metadata, and pending `.pacnew`/`.pacsave` config drift. A
+clean preflight means AuraScan did not find these signals; pacman, hooks,
+packages, or local configuration can still fail.
+
+Kernel/Module Autopilot is enabled by default inside `aurascan upgrade`. It
+checks kernel package families, running-kernel mapping, CachyOS prebuilt NVIDIA
+module packages, DKMS headers/status, external module families, fallback kernel
+evidence, and reboot need. When AuraScan can prove the module state is covered,
+the terminal report says so directly. When a deterministic missing package fix
+is available, AuraScan shows the exact package command and asks before running
+it; `--yes` does not silently apply these extra fixes. After a successful
+upgrade handoff, AuraScan runs a post-upgrade kernel/module aftercare check and
+reports whether a reboot is expected. It never reboots automatically.
 
 If HIGH or CRITICAL preflight risk is found, AuraScan asks for one extra
 confirmation before running the package-manager command:
@@ -256,7 +267,8 @@ AI may raise a preflight risk or add an advisory `UPG-AI-RISK`, but it cannot
 lower deterministic risk, mark an upgrade safe, or hard-block by itself.
 
 The config keys are `AURASCAN_UPGRADE_PREFLIGHT_ENABLED`,
-`AURASCAN_UPGRADE_AUR_HELPER`, and `AURASCAN_UPGRADE_PREFLIGHT_AI`.
+`AURASCAN_UPGRADE_AUR_HELPER`, `AURASCAN_UPGRADE_PREFLIGHT_AI`, and
+`AURASCAN_KERNEL_MODULE_AUTOPILOT_ENABLED`.
 Supported helper values are `auto`, `paru`, `yay`, `shelly`, and `none`.
 `aurascan upgrade --enable-preflight` can temporarily override a disabled
 preflight setting, while `--disable-preflight` disables it for that invocation

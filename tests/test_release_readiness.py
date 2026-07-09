@@ -28,11 +28,13 @@ def test_pyproject_console_scripts_are_registered():
 def test_entry_point_targets_import():
     from aurascan.cli import main as cli_main
     from aurascan.__main__ import main as module_main
+    from aurascan.core.kernel_module_autopilot import build_kernel_module_check
     from aurascan.makepkg_wrapper import main as wrapper_main
     from aurascan.core.updater_tray import run_updater
 
     assert callable(cli_main)
     assert callable(module_main)
+    assert callable(build_kernel_module_check)
     assert callable(wrapper_main)
     assert callable(run_updater)
 
@@ -63,6 +65,8 @@ def test_readme_contains_release_safety_boundaries():
         "does not auto-run the wizard",
         "aurascan_ai_enabled",
         "provider-specific keys",
+        "kernel/module autopilot is enabled by default",
+        "aurascan_kernel_module_autopilot_enabled",
     ]
     for phrase in required_phrases:
         assert phrase in readme

@@ -176,12 +176,22 @@ def test_upgrade_options_default_to_enabled_and_read_env():
         "AURASCAN_UPGRADE_PREFLIGHT_ENABLED": "1",
         "AURASCAN_UPGRADE_AUR_HELPER": "yay",
         "AURASCAN_UPGRADE_PREFLIGHT_AI": "0",
+        "AURASCAN_KERNEL_MODULE_AUTOPILOT_ENABLED": "1",
     })
 
     assert options.preflight_enabled is True
     assert options.aur_helper == "yay"
     assert options.no_ai is True
     assert options.config_drift_enabled is True
+    assert options.kernel_module_autopilot_enabled is True
+
+
+def test_upgrade_options_can_disable_kernel_module_autopilot():
+    args = build_upgrade_parser().parse_args(["--no-kernel-module-autopilot"])
+
+    options = options_from_args(args, {"AURASCAN_KERNEL_MODULE_AUTOPILOT_ENABLED": "1"})
+
+    assert options.kernel_module_autopilot_enabled is False
 
 
 def test_upgrade_options_cli_can_override_disabled_config():
@@ -294,6 +304,15 @@ def test_deterministic_rules_cover_system_breakage_risks():
         "UPG-AUR-NOT-CHECKED",
         "UPG-PACNEW-CONFIG",
     }.issubset(rule_ids)
+
+
+def test_no_kernel_module_autopilot_keeps_legacy_module_warning():
+    plan = UpgradePlan(repo_packages=[UpgradePackage("linux-cachyos", "7.1.4-1")])
+    snap = base_snapshot(dkms_packages=["nvidia-dkms"], nvidia_packages=["nvidia-utils"])
+
+    rule_ids = {finding.rule_id for finding in analyze_upgrade_risks(plan, snap, kernel_module_autopilot_enabled=False)}
+
+    assert "UPG-KERNEL-MODULES" in rule_ids
 
 
 def test_foreign_dependency_check_reports_concrete_missing_deps_and_conflicts():
@@ -550,7 +569,88 @@ def test_json_mode_does_not_run_without_yes():
 
     assert status == 0
     assert data["report_type"] == "upgrade_preflight"
+    assert data["kernel_module_check"]["enabled"] is True
     assert ["sudo", "pacman", "-Syu"] not in runner.calls
+
+
+def test_kernel_module_autopilot_accepts_fix_and_reruns_preflight():
+    class SequenceRunner(FakeRunner):
+        def __init__(self):
+            super().__init__({
+                ("sudo", "pacman", "-S", "--needed", "linux-cachyos-nvidia-open"): completed(returncode=0),
+                ("sudo", "pacman", "-Syu"): completed(returncode=0),
+            })
+            self.preview_count = 0
+
+        def __call__(self, cmd, **kwargs):
+            if list(cmd) == preview_cmd():
+                self.calls.append(list(cmd))
+                self.preview_count += 1
+                if self.preview_count == 1:
+                    return completed("linux-cachyos\t7.1.4-1\tcore\t1\t\t\t\n")
+                return completed(
+                    "linux-cachyos\t7.1.4-1\tcore\t1\t\t\t\n"
+                    "linux-cachyos-nvidia-open\t7.1.4-1\tcore\t1\tlinux-cachyos=7.1.4-1\t\t\n"
+                )
+            return super().__call__(cmd, **kwargs)
+
+    runner = SequenceRunner()
+    stdout = io.StringIO()
+
+    status = run_upgrade(
+        ["--yes", "--no-ai", "--aur-helper", "none"],
+        runner=runner,
+        snapshot=base_snapshot(
+            installed_packages=["linux-cachyos", "linux-cachyos-nvidia-open", "nvidia-utils", "linux-cachyos-lts"],
+            nvidia_packages=["linux-cachyos-nvidia-open", "nvidia-utils"],
+        ),
+        input_func=lambda _prompt: "",
+        stdout=stdout,
+    )
+
+    assert status == 0
+    assert ["sudo", "pacman", "-S", "--needed", "linux-cachyos-nvidia-open"] in runner.calls
+    assert runner.preview_count == 2
+    assert "Kernel/module fix completed. Rerunning preflight." in stdout.getvalue()
+
+
+def test_kernel_module_autopilot_declined_fix_keeps_high_risk_prompt():
+    runner = FakeRunner({tuple(preview_cmd()): completed("linux-cachyos\t7.1.4-1\tcore\t1\t\t\t\n")})
+    answers = iter(["n", "n"])
+
+    status = run_upgrade(
+        ["--no-ai", "--aur-helper", "none"],
+        runner=runner,
+        snapshot=base_snapshot(
+            installed_packages=["linux-cachyos", "linux-cachyos-nvidia-open", "nvidia-utils"],
+            nvidia_packages=["linux-cachyos-nvidia-open", "nvidia-utils"],
+        ),
+        input_func=lambda _prompt: next(answers),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert status == EXIT_USER_DECLINED
+    assert ["sudo", "pacman", "-S", "--needed", "linux-cachyos-nvidia-open"] not in runner.calls
+    assert ["sudo", "pacman", "-Syu"] not in runner.calls
+
+
+def test_upgrade_success_runs_kernel_module_aftercare():
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+        ("sudo", "pacman", "-Syu"): completed(returncode=0),
+    })
+    stdout = io.StringIO()
+
+    status = run_upgrade(
+        ["--yes", "--no-ai", "--aur-helper", "none"],
+        runner=runner,
+        snapshot=base_snapshot(),
+        stdout=stdout,
+    )
+
+    assert status == 0
+    assert "Kernel/module aftercare" in stdout.getvalue()
 
 
 def test_upgrade_json_mode_does_not_emit_config_drift_output_even_with_yes():

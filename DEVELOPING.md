@@ -288,11 +288,21 @@ makepkg, build AUR packages, inspect AUR sources, or execute package code during
 preflight.
 
 Upgrade preflight is enabled by default. The wizard may write
-`AURASCAN_UPGRADE_PREFLIGHT_ENABLED`, `AURASCAN_UPGRADE_AUR_HELPER`, and
-`AURASCAN_UPGRADE_PREFLIGHT_AI` to user config. If preflight is disabled,
-`aurascan upgrade` must not silently run a raw package-manager upgrade; it
-should report that preflight did not run and exit without invoking pacman or a
-helper. `--enable-preflight` may override a disabled config for one invocation.
+`AURASCAN_UPGRADE_PREFLIGHT_ENABLED`, `AURASCAN_UPGRADE_AUR_HELPER`,
+`AURASCAN_UPGRADE_PREFLIGHT_AI`, and
+`AURASCAN_KERNEL_MODULE_AUTOPILOT_ENABLED` to user config. If preflight is
+disabled, `aurascan upgrade` must not silently run a raw package-manager
+upgrade; it should report that preflight did not run and exit without invoking
+pacman or a helper. `--enable-preflight` may override a disabled config for one
+invocation.
+
+Kernel/module autopilot is deterministic and enabled by default. It may verify
+kernel families, running-kernel mapping, headers, DKMS status, prebuilt module
+package pairing, fallback kernel evidence, and reboot need. It may prepare
+bounded repo-package fixes, but must ask before running any extra package
+command; `--yes` must not silently apply those fixes. After a successful
+package-manager handoff, autopilot should run post-upgrade aftercare and report
+module/reboot status without rebooting automatically.
 
 Preflight findings are advisory. HIGH or CRITICAL risk requires AuraScan's
 extra confirmation prompt unless `--yes` is used, but this is not a hard-blocker
@@ -305,6 +315,8 @@ mark an upgrade safe, suppress findings, or hard-block by itself. The prompt
 must use a redacted structured summary only: package names, versions,
 deterministic finding summaries, and selected local system facts. Do not send
 environment variables, API keys, arbitrary command output, or file contents.
+AI may explain or raise kernel/module risk, but deterministic autopilot owns
+package-fix decisions and local verification status.
 
 ## config drift assistant
 

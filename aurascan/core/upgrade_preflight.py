@@ -17,10 +17,17 @@ from aurascan.core.config_drift import (
     resolve_config_drift_config,
     run_config_drift,
 )
+from aurascan.core.kernel_module_autopilot import (
+    KERNEL_MODULE_AUTOPILOT_ENV,
+    KernelModuleCheck,
+    build_kernel_module_check,
+    issues_to_findings,
+    kernel_module_fix_command,
+)
 from aurascan.core.models import SCANNER_VERSION, Severity
 
 
-UPGRADE_PREFLIGHT_SCHEMA_VERSION = "1.0"
+UPGRADE_PREFLIGHT_SCHEMA_VERSION = "1.1"
 EXIT_PREFLIGHT_UNAVAILABLE = 20
 EXIT_USER_DECLINED = 21
 EXIT_PREFLIGHT_DISABLED = 22
@@ -150,6 +157,7 @@ class SystemSnapshot:
     installed_packages: List[str] = field(default_factory=list)
     foreign_packages: List[str] = field(default_factory=list)
     foreign_package_info: List[ForeignPackageInfo] = field(default_factory=list)
+    package_info: List[ForeignPackageInfo] = field(default_factory=list)
     ignored_packages: List[str] = field(default_factory=list)
     ignored_groups: List[str] = field(default_factory=list)
     root_free_mib: Optional[int] = None
@@ -197,6 +205,7 @@ class SystemSnapshot:
             "installed_package_count": len(self.installed_packages),
             "foreign_packages": list(self.foreign_packages),
             "foreign_package_info": [item.to_dict() for item in self.foreign_package_info],
+            "package_info": [item.to_dict() for item in self.package_info],
             "ignored_packages": list(self.ignored_packages),
             "ignored_groups": list(self.ignored_groups),
             "root_free_mib": self.root_free_mib,
@@ -245,6 +254,7 @@ class UpgradePreflightReport:
     snapshot: SystemSnapshot
     findings: List[UpgradeFinding] = field(default_factory=list)
     ai_review: Dict[str, object] = field(default_factory=dict)
+    kernel_module_check: Optional[KernelModuleCheck] = None
     schema_version: str = UPGRADE_PREFLIGHT_SCHEMA_VERSION
     scanner_version: str = SCANNER_VERSION
 
@@ -288,6 +298,7 @@ class UpgradePreflightReport:
             "risk_summary": self.risk_summary(),
             "plan": self.plan.to_dict(),
             "system_snapshot": self.snapshot.to_dict(),
+            "kernel_module_check": self.kernel_module_check.to_dict() if self.kernel_module_check else {"enabled": False, "status": "not_run"},
             "findings": [finding.to_dict() for finding in self.findings],
             "ai_review": dict(self.ai_review),
         }
@@ -358,6 +369,8 @@ class UpgradePreflightReport:
 
     def _check_summary_lines(self) -> List[str]:
         lines: List[str] = []
+        if self.kernel_module_check and self.kernel_module_check.enabled:
+            lines.append(f"Kernel/module check: {self.kernel_module_check.summary}.")
         if self.snapshot.foreign_packages:
             issue_count = sum(1 for finding in self.findings if finding.rule_id in {"UPG-AUR-DEPENDENCY-MISSING", "UPG-AUR-CONFLICTS"})
             if self.plan.selected_helper != "none" and not self.plan.helper_error:
@@ -379,6 +392,7 @@ class UpgradeConfig:
     preflight_enabled: bool = True
     aur_helper: str = "auto"
     ai_enabled: bool = True
+    kernel_module_autopilot_enabled: bool = True
     error: str = ""
 
 
@@ -393,6 +407,7 @@ class UpgradeOptions:
     preflight_enabled: bool = True
     config_drift_enabled: bool = True
     config_drift_ai_diffs: bool = False
+    kernel_module_autopilot_enabled: bool = True
     config_error: str = ""
     config_drift_error: str = ""
 
@@ -408,6 +423,7 @@ def build_upgrade_parser() -> argparse.ArgumentParser:
     parser.add_argument("--yes", action="store_true", help="skip AuraScan's high-risk confirmation prompt")
     parser.add_argument("--no-ai", action="store_true", help="disable AI upgrade risk review for this run")
     parser.add_argument("--no-config-drift", action="store_true", help="skip the config drift assistant before and after the upgrade")
+    parser.add_argument("--no-kernel-module-autopilot", action="store_true", help="skip deterministic kernel/module compatibility autopilot checks")
     parser.add_argument("--config-drift-ai-diffs", action="store_true", help="allow config drift assistant AI to inspect redacted bounded diffs")
     preflight = parser.add_mutually_exclusive_group()
     preflight.add_argument("--enable-preflight", action="store_true", help="run upgrade preflight even if disabled in config")
@@ -432,6 +448,13 @@ def resolve_upgrade_config(env: Optional[Mapping[str, str]] = None) -> UpgradeCo
     if ai_enabled is None:
         ai_enabled = True
 
+    autopilot_raw = source.get(KERNEL_MODULE_AUTOPILOT_ENV)
+    autopilot_enabled = parse_config_bool(autopilot_raw)
+    if autopilot_raw is not None and autopilot_enabled is None:
+        return UpgradeConfig(error=f"invalid {KERNEL_MODULE_AUTOPILOT_ENV} value")
+    if autopilot_enabled is None:
+        autopilot_enabled = True
+
     aur_helper = source.get(UPGRADE_PREFLIGHT_AUR_HELPER_ENV, "auto").strip().lower() or "auto"
     if aur_helper not in UPGRADE_AUR_HELPERS:
         return UpgradeConfig(error=f"invalid {UPGRADE_PREFLIGHT_AUR_HELPER_ENV} value")
@@ -440,6 +463,7 @@ def resolve_upgrade_config(env: Optional[Mapping[str, str]] = None) -> UpgradeCo
         preflight_enabled=bool(preflight_enabled),
         aur_helper=aur_helper,
         ai_enabled=bool(ai_enabled),
+        kernel_module_autopilot_enabled=bool(autopilot_enabled),
     )
 
 
@@ -454,6 +478,7 @@ def options_from_args(args: argparse.Namespace, env: Optional[Mapping[str, str]]
     aur_helper = str(args.aur_helper or config.aur_helper)
     config_drift_enabled = bool(preflight_enabled and drift_config.enabled and not getattr(args, "no_config_drift", False))
     config_drift_ai_diffs = bool(getattr(args, "config_drift_ai_diffs", False) or drift_config.ai_diffs == "always")
+    kernel_module_autopilot_enabled = bool(config.kernel_module_autopilot_enabled and not getattr(args, "no_kernel_module_autopilot", False))
     return UpgradeOptions(
         dry_run=bool(args.dry_run),
         json_output=bool(args.json_output),
@@ -464,6 +489,7 @@ def options_from_args(args: argparse.Namespace, env: Optional[Mapping[str, str]]
         preflight_enabled=preflight_enabled,
         config_drift_enabled=config_drift_enabled,
         config_drift_ai_diffs=config_drift_ai_diffs,
+        kernel_module_autopilot_enabled=kernel_module_autopilot_enabled,
         config_error=config.error,
         config_drift_error=drift_config.error,
     )
@@ -481,6 +507,7 @@ def run_upgrade(
     urlopen: Optional[Callable] = None,
     config_drift_root: Optional[Path] = None,
     config_drift_runner: Callable = run_config_drift,
+    modules_root: Path = Path("/usr/lib/modules"),
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -504,7 +531,7 @@ def run_upgrade(
             print("[AuraScan] Upgrade command was not run. Use --enable-preflight or update AuraScan config to enable this feature.", file=stderr)
         return EXIT_PREFLIGHT_DISABLED
 
-    report = run_upgrade_preflight(options, runner=runner, which=which, snapshot=snapshot, urlopen=urlopen)
+    report = run_upgrade_preflight(options, runner=runner, which=which, snapshot=snapshot, urlopen=urlopen, modules_root=modules_root)
 
     if options.json_output:
         print(report.to_json(), file=stdout)
@@ -518,6 +545,21 @@ def run_upgrade(
         return 0
     if options.json_output and not options.yes:
         return 0
+    if not options.dry_run and not options.json_output:
+        fix_status = run_kernel_module_autopilot_fixes(
+            report,
+            options,
+            runner=runner,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+            which=which,
+            snapshot=snapshot,
+            urlopen=urlopen,
+            modules_root=modules_root,
+        )
+        if fix_status is not None:
+            return fix_status
     if report.requires_confirmation and not options.yes:
         answer = input_func("AuraScan found upgrade risks. Continue anyway? [y/N] ").strip().lower()
         if answer not in {"y", "yes"}:
@@ -530,8 +572,81 @@ def run_upgrade(
     except OSError as exc:
         print(f"[AuraScan] Upgrade command failed to start: {exc}", file=stderr)
         return EXIT_UPGRADE_COMMAND_FAILED_TO_START
-    run_upgrade_config_drift("after", options, input_func=input_func, stdout=stdout, stderr=stderr, root=config_drift_root, snapshot=snapshot, runner=config_drift_runner)
-    return int(getattr(result, "returncode", 0))
+    result_code = int(getattr(result, "returncode", 0))
+    if result_code == 0:
+        run_upgrade_kernel_module_aftercare(options, plan=report.plan, runner=runner, stdout=stdout, stderr=stderr, snapshot=snapshot, modules_root=modules_root)
+        run_upgrade_config_drift("after", options, input_func=input_func, stdout=stdout, stderr=stderr, root=config_drift_root, snapshot=snapshot, runner=config_drift_runner)
+    return result_code
+
+
+def run_kernel_module_autopilot_fixes(
+    report: UpgradePreflightReport,
+    options: UpgradeOptions,
+    *,
+    runner: Callable,
+    input_func: Callable[[str], str],
+    stdout,
+    stderr,
+    which: Callable[[str], Optional[str]],
+    snapshot: Optional[SystemSnapshot],
+    urlopen: Optional[Callable],
+    modules_root: Path,
+) -> Optional[int]:
+    check = report.kernel_module_check
+    if not options.kernel_module_autopilot_enabled or check is None or not check.fix_packages():
+        return None
+    command = kernel_module_fix_command(check)
+    if not command:
+        return None
+    packages = ", ".join(command[4:])
+    answer = input_func(f"AuraScan can install missing kernel support packages: {packages}. Apply fix before upgrading? [Y/n] ").strip().lower()
+    if answer in {"", "y", "yes"}:
+        print(f"[AuraScan] Running kernel/module fix: {' '.join(command)}", file=stdout)
+        try:
+            result = runner(command, check=False)
+        except OSError as exc:
+            print(f"[AuraScan] Kernel/module fix command failed to start: {exc}", file=stderr)
+            return EXIT_UPGRADE_COMMAND_FAILED_TO_START
+        code = int(getattr(result, "returncode", 0))
+        if code != 0:
+            print(f"[AuraScan] Kernel/module fix command failed with exit code {code}. Upgrade not run.", file=stderr)
+            return code
+        print("[AuraScan] Kernel/module fix completed. Rerunning preflight.", file=stdout)
+        refreshed = run_upgrade_preflight(options, runner=runner, which=which, snapshot=snapshot, urlopen=urlopen, modules_root=modules_root)
+        report.plan = refreshed.plan
+        report.snapshot = refreshed.snapshot
+        report.findings = refreshed.findings
+        report.ai_review = refreshed.ai_review
+        report.kernel_module_check = refreshed.kernel_module_check
+        print(report.render_terminal(verbose=options.verbose), file=stdout)
+    else:
+        print("[AuraScan] Kernel/module fix skipped. Keeping preflight risk for confirmation.", file=stderr)
+    return None
+
+
+def run_upgrade_kernel_module_aftercare(
+    options: UpgradeOptions,
+    *,
+    plan: UpgradePlan,
+    runner: Callable,
+    stdout,
+    stderr,
+    snapshot: Optional[SystemSnapshot],
+    modules_root: Path,
+) -> None:
+    if not options.kernel_module_autopilot_enabled or options.dry_run:
+        return
+    post_snapshot = snapshot or SystemSnapshot.collect(runner=runner)
+    check = build_kernel_module_check(plan, post_snapshot, runner=runner, modules_root=modules_root, mode="post_upgrade")
+    stream = stderr if options.json_output else stdout
+    print("\n[AuraScan] Kernel/module aftercare", file=stream)
+    print(f"Kernel/module check: {check.summary}.", file=stream)
+    if check.reboot_required:
+        print("Reboot required after successful kernel upgrade.", file=stream)
+    elif getattr(post_snapshot, "running_kernel", ""):
+        print("No new kernel transaction is visible in aftercare; reboot only if the package manager requested it.", file=stream)
+    for issue in check.fixable_issues + check.unfixable_issues:
+        print(f"- {issue.summary}", file=stream)
 
 
 def run_upgrade_config_drift(
@@ -599,11 +714,20 @@ def run_upgrade_preflight(
     which: Callable[[str], Optional[str]] = shutil.which,
     snapshot: Optional[SystemSnapshot] = None,
     urlopen: Optional[Callable] = None,
+    modules_root: Path = Path("/usr/lib/modules"),
 ) -> UpgradePreflightReport:
     plan = build_upgrade_plan(options, runner=runner, which=which)
     system_snapshot = snapshot or SystemSnapshot.collect(runner=runner)
-    findings = analyze_upgrade_risks(plan, system_snapshot)
-    report = UpgradePreflightReport(plan=plan, snapshot=system_snapshot, findings=findings)
+    kernel_module_check = None
+    if options.kernel_module_autopilot_enabled and not plan.preview_error:
+        kernel_module_check = build_kernel_module_check(plan, system_snapshot, runner=runner, modules_root=modules_root)
+    findings = analyze_upgrade_risks(
+        plan,
+        system_snapshot,
+        kernel_module_check=kernel_module_check,
+        kernel_module_autopilot_enabled=options.kernel_module_autopilot_enabled,
+    )
+    report = UpgradePreflightReport(plan=plan, snapshot=system_snapshot, findings=findings, kernel_module_check=kernel_module_check)
     apply_ai_upgrade_review(report, disabled=options.no_ai, urlopen=urlopen)
     return report
 
@@ -782,7 +906,13 @@ def _load_noisy_json(output: str) -> object:
     raise ValueError("no JSON object or array found")
 
 
-def analyze_upgrade_risks(plan: UpgradePlan, snapshot: SystemSnapshot) -> List[UpgradeFinding]:
+def analyze_upgrade_risks(
+    plan: UpgradePlan,
+    snapshot: SystemSnapshot,
+    *,
+    kernel_module_check: Optional[KernelModuleCheck] = None,
+    kernel_module_autopilot_enabled: bool = False,
+) -> List[UpgradeFinding]:
     findings: List[UpgradeFinding] = []
     updated_names = set(plan.package_names())
     repo_names = {pkg.name for pkg in plan.repo_packages}
@@ -860,7 +990,7 @@ def analyze_upgrade_risks(plan: UpgradePlan, snapshot: SystemSnapshot) -> List[U
             f"running kernel={snapshot.running_kernel}; expected package={running_kernel_pkg}",
         ))
 
-    if kernel_updates and module_packages:
+    if kernel_updates and module_packages and not kernel_module_autopilot_enabled:
         findings.append(_finding(
             "UPG-KERNEL-MODULES",
             Severity.HIGH,
@@ -870,6 +1000,18 @@ def analyze_upgrade_risks(plan: UpgradePlan, snapshot: SystemSnapshot) -> List[U
             "Make sure matching module packages are upgraded and be ready to rebuild DKMS modules or boot an older kernel if needed.",
             f"kernel packages={', '.join(kernel_updates)}; module packages={', '.join(module_packages[:12])}",
         ))
+
+    if kernel_module_autopilot_enabled and kernel_module_check is not None:
+        for item in issues_to_findings(kernel_module_check):
+            findings.append(_finding(
+                str(item["rule_id"]),
+                item["severity"],
+                str(item["title"]),
+                str(item["summary"]),
+                str(item["why"]),
+                str(item["action"]),
+                str(item["evidence"]),
+            ))
 
     cachyos_kernel_updates = [name for name in kernel_updates if name.startswith("linux-cachyos")]
     if cachyos_kernel_updates:
@@ -1055,6 +1197,7 @@ def build_upgrade_ai_prompt(report: UpgradePreflightReport) -> str:
             "pacnew_count": report.snapshot.pacnew_count,
             "pacsave_count": report.snapshot.pacsave_count,
         },
+        "kernel_module_check": report.kernel_module_check.to_dict() if report.kernel_module_check else {"enabled": False, "status": "not_run"},
         "deterministic_findings": [
             {
                 "rule_id": finding.rule_id,
@@ -1070,6 +1213,8 @@ def build_upgrade_ai_prompt(report: UpgradePreflightReport) -> str:
         "You are AuraScan's upgrade preflight reviewer for Arch/CachyOS.\n"
         "Use only the JSON data below. Do not claim the upgrade is safe.\n"
         "You may only suggest risk raises, never risk reductions. Do not suggest hard blocking.\n"
+        "Do not create package commands or package-fix plans; AuraScan's deterministic kernel/module autopilot owns those decisions.\n"
+        "Do not tell the user to manually verify kernel/module compatibility when kernel_module_check status is ok.\n"
         "Do not raise risk merely because foreign/AUR packages exist when AuraScan's foreign package dependency check reports no issues and the helper query succeeded.\n"
         "Avoid telling the user to manually verify compatibility unless AuraScan found a concrete issue or a named check could not run.\n"
         "For .pacnew/.pacsave config drift, do not recommend rebooting or restarting services merely because files exist; recommend merging config and restarting only affected services when config actually changes.\n"

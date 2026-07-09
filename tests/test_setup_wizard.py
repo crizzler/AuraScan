@@ -10,6 +10,7 @@ from aurascan.setup_wizard import (
     run_doctor,
     run_init,
 )
+from aurascan.core.kernel_module_autopilot import KERNEL_MODULE_AUTOPILOT_ENV
 from aurascan.core.updater_tray import UPDATER_AUTOSTART_ENV, UPDATER_TERMINAL_ENV, UPDATER_TRAY_ENABLED_ENV
 
 
@@ -73,6 +74,7 @@ def test_init_can_write_upgrade_preflight_defaults(tmp_path):
             "--upgrade-aur-helper",
             "yay",
             "--disable-upgrade-ai",
+            "--disable-kernel-module-autopilot",
             "--enable-config-drift",
             "--config-drift-ai-diffs",
             "never",
@@ -87,10 +89,26 @@ def test_init_can_write_upgrade_preflight_defaults(tmp_path):
     assert "AURASCAN_UPGRADE_PREFLIGHT_ENABLED=1" in text
     assert "AURASCAN_UPGRADE_AUR_HELPER=yay" in text
     assert "AURASCAN_UPGRADE_PREFLIGHT_AI=0" in text
+    assert f"{KERNEL_MODULE_AUTOPILOT_ENV}=0" in text
     assert "AURASCAN_CONFIG_DRIFT_ENABLED=1" in text
     assert "AURASCAN_CONFIG_DRIFT_AI_DIFFS=never" in text
     assert "Configured upgrade preflight defaults." in stdout.getvalue()
     assert "Configured config drift assistant defaults." in stdout.getvalue()
+
+
+def test_init_can_enable_kernel_module_autopilot(tmp_path):
+    env_path = tmp_path / ".config" / "aurascan" / ".env"
+
+    status = run_init(
+        ["--disable-ai", "--enable-kernel-module-autopilot", "--no-install-hook"],
+        stdout=io.StringIO(),
+        env_path=env_path,
+    )
+
+    assert status == 0
+    text = env_path.read_text(encoding="utf-8")
+    assert "AURASCAN_UPGRADE_PREFLIGHT_ENABLED=1" in text
+    assert f"{KERNEL_MODULE_AUTOPILOT_ENV}=1" in text
 
 
 def test_init_can_disable_config_drift_assistant(tmp_path):
@@ -213,6 +231,34 @@ def test_doctor_reports_upgrade_preflight_config(tmp_path):
     by_name = {check.name: check for check in checks}
     assert by_name["upgrade_preflight"].status == "warn"
     assert "disabled" in by_name["upgrade_preflight"].message
+
+
+def test_doctor_reports_kernel_module_autopilot(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"AURASCAN_UPGRADE_PREFLIGHT_ENABLED=1\n{KERNEL_MODULE_AUTOPILOT_ENV}=1\n",
+        encoding="utf-8",
+    )
+    env_path.chmod(0o600)
+
+    def fake_runner(cmd, **_kwargs):
+        if cmd == ["pacman", "-Qq"]:
+            return subprocess.CompletedProcess(cmd, 0, "linux-cachyos\nlinux-cachyos-nvidia-open\nnvidia-utils\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    checks = build_doctor_checks(
+        env_path=env_path,
+        env={},
+        executable_path=tmp_path / "usr" / "bin" / "aurascan",
+        local_hook_path=tmp_path / "local.hook",
+        packaged_hook_path=tmp_path / "packaged.hook",
+        which=lambda name: f"/usr/bin/{name}" if name in {"pacman", "konsole"} else None,
+        runner=fake_runner,
+    )
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["kernel_module_autopilot"].status == "ok"
+    assert by_name["kernel_module_autopilot"].details["module_families"] == ["nvidia"]
 
 
 def test_doctor_reports_config_drift_config(tmp_path):

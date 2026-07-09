@@ -5,6 +5,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -27,7 +29,7 @@ from aurascan.core.kernel_module_autopilot import (
 from aurascan.core.models import SCANNER_VERSION, Severity
 
 
-UPGRADE_PREFLIGHT_SCHEMA_VERSION = "1.1"
+UPGRADE_PREFLIGHT_SCHEMA_VERSION = "1.2"
 EXIT_PREFLIGHT_UNAVAILABLE = 20
 EXIT_USER_DECLINED = 21
 EXIT_PREFLIGHT_DISABLED = 22
@@ -40,6 +42,7 @@ UPGRADE_PREFLIGHT_ENABLED_ENV = "AURASCAN_UPGRADE_PREFLIGHT_ENABLED"
 UPGRADE_PREFLIGHT_AUR_HELPER_ENV = "AURASCAN_UPGRADE_AUR_HELPER"
 UPGRADE_PREFLIGHT_AI_ENV = "AURASCAN_UPGRADE_PREFLIGHT_AI"
 UPGRADE_AUR_HELPERS = {"auto", "paru", "yay", "shelly", "none"}
+REPOSITORY_HEALTH_BACKUP_ROOT = Path("/var/lib/aurascan/repo-health")
 
 KERNEL_PACKAGE_RE = re.compile(r"^(linux($|-)|linux-cachyos($|-)|linux-lts($|-)|linux-zen($|-)|linux-hardened($|-))")
 INITRAMFS_BOOT_PACKAGES = {
@@ -65,6 +68,10 @@ ABI_SENSITIVE_PACKAGES = {
     "qt5-base",
     "qt6-base",
 }
+
+REPO_HEADER_RE = re.compile(r"^\s*\[([^]]+)\]\s*$")
+REPO_INCLUDE_RE = re.compile(r"^\s*Include\s*=\s*(.+?)\s*$")
+REPO_SERVER_RE = re.compile(r"^\s*Server\s*=")
 
 
 @dataclass
@@ -150,6 +157,81 @@ class UpgradePlan:
             "final_command": list(self.final_command),
             "command_source": self.command_source,
         }
+
+
+@dataclass
+class RepositoryMirrorIssue:
+    repositories: List[str]
+    include_path: str
+    active_servers: int = 0
+    backup_path: str = ""
+    backup_active_servers: int = 0
+    repair_action: str = ""
+    detail: str = ""
+
+    @property
+    def fixable(self) -> bool:
+        return self.repair_action == "restore_from_backup" and bool(self.backup_path) and self.backup_active_servers > 0
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "repositories": list(self.repositories),
+            "include_path": self.include_path,
+            "active_servers": self.active_servers,
+            "backup_path": self.backup_path,
+            "backup_active_servers": self.backup_active_servers,
+            "repair_action": self.repair_action,
+            "fixable": self.fixable,
+            "detail": self.detail,
+        }
+
+
+@dataclass
+class RepositoryHealthCheck:
+    enabled_repositories: List[str] = field(default_factory=list)
+    issues: List[RepositoryMirrorIssue] = field(default_factory=list)
+    pacman_conf_path: str = ""
+    status: str = "ok"
+
+    @property
+    def fixable_issues(self) -> List[RepositoryMirrorIssue]:
+        return [issue for issue in self.issues if issue.fixable]
+
+    @property
+    def summary(self) -> str:
+        if not self.issues:
+            return "enabled repositories have active servers"
+        if self.fixable_issues:
+            count = len(self.fixable_issues)
+            item = "mirrorlist" if count == 1 else "mirrorlists"
+            return f"{count} disabled {item} can be restored from backup"
+        count = len(self.issues)
+        item = "repository include" if count == 1 else "repository includes"
+        return f"{count} {item} have no active servers"
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "enabled_repositories": list(self.enabled_repositories),
+            "issues": [issue.to_dict() for issue in self.issues],
+            "pacman_conf_path": self.pacman_conf_path,
+            "status": self.status,
+            "summary": self.summary,
+        }
+
+
+@dataclass
+class RepositoryRepairResult:
+    success: bool
+    applied: List[str] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
+    backup_dir: str = ""
+
+
+@dataclass
+class _RepositoryEntry:
+    name: str
+    includes: List[Path] = field(default_factory=list)
+    server_count: int = 0
 
 
 @dataclass
@@ -256,6 +338,7 @@ class UpgradePreflightReport:
     findings: List[UpgradeFinding] = field(default_factory=list)
     ai_review: Dict[str, object] = field(default_factory=dict)
     kernel_module_check: Optional[KernelModuleCheck] = None
+    repository_health: Optional[RepositoryHealthCheck] = None
     schema_version: str = UPGRADE_PREFLIGHT_SCHEMA_VERSION
     scanner_version: str = SCANNER_VERSION
 
@@ -308,6 +391,7 @@ class UpgradePreflightReport:
             "plan": self.plan.to_dict(),
             "system_snapshot": self.snapshot.to_dict(),
             "kernel_module_check": self.kernel_module_check.to_dict() if self.kernel_module_check else {"enabled": False, "status": "not_run"},
+            "repository_health": self.repository_health.to_dict() if self.repository_health else {"enabled": False, "status": "not_run"},
             "findings": [finding.to_dict() for finding in self.findings],
             "ai_review": dict(self.ai_review),
         }
@@ -379,6 +463,8 @@ class UpgradePreflightReport:
 
     def _check_summary_lines(self) -> List[str]:
         lines: List[str] = []
+        if self.repository_health and self.repository_health.issues:
+            lines.append(f"Repository health: {self.repository_health.summary}.")
         if self.kernel_module_check and self.kernel_module_check.enabled:
             lines.append(f"Kernel/module check: {self.kernel_module_check.summary}.")
         if self.snapshot.foreign_packages:
@@ -518,6 +604,8 @@ def run_upgrade(
     config_drift_root: Optional[Path] = None,
     config_drift_runner: Callable = run_config_drift,
     modules_root: Path = Path("/usr/lib/modules"),
+    pacman_conf_path: Path = Path("/etc/pacman.conf"),
+    repository_repair_backup_root: Path = REPOSITORY_HEALTH_BACKUP_ROOT,
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -541,7 +629,20 @@ def run_upgrade(
             print("[AuraScan] Upgrade command was not run. Use --enable-preflight or update AuraScan config to enable this feature.", file=stderr)
         return EXIT_PREFLIGHT_DISABLED
 
-    report = run_upgrade_preflight(options, runner=runner, which=which, snapshot=snapshot, urlopen=urlopen, modules_root=modules_root)
+    report = run_upgrade_preflight(options, runner=runner, which=which, snapshot=snapshot, urlopen=urlopen, modules_root=modules_root, pacman_conf_path=pacman_conf_path)
+
+    if not report.plan.available and not options.dry_run and not options.json_output:
+        repaired = run_repository_health_autopilot_repairs(
+            report,
+            options,
+            runner=runner,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+            backup_root=repository_repair_backup_root,
+        )
+        if repaired:
+            report = run_upgrade_preflight(options, runner=runner, which=which, snapshot=snapshot, urlopen=urlopen, modules_root=modules_root, pacman_conf_path=pacman_conf_path)
 
     if options.json_output:
         print(report.to_json(), file=stdout)
@@ -567,6 +668,7 @@ def run_upgrade(
             snapshot=snapshot,
             urlopen=urlopen,
             modules_root=modules_root,
+            pacman_conf_path=pacman_conf_path,
         )
         if fix_status is not None:
             return fix_status
@@ -641,6 +743,7 @@ def run_kernel_module_autopilot_fixes(
     snapshot: Optional[SystemSnapshot],
     urlopen: Optional[Callable],
     modules_root: Path,
+    pacman_conf_path: Path,
 ) -> Optional[int]:
     check = report.kernel_module_check
     if not options.kernel_module_autopilot_enabled or check is None or not check.fix_packages():
@@ -662,7 +765,7 @@ def run_kernel_module_autopilot_fixes(
             print(f"[AuraScan] Kernel/module fix command failed with exit code {code}. Upgrade not run.", file=stderr)
             return code
         print("[AuraScan] Kernel/module fix completed. Rerunning preflight.", file=stdout)
-        refreshed = run_upgrade_preflight(options, runner=runner, which=which, snapshot=snapshot, urlopen=urlopen, modules_root=modules_root)
+        refreshed = run_upgrade_preflight(options, runner=runner, which=which, snapshot=snapshot, urlopen=urlopen, modules_root=modules_root, pacman_conf_path=pacman_conf_path)
         report.plan = refreshed.plan
         report.snapshot = refreshed.snapshot
         report.findings = refreshed.findings
@@ -734,6 +837,280 @@ def run_upgrade_config_drift(
         return int(runner(args))
 
 
+def run_repository_health_autopilot_repairs(
+    report: UpgradePreflightReport,
+    options: UpgradeOptions,
+    *,
+    runner: Callable,
+    input_func: Callable[[str], str],
+    stdout,
+    stderr,
+    backup_root: Path = REPOSITORY_HEALTH_BACKUP_ROOT,
+) -> bool:
+    check = report.repository_health
+    if check is None or not check.fixable_issues:
+        return False
+    print("\n[AuraScan] Pacman repository repair", file=stdout)
+    print(f"Repository health: {check.summary}.", file=stdout)
+    for issue in check.fixable_issues[:6]:
+        repos = ", ".join(issue.repositories)
+        print(f"- {issue.include_path} has no active servers for {repos}; backup has {issue.backup_active_servers}.", file=stdout)
+    if not options.yes:
+        answer = input_func("AuraScan can restore the disabled mirrorlist from backup and rerun preflight. Apply repair? [Y/n] ").strip().lower()
+        if answer in {"n", "no"}:
+            print("[AuraScan] Repository repair skipped. Upgrade preflight remains unavailable.", file=stderr)
+            return False
+
+    result = apply_repository_health_repairs(check, runner=runner, backup_root=backup_root)
+    if not result.success:
+        print("[AuraScan] Repository repair failed. Upgrade preflight remains unavailable.", file=stderr)
+        for error in result.errors[:6]:
+            print(f"[AuraScan] {error}", file=stderr)
+        return False
+    for applied in result.applied:
+        print(f"[AuraScan] Repaired mirrorlist: {applied}", file=stdout)
+    if result.backup_dir:
+        print(f"[AuraScan] Repository repair backup: {result.backup_dir}", file=stdout)
+    print("[AuraScan] Repository repair completed. Rerunning preflight.", file=stdout)
+    return True
+
+
+def preview_error_indicates_no_servers(error: str) -> bool:
+    return "no servers configured for repository" in error.lower()
+
+
+def build_repository_health_check(pacman_conf_path: Path = Path("/etc/pacman.conf")) -> RepositoryHealthCheck:
+    check = RepositoryHealthCheck(pacman_conf_path=str(pacman_conf_path))
+    try:
+        text = pacman_conf_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        check.status = "error"
+        check.issues.append(RepositoryMirrorIssue(
+            repositories=[],
+            include_path=str(pacman_conf_path),
+            detail=f"could not read pacman.conf: {exc}",
+        ))
+        return check
+
+    entries = parse_pacman_repository_entries(text, base_dir=pacman_conf_path.parent)
+    check.enabled_repositories = [entry.name for entry in entries]
+    include_repos: Dict[Path, List[str]] = {}
+    include_counts: Dict[Path, int] = {}
+    for entry in entries:
+        if entry.server_count > 0:
+            continue
+        if not entry.includes:
+            check.issues.append(RepositoryMirrorIssue(
+                repositories=[entry.name],
+                include_path="",
+                detail=f"repository {entry.name} has no Server or Include directives",
+            ))
+            continue
+        for include_path in entry.includes:
+            count = include_counts.setdefault(include_path, count_active_servers(include_path))
+            if count == 0:
+                include_repos.setdefault(include_path, []).append(entry.name)
+
+    for include_path, repos in sorted(include_repos.items(), key=lambda item: str(item[0])):
+        backup_path = include_path.with_name(include_path.name + "-backup")
+        backup_count = count_active_servers(backup_path)
+        action = "restore_from_backup" if backup_count > 0 else ""
+        detail = (
+            "included mirrorlist has no active Server entries; companion backup has active servers"
+            if action
+            else "included mirrorlist has no active Server entries and no usable companion backup was found"
+        )
+        check.issues.append(RepositoryMirrorIssue(
+            repositories=sorted(set(repos)),
+            include_path=str(include_path),
+            active_servers=0,
+            backup_path=str(backup_path) if backup_path.exists() else "",
+            backup_active_servers=backup_count,
+            repair_action=action,
+            detail=detail,
+        ))
+
+    if check.issues:
+        check.status = "repair_available" if check.fixable_issues else "broken"
+    return check
+
+
+def parse_pacman_repository_entries(text: str, *, base_dir: Path = Path("/etc")) -> List[_RepositoryEntry]:
+    entries: List[_RepositoryEntry] = []
+    current: Optional[_RepositoryEntry] = None
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        header = REPO_HEADER_RE.match(raw)
+        if header:
+            if current and current.name.lower() != "options":
+                entries.append(current)
+            current = _RepositoryEntry(name=header.group(1).strip())
+            continue
+        if current is None:
+            continue
+        include = REPO_INCLUDE_RE.match(raw)
+        if include:
+            current.includes.append(resolve_pacman_include_path(include.group(1), base_dir=base_dir))
+            continue
+        if REPO_SERVER_RE.match(raw):
+            current.server_count += 1
+    if current and current.name.lower() != "options":
+        entries.append(current)
+    return entries
+
+
+def resolve_pacman_include_path(value: str, *, base_dir: Path = Path("/etc")) -> Path:
+    raw = value.strip().strip('"').strip("'")
+    path = Path(raw)
+    if not path.is_absolute():
+        path = base_dir / path
+    return path
+
+
+def count_active_servers(path: Path) -> int:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return 0
+    return sum(1 for line in lines if REPO_SERVER_RE.match(line) and not line.lstrip().startswith("#"))
+
+
+def apply_repository_health_repairs(
+    check: RepositoryHealthCheck,
+    *,
+    runner: Callable = subprocess.run,
+    backup_root: Path = REPOSITORY_HEALTH_BACKUP_ROOT,
+) -> RepositoryRepairResult:
+    issues = check.fixable_issues
+    if not issues:
+        return RepositoryRepairResult(success=True)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    backup_dir = backup_root / run_id
+    result = RepositoryRepairResult(success=False, backup_dir=str(backup_dir))
+    use_sudo = repository_repair_needs_sudo(issues, backup_root)
+    manifest = {
+        "run_id": run_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "pacman_conf_path": check.pacman_conf_path,
+        "actions": [],
+    }
+
+    try:
+        if use_sudo:
+            command = ["sudo", "mkdir", "-p", str(backup_dir)]
+            status = runner(command, check=False)
+            if int(getattr(status, "returncode", 0)) != 0:
+                result.errors.append(f"failed to create backup directory: {' '.join(command)}")
+                return result
+        else:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+
+        for issue in issues:
+            target = Path(issue.include_path)
+            source = Path(issue.backup_path)
+            if not source.exists():
+                result.errors.append(f"backup mirrorlist is missing: {source}")
+                return result
+            if count_active_servers(source) <= 0:
+                result.errors.append(f"backup mirrorlist has no active servers: {source}")
+                return result
+            if target.exists():
+                mode = target.stat().st_mode & 0o7777
+                owner = target.stat().st_uid
+                group = target.stat().st_gid
+            else:
+                mode = 0o644
+                owner = 0
+                group = 0
+            backup_path = backup_dir / target.name
+            if use_sudo:
+                copy_status = runner(["sudo", "cp", "-a", str(target), str(backup_path)], check=False)
+                if int(getattr(copy_status, "returncode", 0)) != 0:
+                    result.errors.append(f"failed to back up {target} to {backup_path}")
+                    return result
+                install_status = runner([
+                    "sudo",
+                    "install",
+                    "-o",
+                    str(owner),
+                    "-g",
+                    str(group),
+                    "-m",
+                    f"{mode & 0o777:o}",
+                    str(source),
+                    str(target),
+                ], check=False)
+                if int(getattr(install_status, "returncode", 0)) != 0:
+                    result.errors.append(f"failed to restore {target} from {source}")
+                    return result
+            else:
+                if target.exists():
+                    shutil.copy2(target, backup_path)
+                shutil.copy2(source, target)
+                try:
+                    os.chmod(target, mode)
+                    if os.geteuid() == 0:
+                        os.chown(target, owner, group)
+                except OSError as exc:
+                    result.errors.append(f"restored {target} but could not preserve ownership/mode: {exc}")
+                    return result
+
+            result.applied.append(str(target))
+            manifest["actions"].append({
+                "action": "restore_from_backup",
+                "target": str(target),
+                "source": str(source),
+                "backup": str(backup_path),
+                "repositories": list(issue.repositories),
+                "mode": f"{mode & 0o777:o}",
+                "owner": owner,
+                "group": group,
+            })
+
+        manifest_path = backup_dir / "manifest.json"
+        write_repository_repair_manifest(manifest_path, manifest, runner=runner, use_sudo=use_sudo)
+    except OSError as exc:
+        result.errors.append(str(exc))
+        return result
+
+    result.success = True
+    return result
+
+
+def repository_repair_needs_sudo(issues: List[RepositoryMirrorIssue], backup_root: Path) -> bool:
+    if os.geteuid() == 0:
+        return False
+    paths = [Path(issue.include_path) for issue in issues] + [backup_root]
+    return any(str(path).startswith(("/etc/", "/var/")) or str(path) in {"/etc", "/var"} for path in paths)
+
+
+def write_repository_repair_manifest(
+    manifest_path: Path,
+    manifest: Dict[str, object],
+    *,
+    runner: Callable,
+    use_sudo: bool,
+) -> None:
+    text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    if not use_sudo:
+        manifest_path.write_text(text, encoding="utf-8")
+        return
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
+        handle.write(text)
+        tmp_path = Path(handle.name)
+    try:
+        status = runner(["sudo", "install", "-m", "0644", str(tmp_path), str(manifest_path)], check=False)
+        if int(getattr(status, "returncode", 0)) != 0:
+            raise OSError(f"failed to write repair manifest to {manifest_path}")
+    finally:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+
+
 def build_upgrade_unavailable_report(reason: str) -> UpgradePreflightReport:
     return UpgradePreflightReport(
         plan=UpgradePlan(
@@ -765,9 +1142,11 @@ def run_upgrade_preflight(
     snapshot: Optional[SystemSnapshot] = None,
     urlopen: Optional[Callable] = None,
     modules_root: Path = Path("/usr/lib/modules"),
+    pacman_conf_path: Path = Path("/etc/pacman.conf"),
 ) -> UpgradePreflightReport:
     plan = build_upgrade_plan(options, runner=runner, which=which)
     system_snapshot = snapshot or SystemSnapshot.collect(runner=runner)
+    repository_health = build_repository_health_check(pacman_conf_path) if preview_error_indicates_no_servers(plan.preview_error) else None
     kernel_module_check = None
     if options.kernel_module_autopilot_enabled and not plan.preview_error:
         kernel_module_check = build_kernel_module_check(plan, system_snapshot, runner=runner, modules_root=modules_root)
@@ -776,8 +1155,15 @@ def run_upgrade_preflight(
         system_snapshot,
         kernel_module_check=kernel_module_check,
         kernel_module_autopilot_enabled=options.kernel_module_autopilot_enabled,
+        repository_health=repository_health,
     )
-    report = UpgradePreflightReport(plan=plan, snapshot=system_snapshot, findings=findings, kernel_module_check=kernel_module_check)
+    report = UpgradePreflightReport(
+        plan=plan,
+        snapshot=system_snapshot,
+        findings=findings,
+        kernel_module_check=kernel_module_check,
+        repository_health=repository_health,
+    )
     apply_ai_upgrade_review(report, disabled=options.no_ai, urlopen=urlopen)
     return report
 
@@ -962,6 +1348,7 @@ def analyze_upgrade_risks(
     *,
     kernel_module_check: Optional[KernelModuleCheck] = None,
     kernel_module_autopilot_enabled: bool = False,
+    repository_health: Optional[RepositoryHealthCheck] = None,
 ) -> List[UpgradeFinding]:
     findings: List[UpgradeFinding] = []
     updated_names = set(plan.package_names())
@@ -972,14 +1359,23 @@ def analyze_upgrade_risks(
     foreign_dependency_issues = foreign_package_dependency_issues(snapshot, plan)
 
     if plan.preview_error:
+        action = "Resolve the preview error, then run the upgrade preflight again."
+        evidence = plan.preview_error
+        if repository_health and repository_health.fixable_issues:
+            action = "Let AuraScan restore active mirrorlist servers from backup, then rerun preflight."
+            details = "; ".join(
+                f"{issue.include_path} from {issue.backup_path} for {', '.join(issue.repositories)}"
+                for issue in repository_health.fixable_issues[:6]
+            )
+            evidence = f"{plan.preview_error}; repairable mirrorlists={details}"
         findings.append(_finding(
             "UPG-PREVIEW-FAILED",
             Severity.CRITICAL,
             "Upgrade preview could not be built.",
             "AuraScan could not get an authoritative package-manager preview for this upgrade.",
             "Without a transaction preview, AuraScan cannot reliably check upgrade breakage risks before handing off to pacman or a helper.",
-            "Resolve the preview error, then run the upgrade preflight again.",
-            plan.preview_error,
+            action,
+            evidence,
         ))
         return findings
 
@@ -1258,6 +1654,7 @@ def build_upgrade_ai_prompt(report: UpgradePreflightReport) -> str:
             "pacsave_count": report.snapshot.pacsave_count,
         },
         "kernel_module_check": report.kernel_module_check.to_dict() if report.kernel_module_check else {"enabled": False, "status": "not_run"},
+        "repository_health": report.repository_health.to_dict() if report.repository_health else {"enabled": False, "status": "not_run"},
         "deterministic_findings": [
             {
                 "rule_id": finding.rule_id,
@@ -1274,6 +1671,7 @@ def build_upgrade_ai_prompt(report: UpgradePreflightReport) -> str:
         "Use only the JSON data below. Do not claim the upgrade is safe.\n"
         "You may only suggest risk raises, never risk reductions. Do not suggest hard blocking.\n"
         "Do not create package commands or package-fix plans; AuraScan's deterministic kernel/module autopilot owns those decisions.\n"
+        "Do not propose arbitrary pacman.conf or mirrorlist edits; AuraScan's deterministic repository_health repair owns mirrorlist recovery decisions.\n"
         "Do not tell the user to manually verify kernel/module compatibility when kernel_module_check status is ok.\n"
         "Do not raise fallback-kernel risk when kernel_module_check.fallback_kernel.available is true.\n"
         "Do not raise replacement/removal risk solely from transaction_changes.metadata_only_replaces; those are package metadata, not installed removals.\n"

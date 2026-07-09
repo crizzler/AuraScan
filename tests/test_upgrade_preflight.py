@@ -21,8 +21,10 @@ from aurascan.core.upgrade_preflight import (
     UpgradePreflightReport,
     SystemSnapshot,
     analyze_upgrade_risks,
+    apply_repository_health_repairs,
     apply_ai_risk_raises,
     apply_ai_upgrade_review,
+    build_repository_health_check,
     build_upgrade_plan,
     collect_foreign_package_info,
     foreign_package_dependency_issues,
@@ -30,6 +32,7 @@ from aurascan.core.upgrade_preflight import (
     parse_aur_updates,
     parse_pacman_preview,
     parse_pacman_qi,
+    parse_pacman_repository_entries,
     parse_shelly_updates,
     options_from_args,
     resolve_aur_helper,
@@ -384,6 +387,67 @@ def test_preview_failure_returns_only_unavailable_finding():
 
     assert [finding.rule_id for finding in findings] == ["UPG-PREVIEW-FAILED"]
     assert findings[0].severity == Severity.CRITICAL
+
+
+def test_repository_health_detects_empty_mirrorlist_with_backup(tmp_path):
+    pacman_conf = tmp_path / "pacman.conf"
+    mirrorlist = tmp_path / "mirrorlist"
+    backup = tmp_path / "mirrorlist-backup"
+    pacman_conf.write_text("[options]\nColor\n[core]\nInclude = mirrorlist\n[extra]\nInclude = mirrorlist\n", encoding="utf-8")
+    mirrorlist.write_text("#Server = https://example.invalid/$repo/os/$arch\n", encoding="utf-8")
+    backup.write_text("Server = https://mirror.example/$repo/os/$arch\n", encoding="utf-8")
+
+    check = build_repository_health_check(pacman_conf)
+
+    assert check.status == "repair_available"
+    assert check.fixable_issues[0].repositories == ["core", "extra"]
+    assert check.fixable_issues[0].include_path == str(mirrorlist)
+    assert check.fixable_issues[0].backup_path == str(backup)
+
+
+def test_parse_pacman_repository_entries_ignores_commented_repos(tmp_path):
+    entries = parse_pacman_repository_entries(
+        "#[testing]\n#Include = mirrorlist\n[core]\nInclude = mirrorlist\nServer = https://local/$repo/os/$arch\n",
+        base_dir=tmp_path,
+    )
+
+    assert [entry.name for entry in entries] == ["core"]
+    assert entries[0].server_count == 1
+    assert entries[0].includes == [tmp_path / "mirrorlist"]
+
+
+def test_apply_repository_health_repairs_restores_from_backup(tmp_path):
+    pacman_conf = tmp_path / "pacman.conf"
+    mirrorlist = tmp_path / "mirrorlist"
+    backup = tmp_path / "mirrorlist-backup"
+    pacman_conf.write_text("[core]\nInclude = mirrorlist\n", encoding="utf-8")
+    mirrorlist.write_text("#Server = https://disabled.invalid/$repo/os/$arch\n", encoding="utf-8")
+    backup.write_text("Server = https://mirror.example/$repo/os/$arch\n", encoding="utf-8")
+    check = build_repository_health_check(pacman_conf)
+
+    result = apply_repository_health_repairs(check, backup_root=tmp_path / "backups")
+
+    assert result.success is True
+    assert "Server = https://mirror.example" in mirrorlist.read_text(encoding="utf-8")
+    assert (Path(result.backup_dir) / "mirrorlist").exists()
+    assert (Path(result.backup_dir) / "manifest.json").exists()
+
+
+def test_preview_no_servers_finding_points_to_aurascan_repair(tmp_path):
+    pacman_conf = tmp_path / "pacman.conf"
+    mirrorlist = tmp_path / "mirrorlist"
+    backup = tmp_path / "mirrorlist-backup"
+    pacman_conf.write_text("[core]\nInclude = mirrorlist\n", encoding="utf-8")
+    mirrorlist.write_text("#Server = https://disabled.invalid/$repo/os/$arch\n", encoding="utf-8")
+    backup.write_text("Server = https://mirror.example/$repo/os/$arch\n", encoding="utf-8")
+    check = build_repository_health_check(pacman_conf)
+    plan = UpgradePlan(preview_error="pacman upgrade preview failed: error: no servers configured for repository")
+
+    findings = analyze_upgrade_risks(plan, base_snapshot(), repository_health=check)
+
+    assert findings[0].rule_id == "UPG-PREVIEW-FAILED"
+    assert "Let AuraScan restore active mirrorlist servers from backup" in findings[0].recommended_action
+    assert str(mirrorlist) in findings[0].evidence
 
 
 def test_ai_raise_only_caps_critical_and_never_lowers():
@@ -795,6 +859,50 @@ def test_unavailable_preflight_does_not_run_upgrade():
 
     assert status == EXIT_PREFLIGHT_UNAVAILABLE
     assert ["sudo", "pacman", "-Syu"] not in runner.calls
+
+
+def test_upgrade_repairs_empty_mirrorlist_and_reruns_preflight(tmp_path):
+    pacman_conf = tmp_path / "pacman.conf"
+    mirrorlist = tmp_path / "mirrorlist"
+    backup = tmp_path / "mirrorlist-backup"
+    pacman_conf.write_text("[core]\nInclude = mirrorlist\n", encoding="utf-8")
+    mirrorlist.write_text("#Server = https://disabled.invalid/$repo/os/$arch\n", encoding="utf-8")
+    backup.write_text("Server = https://mirror.example/$repo/os/$arch\n", encoding="utf-8")
+
+    class SequenceRunner(FakeRunner):
+        def __init__(self):
+            super().__init__({
+                ("sudo", "pacman", "-Syu"): completed(returncode=0),
+                installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
+            })
+            self.preview_count = 0
+
+        def __call__(self, cmd, **kwargs):
+            if list(cmd) == preview_cmd():
+                self.calls.append(list(cmd))
+                self.preview_count += 1
+                if self.preview_count == 1:
+                    return completed(stderr="error: failed to synchronize all databases (no servers configured for repository)", returncode=1)
+                return completed("glibc\t2.40-1\tcore\t1\t\t\t\n")
+            return super().__call__(cmd, **kwargs)
+
+    runner = SequenceRunner()
+    stdout = io.StringIO()
+
+    status = run_upgrade(
+        ["--yes", "--no-ai", "--aur-helper", "none"],
+        runner=runner,
+        snapshot=base_snapshot(),
+        stdout=stdout,
+        pacman_conf_path=pacman_conf,
+        repository_repair_backup_root=tmp_path / "repair-backups",
+    )
+
+    assert status == 0
+    assert runner.preview_count == 2
+    assert "Repository repair completed. Rerunning preflight." in stdout.getvalue()
+    assert "Server = https://mirror.example" in mirrorlist.read_text(encoding="utf-8")
+    assert ["sudo", "pacman", "-Syu"] in runner.calls
 
 
 def test_final_command_os_error_returns_command_failure():

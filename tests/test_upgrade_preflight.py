@@ -2,6 +2,7 @@ import io
 import json
 import subprocess
 from pathlib import Path
+from urllib.error import HTTPError
 
 from aurascan.core import ai_provider
 from aurascan.core.models import Severity
@@ -27,6 +28,7 @@ from aurascan.core.upgrade_preflight import (
     build_repository_health_check,
     build_upgrade_plan,
     collect_foreign_package_info,
+    diagnose_upgrade_failure,
     foreign_package_dependency_issues,
     helper_upgrade_command,
     parse_aur_updates,
@@ -586,6 +588,25 @@ def test_upgrade_dry_run_never_runs_final_command():
     assert "Upgrade Preflight" in stdout.getvalue()
 
 
+def test_upgrade_shows_progress_before_preflight_report():
+    runner = FakeRunner({tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n")})
+    stdout = io.StringIO()
+
+    status = run_upgrade(
+        ["--dry-run", "--no-ai", "--aur-helper", "none"],
+        runner=runner,
+        snapshot=base_snapshot(),
+        stdout=stdout,
+    )
+    output = stdout.getvalue()
+
+    assert status == 0
+    assert output.index("[AuraScan] Starting upgrade preflight.") < output.index("[AuraScan] Upgrade Preflight")
+    assert "[AuraScan] Building pacman upgrade preview. This may sync package databases and can take a moment." in output
+    assert "[AuraScan] Collecting local system facts." in output
+    assert "[AuraScan] Checking kernel and external module compatibility." in output
+
+
 def test_upgrade_dry_run_invokes_config_drift_when_root_is_explicit():
     runner = FakeRunner({tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n")})
     calls = []
@@ -768,6 +789,7 @@ def test_json_mode_does_not_run_without_yes():
     assert data["report_type"] == "upgrade_preflight"
     assert data["kernel_module_check"]["enabled"] is True
     assert ["sudo", "pacman", "-Syu"] not in runner.calls
+    assert "Starting upgrade preflight" not in stdout.getvalue()
 
 
 def test_kernel_module_autopilot_accepts_fix_and_reruns_preflight():
@@ -876,6 +898,66 @@ def test_upgrade_reported_success_but_versions_not_updated_skips_aftercare():
     assert "Kernel/module aftercare" not in stdout.getvalue()
     assert "planned package versions were not installed" in stderr.getvalue()
     assert "clamav expected 1.5.3-1, found 1.5.2-2" in stderr.getvalue()
+
+
+def test_failed_upgrade_diagnoses_mirror_notfound():
+    url = "https://mirror.example/extra/os/x86_64/luajit-2.1-1-x86_64.pkg.tar.zst"
+
+    class UrlRunner(FakeRunner):
+        def __call__(self, cmd, **kwargs):
+            if list(cmd) == preview_cmd():
+                self.calls.append(list(cmd))
+                return completed("luajit\t2.1-1\textra\t1\t\t\t\n")
+            if list(cmd) == ["shelly", "upgrade-all", "--no-flatpak", "--no-appimage", "--no-confirm"]:
+                self.calls.append(list(cmd))
+                return completed(returncode=1)
+            if len(cmd) >= 5 and list(cmd[:3]) == ["pacman", "-Sp", "--cachedir"]:
+                self.calls.append(list(cmd))
+                return completed(url + "\n")
+            return super().__call__(cmd, **kwargs)
+
+    def fake_urlopen(req, timeout):
+        raise HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+    runner = UrlRunner({
+        ("shelly", "check-updates", "--aur", "--json"): completed('{"Packages":[],"Aur":[]}\n'),
+    })
+    stdout = io.StringIO()
+
+    status = run_upgrade(
+        ["--no-ai", "--aur-helper", "shelly"],
+        runner=runner,
+        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
+        snapshot=base_snapshot(),
+        stdout=stdout,
+        urlopen=fake_urlopen,
+    )
+
+    output = stdout.getvalue()
+    assert status == 1
+    assert "Package mirror looks temporarily out of sync" in output
+    assert "usually a mirror sync race" in output
+    assert url in output
+
+
+def test_upgrade_failure_diagnosis_ignores_reachable_package_urls():
+    plan = UpgradePlan(repo_packages=[UpgradePackage("luajit", "2.1-1")])
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def runner(cmd, **_kwargs):
+        if len(cmd) >= 5 and list(cmd[:3]) == ["pacman", "-Sp", "--cachedir"]:
+            return completed("https://mirror.example/luajit.pkg.tar.zst\n")
+        return completed()
+
+    assert diagnose_upgrade_failure(plan, runner=runner, urlopen=lambda _req, timeout: Response()) is None
 
 
 def test_verify_upgrade_handoff_reports_uninstalled_or_old_packages():

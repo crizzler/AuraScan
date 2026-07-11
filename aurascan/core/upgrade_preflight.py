@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen as urllib_urlopen
 
 from aurascan.core.ai_provider import call_ai_provider, resolve_ai_config
 from aurascan.core.ai_provider import parse_bool as parse_config_bool
@@ -73,6 +75,7 @@ ABI_SENSITIVE_PACKAGES = {
 REPO_HEADER_RE = re.compile(r"^\s*\[([^]]+)\]\s*$")
 REPO_INCLUDE_RE = re.compile(r"^\s*Include\s*=\s*(.+?)\s*$")
 REPO_SERVER_RE = re.compile(r"^\s*Server\s*=")
+ProgressReporter = Callable[[str], None]
 
 
 @dataclass
@@ -226,6 +229,30 @@ class RepositoryRepairResult:
     applied: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     backup_dir: str = ""
+
+
+@dataclass
+class UpgradeFailureDiagnosis:
+    kind: str
+    title: str
+    summary: str
+    likely_cause: str
+    recommended_action: str
+    evidence: List[str] = field(default_factory=list)
+
+    def render_terminal(self) -> str:
+        lines = [
+            "\n[AuraScan] Upgrade failure diagnosis",
+            f"{self.title}.",
+            self.summary,
+            f"Likely cause: {self.likely_cause}",
+            f"Next step: {self.recommended_action}",
+        ]
+        if self.evidence:
+            lines.append("Evidence:")
+            for item in self.evidence[:6]:
+                lines.append(f"- {item}")
+        return "\n".join(lines)
 
 
 @dataclass
@@ -643,7 +670,18 @@ def run_upgrade(
             print("[AuraScan] Upgrade command was not run. Use --enable-preflight or update AuraScan config to enable this feature.", file=stderr)
         return EXIT_PREFLIGHT_DISABLED
 
-    report = run_upgrade_preflight(options, runner=runner, which=which, snapshot=snapshot, urlopen=urlopen, modules_root=modules_root, pacman_conf_path=pacman_conf_path)
+    progress = upgrade_progress_reporter(options, stdout)
+    progress("Starting upgrade preflight.")
+    report = run_upgrade_preflight(
+        options,
+        runner=runner,
+        which=which,
+        snapshot=snapshot,
+        urlopen=urlopen,
+        modules_root=modules_root,
+        pacman_conf_path=pacman_conf_path,
+        progress=progress,
+    )
 
     if not report.plan.available and not options.dry_run and not options.json_output:
         repaired = run_repository_health_autopilot_repairs(
@@ -656,7 +694,16 @@ def run_upgrade(
             backup_root=repository_repair_backup_root,
         )
         if repaired:
-            report = run_upgrade_preflight(options, runner=runner, which=which, snapshot=snapshot, urlopen=urlopen, modules_root=modules_root, pacman_conf_path=pacman_conf_path)
+            report = run_upgrade_preflight(
+                options,
+                runner=runner,
+                which=which,
+                snapshot=snapshot,
+                urlopen=urlopen,
+                modules_root=modules_root,
+                pacman_conf_path=pacman_conf_path,
+                progress=progress,
+            )
 
     apply_trusted_handoff(report, options)
 
@@ -685,6 +732,7 @@ def run_upgrade(
             urlopen=urlopen,
             modules_root=modules_root,
             pacman_conf_path=pacman_conf_path,
+            progress=progress,
         )
         if fix_status is not None:
             return fix_status
@@ -710,10 +758,13 @@ def run_upgrade(
                 print(f"[AuraScan] Not upgraded: {item}", file=stderr)
             if len(verification) > 12:
                 print(f"[AuraScan] {len(verification) - 12} additional planned packages did not verify.", file=stderr)
+            print_upgrade_failure_diagnosis(report.plan, options, runner=runner, urlopen=urlopen, stdout=stdout, stderr=stderr)
             print("[AuraScan] Skipping post-upgrade aftercare because the package transaction did not verify.", file=stderr)
             return EXIT_UPGRADE_VERIFICATION_FAILED
         run_upgrade_kernel_module_aftercare(options, plan=report.plan, runner=runner, stdout=stdout, stderr=stderr, snapshot=snapshot, modules_root=modules_root)
         run_upgrade_config_drift("after", options, input_func=input_func, stdout=stdout, stderr=stderr, root=config_drift_root, snapshot=snapshot, runner=config_drift_runner)
+    else:
+        print_upgrade_failure_diagnosis(report.plan, options, runner=runner, urlopen=urlopen, stdout=stdout, stderr=stderr)
     return result_code
 
 
@@ -746,6 +797,99 @@ def installed_package_versions(packages: Iterable[str], *, runner: Callable = su
         if len(parts) == 2:
             versions[parts[0]] = parts[1]
     return versions
+
+
+def upgrade_progress_reporter(options: UpgradeOptions, stdout) -> ProgressReporter:
+    if options.json_output:
+        return lambda _message: None
+
+    def report(message: str) -> None:
+        print(f"[AuraScan] {message}", file=stdout, flush=True)
+
+    return report
+
+
+def print_upgrade_failure_diagnosis(
+    plan: UpgradePlan,
+    options: UpgradeOptions,
+    *,
+    runner: Callable = subprocess.run,
+    urlopen: Optional[Callable] = None,
+    stdout=None,
+    stderr=None,
+) -> None:
+    diagnosis = diagnose_upgrade_failure(plan, runner=runner, urlopen=urlopen)
+    if diagnosis is None:
+        return
+    stream = stderr if options.json_output else stdout
+    print(diagnosis.render_terminal(), file=stream)
+
+
+def diagnose_upgrade_failure(
+    plan: UpgradePlan,
+    *,
+    runner: Callable = subprocess.run,
+    urlopen: Optional[Callable] = None,
+    max_urls: int = 60,
+) -> Optional[UpgradeFailureDiagnosis]:
+    urls = planned_package_download_urls(plan, runner=runner, max_urls=max_urls)
+    missing = [url for url in urls if package_url_status(url, urlopen=urlopen) in {404, 410}]
+    if not missing:
+        return None
+    return UpgradeFailureDiagnosis(
+        kind="mirror_not_found",
+        title="Package mirror looks temporarily out of sync",
+        summary=(
+            "One or more package files from the current pacman database are missing on the selected mirror. "
+            "This is usually a mirror sync race, not a sign that the upgrade damaged the installed system."
+        ),
+        likely_cause=(
+            "The repository database was refreshed before that mirror finished publishing the matching package archive."
+        ),
+        recommended_action=(
+            "Wait a little and run AuraScan upgrade again, or refresh/rank mirrors if the same package URL keeps returning NotFound."
+        ),
+        evidence=missing,
+    )
+
+
+def planned_package_download_urls(
+    plan: UpgradePlan,
+    *,
+    runner: Callable = subprocess.run,
+    max_urls: int = 60,
+) -> List[str]:
+    names = [pkg.name for pkg in plan.repo_packages if pkg.name]
+    if not names:
+        return []
+    with tempfile.TemporaryDirectory(prefix="aurascan-url-check.") as cache_dir:
+        cmd = ["pacman", "-Sp", "--cachedir", cache_dir] + names[:max_urls]
+        try:
+            result = runner(cmd, capture_output=True, text=True, check=False)
+        except OSError:
+            return []
+    output = "\n".join([
+        str(getattr(result, "stdout", "") or ""),
+        str(getattr(result, "stderr", "") or ""),
+    ])
+    urls: List[str] = []
+    for raw in output.splitlines():
+        line = raw.strip()
+        if line.startswith(("http://", "https://")) and line.endswith(".pkg.tar.zst"):
+            urls.append(line)
+    return urls[:max_urls]
+
+
+def package_url_status(url: str, *, urlopen: Optional[Callable] = None, timeout: int = 4) -> int:
+    opener = urlopen or urllib_urlopen
+    try:
+        request = Request(url, method="HEAD", headers={"User-Agent": "AuraScan upgrade failure diagnosis"})
+        with opener(request, timeout=timeout) as response:
+            return int(getattr(response, "status", 200) or 200)
+    except HTTPError as exc:
+        return int(exc.code)
+    except (URLError, TimeoutError, OSError, ValueError):
+        return 0
 
 
 def apply_trusted_handoff(report: UpgradePreflightReport, options: UpgradeOptions) -> bool:
@@ -790,6 +934,7 @@ def run_kernel_module_autopilot_fixes(
     urlopen: Optional[Callable],
     modules_root: Path,
     pacman_conf_path: Path,
+    progress: Optional[ProgressReporter] = None,
 ) -> Optional[int]:
     check = report.kernel_module_check
     if not options.kernel_module_autopilot_enabled or check is None or not check.fix_packages():
@@ -811,7 +956,16 @@ def run_kernel_module_autopilot_fixes(
             print(f"[AuraScan] Kernel/module fix command failed with exit code {code}. Upgrade not run.", file=stderr)
             return code
         print("[AuraScan] Kernel/module fix completed. Rerunning preflight.", file=stdout)
-        refreshed = run_upgrade_preflight(options, runner=runner, which=which, snapshot=snapshot, urlopen=urlopen, modules_root=modules_root, pacman_conf_path=pacman_conf_path)
+        refreshed = run_upgrade_preflight(
+            options,
+            runner=runner,
+            which=which,
+            snapshot=snapshot,
+            urlopen=urlopen,
+            modules_root=modules_root,
+            pacman_conf_path=pacman_conf_path,
+            progress=progress,
+        )
         report.plan = refreshed.plan
         report.snapshot = refreshed.snapshot
         report.findings = refreshed.findings
@@ -1191,13 +1345,18 @@ def run_upgrade_preflight(
     urlopen: Optional[Callable] = None,
     modules_root: Path = Path("/usr/lib/modules"),
     pacman_conf_path: Path = Path("/etc/pacman.conf"),
+    progress: Optional[ProgressReporter] = None,
 ) -> UpgradePreflightReport:
-    plan = build_upgrade_plan(options, runner=runner, which=which)
+    progress = progress or (lambda _message: None)
+    plan = build_upgrade_plan(options, runner=runner, which=which, progress=progress)
+    progress("Collecting local system facts.")
     system_snapshot = snapshot or SystemSnapshot.collect(runner=runner)
     repository_health = build_repository_health_check(pacman_conf_path) if preview_error_indicates_no_servers(plan.preview_error) else None
     kernel_module_check = None
     if options.kernel_module_autopilot_enabled and not plan.preview_error:
+        progress("Checking kernel and external module compatibility.")
         kernel_module_check = build_kernel_module_check(plan, system_snapshot, runner=runner, modules_root=modules_root)
+    progress("Evaluating deterministic upgrade risks.")
     findings = analyze_upgrade_risks(
         plan,
         system_snapshot,
@@ -1212,6 +1371,8 @@ def run_upgrade_preflight(
         kernel_module_check=kernel_module_check,
         repository_health=repository_health,
     )
+    if not options.no_ai:
+        progress("Requesting AI advisory review.")
     apply_ai_upgrade_review(report, disabled=options.no_ai, urlopen=urlopen)
     return report
 
@@ -1221,7 +1382,9 @@ def build_upgrade_plan(
     *,
     runner: Callable = subprocess.run,
     which: Callable[[str], Optional[str]] = shutil.which,
+    progress: Optional[ProgressReporter] = None,
 ) -> UpgradePlan:
+    progress = progress or (lambda _message: None)
     helper, helper_error = resolve_aur_helper(options.aur_helper, which=which)
     final_command = helper_upgrade_command(helper)
     preview_command = ["sudo", "pacman", "-Syu", "--print", "--print-format", PACMAN_PRINT_FORMAT]
@@ -1236,6 +1399,7 @@ def build_upgrade_plan(
         plan.preview_error = helper_error
         return plan
 
+    progress("Building pacman upgrade preview. This may sync package databases and can take a moment.")
     try:
         result = runner(preview_command, capture_output=True, text=True, check=False)
     except OSError as exc:
@@ -1252,6 +1416,7 @@ def build_upgrade_plan(
         plan.replacements.extend(pkg.replaces)
 
     if helper != "none":
+        progress(f"Checking AUR updates with {helper}.")
         helper_result = query_helper_updates(helper, runner=runner)
         if helper_result["ok"]:
             plan.aur_packages = helper_result["packages"]

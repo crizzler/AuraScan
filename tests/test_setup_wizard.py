@@ -190,6 +190,47 @@ def test_doctor_reports_optional_recovery_state(tmp_path):
     assert by_name["recovery_last_result"].status == "ok"
 
 
+def test_doctor_treats_root_only_recovery_status_as_expected(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        setup_wizard,
+        "recovery_status",
+        lambda **_kwargs: {
+            "policy": {
+                "enabled": False,
+                "error": "recovery policy could not be read: [Errno 13] Permission denied: '/etc/aurascan/recovery.conf'",
+            },
+            "image": {"installed": False, "valid_pe": False, "bootloader": {}},
+            "installation": {"esp_space_ready": True},
+            "tools": {},
+            "profile_installed": True,
+            "refresh_hook_installed": True,
+            "iso_manifest": {},
+            "last_recovery": {},
+        },
+    )
+
+    checks = build_doctor_checks(
+        env_path=tmp_path / "missing.env",
+        env={},
+        executable_path=tmp_path / "usr/bin/aurascan",
+        local_hook_path=tmp_path / "local.hook",
+        packaged_hook_path=tmp_path / "packaged.hook",
+        recovery_root=tmp_path / "target",
+        which=lambda _name: None,
+        runner=lambda command, **_kwargs: subprocess.CompletedProcess(command, 1, "", ""),
+    )
+    by_name = {item.name: item for item in checks}
+
+    assert by_name["recovery_config"].status == "warn"
+    assert by_name["recovery_config"].details == {"status_requires_root": True}
+    assert by_name["recovery_image"].status == "warn"
+    assert "disabled" not in by_name["recovery_image"].message.lower()
+    assert "missing" not in by_name["recovery_image"].message.lower()
+    assert by_name["recovery_bootloader"].status == "warn"
+    assert by_name["recovery_refresh"].status == "warn"
+    assert by_name["recovery_last_result"].status == "warn"
+
+
 def test_init_can_disable_config_drift_assistant(tmp_path):
     env_path = tmp_path / ".config" / "aurascan" / ".env"
     stdout = io.StringIO()
@@ -371,6 +412,7 @@ def test_doctor_json_reports_missing_key_without_leaking_values(tmp_path):
         executable_path=tmp_path / "usr" / "bin" / "aurascan",
         local_hook_path=tmp_path / "etc" / "pacman.d" / "hooks" / "aurascan.hook",
         packaged_hook_path=tmp_path / "usr" / "share" / "libalpm" / "hooks" / "aurascan.hook",
+        recovery_root=tmp_path / "recovery-root",
     )
     data = json.loads(stdout.getvalue())
 
@@ -749,6 +791,7 @@ def test_doctor_check_ai_uses_mocked_provider(tmp_path):
         executable_path=tmp_path / "usr" / "bin" / "aurascan",
         local_hook_path=tmp_path / "etc" / "pacman.d" / "hooks" / "aurascan.hook",
         packaged_hook_path=tmp_path / "usr" / "share" / "libalpm" / "hooks" / "aurascan.hook",
+        recovery_root=tmp_path / "recovery-root",
     )
     data = json.loads(stdout.getvalue())
 

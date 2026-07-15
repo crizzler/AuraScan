@@ -89,6 +89,8 @@ RECOVERY_PROFILE_PATH = Path("/usr/lib/aurascan/recovery/mkosi.conf")
 RECOVERY_ISO_MANIFEST_PATH = Path("/usr/share/aurascan/recovery/iso-manifest.json")
 RECOVERY_REFRESH_HOOK = Path("/usr/share/libalpm/hooks/aurascan-recovery-refresh.hook")
 RECOVERY_MIN_ESP_FREE = 64 * 1024 * 1024
+RECOVERY_REFRESH_DELAY_SECONDS = 30
+RECOVERY_REFRESH_UNIT = "aurascan-recovery-refresh"
 EXIT_RECOVERY_UNAVAILABLE = 50
 EXIT_RECOVERY_DECLINED = 51
 EXIT_RECOVERY_FAILED = 52
@@ -356,6 +358,9 @@ def create_recovery_overlay(destination: Path) -> Path:
     wants.mkdir(parents=True, mode=0o755, exist_ok=True)
     service_link = wants / "aurascan-recovery.service"
     service_link.symlink_to("/usr/lib/systemd/system/aurascan-recovery.service")
+    getty_mask = destination / "etc/systemd/system/getty@tty1.service"
+    getty_mask.parent.mkdir(parents=True, mode=0o755, exist_ok=True)
+    getty_mask.symlink_to("/dev/null")
     issue = destination / "etc/issue"
     issue.parent.mkdir(parents=True, mode=0o755, exist_ok=True)
     issue.write_text(
@@ -711,6 +716,41 @@ def _progress(message: str, stream) -> None:
     print(f"[AuraScan] {message}...", file=stream, flush=True)
 
 
+def schedule_recovery_refresh(
+    *,
+    runner: Callable = subprocess.run,
+    which: Callable[[str], Optional[str]] = shutil.which,
+) -> BootOperationResult:
+    systemd_run = which("systemd-run")
+    if not systemd_run:
+        return BootOperationResult(False, "unavailable", "systemd-run is unavailable; the recovery refresh was not scheduled.")
+    command = [
+        systemd_run,
+        "--quiet",
+        "--collect",
+        "--no-block",
+        f"--on-active={RECOVERY_REFRESH_DELAY_SECONDS}s",
+        f"--unit={RECOVERY_REFRESH_UNIT}",
+        "--property=Nice=10",
+        "--property=IOSchedulingClass=idle",
+        "/usr/bin/aurascan",
+        "recovery",
+        "--refresh",
+    ]
+    try:
+        result = runner(command, capture_output=True, text=True, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return BootOperationResult(False, "failed", f"Recovery refresh scheduling failed: {exc}", command=command)
+    if result.returncode != 0:
+        return BootOperationResult(False, "failed", "systemd could not schedule the recovery refresh.", command=command)
+    return BootOperationResult(
+        True,
+        "scheduled",
+        f"Recovery refresh scheduled {RECOVERY_REFRESH_DELAY_SECONDS} seconds after the package transaction.",
+        command=command,
+    )
+
+
 def _offer_report_export(
     report: RecoveryReport,
     save_message: str,
@@ -791,6 +831,7 @@ def _select_runtime_target(
     *,
     root: Optional[Path],
     input_func: Callable[[str], str],
+    getpass_func: Callable[[str], str],
     stdout,
     runner: Callable,
     which: Callable[[str], Optional[str]],
@@ -831,7 +872,12 @@ def _select_runtime_target(
     choice = input_func("Target [1]: ").strip() or "1"
     if not choice.isdigit() or not 1 <= int(choice) <= len(candidates):
         return None, "Invalid recovery target selection."
-    return mount_recovery_target_read_only(candidates[int(choice) - 1], runner=runner, which=which)
+    return mount_recovery_target_read_only(
+        candidates[int(choice) - 1],
+        unlock_secret_func=getpass_func,
+        runner=runner,
+        which=which,
+    )
 
 
 def _configure_runtime_network(
@@ -909,6 +955,7 @@ def run_recovery_session(
     target, message = _select_runtime_target(
         root=root,
         input_func=input_func,
+        getpass_func=getpass_func,
         stdout=stdout,
         runner=runner,
         which=which,
@@ -1146,6 +1193,17 @@ def run_recovery(
         if args.refresh_from_hook:
             hook_policy = read_recovery_policy(_policy_path(root))
             if not hook_policy.enabled or hook_policy.refresh_policy != "automatic":
+                return 0
+            if root == Path("/") and os.geteuid() == 0:
+                scheduled = schedule_recovery_refresh(runner=runner, which=which)
+                hook_policy.last_refresh_status = "scheduled" if scheduled.ok else "warning"
+                hook_policy.last_refresh_error = "" if scheduled.ok else scheduled.message
+                try:
+                    write_recovery_policy(hook_policy, _policy_path(root), require_root=True)
+                except OSError:
+                    pass
+                if not scheduled.ok:
+                    print("[AuraScan] Recovery image refresh warning: " + scheduled.message, file=stderr)
                 return 0
         result = install_or_refresh_recovery(
             root=root,

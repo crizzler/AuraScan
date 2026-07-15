@@ -92,6 +92,9 @@ def test_uki_command_uses_supported_mkosi_initrd_profile_without_host_config_imp
     assert "--directory=" in command
     assert not any(item.startswith("--kernel-version=") for item in command)
     assert f"--extra-tree={overlay}:/" in command
+    kernel_command_line = next(item for item in command if item.startswith("--kernel-command-line="))
+    assert "rd.systemd.wants=aurascan-recovery.service" in kernel_command_line
+    assert "systemd.wants=aurascan-recovery.service" in kernel_command_line
 
 
 def test_image_validation_scans_entire_file_for_credentials(tmp_path):
@@ -113,11 +116,37 @@ def test_image_validation_requires_selected_kernel_in_ukify_metadata(tmp_path):
         minimum_size=2,
         expected_kernel_version="6.18.1-lts",
         which=lambda name: "/usr/bin/ukify" if name == "ukify" else None,
-        runner=lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "Kernel Version: 7.1.0-arch\n", ""),
+        runner=lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            "Kernel Version: 7.1.0-arch\nsystemd.wants=aurascan-recovery.service\n",
+            "",
+        ),
     )
 
     assert valid is False
     assert any("selected recovery kernel" in item for item in errors)
+
+
+def test_image_validation_requires_recovery_service_boot_request(tmp_path):
+    image = tmp_path / "recovery.efi"
+    image.write_bytes(b"MZfixture")
+
+    valid, errors = validate_recovery_image(
+        image,
+        minimum_size=2,
+        expected_kernel_version="6.18.1-lts",
+        which=lambda name: "/usr/bin/ukify" if name == "ukify" else None,
+        runner=lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            "Kernel Version: 6.18.1-lts\n",
+            "",
+        ),
+    )
+
+    assert valid is False
+    assert any("recovery service" in item for item in errors)
 
 
 def test_usb_inspection_accepts_only_removable_unmounted_whole_disk():

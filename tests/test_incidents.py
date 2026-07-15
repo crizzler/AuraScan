@@ -35,6 +35,7 @@ from aurascan.core.incidents import (
     collect_pacman_history,
     collect_pstore_evidence,
     current_boot_id,
+    current_user_uid,
     list_incident_reports,
     load_maintenance_checkpoint,
     load_maintenance_status,
@@ -119,6 +120,13 @@ def test_current_boot_id_falls_back_to_journal_when_proc_is_hidden(tmp_path):
 
     assert result == boot_id
     assert runner.calls == [list(command)]
+
+
+def test_current_user_uid_ignores_sudo_uid_when_not_root(monkeypatch):
+    monkeypatch.setattr(os, "getuid", lambda: 1000)
+    monkeypatch.setenv("SUDO_UID", "0")
+
+    assert current_user_uid() == 1000
 
 
 def minimal_report(**updates):

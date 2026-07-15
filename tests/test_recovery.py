@@ -40,6 +40,7 @@ from aurascan.core.recovery_cli import (
     install_or_refresh_recovery,
     recovery_status,
     run_recovery,
+    schedule_recovery_refresh,
 )
 from aurascan.core.recovery_boot import UsbDeviceInfo
 from aurascan.core.recovery_network import RecoveryNetworkState
@@ -178,9 +179,12 @@ def test_recovery_runtime_loads_separate_ai_consent_from_mounted_target(tmp_path
 def test_internal_overlay_explicitly_enables_recovery_service(tmp_path):
     overlay = create_recovery_overlay(tmp_path / "overlay")
     link = overlay / "etc/systemd/system/multi-user.target.wants/aurascan-recovery.service"
+    getty_mask = overlay / "etc/systemd/system/getty@tty1.service"
 
     assert link.is_symlink()
     assert os.readlink(link) == "/usr/lib/systemd/system/aurascan-recovery.service"
+    assert getty_mask.is_symlink()
+    assert os.readlink(getty_mask) == "/dev/null"
     assert not (overlay / "etc/hostname").exists()
 
 
@@ -557,6 +561,31 @@ def test_recovery_cli_parser_has_management_and_safety_flags():
     assert args.yes is True
 
 
+def test_pacman_hook_schedules_refresh_after_transaction_lock_release():
+    commands = []
+
+    result = schedule_recovery_refresh(
+        runner=lambda command, **_kwargs: (
+            commands.append(command) or subprocess.CompletedProcess(command, 0, "", "")
+        ),
+        which=lambda name: "/usr/bin/systemd-run" if name == "systemd-run" else None,
+    )
+
+    assert result.ok is True
+    assert result.status == "scheduled"
+    assert commands == [result.command]
+    assert "--on-active=30s" in result.command
+    assert "--no-block" in result.command
+    assert result.command[-3:] == ["/usr/bin/aurascan", "recovery", "--refresh"]
+
+
+def test_pacman_hook_refresh_schedule_refuses_missing_systemd_run():
+    result = schedule_recovery_refresh(which=lambda _name: None)
+
+    assert result.ok is False
+    assert result.status == "unavailable"
+
+
 def test_internal_install_dry_run_requires_no_esp_write(tmp_path):
     root = make_target(tmp_path)
     paths = {
@@ -630,9 +659,11 @@ def test_luks_target_is_opened_read_only_and_closed_after_mount_failure(tmp_path
         supported=True,
     )
     commands = []
+    subprocess_kwargs = []
 
-    def runner(command, **_kwargs):
+    def runner(command, **kwargs):
         commands.append(command)
+        subprocess_kwargs.append(kwargs)
         if command[:2] == ["lsblk", "--noheadings"]:
             return subprocess.CompletedProcess(command, 0, "ext4\n", "")
         if command[0] == "mount":
@@ -643,14 +674,34 @@ def test_luks_target_is_opened_read_only_and_closed_after_mount_failure(tmp_path
     target, _message = mount_recovery_target_read_only(
         candidate,
         mount_root=tmp_path / "mount",
+        unlock_secret_func=lambda _prompt: "fixture unlock secret",
         runner=runner,
         which=lambda name: f"/usr/bin/{name}" if name == "cryptsetup" else None,
     )
 
     assert target is None
     open_command = next(command for command in commands if command[:2] == ["cryptsetup", "open"])
+    open_kwargs = subprocess_kwargs[commands.index(open_command)]
     assert "--readonly" in open_command
+    assert "--key-file" in open_command
+    assert "fixture unlock secret" not in " ".join(open_command)
+    assert open_kwargs["input"] == "fixture unlock secret"
     assert any(command[:2] == ["cryptsetup", "close"] for command in commands)
+
+
+def test_luks_target_refuses_noninteractive_unlock(tmp_path, monkeypatch):
+    candidate = RecoveryTargetCandidate(device="/dev/sdz2", fstype="crypto_luks", supported=True)
+    monkeypatch.setattr("aurascan.core.recovery.os.geteuid", lambda: 0)
+
+    target, message = mount_recovery_target_read_only(
+        candidate,
+        mount_root=tmp_path / "mount",
+        runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cryptsetup ran")),
+        which=lambda name: f"/usr/bin/{name}" if name == "cryptsetup" else None,
+    )
+
+    assert target is None
+    assert "interactive unlock password" in message
 
 
 @pytest.mark.parametrize(("filesystem", "required_option"), [("ext4", "noload"), ("xfs", "norecovery")])

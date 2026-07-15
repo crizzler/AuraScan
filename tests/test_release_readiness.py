@@ -13,7 +13,7 @@ def test_pyproject_console_scripts_are_registered():
     data = tomllib.loads(read_text("pyproject.toml"))
 
     scripts = data["project"]["scripts"]
-    assert data["project"]["version"] == "0.5.0"
+    assert data["project"]["version"] == "0.6.0"
     assert scripts["aurascan"] == "aurascan.cli:main"
     assert scripts["aurascan-makepkg"] == "aurascan.makepkg_wrapper:main"
     assert data["project"]["requires-python"] == ">=3.8"
@@ -126,6 +126,7 @@ def test_gitignore_excludes_release_local_artifacts():
         ".pytest_cache/",
         "dist/",
         "build/",
+        ".build/",
         "*.egg-info/",
         "packaging/arch/pkg/",
         "packaging/arch/src/",

@@ -1187,10 +1187,23 @@ def build_doctor_checks(
     recovery_tools = recovery_state.get("tools", {}) if isinstance(recovery_state.get("tools"), Mapping) else {}
     recovery_installation = recovery_state.get("installation", {}) if isinstance(recovery_state.get("installation"), Mapping) else {}
     recovery_enabled = bool(recovery_policy.get("enabled"))
+    recovery_policy_error = str(recovery_policy.get("error") or "")
+    recovery_access_limited = bool(
+        recovery_policy_error
+        and "recovery policy could not be read" in recovery_policy_error.lower()
+        and ("permission denied" in recovery_policy_error.lower() or "errno 13" in recovery_policy_error.lower())
+    )
     if recovery_config.error:
         checks.append(DoctorCheck("recovery_config", "error", recovery_config.error))
-    elif recovery_policy.get("error"):
-        checks.append(DoctorCheck("recovery_config", "error", str(recovery_policy.get("error")), dict(recovery_policy)))
+    elif recovery_access_limited:
+        checks.append(DoctorCheck(
+            "recovery_config",
+            "warn",
+            "Recovery system policy is root-only; run sudo aurascan recovery --status for installed image details",
+            {"status_requires_root": True},
+        ))
+    elif recovery_policy_error:
+        checks.append(DoctorCheck("recovery_config", "error", recovery_policy_error, dict(recovery_policy)))
     else:
         checks.append(DoctorCheck(
             "recovery_config",
@@ -1199,7 +1212,14 @@ def build_doctor_checks(
             {"user": recovery_config.to_dict(), "system_policy": dict(recovery_policy)},
         ))
     image_ready = bool(recovery_image.get("installed") and recovery_image.get("valid_pe") and not recovery_image.get("errors"))
-    if recovery_enabled and image_ready and not recovery_image.get("stale"):
+    if recovery_access_limited:
+        checks.append(DoctorCheck(
+            "recovery_image",
+            "warn",
+            "Recovery image status requires root access; AuraScan made no installation-state inference",
+            {"status_requires_root": True},
+        ))
+    elif recovery_enabled and image_ready and not recovery_image.get("stale"):
         checks.append(DoctorCheck("recovery_image", "ok", f"Recovery image {recovery_image.get('version') or 'unknown'} is installed and current", dict(recovery_image)))
     elif recovery_enabled and recovery_image.get("stale"):
         checks.append(DoctorCheck("recovery_image", "warn", "Recovery image is stale and should be refreshed", dict(recovery_image)))
@@ -1208,12 +1228,20 @@ def build_doctor_checks(
     else:
         checks.append(DoctorCheck("recovery_image", "ok", "No internal recovery image is expected while recovery is disabled", dict(recovery_image)))
     bootloader = recovery_image.get("bootloader", {}) if isinstance(recovery_image.get("bootloader"), Mapping) else {}
-    checks.append(DoctorCheck(
-        "recovery_bootloader",
-        "ok" if bootloader.get("installed") else "warn",
-        f"Recovery bootloader adapter: {bootloader.get('name', 'Unknown')}" if bootloader.get("installed") else "No supported recovery bootloader adapter was detected",
-        dict(bootloader),
-    ))
+    if recovery_access_limited:
+        checks.append(DoctorCheck(
+            "recovery_bootloader",
+            "warn",
+            "Recovery bootloader status requires root access",
+            {"status_requires_root": True},
+        ))
+    else:
+        checks.append(DoctorCheck(
+            "recovery_bootloader",
+            "ok" if bootloader.get("installed") else "warn",
+            f"Recovery bootloader adapter: {bootloader.get('name', 'Unknown')}" if bootloader.get("installed") else "No supported recovery bootloader adapter was detected",
+            dict(bootloader),
+        ))
     secure_boot = str(recovery_image.get("secure_boot") or "unknown")
     signed = bool(recovery_image.get("signed"))
     secure_ok = secure_boot != "enabled" or signed or not recovery_enabled
@@ -1258,12 +1286,20 @@ def build_doctor_checks(
         {"enabled": recovery_config.ai_enabled, "provider": ai_config.provider, "key_present": ai_config.api_key_present, "maximum_provider_requests": 2},
     ))
     refresh_ready = bool(recovery_state.get("refresh_hook_installed"))
-    checks.append(DoctorCheck(
-        "recovery_refresh",
-        "ok" if (not recovery_enabled or refresh_ready) else "warn",
-        "Recovery refresh hook is installed" if refresh_ready else "Recovery refresh hook is missing",
-        {"installed": refresh_ready, "last_status": recovery_policy.get("last_refresh_status"), "last_error": recovery_policy.get("last_refresh_error")},
-    ))
+    if recovery_access_limited and refresh_ready:
+        checks.append(DoctorCheck(
+            "recovery_refresh",
+            "warn",
+            "Recovery refresh hook is installed; last refresh status requires root access",
+            {"installed": True, "status_requires_root": True},
+        ))
+    else:
+        checks.append(DoctorCheck(
+            "recovery_refresh",
+            "ok" if (not recovery_enabled or refresh_ready) else "warn",
+            "Recovery refresh hook is installed" if refresh_ready else "Recovery refresh hook is missing",
+            {"installed": refresh_ready, "last_status": recovery_policy.get("last_refresh_status"), "last_error": recovery_policy.get("last_refresh_error")},
+        ))
     recovery_iso = recovery_state.get("iso_manifest", {}) if isinstance(recovery_state.get("iso_manifest"), Mapping) else {}
     iso_digest = str(recovery_iso.get("sha256") or "").lower()
     iso_ready = bool(
@@ -1279,12 +1315,20 @@ def build_doctor_checks(
     last_recovery = recovery_state.get("last_recovery", {}) if isinstance(recovery_state.get("last_recovery"), Mapping) else {}
     repair_statuses = last_recovery.get("repair_statuses", []) if isinstance(last_recovery.get("repair_statuses"), list) else []
     last_failed = any(item in {"failed", "refused", "rolled_back"} for item in repair_statuses)
-    checks.append(DoctorCheck(
-        "recovery_last_result",
-        "warn" if last_failed or last_recovery.get("error") else "ok",
-        "The last recovery run retained failed or refused actions" if last_failed else "No failed private recovery result is recorded",
-        dict(last_recovery),
-    ))
+    if recovery_access_limited:
+        checks.append(DoctorCheck(
+            "recovery_last_result",
+            "warn",
+            "The private last-recovery result requires root access",
+            {"status_requires_root": True},
+        ))
+    else:
+        checks.append(DoctorCheck(
+            "recovery_last_result",
+            "warn" if last_failed or last_recovery.get("error") else "ok",
+            "The last recovery run retained failed or refused actions" if last_failed else "No failed private recovery result is recorded",
+            dict(last_recovery),
+        ))
 
     updater_status = build_updater_status(
         env=effective_env,

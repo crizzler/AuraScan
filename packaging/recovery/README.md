@@ -10,6 +10,13 @@ Release sequence:
    digest left empty. The builder packages that exact commit with `git archive`;
    it never downloads an older tag.
 2. Run `packaging/recovery/build-iso.sh` on a clean Arch builder with `archiso`.
+   Package creation stays unprivileged; only `mkarchiso` is elevated. The
+   default helper is `sudo`. Set `AURASCAN_ARCHISO_ROOT_HELPER` to `doas`,
+   `pkexec`, or `run0` when that is the builder's normal privilege boundary.
+   Arch packages use an isolated, signature-checked cache under
+   `~/.cache/aurascan/recovery-archiso` by default so Arch and downstream
+   packages with identical filenames cannot be mixed. Override it with
+   `AURASCAN_ARCHISO_CACHE` when the builder provides an equally isolated path.
 3. Boot the ISO with `qemu-smoke.sh ISO bios` and `uefi`. Boot the locally
    built UKI with `qemu-uki-smoke.sh UKI uefi` and
    `qemu-uki-smoke.sh UKI secure-boot` using matching OVMF variables.

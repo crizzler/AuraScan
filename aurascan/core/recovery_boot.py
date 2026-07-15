@@ -250,7 +250,12 @@ def build_uki_command(
         "--remove-files=/usr/lib/firmware/*-ucode",
         "--build-sources=",
         "--kernel-modules=host",
-        "--kernel-command-line=rd.systemd.unit=multi-user.target systemd.unit=multi-user.target",
+        (
+            "--kernel-command-line=rd.systemd.unit=multi-user.target "
+            "systemd.unit=multi-user.target "
+            "rd.systemd.wants=aurascan-recovery.service "
+            "systemd.wants=aurascan-recovery.service"
+        ),
         "--output-mode=600",
     ]
     if extra_tree is not None:
@@ -298,8 +303,12 @@ def validate_recovery_image(
         result = runner([ukify, "inspect", str(path)], capture_output=True, text=True, timeout=30, check=False)
         if result.returncode != 0:
             errors.append("ukify could not validate the recovery image.")
-        elif expected_kernel_version and expected_kernel_version not in ((result.stdout or "") + "\n" + (result.stderr or "")):
-            errors.append("ukify did not prove the selected recovery kernel version is present.")
+        else:
+            inspection = (result.stdout or "") + "\n" + (result.stderr or "")
+            if expected_kernel_version and expected_kernel_version not in inspection:
+                errors.append("ukify did not prove the selected recovery kernel version is present.")
+            if "systemd.wants=aurascan-recovery.service" not in inspection:
+                errors.append("The recovery UKI does not request the AuraScan recovery service at boot.")
     return not errors, errors
 
 

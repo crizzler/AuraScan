@@ -3500,9 +3500,10 @@ def validate_privileged_request_file(path: Path) -> Tuple[bool, str]:
         return False, sanitize_error(str(exc))
     if stat_result.st_mode & 0o077:
         return False, "request permissions expose it to another user"
+    actual_uid = os.getuid() if hasattr(os, "getuid") else 0
     sudo_uid = os.environ.get("SUDO_UID", "").strip()
     allowed_owners = {0}
-    if sudo_uid.isdigit():
+    if actual_uid == 0 and sudo_uid.isdigit():
         allowed_owners.add(int(sudo_uid))
     if stat_result.st_uid not in allowed_owners:
         return False, "request owner does not match the invoking user"
@@ -3518,10 +3519,11 @@ def make_incident_id(target_boot: str) -> str:
 
 
 def current_user_uid() -> int:
+    actual_uid = os.getuid() if hasattr(os, "getuid") else 0
     sudo_uid = os.environ.get("SUDO_UID", "").strip()
-    if sudo_uid.isdigit():
+    if actual_uid == 0 and sudo_uid.isdigit():
         return int(sudo_uid)
-    return os.getuid() if hasattr(os, "getuid") else 0
+    return actual_uid
 
 
 def current_boot_id(

@@ -1,6 +1,6 @@
 pkgbase = aurascan
-	pkgdesc = AI-assisted safety layer for Arch-family package, AUR, and upgrade workflows
-	pkgver = 0.5.0
+	pkgdesc = AI-assisted safety and recovery layer for Arch-family systems
+	pkgver = 0.6.0
 	pkgrel = 1
 	url = https://github.com/crizzler/AuraScan
 	install = aurascan.install
@@ -12,6 +12,7 @@ pkgbase = aurascan
 	makedepends = python-setuptools
 	makedepends = python-wheel
 	depends = python
+	depends = hicolor-icon-theme
 	optdepends = clamav: AV signature scanning through clamscan
 	optdepends = gnupg: explicit deep-static signature verification
 	optdepends = pacman: local package database, upgrade preflight, and vercmp support
@@ -34,7 +35,7 @@ pkgbase = aurascan
 	optdepends = btrfs-progs: Btrfs diagnosis and snapshot recovery
 	optdepends = snapper: snapshot test and confirmed restore workflows
 	optdepends = xfsprogs: read-only XFS recovery diagnostics
-	source = aurascan-0.5.0.tar.gz::https://github.com/crizzler/AuraScan/archive/refs/tags/v0.5.0.tar.gz
-	sha256sums = 9094d43441320e33f8b2372dd746d49b8e5a00b8987a0a476817bf71c474609e
+	source = aurascan-0.6.0.tar.gz::https://github.com/crizzler/AuraScan/archive/refs/tags/v0.6.0.tar.gz
+	sha256sums = SKIP
 
 pkgname = aurascan

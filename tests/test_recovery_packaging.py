@@ -29,11 +29,23 @@ def test_arch_package_installs_recovery_assets_without_enabling_a_boot_entry():
     assert "aurascan recovery --install" in install_script
 
 
+def test_arch_package_installs_license_and_declares_icon_theme_dependency():
+    pkgbuild = read_text("packaging/arch/PKGBUILD")
+    srcinfo = read_text("packaging/arch/.SRCINFO")
+
+    assert "'hicolor-icon-theme'" in pkgbuild
+    assert "depends = hicolor-icon-theme" in srcinfo
+    assert 'install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"' in pkgbuild
+
+
 def test_recovery_service_cannot_start_on_the_installed_host_by_accident():
     service = read_text("aurascan/assets/aurascan-recovery.service")
 
     assert "ConditionPathExists=/etc/aurascan/recovery-environment" in service
     assert "ExecStart=/usr/bin/aurascan recovery --runtime" in service
+    assert "Before=getty@tty1.service" in service
+    assert "Conflicts=getty@tty1.service" in service
+    assert "Type=simple" in service
     assert "UMask=0077" in service
     assert "WantedBy=multi-user.target" in service
 
@@ -48,8 +60,8 @@ def test_archiso_profile_is_hybrid_and_contains_no_credentials():
         if path.is_file()
     )
 
-    assert "bios.syslinux.mbr" in profile
-    assert "uefi-x64.systemd-boot.esp" in profile
+    assert "bios.syslinux" in profile
+    assert "uefi.systemd-boot" in profile
     assert "aurascan" in packages
     assert not re.search(r"AURASCAN_(?:AI|OPENAI|ANTHROPIC|DEEPSEEK|GEMINI|OPENROUTER)_KEY=", material)
     assert manifest["version"] == "0.6.0"
@@ -94,6 +106,7 @@ def test_qemu_uki_smoke_harness_requires_digest_and_ovmf():
 def test_iso_builder_layers_aurascan_onto_the_maintained_archiso_profile():
     builder = read_text("packaging/recovery/build-iso.sh")
     live_pacman = read_text("packaging/recovery/archiso/airootfs/etc/pacman.conf")
+    build_pacman = read_text("packaging/recovery/archiso/pacman.conf")
 
     assert "/usr/share/archiso/configs/releng" in builder
     assert 'cp -a "$archiso_base"/. "$profile"/' in builder
@@ -101,8 +114,25 @@ def test_iso_builder_layers_aurascan_onto_the_maintained_archiso_profile():
     assert 'cat "$profile_source/profiledef.sh" >> "$profile/profiledef.sh"' in builder
     assert 'sort -u -o "$profile/packages.x86_64"' in builder
     assert "multi-user.target.wants/aurascan-recovery.service" in builder
+    assert 'getty@tty1.service"' in builder
+    assert "ln -sfn /dev/null" in builder
     assert "git -C \"$repo_root\" archive" in builder
     assert "status --porcelain" in builder
+    assert "AURASCAN_ARCHISO_ROOT_HELPER" in builder
+    assert "AURASCAN_ARCHISO_CACHE" in builder
+    assert "CacheDir = $package_cache" in builder
+    assert "/modules\\.alias/s/ -print -exec gzip/ -exec gzip/" in builder
+    assert "gzip -t \"$modalias\"" in builder
+    assert 'grep -aFq "$repo_root" "$iso"' in builder
+    assert "sudo|doas|pkexec" in builder
+    assert 'if (( EUID == 0 ))' in builder
+    assert "resolve().as_uri()" in builder
+    assert 'sha256sum "$iso_name"' in builder
+    assert 'pkglist.x86_64.txt' in builder
+    assert 'sort -u "$profile/packages.x86_64"' not in builder
     assert 'cd "$repo_root/packaging/arch"' not in builder
     assert "aurascan-recovery" not in live_pacman
     assert "file://" not in live_pacman
+    assert "https://geo.mirror.pkgbuild.com/$repo/os/$arch" in build_pacman
+    assert "https://fastly.mirror.pkgbuild.com/$repo/os/$arch" in build_pacman
+    assert "https://geo.mirror.pkgbuild.com/$repo/os/$arch" in live_pacman

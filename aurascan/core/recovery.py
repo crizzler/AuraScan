@@ -917,6 +917,7 @@ def mount_recovery_target_read_only(
     candidate: RecoveryTargetCandidate,
     *,
     mount_root: Path = RECOVERY_TARGET_MOUNT,
+    unlock_secret_func: Optional[Callable[[str], str]] = None,
     runner: Callable = subprocess.run,
     which: Callable[[str], Optional[str]] = shutil.which,
 ) -> Tuple[Optional[RecoveryTarget], str]:
@@ -930,8 +931,23 @@ def mount_recovery_target_read_only(
     if candidate.fstype == "crypto_luks":
         if not which("cryptsetup"):
             return None, "cryptsetup is unavailable."
+        if unlock_secret_func is None:
+            return None, "The encrypted target requires an interactive unlock password."
+        try:
+            passphrase = unlock_secret_func(f"Unlock password for {device}: ")
+        except (EOFError, KeyboardInterrupt):
+            return None, "Encrypted target unlock was cancelled."
+        if not passphrase or "\n" in passphrase or "\r" in passphrase:
+            return None, "Encrypted target unlock was cancelled."
         mapping = "aurascan-target-" + hashlib.sha256(device.encode()).hexdigest()[:8]
-        result = runner(["cryptsetup", "open", "--readonly", "--type", "luks2", device, mapping], timeout=120, check=False)
+        result = runner(
+            ["cryptsetup", "open", "--readonly", "--type", "luks2", "--key-file", "-", device, mapping],
+            input=passphrase,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        passphrase = ""
         if result.returncode != 0:
             return None, "The encrypted target could not be unlocked."
         device = f"/dev/mapper/{mapping}"

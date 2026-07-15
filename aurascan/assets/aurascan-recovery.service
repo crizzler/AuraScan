@@ -3,11 +3,13 @@ Description=AuraScan AI-Assisted Recovery Environment
 Documentation=https://github.com/crizzler/AuraScan
 After=systemd-udev-settle.service NetworkManager.service
 Wants=systemd-udev-settle.service NetworkManager.service
+Before=getty@tty1.service
+Conflicts=getty@tty1.service
 ConditionPathExists=/usr/bin/aurascan
 ConditionPathExists=/etc/aurascan/recovery-environment
 
 [Service]
-Type=idle
+Type=simple
 ExecStartPre=/usr/bin/install -Dm600 /dev/null /run/aurascan-recovery/environment
 ExecStart=/usr/bin/aurascan recovery --runtime
 StandardInput=tty-force

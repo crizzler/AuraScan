@@ -2,6 +2,7 @@ from io import StringIO
 import os
 from pathlib import Path
 import re
+import subprocess
 import tomllib
 
 from aurascan.cli import (
@@ -97,24 +98,36 @@ def test_arch_package_metadata_targets_current_public_release():
     srcinfo = read_text("packaging/arch/.SRCINFO")
     release_notes = ROOT / "docs" / "releases" / f"v{version}.md"
     is_git_checkout = (ROOT / ".git").exists()
+    release_tag_exists = is_git_checkout and subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/v{version}"],
+        cwd=ROOT,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
 
     assert re.search(rf"^pkgver={re.escape(version)}$", pkgbuild, re.MULTILINE)
     assert f"v$pkgver.tar.gz" in pkgbuild
-    # A tagged archive cannot contain the checksum of itself. The checkout
-    # metadata is finalized and validated immediately after the tag exists.
-    if is_git_checkout:
+    # A tagged archive cannot contain the checksum of itself. The release
+    # candidate uses SKIP until the tag exists, then the checkout metadata is
+    # finalized immediately from GitHub's exact generated archive.
+    if release_tag_exists:
         assert 'sha256sums=(\'SKIP\')' not in pkgbuild
+    elif is_git_checkout:
+        assert "sha256sums=('SKIP')" in pkgbuild
     assert 'cd "AuraScan-$pkgver"' in pkgbuild
     assert 'cd "$pkgname-$pkgver"' not in pkgbuild
     assert 'python -m installer --destdir="$pkgdir" --prefix=/usr dist/*.whl' in pkgbuild
-    assert "Arch-family package, AUR, and upgrade workflows" in pkgbuild
+    assert "AI-assisted safety and recovery layer for Arch-family systems" in pkgbuild
     assert "shelly: optional Shelly update handoff for aurascan upgrade" in pkgbuild
     assert f"pkgver = {version}" in srcinfo
-    assert "pkgdesc = AI-assisted safety layer for Arch-family package, AUR, and upgrade workflows" in srcinfo
+    assert "pkgdesc = AI-assisted safety and recovery layer for Arch-family systems" in srcinfo
     assert "optdepends = shelly: optional Shelly update handoff for aurascan upgrade" in srcinfo
     assert f"aurascan-{version}.tar.gz::https://github.com/crizzler/AuraScan/archive/refs/tags/v{version}.tar.gz" in srcinfo
-    if is_git_checkout:
+    if release_tag_exists:
         assert "sha256sums = SKIP" not in srcinfo
+    elif is_git_checkout:
+        assert "sha256sums = SKIP" in srcinfo
     assert release_notes.exists()
 
 

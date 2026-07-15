@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aurascan"
-version = "0.4.0"
+version = "0.5.0"
 description = "AI-assisted safety layer for Arch-family package, AUR, and upgrade workflows."
 readme = "README.md"
 authors = [{name = "AuraScan Team"}]

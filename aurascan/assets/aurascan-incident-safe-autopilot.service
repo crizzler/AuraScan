@@ -1,12 +1,12 @@
 [Unit]
-Description=AuraScan weekly incident maintenance scan
+Description=AuraScan offline deterministic incident Safe Autopilot
 Documentation=https://github.com/crizzler/AuraScan
-ConditionPathExists=/usr/bin/journalctl
-OnSuccess=aurascan-incident-safe-autopilot.service
+ConditionPathExists=/usr/bin/aurascan
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/aurascan incidents --current-boot --capture-maintenance
+ExecCondition=/usr/bin/aurascan incidents --safe-autopilot-enabled
+ExecStart=/usr/bin/aurascan incidents --capture-safe-autopilot
 User=root
 Group=root
 UMask=0077
@@ -25,9 +25,9 @@ ProtectControlGroups=yes
 ProtectKernelLogs=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
-ProtectProc=invisible
+ProtectProc=ptraceable
 ProcSubset=pid
-ReadWritePaths=/var/lib/aurascan/incidents
+ReadWritePaths=/var/lib/aurascan/incidents /var/lib/pacman /etc/pacman.d
 StateDirectory=aurascan/incidents
 StateDirectoryMode=0755
 RestrictAddressFamilies=AF_UNIX
@@ -40,8 +40,6 @@ SystemCallArchitectures=native
 SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @privileged @raw-io @reboot @swap
 SystemCallErrorNumber=EPERM
 IPAddressDeny=any
-TimeoutStartSec=120
-Nice=15
-CPUWeight=10
-IOWeight=10
+TimeoutStartSec=180
+Nice=10
 IOSchedulingClass=idle

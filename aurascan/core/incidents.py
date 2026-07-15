@@ -22,11 +22,12 @@ from aurascan.core.config import read_env_file, user_env_path, write_user_env
 from aurascan.core.models import Confidence, SCANNER_VERSION, Severity
 
 
-INCIDENT_SCHEMA_VERSION = "1.1"
+INCIDENT_SCHEMA_VERSION = "1.3"
 INCIDENT_REPORT_TYPE = "incident_report"
 INCIDENT_MONITOR_ENABLED_ENV = "AURASCAN_INCIDENT_MONITOR_ENABLED"
 INCIDENT_AI_ENABLED_ENV = "AURASCAN_INCIDENT_AI_ENABLED"
 INCIDENT_AI_EVIDENCE_ENV = "AURASCAN_INCIDENT_AI_EVIDENCE"
+INCIDENT_BACKGROUND_AI_ENV = "AURASCAN_INCIDENT_BACKGROUND_AI"
 INCIDENT_AI_EVIDENCE_VALUES = {"redacted", "facts-only"}
 INCIDENT_MONITOR_SERVICE = "aurascan-incident-monitor.service"
 INCIDENT_MAINTENANCE_SERVICE = "aurascan-incident-maintenance.service"
@@ -45,7 +46,7 @@ INCIDENT_MAX_COREDUMPS = 200
 INCIDENT_MAX_AI_EVIDENCE = 80
 INCIDENT_MAX_AI_CHARS = 12000
 INCIDENT_COLLECTION_PROGRESS_STEPS = 7
-INCIDENT_ANALYSIS_PROGRESS_STEPS = 10
+INCIDENT_ANALYSIS_PROGRESS_STEPS = 12
 INCIDENT_RETENTION_DAYS = 30
 INCIDENT_MAX_REPORTS = 50
 INCIDENT_MAINTENANCE_DUE_SECONDS = 8 * 24 * 60 * 60
@@ -104,6 +105,7 @@ class IncidentConfig:
     monitor_enabled: bool = False
     ai_enabled: bool = True
     ai_evidence: str = "redacted"
+    background_ai_enabled: bool = False
     error: str = ""
 
 
@@ -310,6 +312,86 @@ class CoredumpGroup:
 
 
 @dataclass
+class DiagnosticProbe:
+    probe_id: str
+    probe_type: str
+    title: str
+    summary: str
+    target: Dict[str, object] = field(default_factory=dict)
+    evidence_ids: List[str] = field(default_factory=list)
+    priority: int = 100
+    required: bool = False
+    affects_plan: bool = True
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "probe_id": self.probe_id,
+            "probe_type": self.probe_type,
+            "title": self.title,
+            "summary": self.summary,
+            "target": dict(self.target),
+            "evidence_ids": list(self.evidence_ids),
+            "priority": self.priority,
+            "required": self.required,
+            "affects_plan": self.affects_plan,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "DiagnosticProbe":
+        return cls(
+            probe_id=str(data.get("probe_id") or ""),
+            probe_type=str(data.get("probe_type") or ""),
+            title=str(data.get("title") or ""),
+            summary=str(data.get("summary") or ""),
+            target=dict(data.get("target") or {}) if isinstance(data.get("target"), Mapping) else {},
+            evidence_ids=[str(item) for item in data.get("evidence_ids", [])],
+            priority=int(data.get("priority") or 100),
+            required=bool(data.get("required", False)),
+            affects_plan=bool(data.get("affects_plan", True)),
+        )
+
+
+@dataclass
+class DiagnosticProbeResult:
+    probe_id: str
+    probe_type: str
+    status: str
+    summary: str
+    requested_by: str = "ai"
+    evidence_ids: List[str] = field(default_factory=list)
+    action_ids: List[str] = field(default_factory=list)
+    affects_plan: bool = True
+    duration_ms: int = 0
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "probe_id": self.probe_id,
+            "probe_type": self.probe_type,
+            "status": self.status,
+            "summary": self.summary,
+            "requested_by": self.requested_by,
+            "evidence_ids": list(self.evidence_ids),
+            "action_ids": list(self.action_ids),
+            "affects_plan": self.affects_plan,
+            "duration_ms": self.duration_ms,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "DiagnosticProbeResult":
+        return cls(
+            probe_id=str(data.get("probe_id") or ""),
+            probe_type=str(data.get("probe_type") or ""),
+            status=str(data.get("status") or "unknown"),
+            summary=str(data.get("summary") or ""),
+            requested_by=str(data.get("requested_by") or "ai"),
+            evidence_ids=[str(item) for item in data.get("evidence_ids", [])],
+            action_ids=[str(item) for item in data.get("action_ids", [])],
+            affects_plan=bool(data.get("affects_plan", True)),
+            duration_ms=max(0, int(data.get("duration_ms") or 0)),
+        )
+
+
+@dataclass
 class RepairAction:
     action_id: str
     recipe_id: str
@@ -422,11 +504,14 @@ class IncidentReport:
     findings: List[IncidentFinding] = field(default_factory=list)
     coredumps: List[CoredumpGroup] = field(default_factory=list)
     system_facts: Dict[str, object] = field(default_factory=dict)
+    diagnostic_probes: List[DiagnosticProbe] = field(default_factory=list)
+    probe_results: List[DiagnosticProbeResult] = field(default_factory=list)
     repair_actions: List[RepairAction] = field(default_factory=list)
     repair_results: List[RepairResult] = field(default_factory=list)
     post_repair: Dict[str, object] = field(default_factory=dict)
     ai_review: Dict[str, object] = field(default_factory=dict)
     scan_window: Dict[str, object] = field(default_factory=dict)
+    automation: Dict[str, object] = field(default_factory=dict)
     schema_version: str = INCIDENT_SCHEMA_VERSION
     scanner_version: str = SCANNER_VERSION
 
@@ -449,11 +534,19 @@ class IncidentReport:
         )
 
     @property
+    def probe_plan_incomplete(self) -> bool:
+        return any(
+            item.affects_plan and item.status in {"failed", "timeout"}
+            for item in self.probe_results
+        )
+
+    @property
     def apply_prompt_default_yes(self) -> bool:
         return bool(
             self.eligible_actions
             and self.collection_status == "complete"
             and not self.truncated
+            and not self.probe_plan_incomplete
             and not self.unresolved_high_risk
             and all(action.risk in {Severity.LOW, Severity.MEDIUM} for action in self.eligible_actions)
         )
@@ -481,17 +574,23 @@ class IncidentReport:
                 "coredump_groups": len(self.coredumps),
                 "coredump_count": sum(group.count for group in self.coredumps),
                 "repair_actions": len(self.eligible_actions),
+                "diagnostic_probes": len(self.diagnostic_probes),
+                "completed_probes": sum(item.status not in {"failed", "timeout"} for item in self.probe_results),
+                "probe_plan_incomplete": self.probe_plan_incomplete,
                 "default_apply_yes": self.apply_prompt_default_yes,
             },
             "evidence": [item.to_dict() for item in self.evidence],
             "findings": [item.to_dict() for item in self.findings],
             "coredumps": [item.to_dict() for item in self.coredumps],
             "system_facts": dict(self.system_facts),
+            "diagnostic_probes": [item.to_dict() for item in self.diagnostic_probes],
+            "probe_results": [item.to_dict() for item in self.probe_results],
             "repair_actions": [item.to_dict() for item in self.repair_actions],
             "repair_results": [item.to_dict() for item in self.repair_results],
             "post_repair": dict(self.post_repair),
             "ai_review": dict(self.ai_review),
             "scan_window": dict(self.scan_window),
+            "automation": dict(self.automation),
         }
 
     def to_json(self, *, indent: Optional[int] = 2) -> str:
@@ -516,11 +615,14 @@ class IncidentReport:
             findings=[IncidentFinding.from_dict(item) for item in data.get("findings", []) if isinstance(item, Mapping)],
             coredumps=[CoredumpGroup.from_dict(item) for item in data.get("coredumps", []) if isinstance(item, Mapping)],
             system_facts=dict(data.get("system_facts") or {}) if isinstance(data.get("system_facts"), Mapping) else {},
+            diagnostic_probes=[DiagnosticProbe.from_dict(item) for item in data.get("diagnostic_probes", []) if isinstance(item, Mapping)],
+            probe_results=[DiagnosticProbeResult.from_dict(item) for item in data.get("probe_results", []) if isinstance(item, Mapping)],
             repair_actions=[RepairAction.from_dict(item) for item in data.get("repair_actions", []) if isinstance(item, Mapping)],
             repair_results=[RepairResult.from_dict(item) for item in data.get("repair_results", []) if isinstance(item, Mapping)],
             post_repair=dict(data.get("post_repair") or {}) if isinstance(data.get("post_repair"), Mapping) else {},
             ai_review=dict(data.get("ai_review") or {}) if isinstance(data.get("ai_review"), Mapping) else {},
             scan_window=dict(data.get("scan_window") or {}) if isinstance(data.get("scan_window"), Mapping) else {},
+            automation=dict(data.get("automation") or {}) if isinstance(data.get("automation"), Mapping) else {},
             schema_version=str(data.get("schema_version") or str(data.get("schema") or "").partition("/")[2] or INCIDENT_SCHEMA_VERSION),
             scanner_version=str(data.get("scanner_version") or SCANNER_VERSION),
         )
@@ -567,10 +669,32 @@ class IncidentReport:
                 lines.append(f"- {label}{package}: signal {group.signal or 'unknown'}, count {group.count}")
             if len(self.coredumps) > len(groups):
                 lines.append(f"- {len(self.coredumps) - len(groups)} additional groups hidden")
+        if self.probe_results:
+            completed = sum(item.status not in {"failed", "timeout"} for item in self.probe_results)
+            ready = sum(item.status == "action_ready" for item in self.probe_results)
+            failed = len(self.probe_results) - completed
+            lines.append(
+                f"\nAI-guided local checks: {completed}/{len(self.probe_results)} completed; "
+                f"{ready} produced verified repair options"
+                + (f"; {failed} incomplete" if failed else "")
+                + "."
+            )
+            if verbose:
+                for item in self.probe_results:
+                    lines.append(f"- {item.probe_type}: {item.status} - {item.summary}")
         if self.eligible_actions:
+            eligible_actions = self.eligible_actions
+            recommended_ids = self.ai_review.get("recommended_action_ids", []) if isinstance(self.ai_review, Mapping) else []
+            recommended = {str(item) for item in recommended_ids} if isinstance(recommended_ids, list) else set()
+            original_order = {item.action_id: index for index, item in enumerate(eligible_actions)}
+            display_actions = sorted(
+                eligible_actions,
+                key=lambda item: (item.action_id not in recommended, original_order[item.action_id]),
+            )
             lines.append("\nPrepared repairs:")
-            for index, action in enumerate(self.eligible_actions, start=1):
-                lines.append(f"{index}. {action.title} [{action.risk.value}]")
+            for index, action in enumerate(display_actions, start=1):
+                recommendation = " | AI recommended" if action.action_id in recommended else ""
+                lines.append(f"{index}. {action.title} [{action.risk.value}{recommendation}]")
                 lines.append(action.summary)
                 if verbose and action.command_preview:
                     for command in action.command_preview:
@@ -584,7 +708,9 @@ class IncidentReport:
             status = str(self.ai_review.get("status") or "unknown")
             provider = str(self.ai_review.get("provider") or "")
             summary = str(self.ai_review.get("summary") or "")
-            lines.append("\nAI review: " + status + (f" ({provider})" if provider else ""))
+            final_phase = self.ai_review.get("final", {})
+            phase_label = "two-pass" if isinstance(final_phase, Mapping) and final_phase.get("status") == "ok" else "triage"
+            lines.append("\nAI review: " + status + (f", {phase_label}" if status in {"ok", "triage_only"} else "") + (f" ({provider})" if provider else ""))
             if summary:
                 lines.append(summary)
             causes = self.ai_review.get("likely_causes", [])
@@ -774,12 +900,16 @@ def build_incidents_parser() -> argparse.ArgumentParser:
     mode.add_argument("--history", action="store_true", help="list saved incident reports")
     mode.add_argument("--show", metavar="INCIDENT_ID", help="show a saved incident report")
     mode.add_argument("--resolve", action="store_true", help="resolve or acknowledge pending tray findings in one guided flow")
-    monitor = parser.add_mutually_exclusive_group()
-    monitor.add_argument("--enable-monitor", action="store_true", help="enable read-only boot and weekly incident monitoring")
-    monitor.add_argument("--disable-monitor", action="store_true", help="disable boot and weekly incident monitoring")
-    monitor.add_argument("--monitor-status", action="store_true", help="show boot monitor and weekly timer status")
-    monitor.add_argument("--run-maintenance", action="store_true", help="run the bounded weekly maintenance scan now")
-    monitor.add_argument("--maintenance-status", action="store_true", help="show weekly incident maintenance status")
+    automation = parser.add_mutually_exclusive_group()
+    automation.add_argument("--enable-monitor", action="store_true", help="enable read-only boot and weekly incident monitoring")
+    automation.add_argument("--disable-monitor", action="store_true", help="disable boot and weekly incident monitoring")
+    automation.add_argument("--monitor-status", action="store_true", help="show boot monitor and weekly timer status")
+    automation.add_argument("--run-maintenance", action="store_true", help="run the bounded weekly maintenance scan now")
+    automation.add_argument("--maintenance-status", action="store_true", help="show weekly incident maintenance status")
+    automation.add_argument("--enable-background-ai", action="store_true", help="enable redacted incident AI analysis in the logged-in user session")
+    automation.add_argument("--disable-background-ai", action="store_true", help="disable logged-in background incident AI analysis")
+    automation.add_argument("--background-ai-status", action="store_true", help="show background incident AI configuration and timer status")
+    automation.add_argument("--auto-repair", choices=["off", "safe"], help="configure the root-owned deterministic incident repair policy")
     parser.add_argument("--dry-run", action="store_true", help="diagnose and show repairs without applying them")
     parser.add_argument("--json", action="store_true", dest="json_output", help="emit structured incident JSON")
     parser.add_argument("--verbose", action="store_true", help="show all findings, evidence IDs, and command previews")
@@ -788,6 +918,10 @@ def build_incidents_parser() -> argparse.ArgumentParser:
     parser.add_argument("--facts-only", action="store_true", help="send structured facts but no evidence excerpts to AI")
     parser.add_argument("--capture-monitor", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--capture-maintenance", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--background-assist", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--capture-safe-autopilot", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--safe-autopilot-enabled", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--set-auto-repair-policy", choices=["off", "safe"], help=argparse.SUPPRESS)
     parser.add_argument("--apply-request", help=argparse.SUPPRESS)
     return parser
 
@@ -811,7 +945,18 @@ def resolve_incident_config(env: Optional[Mapping[str, str]] = None) -> Incident
     ai_evidence = source.get(INCIDENT_AI_EVIDENCE_ENV, "redacted").strip().lower() or "redacted"
     if ai_evidence not in INCIDENT_AI_EVIDENCE_VALUES:
         return IncidentConfig(error=f"invalid {INCIDENT_AI_EVIDENCE_ENV} value")
-    return IncidentConfig(bool(monitor_enabled), bool(ai_enabled), ai_evidence)
+    background_raw = source.get(INCIDENT_BACKGROUND_AI_ENV)
+    background_enabled = parse_config_bool(background_raw)
+    if background_raw is not None and background_enabled is None:
+        return IncidentConfig(error=f"invalid {INCIDENT_BACKGROUND_AI_ENV} value")
+    if background_enabled is None:
+        background_enabled = False
+    return IncidentConfig(
+        monitor_enabled=bool(monitor_enabled),
+        ai_enabled=bool(ai_enabled),
+        ai_evidence=ai_evidence,
+        background_ai_enabled=bool(background_enabled),
+    )
 
 
 def incident_options_from_args(args: argparse.Namespace, env: Optional[Mapping[str, str]] = None) -> IncidentOptions:
@@ -860,6 +1005,19 @@ def run_incidents(
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
     args = build_incidents_parser().parse_args(list(argv or []))
+    if args.set_auto_repair_policy:
+        if not hasattr(os, "geteuid") or os.geteuid() != 0:
+            print("[AuraScan] Safe Autopilot policy writes require root privileges.", file=stderr)
+            return EXIT_INCIDENT_CONFIG_ERROR
+        from aurascan.core.incident_automation import write_auto_repair_policy
+
+        ok, message = write_auto_repair_policy(str(args.set_auto_repair_policy))
+        print(message, file=stdout if ok else stderr)
+        return 0 if ok else EXIT_INCIDENT_CONFIG_ERROR
+    if args.safe_autopilot_enabled:
+        from aurascan.core.incident_automation import read_auto_repair_policy
+
+        return 0 if read_auto_repair_policy().policy == "safe" else 1
     if args.apply_request:
         if not hasattr(os, "geteuid") or os.geteuid() != 0:
             print("[AuraScan] Privileged incident repair helper refused a non-root invocation.", file=stderr)
@@ -880,14 +1038,54 @@ def run_incidents(
             effective_env.update(read_env_file(env_path))
         except OSError:
             pass
+    if args.enable_background_ai or args.disable_background_ai:
+        from aurascan.core.incident_automation import set_background_ai_enabled
+
+        enabled = bool(args.enable_background_ai and not args.disable_background_ai)
+        ok, message = set_background_ai_enabled(enabled, runner=runner, env_path=env_path or user_env_path())
+        print(message, file=stdout if ok else stderr)
+        return 0 if ok else EXIT_INCIDENT_CONFIG_ERROR
+    if args.auto_repair:
+        from aurascan.core.incident_automation import configure_auto_repair_policy
+
+        ok, message = configure_auto_repair_policy(str(args.auto_repair), runner=runner)
+        print(message, file=stdout if ok else stderr)
+        return 0 if ok else EXIT_INCIDENT_CONFIG_ERROR
+    if args.background_ai_status:
+        from aurascan.core.incident_automation import print_background_ai_status
+
+        return print_background_ai_status(
+            env=effective_env,
+            runner=runner,
+            user_root=user_root,
+            stdout=stdout,
+            json_output=bool(args.json_output),
+        )
     options = incident_options_from_args(args, effective_env)
     if options.config.error:
         print(f"[AuraScan] Incident configuration error: {options.config.error}", file=stderr)
         return EXIT_INCIDENT_CONFIG_ERROR
-    if (options.capture_monitor or options.capture_maintenance) and (not hasattr(os, "geteuid") or os.geteuid() != 0):
+    if (options.capture_monitor or options.capture_maintenance or args.capture_safe_autopilot) and (not hasattr(os, "geteuid") or os.geteuid() != 0):
         print("[AuraScan] Incident monitor capture must run as root.", file=stderr)
         return EXIT_INCIDENT_CONFIG_ERROR
 
+    if args.capture_safe_autopilot:
+        from aurascan.core.incident_automation import run_safe_autopilot
+
+        return run_safe_autopilot(system_root=system_root, runner=runner, which=which, stdout=stdout, stderr=stderr)
+    if args.background_assist:
+        from aurascan.core.incident_automation import run_background_assistant
+
+        return run_background_assistant(
+            env=effective_env,
+            system_root=system_root,
+            user_root=user_root,
+            runner=runner,
+            which=which,
+            urlopen=urlopen,
+            stdout=stdout,
+            stderr=stderr,
+        )
     if options.capture_maintenance:
         return capture_incident_maintenance(
             system_root=system_root,
@@ -945,9 +1143,10 @@ def run_incidents(
         uid=current_user_uid(),
         marker_root=system_root / "pending",
         seen_path=reviewed_path,
+        include_resolved=options.resolve_pending,
     )
+    pending_marker = highest_priority_pending_marker(unreviewed_markers)
     if options.target == "auto":
-        pending_marker = highest_priority_pending_marker(unreviewed_markers)
         pending_boot = str(pending_marker.get("boot_id") or "") if pending_marker else ""
         options.target = pending_boot if valid_boot_target(pending_boot) else "0"
     if not valid_boot_target(options.target):
@@ -993,22 +1192,40 @@ def run_incidents(
             return 0
 
         from aurascan.core.incident_repairs import plan_repair_actions
+        from aurascan.core.incident_diagnostics import prepare_ai_guided_repair_plan
 
         activity.update(8, "Verifying safe repair recipes")
-        report.repair_actions = plan_repair_actions(report, runner=runner, which=which)
         ai_disabled = options.no_ai or not options.config.ai_enabled
-        activity.update(
-            9,
-            "Finalizing deterministic findings" if ai_disabled else "Correlating redacted evidence with the configured AI",
+        report.repair_actions = plan_repair_actions(
+            report,
+            runner=runner,
+            which=which,
+            include_package_integrity=ai_disabled,
         )
-        apply_ai_incident_review(
+        cached_report = None
+        if options.resolve_pending and pending_marker and not ai_disabled:
+            from aurascan.core.incident_automation import load_reusable_background_plan
+
+            cached_report = load_reusable_background_plan(report, pending_marker, report_root)
+        activity.update(9, "Finalizing deterministic findings" if ai_disabled else "Preparing AI-guided diagnostic choices")
+        guided_step = [9]
+
+        def guided_progress(label: str) -> None:
+            guided_step[0] = min(11, guided_step[0] + 1)
+            activity.update(guided_step[0], label)
+
+        prepare_ai_guided_repair_plan(
             report,
             disabled=ai_disabled,
             facts_only=options.facts_only or options.config.ai_evidence == "facts-only",
+            runner=runner,
+            which=which,
             urlopen=urlopen,
             env=effective_env,
+            cached_report=cached_report,
+            progress_callback=guided_progress if show_progress else None,
         )
-        activity.update(10, "Saving the private incident report")
+        activity.update(12, "Saving the private incident report")
         persist_incident_report(report, report_root)
     if not options.resolve_pending and report.collection_status != "unavailable" and report.boot_id:
         reviewed = [item for item in unreviewed_markers if str(item.get("boot_id") or "").replace("-", "") == report.boot_id.replace("-", "")]
@@ -1034,7 +1251,10 @@ def run_incidents(
         return 0
     if not options.yes:
         suffix = "[Y/n]" if report.apply_prompt_default_yes else "[y/N]"
-        answer = input_func(f"AuraScan prepared {len(report.eligible_actions)} verified repair(s). Apply now? {suffix} ").strip().lower()
+        answer = input_func(
+            f"AuraScan prepared one locally verified repair plan with {len(report.eligible_actions)} action(s). "
+            f"Apply now? {suffix} "
+        ).strip().lower()
         declined = answer in {"n", "no"} if report.apply_prompt_default_yes else answer not in {"y", "yes"}
         if declined:
             print("[AuraScan] Incident repairs were not applied.", file=stderr)
@@ -1916,9 +2136,14 @@ def apply_ai_incident_review(
     *,
     disabled: bool = False,
     facts_only: bool = False,
+    phase: str = "final",
+    probes: Sequence[DiagnosticProbe] = (),
+    probe_results: Sequence[DiagnosticProbeResult] = (),
     urlopen: Optional[Callable] = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> None:
+    if phase not in {"triage", "final"}:
+        raise ValueError("incident AI phase must be triage or final")
     if disabled:
         report.ai_review = {"enabled": False, "status": "disabled"}
         return
@@ -1929,40 +2154,109 @@ def apply_ai_incident_review(
     if not config.enabled or not config.api_key_present:
         report.ai_review = {"enabled": False, "status": "not_configured"}
         return
-    prompt = build_incident_ai_prompt(report, facts_only=facts_only)
+    prompt = build_incident_ai_prompt(
+        report,
+        facts_only=facts_only,
+        phase=phase,
+        probes=probes,
+        probe_results=probe_results,
+    )
     try:
         text = call_ai_provider(config, prompt, timeout=25, urlopen=urlopen)
         data = json.loads(text)
         if not isinstance(data, dict):
             raise ValueError("AI response was not a JSON object")
-        validated = validate_incident_ai_response(report, data)
+        visible_probes = [
+            item for item in probes
+            if json.dumps(item.probe_id) in prompt
+        ] if phase == "triage" else []
+        visible_action_ids = [
+            item.action_id for item in report.eligible_actions
+            if json.dumps(item.action_id) in prompt
+        ]
+        validated = validate_incident_ai_response(
+            report,
+            data,
+            phase=phase,
+            probes=visible_probes,
+            action_ids=visible_action_ids,
+        )
     except Exception as exc:
-        report.ai_review = {"enabled": True, "provider": config.provider, "status": "invalid_response", "error": sanitize_error(str(exc))}
+        failed_phase = {
+            "enabled": True,
+            "provider": config.provider,
+            "status": "invalid_response",
+            "error": sanitize_error(str(exc)),
+        }
+        existing = dict(report.ai_review) if isinstance(report.ai_review, Mapping) else {}
+        existing[phase] = failed_phase
+        triage = existing.get("triage", {})
+        if phase == "final" and isinstance(triage, Mapping) and triage.get("status") == "ok":
+            existing.update({
+                "enabled": True,
+                "provider": config.provider,
+                "status": "triage_only",
+                "summary": str(triage.get("summary") or ""),
+                "likely_causes": list(triage.get("likely_causes", [])),
+                "recommended_action_ids": list(triage.get("recommended_action_ids", [])),
+                "requested_probe_ids": list(triage.get("requested_probe_ids", [])),
+                "error": failed_phase["error"],
+            })
+            report.ai_review = existing
+            return
+        existing.update(failed_phase)
+        report.ai_review = existing
         return
-    report.ai_review = {
+    phase_review = {
         "enabled": True,
         "provider": config.provider,
         "status": "ok",
         "summary": validated["summary"],
         "likely_causes": validated["likely_causes"],
         "recommended_action_ids": validated["recommended_action_ids"],
+        "requested_probe_ids": validated["requested_probe_ids"],
         "evidence_mode": "facts-only" if facts_only else "redacted",
     }
+    existing = dict(report.ai_review) if isinstance(report.ai_review, Mapping) else {}
+    existing[phase] = dict(phase_review)
+    if phase == "final":
+        triage = existing.get("triage", {})
+        if isinstance(triage, Mapping):
+            phase_review["requested_probe_ids"] = list(triage.get("requested_probe_ids", []))
+    existing.update(phase_review)
+    report.ai_review = existing
 
 
-def build_incident_ai_prompt(report: IncidentReport, *, facts_only: bool = False) -> str:
+def build_incident_ai_prompt(
+    report: IncidentReport,
+    *,
+    facts_only: bool = False,
+    phase: str = "final",
+    probes: Sequence[DiagnosticProbe] = (),
+    probe_results: Sequence[DiagnosticProbeResult] = (),
+) -> str:
+    phase_instructions = (
+        "This is the triage pass. Select only useful probe IDs from available_probes. "
+        "A probe is a bounded read-only local check; selecting it does not authorize a repair.\n"
+        "Return strict JSON only with this shape:\n"
+        "{\"summary\":\"plain-language summary\",\"likely_causes\":[{\"title\":\"cause\",\"confidence\":\"low|medium|high\",\"evidence_ids\":[\"known id\"],\"explanation\":\"why\"}],\"requested_probe_ids\":[\"known probe id\"],\"recommended_action_ids\":[\"known prepared action id\"]}\n\n"
+        if phase == "triage"
+        else
+        "This is the final review pass. Rank only verified action IDs after considering normalized probe results. "
+        "Do not request more probes.\n"
+        "Return strict JSON only with this shape:\n"
+        "{\"summary\":\"plain-language summary\",\"likely_causes\":[{\"title\":\"cause\",\"confidence\":\"low|medium|high\",\"evidence_ids\":[\"known id\"],\"explanation\":\"why\"}],\"recommended_action_ids\":[\"known prepared action id\"]}\n\n"
+    )
     instructions = (
         "You are AuraScan's incident analyst for Arch-family Linux systems.\n"
         "Use only the supplied bounded, redacted data. Do not claim certainty beyond the evidence.\n"
-        "You may correlate causes and rank action IDs that AuraScan already prepared.\n"
+        "You may correlate causes and rank action IDs that AuraScan already prepared and locally verified.\n"
         "Do not claim that an application depends on, or was broken by, a package merely because that package was updated in the same boot. "
         "Package-update causation requires direct supplied ownership, dependency, integrity, or timestamp evidence; otherwise describe it as unproven.\n"
         "Treat NVIDIA NV_ERR_NO_MEMORY as a driver allocation failure, not proof of whole-system RAM exhaustion, unless separate OOM-killer evidence is supplied.\n"
         "Never create commands, scripts, package names, file edits, new action IDs, or privileged instructions.\n"
         "Never suppress deterministic findings or claim a repair succeeded.\n"
-        "Return strict JSON only with this shape:\n"
-        "{\"summary\":\"plain-language summary\",\"likely_causes\":[{\"title\":\"cause\",\"confidence\":\"low|medium|high\",\"evidence_ids\":[\"known id\"],\"explanation\":\"why\"}],\"recommended_action_ids\":[\"known prepared action id\"]}\n\n"
-    )
+    ) + phase_instructions
     findings_payload = []
     for finding in report.findings[:30]:
         findings_payload.append(redact_structure({
@@ -2022,6 +2316,27 @@ def build_incident_ai_prompt(report: IncidentReport, *, facts_only: bool = False
             }
             for action in report.repair_actions[:20]
         ],
+        "available_probes": [
+            {
+                "probe_id": item.probe_id,
+                "probe_type": item.probe_type,
+                "title": redact_incident_text(item.title)[:160],
+                "required": item.required,
+                "evidence_ids": item.evidence_ids[:4],
+            }
+            for item in probes[:24]
+        ] if phase == "triage" else [],
+        "probe_results": [
+            {
+                "probe_id": item.probe_id,
+                "probe_type": item.probe_type,
+                "status": item.status,
+                "summary": redact_incident_text(item.summary)[:500],
+                "evidence_ids": item.evidence_ids[:12],
+                "action_ids": item.action_ids[:12],
+            }
+            for item in probe_results[:12]
+        ] if phase == "final" else [],
         "evidence": evidence_payload,
         "input_truncated": bool(
             len(report.findings) > len(findings_payload)
@@ -2040,14 +2355,22 @@ def build_incident_ai_prompt(report: IncidentReport, *, facts_only: bool = False
             payload["deterministic_findings"].pop()
         elif payload["prepared_actions"]:
             payload["prepared_actions"].pop()
-        else:
+        elif payload["system_facts"]:
             payload["system_facts"] = {}
+        elif payload["available_probes"]:
+            payload["available_probes"].pop()
+        elif payload["probe_results"]:
+            payload["probe_results"].pop()
+        else:
+            break
         prompt = instructions + json.dumps(payload, sort_keys=True)
         if len(prompt) <= INCIDENT_MAX_AI_CHARS or not any((
             payload["evidence"],
             payload["coredump_groups"],
             len(payload["deterministic_findings"]) > 1,
             payload["prepared_actions"],
+            payload["available_probes"],
+            payload["probe_results"],
             payload["system_facts"],
         )):
             break
@@ -2079,15 +2402,26 @@ def bounded_ai_system_facts(facts: Mapping[str, object]) -> Dict[str, object]:
     return redact_structure(result)
 
 
-def validate_incident_ai_response(report: IncidentReport, data: Mapping[str, object]) -> Dict[str, object]:
+def validate_incident_ai_response(
+    report: IncidentReport,
+    data: Mapping[str, object],
+    *,
+    phase: str = "final",
+    probes: Sequence[DiagnosticProbe] = (),
+    action_ids: Optional[Sequence[str]] = None,
+) -> Dict[str, object]:
     if not isinstance(data.get("summary"), str):
         raise ValueError("AI incident response summary must be a string")
     if not isinstance(data.get("likely_causes"), list):
         raise ValueError("AI incident response likely_causes must be a list")
     if not isinstance(data.get("recommended_action_ids"), list):
         raise ValueError("AI incident response recommended_action_ids must be a list")
+    if phase == "triage" and not isinstance(data.get("requested_probe_ids"), list):
+        raise ValueError("AI incident triage response requested_probe_ids must be a list")
     valid_evidence = {item.evidence_id for item in report.evidence}
     valid_actions = {item.action_id for item in report.repair_actions if item.eligible and item.verified}
+    if action_ids is not None:
+        valid_actions &= {str(item) for item in action_ids}
     summary = redact_incident_text(bounded_text(data.get("summary"), 1000))
     causes = []
     raw_causes = data.get("likely_causes", [])
@@ -2114,7 +2448,22 @@ def validate_incident_ai_response(report: IncidentReport, data: Mapping[str, obj
             value = str(item)
             if value in valid_actions and value not in action_ids:
                 action_ids.append(value)
-    return {"summary": summary, "likely_causes": causes, "recommended_action_ids": action_ids}
+    valid_probes = {item.probe_id for item in probes}
+    probe_ids = []
+    raw_probes = data.get("requested_probe_ids", [])
+    if isinstance(raw_probes, list):
+        for item in raw_probes:
+            value = str(item)
+            if value in valid_probes and value not in probe_ids:
+                probe_ids.append(value)
+            if len(probe_ids) >= 6:
+                break
+    return {
+        "summary": summary,
+        "likely_causes": causes,
+        "recommended_action_ids": action_ids,
+        "requested_probe_ids": probe_ids,
+    }
 
 
 def redact_incident_text(text: str) -> str:
@@ -2466,6 +2815,13 @@ def write_pending_markers(report: IncidentReport, *, root: Path) -> List[Path]:
     scope_severities: Dict[str, List[Severity]] = {
         "global": [finding.severity for finding in report.findings if finding.category != "application_crash"]
     }
+    scope_category_severities: Dict[str, Dict[str, Severity]] = {"global": {}}
+    for finding in report.findings:
+        if finding.category == "application_crash":
+            continue
+        current = scope_category_severities["global"].get(finding.category)
+        if current is None or SEVERITY_ORDER.index(finding.severity) > SEVERITY_ORDER.index(current):
+            scope_category_severities["global"][finding.category] = finding.severity
     scope_repeated: Dict[str, bool] = {"global": False}
     for group in report.coredumps:
         scope = str(group.uid) if group.uid is not None and group.uid >= 1000 else "global"
@@ -2473,6 +2829,9 @@ def write_pending_markers(report: IncidentReport, *, root: Path) -> List[Path]:
         scope_categories.setdefault(scope, set()).add("application_crash")
         group_severity = Severity.MEDIUM if group.desktop_component or group.count >= 3 else Severity.LOW
         scope_severities.setdefault(scope, []).append(group_severity)
+        current = scope_category_severities.setdefault(scope, {}).get("application_crash")
+        if current is None or SEVERITY_ORDER.index(group_severity) > SEVERITY_ORDER.index(current):
+            scope_category_severities[scope]["application_crash"] = group_severity
         scope_repeated[scope] = scope_repeated.get(scope, False) or group.count >= 3
     for scope, count in scope_counts.items():
         if count <= 0:
@@ -2482,26 +2841,44 @@ def write_pending_markers(report: IncidentReport, *, root: Path) -> List[Path]:
         if marker_type == "maintenance" and SEVERITY_ORDER.index(severity) < SEVERITY_ORDER.index(Severity.MEDIUM):
             continue
         marker = {
+            "schema": "incident_marker/2.0",
             "marker_type": marker_type,
             "scan_id": scan_id,
             "boot_id": boot_id,
             "uid_scope": scope,
             "severity": severity.value,
             "categories": sorted(scope_categories.get(scope, set())),
+            "category_severities": {
+                category: category_severity.value
+                for category, category_severity in sorted(scope_category_severities.get(scope, {}).items())
+            },
+            "resolved_categories": [],
+            "auto_repair_state": "not_run",
             "count": count,
             "repeated": bool(scope_repeated.get(scope, False)),
         }
         key = marker_key(marker)
+        prior: Dict[str, object] = {}
         for existing in root.glob("*.json"):
             try:
                 existing_data = json.loads(existing.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
             if isinstance(existing_data, Mapping) and marker_key(existing_data) == key:
+                prior = dict(existing_data)
                 try:
                     existing.unlink()
                 except OSError:
                     pass
+        prior_resolved = prior.get("resolved_categories", [])
+        if isinstance(prior_resolved, list):
+            marker["resolved_categories"] = sorted(
+                category for category in {str(item) for item in prior_resolved}
+                if category in marker["categories"]
+            )
+        prior_state = str(prior.get("auto_repair_state") or "")
+        if prior_state in {"applied", "failed", "refused", "no_action"}:
+            marker["auto_repair_state"] = prior_state
         file_key = scan_id if scan_id else boot_id
         path = root / f"{file_key}-{scope}.json"
         atomic_write_json(path, marker, mode=0o644)
@@ -2509,7 +2886,55 @@ def write_pending_markers(report: IncidentReport, *, root: Path) -> List[Path]:
     return markers
 
 
-def pending_markers(*, uid: Optional[int] = None, root: Path = INCIDENT_MONITOR_MARKER_ROOT) -> List[Dict[str, object]]:
+def update_pending_marker_repair_state(
+    report: IncidentReport,
+    *,
+    categories: Sequence[str],
+    state: str,
+    root: Path = INCIDENT_MONITOR_MARKER_ROOT,
+) -> int:
+    if state not in {"applied", "failed", "refused", "no_action"}:
+        return 0
+    wanted = {str(item) for item in categories if str(item)}
+    boot_id = re.sub(r"[^a-zA-Z0-9]", "", report.boot_id)
+    updated = 0
+    try:
+        paths = list(root.glob("*.json"))
+    except OSError:
+        return 0
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        marker_boot = re.sub(r"[^a-zA-Z0-9]", "", str(data.get("boot_id") or ""))
+        if marker_boot != boot_id or str(data.get("uid_scope") or "") != "global":
+            continue
+        if str(data.get("marker_type") or "boot_incident") == "maintenance":
+            if str(data.get("scan_id") or "") != report.incident_id:
+                continue
+        marker_categories = {str(item) for item in data.get("categories", [])} if isinstance(data.get("categories"), list) else set()
+        affected = wanted & marker_categories
+        if wanted and not affected:
+            continue
+        data["schema"] = "incident_marker/2.0"
+        data["auto_repair_state"] = state
+        if state == "applied":
+            resolved = {str(item) for item in data.get("resolved_categories", [])} if isinstance(data.get("resolved_categories"), list) else set()
+            data["resolved_categories"] = sorted(resolved | affected)
+        atomic_write_json(path, data, mode=0o644)
+        updated += 1
+    return updated
+
+
+def pending_markers(
+    *,
+    uid: Optional[int] = None,
+    root: Path = INCIDENT_MONITOR_MARKER_ROOT,
+    include_resolved: bool = False,
+) -> List[Dict[str, object]]:
     uid = current_user_uid() if uid is None else uid
     accepted_scopes = {"global", str(uid)}
     items = []
@@ -2523,8 +2948,31 @@ def pending_markers(*, uid: Optional[int] = None, root: Path = INCIDENT_MONITOR_
         except (OSError, json.JSONDecodeError):
             continue
         if isinstance(data, dict) and str(data.get("uid_scope") or data.get("scope") or "") in accepted_scopes:
-            items.append(data)
+            active_categories = marker_active_categories(data)
+            if not active_categories and not include_resolved:
+                continue
+            normalized = dict(data)
+            normalized["active_categories"] = active_categories
+            normalized["severity"] = marker_effective_severity(data)
+            items.append(normalized)
     return items
+
+
+def marker_active_categories(marker: Mapping[str, object]) -> List[str]:
+    categories = {str(item) for item in marker.get("categories", []) if str(item)} if isinstance(marker.get("categories"), list) else set()
+    resolved = {str(item) for item in marker.get("resolved_categories", []) if str(item)} if isinstance(marker.get("resolved_categories"), list) else set()
+    return sorted(categories - resolved)
+
+
+def marker_effective_severity(marker: Mapping[str, object]) -> str:
+    active = marker_active_categories(marker)
+    category_severities = marker.get("category_severities", {})
+    if isinstance(category_severities, Mapping) and active:
+        fallback = str(marker.get("severity") or "LOW").upper()
+        values = [str(category_severities.get(category) or fallback).upper() for category in active]
+        rank = {severity.value: index for index, severity in enumerate(SEVERITY_ORDER)}
+        return max(values, key=lambda value: rank.get(value, 0))
+    return str(marker.get("severity") or "LOW").upper()
 
 
 def latest_pending_marker(*, uid: Optional[int] = None, root: Path = INCIDENT_MONITOR_MARKER_ROOT) -> Optional[Dict[str, object]]:
@@ -2557,6 +3005,7 @@ def unseen_pending_markers(
     uid: Optional[int] = None,
     marker_root: Path = INCIDENT_MONITOR_MARKER_ROOT,
     seen_path: Optional[Path] = None,
+    include_resolved: bool = False,
 ) -> List[Dict[str, object]]:
     seen_path = seen_path or incident_seen_state_path()
     seen = set()
@@ -2566,7 +3015,10 @@ def unseen_pending_markers(
             seen = {str(item) for item in data}
     except (OSError, json.JSONDecodeError):
         pass
-    return [item for item in pending_markers(uid=uid, root=marker_root) if marker_key(item) not in seen]
+    return [
+        item for item in pending_markers(uid=uid, root=marker_root, include_resolved=include_resolved)
+        if marker_key(item) not in seen
+    ]
 
 
 def mark_pending_markers_seen(markers: Sequence[Mapping[str, object]], *, seen_path: Optional[Path] = None) -> None:
@@ -2601,7 +3053,7 @@ def highest_priority_pending_marker(markers: Sequence[Mapping[str, object]]) -> 
     _index, marker = max(
         enumerate(markers),
         key=lambda item: (
-            severity_rank.get(str(item[1].get("severity") or "LOW").upper(), 0),
+            severity_rank.get(marker_effective_severity(item[1]), 0),
             -item[0],
         ),
     )

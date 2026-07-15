@@ -81,14 +81,23 @@ normal, maintenance-due, attention, and critical tray icons.
 Per-user autostart remains controlled by the wizard or `aurascan updater
 --install-autostart`; package install must not enable it automatically.
 
-The package also installs `aurascan-incident-monitor.service`, the hardened
-`aurascan-incident-maintenance.service`, its persistent weekly timer, and
-tmpfiles rules. Both remain disabled after installation. Users opt in through
-`aurascan init --enable-incident-monitor`; package installation must not call
-`systemctl enable`, scan logs, contact AI, or perform repairs. The hardened
-services are read-only, have no network access, and record only redacted
-reports, root-only checkpoints, public timing/health status, and non-sensitive
-UID-scoped pending markers for tray notification.
+The package also installs the root boot/weekly collectors, the disabled
+per-user incident AI assistant timer, the offline Safe Autopilot oneshot, and
+tmpfiles rules. Every unit remains disabled or inert after installation. Users
+opt into collection through `aurascan init --enable-incident-monitor`, opt into
+logged-in AI separately, and must separately set the root repair policy to
+`safe`. Package installation must not call `systemctl enable`, scan logs,
+contact AI, or perform repairs.
+
+The root collectors and Safe Autopilot have no network access. The user AI
+service has network access but no privilege escalation or writable system
+paths. It may make at most two bounded requests, run allowlisted read-only
+diagnostic probes, and prepare a private repair plan for foreground
+confirmation; it cannot invoke repairs or `sudo`. Safe Autopilot accepts only
+stale pacman-lock and verified mirrorlist
+recovery, never loads API credentials, and defaults to `off`. Public status and
+markers contain only non-sensitive timing, category, UID-scope, and coarse
+repair state; evidence and AI output remain private.
 
 Current hook failure behavior:
 

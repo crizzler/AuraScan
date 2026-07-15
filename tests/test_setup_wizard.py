@@ -3,6 +3,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import aurascan.setup_wizard as setup_wizard
 from aurascan.setup_wizard import (
     build_doctor_checks,
     install_pacman_hook,
@@ -15,10 +16,20 @@ from aurascan.core.kernel_module_autopilot import KERNEL_MODULE_AUTOPILOT_ENV
 from aurascan.core.incidents import (
     INCIDENT_AI_ENABLED_ENV,
     INCIDENT_AI_EVIDENCE_ENV,
+    INCIDENT_BACKGROUND_AI_ENV,
     INCIDENT_MAINTENANCE_SERVICE,
     INCIDENT_MAINTENANCE_TIMER,
     INCIDENT_MONITOR_ENABLED_ENV,
     INCIDENT_MONITOR_SERVICE,
+)
+from aurascan.core.incident_automation import (
+    INCIDENT_AUTO_REPAIR_ENV,
+    INCIDENT_BACKGROUND_SERVICE,
+    INCIDENT_BACKGROUND_TIMER,
+    INCIDENT_SAFE_AUTOPILOT_SERVICE,
+    background_result_path,
+    background_state_path,
+    safe_automation_paths,
 )
 from aurascan.core.updater_tray import UPDATER_AUTOSTART_ENV, UPDATER_TERMINAL_ENV, UPDATER_TRAY_ENABLED_ENV
 
@@ -209,6 +220,37 @@ def test_init_can_enable_incident_monitor_and_ai(tmp_path):
     assert ["sudo", "systemctl", "start", INCIDENT_MAINTENANCE_SERVICE] in calls
 
 
+def test_init_explicitly_enables_background_ai_and_safe_autopilot(monkeypatch, tmp_path):
+    env_path = tmp_path / ".env"
+    calls = []
+    policy = []
+    monkeypatch.setattr(setup_wizard, "read_auto_repair_policy", lambda: type("Policy", (), {"policy": "off", "error": ""})())
+    monkeypatch.setattr(
+        setup_wizard,
+        "configure_auto_repair_policy",
+        lambda value, runner=None: policy.append(value) or (True, f"policy {value}"),
+    )
+
+    status = run_init(
+        [
+            "--disable-ai",
+            "--enable-incident-background-ai",
+            "--incident-auto-repair",
+            "safe",
+            "--no-install-hook",
+        ],
+        stdout=io.StringIO(),
+        env_path=env_path,
+        runner=lambda command, **_kwargs: calls.append(command) or subprocess.CompletedProcess(command, 0, "", ""),
+    )
+
+    assert status == 0
+    assert f"{INCIDENT_BACKGROUND_AI_ENV}=1" in env_path.read_text(encoding="utf-8")
+    assert ["systemctl", "--user", "enable", "--now", INCIDENT_BACKGROUND_TIMER] in calls
+    assert ["systemctl", "--user", "start", "--no-block", INCIDENT_BACKGROUND_SERVICE] in calls
+    assert policy == ["safe"]
+
+
 def test_init_restores_monitor_config_when_systemd_enable_fails(tmp_path):
     env_path = tmp_path / ".env"
 
@@ -222,6 +264,34 @@ def test_init_restores_monitor_config_when_systemd_enable_fails(tmp_path):
 
     assert status == 1
     assert f"{INCIDENT_MONITOR_ENABLED_ENV}=0" in env_path.read_text(encoding="utf-8")
+
+
+def test_init_restores_safe_policy_when_monitor_enable_fails(monkeypatch, tmp_path):
+    env_path = tmp_path / ".env"
+    policies = []
+    monkeypatch.setattr(setup_wizard, "read_auto_repair_policy", lambda: type("Policy", (), {"policy": "off", "error": ""})())
+    monkeypatch.setattr(
+        setup_wizard,
+        "configure_auto_repair_policy",
+        lambda value, runner=None: policies.append(value) or (True, f"policy {value}"),
+    )
+
+    status = run_init(
+        [
+            "--disable-ai",
+            "--enable-incident-monitor",
+            "--incident-auto-repair",
+            "safe",
+            "--no-install-hook",
+        ],
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        env_path=env_path,
+        runner=lambda command, **_kwargs: subprocess.CompletedProcess(command, 1, "", "failure"),
+    )
+
+    assert status == 1
+    assert policies == ["safe", "off"]
 
 
 def test_doctor_json_reports_missing_key_without_leaking_values(tmp_path):
@@ -457,6 +527,78 @@ def test_doctor_reports_incident_monitor_sources_and_tray_readiness(tmp_path):
     assert by_name["incident_coredumps"].details["readable"] is True
     assert by_name["incident_storage"].status == "ok"
     assert by_name["incident_tray_notification"].status == "warn"
+
+
+def test_doctor_reports_background_ai_and_safe_autopilot_readiness(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "AURASCAN_AI_ENABLED=1\n"
+        "AURASCAN_AI_PROVIDER=openai\n"
+        "AURASCAN_OPENAI_API_KEY=fixture-secret\n"
+        f"{INCIDENT_AI_ENABLED_ENV}=1\n"
+        f"{INCIDENT_BACKGROUND_AI_ENV}=1\n",
+        encoding="utf-8",
+    )
+    env_path.chmod(0o600)
+    user_units = tmp_path / "user-units"
+    user_units.mkdir()
+    (user_units / INCIDENT_BACKGROUND_SERVICE).write_text("[Service]\n", encoding="utf-8")
+    (user_units / INCIDENT_BACKGROUND_TIMER).write_text("[Timer]\n", encoding="utf-8")
+    safe_service = tmp_path / INCIDENT_SAFE_AUTOPILOT_SERVICE
+    safe_service.write_text("[Service]\n", encoding="utf-8")
+    policy = tmp_path / "incident-autopilot.conf"
+    policy.write_text(f"{INCIDENT_AUTO_REPAIR_ENV}=safe\n", encoding="utf-8")
+    policy.chmod(0o644)
+    user_root = tmp_path / "user-state"
+    state_path = background_state_path(user_root)
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(json.dumps({"last_status": "ok", "last_success_usec": 42}), encoding="utf-8")
+    background_result_path(user_root).write_text(json.dumps({
+        "prepared_repair_count": 2,
+        "analysis_fingerprint": "analysis",
+        "repair_plan_fingerprint": "plan",
+        "planner_status": "ok",
+        "provider_requests": 2,
+        "completed_probe_count": 3,
+    }), encoding="utf-8")
+    system_root = tmp_path / "system-state"
+    _safe_state, safe_status, _safe_lock = safe_automation_paths(system_root)
+    safe_status.parent.mkdir(parents=True)
+    safe_status.write_text(json.dumps({"state": "applied", "last_success_usec": 43, "action_count": 1}), encoding="utf-8")
+
+    def runner(command, **_kwargs):
+        if command[:3] == ["systemctl", "--user", "is-enabled"]:
+            return subprocess.CompletedProcess(command, 0, "enabled\n", "")
+        if command[:3] == ["systemctl", "--user", "is-active"]:
+            state = "active\n" if command[-1] == INCIDENT_BACKGROUND_TIMER else "inactive\n"
+            return subprocess.CompletedProcess(command, 0, state, "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    checks = build_doctor_checks(
+        env_path=env_path,
+        env={},
+        executable_path=tmp_path / "aurascan",
+        local_hook_path=tmp_path / "local.hook",
+        packaged_hook_path=tmp_path / "packaged.hook",
+        incident_system_root=system_root,
+        incident_background_unit_root=user_units,
+        incident_safe_service_path=safe_service,
+        incident_auto_repair_policy_path=policy,
+        incident_auto_repair_policy_uid=policy.stat().st_uid,
+        incident_user_root=user_root,
+        runner=runner,
+    )
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["incident_background_ai"].status == "ok"
+    assert by_name["incident_background_ai"].details["last_status"] == "ok"
+    assert by_name["incident_background_ai"].details["last_prepared_repair_count"] == 2
+    assert by_name["incident_background_ai"].details["last_provider_requests"] == 2
+    assert by_name["incident_background_ai"].details["last_completed_probe_count"] == 3
+    assert by_name["incident_ai_repair_planner"].details["maximum_provider_requests"] == 2
+    assert by_name["incident_safe_autopilot"].status == "ok"
+    assert by_name["incident_safe_autopilot"].details["policy"] == "safe"
+    assert by_name["incident_safe_autopilot"].details["last_action_count"] == 1
 
 
 def test_doctor_accepts_packaged_hook_without_local_override(tmp_path):

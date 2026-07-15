@@ -9,17 +9,22 @@ from aurascan.core.updater_tray import (
     UPDATER_TERMINAL_ENV,
     UPDATER_TRAY_ENABLED_ENV,
     INCIDENT_REVIEW_COMMAND,
+    build_background_incident_notification,
     build_terminal_invocation,
     build_incident_notification,
     build_updater_status,
     install_updater_autostart,
     remove_updater_autostart,
+    request_background_incident_analysis,
     render_desktop_entry,
     resolve_tray_incident_state,
     resolve_updater_config,
     run_updater,
     updater_desktop_paths,
+    unseen_background_result,
+    mark_background_result_seen,
 )
+from aurascan.core.incident_automation import background_result_path
 
 
 def fake_which(found):
@@ -221,6 +226,44 @@ def test_incident_notification_groups_markers_by_boot():
 
     assert title == "AuraScan found crash evidence"
     assert "3 incident event(s)" in message
+
+
+def test_tray_requests_background_analysis_once_per_marker():
+    calls = []
+    requested = set()
+    marker = {
+        "marker_type": "maintenance",
+        "scan_id": "scan-one",
+        "boot_id": "a" * 32,
+        "uid_scope": "1000",
+    }
+
+    assert request_background_incident_analysis([marker], requested=requested, popen=lambda command: calls.append(command)) is True
+    assert request_background_incident_analysis([marker], requested=requested, popen=lambda command: calls.append(command)) is False
+    assert calls == [["systemctl", "--user", "start", "--no-block", "aurascan-incident-assistant.service"]]
+
+
+def test_background_result_notification_is_private_deduplicated_and_bounded(tmp_path):
+    result_path = background_result_path(tmp_path)
+    result_path.parent.mkdir(parents=True)
+    result = {
+        "result_id": "result-one",
+        "marker_key": "maintenance:scan-one:1000",
+        "summary": "A " + "long explanation " * 40,
+        "safe_repair_state": "applied",
+        "prepared_repair_count": 2,
+    }
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+
+    loaded = unseen_background_result(tmp_path)
+    title, message = build_background_incident_notification(loaded)
+
+    assert title == "AuraScan finished incident analysis"
+    assert len(message) < 400
+    assert "verified reversible repair" in message
+    assert "2 locally verified repair action(s)" in message
+    mark_background_result_seen(loaded, tmp_path)
+    assert unseen_background_result(tmp_path) == {}
 
 
 def test_tray_state_is_due_when_maintenance_is_incomplete(tmp_path):

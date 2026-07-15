@@ -15,7 +15,10 @@ help explain `.pacnew`/`.pacsave` config drift with backups before applying
 safe fixes. The new `aurascan incidents --dry-run` command can also inspect
 bounded crash evidence and explain likely system or application failures.
 An optional weekly local scan can also catch recoverable errors during long
-uptime without contacting AI or applying repairs in the background.
+uptime. Separately opted-in logged-in AI can select bounded read-only local
+diagnostic probes, then explain and prioritize the independently verified
+repair plan. The offline Safe Autopilot still handles only reversible
+lock/mirror repairs.
 
 The new `aurascan upgrade` flow is designed as a native-feeling upgrade front
 door: it previews repo and AUR updates, checks kernel/module/initramfs/boot
@@ -62,11 +65,14 @@ The newest work adds upgrade safety helpers:
 - `aurascan config-drift --dry-run` explains config drift and prepares safe
   fixes with backups before applying.
 - `aurascan incidents --dry-run` examines bounded journal, coredump, pstore,
-  package, and module evidence. AI can explain redacted evidence, but repair
-  commands come only from AuraScan's verified allowlist.
-- The optional boot monitor is disabled until the user enables it, performs no
-  background AI requests or repairs, and can notify through the tray when a
-  previous boot recorded crashes.
+  package, and module evidence. Its two-pass AI planner may choose only known
+  probe IDs and recommend only verified action IDs; repair commands still come
+  exclusively from AuraScan's allowlist.
+- The optional root collectors are disabled until the user enables them and
+  perform no AI requests or repairs themselves. Background AI is a separate
+  per-user opt-in that may prepare a private plan but has no execution authority.
+- Safe Autopilot is separately disabled by default, stays offline, and permits
+  only deterministic stale pacman-lock or verified mirrorlist restoration.
 - Enabling incident monitoring also enables a low-priority weekly current-boot
   scan. Clean runs stay silent; the tray changes state for overdue or
   unreviewed maintenance findings.

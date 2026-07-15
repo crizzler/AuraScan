@@ -171,6 +171,23 @@ def test_config_drift_subcommand_dispatches_before_scan_parser(monkeypatch):
     assert calls == [["--dry-run"]]
 
 
+def test_service_command_environment_keeps_ai_credentials_out_of_root_jobs(monkeypatch, tmp_path):
+    calls = []
+    user_config = tmp_path / ".env"
+    monkeypatch.setattr(cli, "load_env", lambda paths=None: calls.append(paths))
+    monkeypatch.setattr(cli, "user_env_path", lambda: user_config)
+
+    cli.load_command_environment(["incidents", "--last-boot", "--capture-monitor"])
+    cli.load_command_environment(["incidents", "--capture-safe-autopilot"])
+    assert calls == []
+
+    cli.load_command_environment(["incidents", "--background-assist"])
+    assert calls == [[user_config]]
+
+    cli.load_command_environment(["incidents", "--current-boot"])
+    assert calls[-1] is None
+
+
 def test_python_module_entrypoint_delegates_to_cli(monkeypatch):
     calls = []
     monkeypatch.setattr(cli, "main", lambda: calls.append("called"))

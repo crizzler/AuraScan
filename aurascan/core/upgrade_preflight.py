@@ -1336,7 +1336,9 @@ def apply_repository_health_repairs(
                 try:
                     os.chmod(target, mode)
                     if os.geteuid() == 0:
-                        os.chown(target, owner, group)
+                        current = target.stat()
+                        if current.st_uid != owner or current.st_gid != group:
+                            os.chown(target, owner, group)
                 except OSError as exc:
                     result.errors.append(f"restored {target} but could not preserve ownership/mode: {exc}")
                     return result

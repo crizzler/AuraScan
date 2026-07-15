@@ -15,12 +15,21 @@ from aurascan.core.config import read_env_file, user_env_path, write_user_env
 from aurascan.core.incidents import (
     INCIDENT_MAINTENANCE_STATUS,
     INCIDENT_MONITOR_MARKER_ROOT,
+    atomic_write_json,
     incident_reviewed_state_path,
     incident_seen_state_path,
     load_maintenance_status,
     mark_pending_markers_seen,
     pending_markers,
+    resolve_incident_config,
     unseen_pending_markers,
+    user_incident_root,
+)
+from aurascan.core.incident_automation import (
+    INCIDENT_BACKGROUND_SERVICE,
+    background_result_path,
+    background_result_seen_path,
+    load_private_json,
 )
 
 
@@ -81,6 +90,7 @@ class TrayIncidentState:
     icon_name: str
     tooltip: str
     unreviewed_markers: List[Dict[str, object]]
+    background_markers: List[Dict[str, object]]
     unseen_notification_markers: List[Dict[str, object]]
     notification_markers: List[Dict[str, object]]
 
@@ -445,6 +455,10 @@ def start_tray_app(
     tray.show()
     seen_path = incident_seen_path or incident_seen_state_path(env)
     reviewed_path = incident_reviewed_path or incident_reviewed_state_path(env)
+    report_root = user_incident_root(env)
+    incident_config = resolve_incident_config(env)
+    background_enabled = bool(not incident_config.error and incident_config.background_ai_enabled)
+    background_requested = set()
 
     def refresh_incident_state() -> None:
         state = resolve_tray_incident_state(
@@ -455,10 +469,27 @@ def start_tray_app(
         )
         tray.setIcon(load_state_icon(QtGui, state.state))
         tray.setToolTip(state.tooltip)
-        if state.notification_markers:
+        if background_enabled:
+            request_background_incident_analysis(
+                state.background_markers,
+                requested=background_requested,
+                popen=popen,
+            )
+        result = unseen_background_result(report_root) if background_enabled else {}
+        if result:
+            title, message = build_background_incident_notification(result)
+            tray.showMessage(title, message)
+            mark_background_result_seen(result, report_root)
+            result_key = str(result.get("marker_key") or "")
+            matched = [
+                marker for marker in state.unseen_notification_markers
+                if marker_identity(marker) == result_key
+            ]
+            mark_pending_markers_seen(matched, seen_path=seen_path)
+        elif state.notification_markers and not background_enabled:
             title, message = build_incident_notification(state.notification_markers)
             tray.showMessage(title, message)
-        mark_pending_markers_seen(state.unseen_notification_markers, seen_path=seen_path)
+            mark_pending_markers_seen(state.unseen_notification_markers, seen_path=seen_path)
 
     refresh_incident_state()
     refresh_timer = QtCore.QTimer(tray)
@@ -515,8 +546,10 @@ def resolve_tray_incident_state(
     notification_seen_path = notification_seen_path or incident_seen_state_path()
     reviewed_path = reviewed_path or incident_reviewed_state_path()
     all_markers = pending_markers(uid=uid, root=marker_root)
+    automation_markers = pending_markers(uid=uid, root=marker_root, include_resolved=True)
     reviewed_keys = read_marker_keys(reviewed_path)
     unreviewed = [marker for marker in all_markers if marker_identity(marker) not in reviewed_keys]
+    background_markers = [marker for marker in automation_markers if marker_identity(marker) not in reviewed_keys]
     unseen_notifications = unseen_pending_markers(
         uid=uid,
         marker_root=marker_root,
@@ -544,6 +577,7 @@ def resolve_tray_incident_state(
         icon_name=UPDATER_STATE_ICONS[state],
         tooltip=tooltip,
         unreviewed_markers=unreviewed,
+        background_markers=background_markers,
         unseen_notification_markers=unseen_notifications,
         notification_markers=notification_markers,
     )
@@ -569,6 +603,68 @@ def marker_identity(marker: Mapping[str, object]) -> str:
 def marker_needs_notification(marker: Mapping[str, object]) -> bool:
     severity = str(marker.get("severity") or "LOW").upper()
     return severity in {"HIGH", "CRITICAL"} or bool(marker.get("repeated"))
+
+
+def request_background_incident_analysis(
+    markers: Sequence[Mapping[str, object]],
+    *,
+    requested: set,
+    popen: Callable = subprocess.Popen,
+) -> bool:
+    keys = [marker_identity(marker) for marker in markers]
+    pending = [key for key in keys if key and key not in requested]
+    if not pending:
+        return False
+    try:
+        popen(["systemctl", "--user", "start", "--no-block", INCIDENT_BACKGROUND_SERVICE])
+    except OSError:
+        return False
+    requested.update(pending)
+    return True
+
+
+def unseen_background_result(report_root: Path) -> Dict[str, object]:
+    result = load_private_json(background_result_path(report_root))
+    if not result.get("result_id"):
+        return {}
+    seen = load_private_json(background_result_seen_path(report_root))
+    if str(seen.get("result_id") or "") == str(result.get("result_id") or ""):
+        return {}
+    return result
+
+
+def mark_background_result_seen(result: Mapping[str, object], report_root: Path) -> None:
+    result_id = str(result.get("result_id") or "")
+    if not result_id:
+        return
+    atomic_write_json(
+        background_result_seen_path(report_root),
+        {"schema": "incident_background_ai_seen/1.0", "result_id": result_id},
+        mode=0o600,
+    )
+
+
+def build_background_incident_notification(result: Mapping[str, object]) -> tuple:
+    summary = " ".join(str(result.get("summary") or "AuraScan completed background incident analysis.").split())
+    repair_state = str(result.get("safe_repair_state") or "not_run")
+    prepared_count = max(0, int(result.get("prepared_repair_count") or 0))
+    repair_text = {
+        "applied": " Safe Autopilot also applied a verified reversible repair.",
+        "failed": " A reversible repair was not applied; the alert remains active.",
+        "refused": " Safe Autopilot left the finding for review.",
+        "no_action": " No unattended repair was safe or necessary.",
+        "not_run": " No unattended repair was run.",
+    }.get(repair_state, "")
+    if prepared_count:
+        prepared_text = f" {prepared_count} locally verified repair action(s) are ready for confirmation."
+    else:
+        prepared_text = ""
+    next_step = " Click to review the result." if repair_state == "applied" else " Click to resolve the finding."
+    suffix = repair_text + prepared_text + next_step
+    summary_limit = max(80, 380 - len(suffix))
+    if len(summary) > summary_limit:
+        summary = summary[:max(1, summary_limit - 3)].rstrip() + "..."
+    return "AuraScan finished incident analysis", summary + suffix
 
 
 def build_incident_notification(markers: Sequence[Mapping[str, object]]) -> tuple:

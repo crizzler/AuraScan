@@ -1,0 +1,13 @@
+[Unit]
+Description=Poll for incidents awaiting optional user AI analysis
+Documentation=https://github.com/crizzler/AuraScan
+
+[Timer]
+OnStartupSec=2m
+OnUnitActiveSec=5m
+RandomizedDelaySec=1m
+Persistent=true
+Unit=aurascan-incident-assistant.service
+
+[Install]
+WantedBy=timers.target

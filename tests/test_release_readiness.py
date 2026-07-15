@@ -13,7 +13,7 @@ def test_pyproject_console_scripts_are_registered():
     data = tomllib.loads(read_text("pyproject.toml"))
 
     scripts = data["project"]["scripts"]
-    assert data["project"]["version"] == "0.4.0"
+    assert data["project"]["version"] == "0.5.0"
     assert scripts["aurascan"] == "aurascan.cli:main"
     assert scripts["aurascan-makepkg"] == "aurascan.makepkg_wrapper:main"
     assert data["project"]["requires-python"] == ">=3.8"
@@ -74,8 +74,10 @@ def test_readme_contains_release_safety_boundaries():
         "kde plasma on wayland or x11 is the best-supported",
         "aurascan incidents --dry-run",
         "the optional root monitor is installed disabled",
-        "the monitor has no network access",
-        "makes no background ai requests",
+        "the root collectors have no network access",
+        "background ai is a second, per-user opt-in",
+        "safe autopilot defaults to `off`",
+        "it cannot run `sudo`",
         "ai cannot generate commands",
         "does not automate filesystem repair",
         "aurascan_incident_ai_evidence",
@@ -105,7 +107,9 @@ def test_release_checklist_references_required_validation_and_safety_items():
         "Live AUR sampling is not part of normal pytest.",
         "MIT license is present.",
         "No generated local artifacts are staged or committed.",
-        "Incident monitor is installed disabled and has no network access.",
+        "Incident root collectors are installed disabled, have no network access",
+        "Background incident AI has a separate per-user opt-in",
+        "Safe Autopilot defaults to `off`",
         "Incident repair actions are allowlisted and freshly revalidated as root.",
     ]
     for phrase in required_phrases:

@@ -9,7 +9,9 @@ for Arch Linux, EndeavourOS, Manjaro, CachyOS, and AUR workflows. It is
 designed to catch obvious and moderately sophisticated malicious package
 behavior, explain risky package metadata clearly, and reduce breakage risk
 before routine upgrades. It can also inspect bounded crash evidence and prepare
-verified repair recipes without allowing AI to invent shell commands.
+verified repair recipes without allowing AI to invent shell commands. Optional
+Assisted Background Recovery keeps networked AI analysis unprivileged and
+separate from the offline deterministic repair service.
 
 AuraScan does not prove that a package is safe. A clean report, a clean ClamAV
 result, or a valid source signature is not a guarantee. The goal is to find risk
@@ -105,7 +107,8 @@ wizard.
 
 The Arch/AUR packaging recipe installs `/usr/bin/aurascan`,
 `/usr/bin/aurascan-makepkg`, the pacman hook template, the optional updater
-desktop/icon assets, and the disabled-by-default incident monitor service. It
+desktop/icon assets, and disabled-by-default incident monitor, user assistant,
+and Safe Autopilot services. It
 also installs a non-interactive post-install message that points users to
 `aurascan init` and `aurascan doctor`. Review it before publishing or installing
 it on a real system.
@@ -195,6 +198,7 @@ aurascan init --enable-upgrade-preflight --upgrade-aur-helper auto --enable-upgr
 aurascan init --enable-config-drift --config-drift-ai-diffs ask
 aurascan init --enable-updater-tray --install-updater-autostart
 aurascan init --enable-incident-monitor --enable-incident-ai --incident-ai-evidence redacted
+aurascan init --enable-incident-background-ai --incident-auto-repair safe
 aurascan init --disable-upgrade-preflight
 ```
 
@@ -368,9 +372,11 @@ for the tray applet, not for normal AuraScan scans.
 The tray refreshes incident state every five seconds. Its normal icon changes to
 maintenance-due, attention, or critical variants when the weekly scan is
 overdue or unreviewed findings need attention. Clean scans are silent. Desktop
-notifications are reserved for HIGH/CRITICAL findings and repeated crashes;
-the icon remains changed until the guided resolution completes or report
-retention expires.
+notifications are reserved for HIGH/CRITICAL findings and repeated crashes
+unless separately opted-in background AI completes an analysis, in which case
+the tray shows one bounded completion summary. The icon remains changed until
+the guided resolution completes or report retention expires; a verified Safe
+Autopilot repair may clear only the category it actually resolved.
 
 The config keys are `AURASCAN_UPDATER_TRAY_ENABLED`,
 `AURASCAN_UPDATER_AUTOSTART`, and `AURASCAN_UPDATER_TERMINAL`.
@@ -391,6 +397,9 @@ aurascan incidents --show INCIDENT_ID
 aurascan incidents --json
 aurascan incidents --run-maintenance
 aurascan incidents --maintenance-status
+aurascan incidents --enable-background-ai
+aurascan incidents --background-ai-status
+aurascan incidents --auto-repair safe
 ```
 
 With no explicit target, AuraScan opens a pending previous-boot incident when
@@ -399,9 +408,13 @@ one exists and otherwise scans the current boot. `--dry-run` never repairs.
 gets a default-yes repair prompt.
 
 `--resolve` is the tray's single incident workflow. AuraScan opens the
-highest-priority pending evidence, uses AI only for bounded explanation and
-ranking of already-verified actions, applies eligible AuraScan-owned repairs
-after confirmation, and reruns deterministic checks. When no safe automatic
+highest-priority pending evidence and, when incident AI is enabled, uses a
+two-pass AI-guided repair planner. The first pass may select only opaque IDs
+for AuraScan-owned read-only probes. AuraScan runs those probes locally,
+constructs independently verified repair actions, and lets the second pass
+explain and prioritize only known action IDs. Eligible AuraScan-owned repairs
+are applied as one plan after confirmation, followed by deterministic
+aftercare. When no safe automatic
 repair exists, it explains that the evidence is historical and acknowledges
 the pending alert. The tray then returns to normal while reports remain in
 history. A normal icon means findings were handled or reviewed; it is not a
@@ -423,28 +436,61 @@ installed disabled, and both are enabled together only through
 after journal flush. The persistent weekly timer incrementally scans the
 current boot, runs a bounded baseline when monitoring is first enabled, and
 stores root-only journal/coredump checkpoints so it does not repeatedly scan a
-long-running boot. The monitor has no network access and makes no background AI requests.
-It applies no repairs, and the weekly service has the same restrictions.
+long-running boot. The root collectors have no network access, make no AI
+requests, and never execute repairs themselves. After successful collection
+they may trigger the separate root Safe Autopilot oneshot. That service also
+has no network access or AI credentials and exits without action unless its
+root-owned policy is explicitly set to `safe`.
+
+Background AI is a second, per-user opt-in. When enabled, a hardened
+`systemd --user` timer processes at most one highest-priority marker every five
+minutes while that user is logged in. It uses the user's existing `0600` AI
+configuration, bounded redacted evidence, and provider retries of 15 minutes,
+1 hour, 6 hours, then 24 hours. It may run the same bounded read-only probes and
+prepare broader repairs, but it cannot run `sudo`, invoke repair execution, or
+write system paths. A matching private prepared plan can be reused for six
+hours; Resolve refreshes its probes and every privileged recipe still performs
+fresh root-side validation. The tray asks it to run immediately for a new
+marker and shows one concise completion notification, including how many
+verified actions await confirmation. Provider failure leaves the alert
+available for the normal **Resolve System Findings** flow.
+
+Safe Autopilot defaults to `off`. In `safe` mode it may apply only a proven
+stale pacman-lock recovery or a verified mirrorlist restoration. Both recipes
+are reversible, freshly revalidated as root, limited to two actions per run,
+recorded in a private manifest, and protected by a 24-hour identical-action
+cooldown. Incomplete/truncated reports and reports with unresolved
+HIGH/CRITICAL findings are refused. Package operations, DKMS, initramfs,
+services, cache deletion, reinstalls, filesystems, bootloaders, and rebooting
+still require the foreground user flow.
 
 Weekly collection uses the same evidence limits as manual diagnostics. A
 truncated scan advances only through its last processed cursor and marks
-maintenance due so the next run can continue. Public status contains only scan
-times and collection health. Pending markers contain only marker type, scan
-generation, boot ID, UID scope, severity, categories, count, and a repeated
-flag, never crash evidence, package names, application names, or commands.
+maintenance due so the next run can continue. Public maintenance status
+contains only scan times and collection health. Pending markers contain only
+marker type, scan
+generation, boot ID, UID scope, category severities, resolved categories,
+coarse repair state, counts, and a repeated flag, never crash evidence, paths,
+package names, application names, AI text, or commands.
 
 Evidence collection is bounded to 2,000 journal records, 256 KiB of local
 evidence, and 200 coredumps. AuraScan does not inspect core memory, process
 environments, arbitrary files, or complete command lines. Persisted reports are
-redacted and separated by user scope. When incident AI is enabled, AI runs only
-when a user opens an incident and receives at most 80 matched excerpts and
-12,000 redacted characters. `facts-only` mode sends structured findings without
-log excerpts.
+redacted and separated by user scope. Foreground incident AI runs when a user
+opens an incident; separately opted-in background AI can run in that user's
+logged-in session. Both receive at most 80 matched excerpts and 12,000 redacted
+characters per request. AI-guided repair planning uses at most two requests per
+incident: triage chooses from at most 24 local probe candidates, then a final
+review sees normalized results from at most 12 executed probes. `facts-only`
+mode sends structured findings without log excerpts.
 
-AI may explain findings and recommend existing action IDs. AI cannot generate commands.
-It also cannot suppress deterministic findings, approve repairs, or mark an
-incident repaired. AuraScan reconstructs every privileged command from trusted
-current state and reruns recipe preconditions as root. An AI correlation may
+AI may request up to six known probe IDs, explain findings, and recommend
+existing action IDs. Probe targets are resolved from trusted local evidence
+before the request; the provider never supplies package names, paths, units, or
+arguments that AuraScan executes. AI cannot generate commands, suppress
+deterministic findings, approve repairs, or mark an incident repaired. AuraScan
+reconstructs every privileged command from trusted current state and reruns
+recipe preconditions as root. An AI correlation may
 not blame unrelated packages merely because they were updated in the same boot.
 
 Confirmed repair recipes cover a proven stale pacman lock, guarded repository
@@ -455,9 +501,11 @@ official-package reinstall from a matching signed local archive. AuraScan does n
 It also does not automate partition or bootloader edits, authentication
 configuration, firmware changes, user-data deletion, AUR rebuilds, or rebooting.
 
-The config keys are `AURASCAN_INCIDENT_MONITOR_ENABLED`,
-`AURASCAN_INCIDENT_AI_ENABLED`, and `AURASCAN_INCIDENT_AI_EVIDENCE`, where
-evidence mode is `redacted` or `facts-only`.
+The user config keys are `AURASCAN_INCIDENT_MONITOR_ENABLED`,
+`AURASCAN_INCIDENT_AI_ENABLED`, `AURASCAN_INCIDENT_AI_EVIDENCE`, and
+`AURASCAN_INCIDENT_BACKGROUND_AI`. Evidence mode is `redacted` or
+`facts-only`. The root-owned `/etc/aurascan/incident-autopilot.conf` accepts
+only `AURASCAN_INCIDENT_AUTO_REPAIR=off|safe` and contains no API credential.
 
 ## Config Drift Assistant
 
@@ -616,9 +664,12 @@ wizard writes an explicit `AURASCAN_AI_ENABLED` value so the user's choice is
 clear. When enabled, package AI analysis may send package metadata, PKGBUILD
 text, and install-script text to the configured provider. Config drift diff
 review has an additional opt-in gate and sends only redacted bounded diffs.
-Incident AI runs only when the user opens an incident; the optional boot monitor
-has no network access. Incident evidence is bounded and redacted before
-persistence or AI use, and `facts-only` mode omits raw evidence excerpts.
+Incident AI normally runs when the user opens an incident. A separate explicit
+opt-in permits background AI only in the logged-in user service. The root boot,
+weekly, and Safe Autopilot services have no network access and never load API
+credentials. Incident evidence is bounded and redacted before persistence or
+AI use, and `facts-only` mode omits raw evidence excerpts. See
+[`docs/PRIVACY.md`](docs/PRIVACY.md) for process and storage boundaries.
 
 Supported AI provider IDs are `openai`, `anthropic`, `deepseek`, `gemini`, and
 `openrouter`. Provider-specific keys use `AURASCAN_OPENAI_API_KEY`,

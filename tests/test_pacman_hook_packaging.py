@@ -130,6 +130,7 @@ def test_arch_pkgbuild_installs_updater_assets():
     assert "aurascan-updater-maintenance.svg" in text
     assert "aurascan-updater-attention.svg" in text
     assert "aurascan-updater-critical.svg" in text
+    assert 'docs/PRIVACY.md "$pkgdir/usr/share/doc/$pkgname/PRIVACY.md"' in text
     assert "python-pyqt6: AuraScan Updater tray applet" in srcinfo
 
 
@@ -140,32 +141,57 @@ def test_arch_pkgbuild_installs_disabled_hardened_incident_monitor():
     tmpfiles = read_text("aurascan/assets/aurascan-incidents.conf")
     maintenance_service = read_text("aurascan/assets/aurascan-incident-maintenance.service")
     maintenance_timer = read_text("aurascan/assets/aurascan-incident-maintenance.timer")
+    assistant_service = read_text("aurascan/assets/aurascan-incident-assistant.service")
+    assistant_timer = read_text("aurascan/assets/aurascan-incident-assistant.timer")
+    safe_service = read_text("aurascan/assets/aurascan-incident-safe-autopilot.service")
 
     assert "aurascan/assets/aurascan-incident-monitor.service" in pkgbuild
     assert "/usr/lib/systemd/system/aurascan-incident-monitor.service" in pkgbuild
     assert "/usr/lib/systemd/system/aurascan-incident-maintenance.service" in pkgbuild
     assert "/usr/lib/systemd/system/aurascan-incident-maintenance.timer" in pkgbuild
+    assert "/usr/lib/systemd/system/aurascan-incident-safe-autopilot.service" in pkgbuild
+    assert "/usr/lib/systemd/user/aurascan-incident-assistant.service" in pkgbuild
+    assert "/usr/lib/systemd/user/aurascan-incident-assistant.timer" in pkgbuild
     assert "aurascan/assets/aurascan-incidents.conf" in pkgbuild
     assert "/usr/lib/tmpfiles.d/aurascan-incidents.conf" in pkgbuild
     assert "pacman-contrib: bounded package-cache cleanup for incident recovery" in pkgbuild
     assert "pacman-contrib: bounded package-cache cleanup for incident recovery" in srcinfo
     assert "ExecStart=/usr/bin/aurascan incidents --last-boot --capture-monitor" in service
     assert "PrivateNetwork=yes" in service
+    assert "UnsetEnvironment=AURASCAN_AI_KEY" in service
     assert "NoNewPrivileges=yes" in service
     assert "ProtectSystem=strict" in service
     assert "StateDirectory=aurascan/incidents" in service
     assert "ReadWritePaths=/var/lib/aurascan/incidents" in service
     assert "ExecStart=/usr/bin/aurascan incidents --current-boot --capture-maintenance" in maintenance_service
     assert "PrivateNetwork=yes" in maintenance_service
+    assert "UnsetEnvironment=AURASCAN_AI_KEY" in maintenance_service
     assert "CPUWeight=10" in maintenance_service
     assert "IOWeight=10" in maintenance_service
     assert "OnCalendar=weekly" in maintenance_timer
     assert "Persistent=true" in maintenance_timer
     assert "RandomizedDelaySec=2h" in maintenance_timer
+    assert "OnSuccess=aurascan-incident-safe-autopilot.service" in service
+    assert "OnSuccess=aurascan-incident-safe-autopilot.service" in maintenance_service
+    assert "ExecStart=/usr/bin/aurascan incidents --background-assist" in assistant_service
+    assert "PrivateNetwork=yes" not in assistant_service
+    assert "NoNewPrivileges=yes" in assistant_service
+    assert "CapabilityBoundingSet=" in assistant_service
+    assert "TimeoutStartSec=300" in assistant_service
+    assert "OnUnitActiveSec=5m" in assistant_timer
+    assert "ExecCondition=/usr/bin/aurascan incidents --safe-autopilot-enabled" in safe_service
+    assert "ExecStart=/usr/bin/aurascan incidents --capture-safe-autopilot" in safe_service
+    assert "PrivateNetwork=yes" in safe_service
+    assert "UnsetEnvironment=AURASCAN_AI_KEY" in safe_service
+    assert "IPAddressDeny=any" in safe_service
+    assert "ProtectProc=ptraceable" in safe_service
+    assert "ReadWritePaths=/var/lib/aurascan/incidents /var/lib/pacman /etc/pacman.d" in safe_service
     assert "/var/lib/aurascan/incidents/pending" in tmpfiles
+    assert "/var/lib/aurascan/incidents/automation" in tmpfiles
     assert "systemctl enable" not in pkgbuild
     assert "systemctl start" not in pkgbuild
     assert "systemctl enable" not in maintenance_timer
+    assert "WantedBy=" not in safe_service
 
 
 def test_updater_desktop_asset_is_release_safe():

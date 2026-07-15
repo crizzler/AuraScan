@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -87,6 +88,7 @@ RECIPE_ORDER = {
     "restart_system_service": 80,
     "restart_user_service": 90,
 }
+BACKGROUND_SAFE_RECIPE_IDS = {"repository_restore", "stale_pacman_lock"}
 
 
 def plan_repair_actions(
@@ -98,6 +100,7 @@ def plan_repair_actions(
     cache_root: Path = Path("/var/cache/pacman/pkg"),
     pacman_conf_path: Path = Path("/etc/pacman.conf"),
     proc_root: Path = Path("/proc"),
+    include_package_integrity: bool = True,
 ) -> List[RepairAction]:
     categories = {finding.category for finding in report.findings}
     actions: List[RepairAction] = []
@@ -131,7 +134,7 @@ def plan_repair_actions(
         if action:
             actions.append(action)
 
-    if "application_crash" in categories and which("pacman"):
+    if include_package_integrity and "application_crash" in categories and which("pacman"):
         for group in report.coredumps[:20]:
             action = plan_exact_package_reinstall(group.executable, group.package, runner=runner, which=which, cache_root=cache_root)
             if action and not any(existing.parameters.get("package") == action.parameters.get("package") for existing in actions):
@@ -574,6 +577,8 @@ def execute_one_repair(
     runner: Callable,
     which: Callable[[str], Optional[str]],
     run_root: Path,
+    background_safe: bool = False,
+    pacman_include_root: Path = Path("/etc/pacman.d"),
 ) -> RepairResult:
     handlers = {
         "repository_restore": execute_repository_restore,
@@ -590,15 +595,38 @@ def execute_one_repair(
     if handler is None or not action.action_id.startswith("ira-"):
         return RepairResult(action.action_id, action.recipe_id, "refused", "Unknown or malformed repair recipe.")
     try:
+        if background_safe and not is_background_safe_action(action, pacman_include_root=pacman_include_root):
+            return refused(action, "This repair does not satisfy Safe Autopilot's fresh allowlist checks.")
+        if action.recipe_id == "repository_restore":
+            return execute_repository_restore(
+                action,
+                runner=runner,
+                which=which,
+                run_root=run_root,
+                background_safe=background_safe,
+                pacman_include_root=pacman_include_root,
+            )
         return handler(action, runner=runner, which=which, run_root=run_root)
     except Exception as exc:
         return RepairResult(action.action_id, action.recipe_id, "failed", redact_incident_text(str(exc))[:1000])
 
 
-def execute_repository_restore(action: RepairAction, *, runner: Callable, which: Callable, run_root: Path) -> RepairResult:
+def execute_repository_restore(
+    action: RepairAction,
+    *,
+    runner: Callable,
+    which: Callable,
+    run_root: Path,
+    background_safe: bool = False,
+    pacman_include_root: Path = Path("/etc/pacman.d"),
+) -> RepairResult:
     conf = Path(str(action.parameters.get("pacman_conf_path") or "/etc/pacman.conf"))
     if conf != Path("/etc/pacman.conf"):
         return refused(action, "Repository configuration path is not allowlisted.")
+    if background_safe and not is_background_safe_action(action, pacman_include_root=pacman_include_root):
+        return refused(action, "Repository files no longer satisfy Safe Autopilot's path and ownership checks.")
+    if background_safe and package_manager_processes(Path("/proc")):
+        return refused(action, "A package manager is active; Safe Autopilot will not change repository files.")
     check = build_repository_health_check(conf)
     if not check.fixable_issues:
         return refused(action, "Repository repair is no longer needed or cannot be verified.")
@@ -616,6 +644,108 @@ def execute_repository_restore(action: RepairAction, *, runner: Callable, which:
         message += " Previous mirrorlists were restored." if rolled_back else " Automatic rollback was incomplete."
         return failed(action, message, result.backup_dir)
     return applied(action, "Repository mirror configuration was restored and active servers were verified.", result.backup_dir, True)
+
+
+def is_background_safe_action(
+    action: RepairAction,
+    *,
+    pacman_include_root: Path = Path("/etc/pacman.d"),
+    required_uid: int = 0,
+) -> bool:
+    if action.recipe_id not in BACKGROUND_SAFE_RECIPE_IDS or not action.eligible or not action.verified or not action.reversible:
+        return False
+    if action.risk not in {Severity.LOW, Severity.MEDIUM}:
+        return False
+    if action.recipe_id == "stale_pacman_lock":
+        return (
+            Path(str(action.parameters.get("lock_path") or "")) == Path("/var/lib/pacman/db.lck")
+            and int(action.parameters.get("minimum_age") or 0) >= 600
+            and str(action.parameters.get("category") or "") == "package_manager"
+        )
+    pacman_conf = Path(str(action.parameters.get("pacman_conf_path") or ""))
+    if pacman_conf != Path("/etc/pacman.conf"):
+        return False
+    try:
+        conf_metadata = pacman_conf.stat()
+    except OSError:
+        return False
+    if pacman_conf.is_symlink() or not stat.S_ISREG(conf_metadata.st_mode) or conf_metadata.st_uid != required_uid:
+        return False
+    check = build_repository_health_check(pacman_conf)
+    if not check.fixable_issues:
+        return False
+    requested = {str(item) for item in action.parameters.get("targets", [])}
+    actual = {str(issue.include_path) for issue in check.fixable_issues}
+    if not requested or requested != actual:
+        return False
+    for issue in check.fixable_issues:
+        if issue.active_servers != 0 or issue.backup_active_servers <= 0:
+            return False
+        if not safe_background_repository_file(Path(issue.include_path), pacman_include_root, required_uid=required_uid):
+            return False
+        if not safe_background_repository_file(Path(issue.backup_path), pacman_include_root, required_uid=required_uid):
+            return False
+    return True
+
+
+def safe_background_repository_file(path: Path, root: Path, *, required_uid: int = 0) -> bool:
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        resolved_root = root.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+        metadata = path.stat()
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISREG(metadata.st_mode) and metadata.st_uid == required_uid
+
+
+def execute_background_safe_actions(
+    actions: Sequence[RepairAction],
+    *,
+    runner: Callable = subprocess.run,
+    which: Callable[[str], Optional[str]] = shutil.which,
+    repair_root: Path = INCIDENT_REPAIR_ROOT,
+    pacman_include_root: Path = Path("/etc/pacman.d"),
+) -> Tuple[List[RepairResult], bool]:
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return [RepairResult("", "", "refused", "Safe Autopilot requires root privileges.")], False
+    ordered = sorted(actions, key=lambda action: (RECIPE_ORDER.get(action.recipe_id, 999), action.action_id))[:2]
+    if not ordered:
+        return [], True
+    run_root = repair_root / make_run_id()
+    run_root.mkdir(parents=True, mode=0o700, exist_ok=False)
+    manifest: Dict[str, object] = {
+        "schema": "incident_repair_manifest/1.0",
+        "mode": "safe_autopilot",
+        "created_at": int(time.time()),
+        "actions": [],
+    }
+    results: List[RepairResult] = []
+    ok = True
+    for action in ordered:
+        if action.action_id != repair_action_id(action.recipe_id, action.parameters) or not is_background_safe_action(
+            action,
+            pacman_include_root=pacman_include_root,
+        ):
+            result = refused(action, "Safe Autopilot rejected a stale or non-allowlisted repair action.")
+        else:
+            result = execute_one_repair(
+                action,
+                runner=runner,
+                which=which,
+                run_root=run_root,
+                background_safe=True,
+                pacman_include_root=pacman_include_root,
+            )
+        results.append(result)
+        manifest["actions"].append(repair_manifest_entry(action, result, run_root=run_root))
+        if result.status != "applied" or not result.verified:
+            ok = False
+            break
+    atomic_write_json(run_root / "manifest.json", manifest, mode=0o600)
+    return results, ok
 
 
 def execute_stale_lock(action: RepairAction, *, runner: Callable, which: Callable, run_root: Path) -> RepairResult:

@@ -8,10 +8,13 @@ from pathlib import Path
 from aurascan.core.incidents import (
     INCIDENT_AI_ENABLED_ENV,
     INCIDENT_AI_EVIDENCE_ENV,
+    INCIDENT_BACKGROUND_AI_ENV,
     INCIDENT_MAINTENANCE_SERVICE,
     INCIDENT_MAINTENANCE_TIMER,
     INCIDENT_MONITOR_ENABLED_ENV,
     CoredumpGroup,
+    DiagnosticProbe,
+    DiagnosticProbeResult,
     IncidentEvidence,
     IncidentFinding,
     IncidentReport,
@@ -131,17 +134,21 @@ def test_incident_config_defaults_and_invalid_values():
     assert config.monitor_enabled is False
     assert config.ai_enabled is True
     assert config.ai_evidence == "redacted"
+    assert config.background_ai_enabled is False
 
     configured = resolve_incident_config({
         INCIDENT_MONITOR_ENABLED_ENV: "1",
         INCIDENT_AI_ENABLED_ENV: "0",
         INCIDENT_AI_EVIDENCE_ENV: "facts-only",
+        INCIDENT_BACKGROUND_AI_ENV: "1",
     })
     assert configured.monitor_enabled is True
     assert configured.ai_enabled is False
     assert configured.ai_evidence == "facts-only"
+    assert configured.background_ai_enabled is True
     assert resolve_incident_config({INCIDENT_AI_EVIDENCE_ENV: "raw"}).error
     assert resolve_incident_config({INCIDENT_MONITOR_ENABLED_ENV: "sometimes"}).error
+    assert resolve_incident_config({INCIDENT_BACKGROUND_AI_ENV: "sometimes"}).error
 
 
 def test_monitor_disable_is_idempotent_when_systemd_reports_already_disabled():
@@ -332,6 +339,55 @@ def test_ai_response_cannot_invent_evidence_actions_or_commands(monkeypatch):
     assert "command" not in validated
 
 
+def test_ai_triage_rejects_fabricated_probe_ids_and_never_accepts_targets():
+    evidence = IncidentEvidence("iev-known", "journal", "redacted message")
+    probe = DiagnosticProbe(
+        "idp-known",
+        "package_integrity",
+        "Inspect demo",
+        "summary",
+        target={"package": "trusted-local-package"},
+        evidence_ids=[evidence.evidence_id],
+    )
+    report = minimal_report(evidence=[evidence])
+    response = {
+        "summary": "Check the implicated package",
+        "likely_causes": [
+            {"title": "cause", "confidence": "medium", "evidence_ids": ["iev-known"], "explanation": "matched"},
+        ],
+        "requested_probe_ids": ["idp-known", "idp-fabricated"],
+        "recommended_action_ids": [],
+        "target": {"package": "ai-invented-package"},
+        "command": "pacman -S ai-invented-package",
+    }
+
+    validated = validate_incident_ai_response(report, response, phase="triage", probes=[probe])
+    prompt = build_incident_ai_prompt(report, phase="triage", probes=[probe])
+
+    assert validated["requested_probe_ids"] == ["idp-known"]
+    assert "target" not in validated
+    assert "command" not in validated
+    assert '"target":' not in prompt
+    assert "trusted-local-package" not in prompt
+
+
+def test_final_ai_prompt_contains_only_normalized_probe_results():
+    report = minimal_report(evidence=[IncidentEvidence("iev-one", "journal", "message")])
+    result = DiagnosticProbeResult(
+        "idp-one",
+        "package_integrity",
+        "no_action",
+        "No missing immutable files were found.",
+        evidence_ids=["iev-one"],
+    )
+
+    prompt = build_incident_ai_prompt(report, phase="final", probe_results=[result])
+
+    assert "No missing immutable files were found." in prompt
+    assert '"available_probes": []' in prompt
+    assert "Do not request more probes" in prompt
+
+
 def test_ai_invalid_json_is_nonblocking(monkeypatch):
     monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
     monkeypatch.setenv("AURASCAN_AI_PROVIDER", "openai")
@@ -344,6 +400,40 @@ def test_ai_invalid_json_is_nonblocking(monkeypatch):
     )
 
     assert report.ai_review["status"] == "invalid_response"
+
+
+def test_final_ai_failure_keeps_valid_triage_and_verified_plan(monkeypatch):
+    monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
+    monkeypatch.setenv("AURASCAN_AI_PROVIDER", "openai")
+    monkeypatch.setenv("AURASCAN_OPENAI_API_KEY", "fixture-only")
+    action = RepairAction("ira-known", "fixture", "Repair", "summary", Severity.LOW, eligible=True, verified=True)
+    report = minimal_report(repair_actions=[action])
+    report.ai_review = {
+        "enabled": True,
+        "provider": "openai",
+        "status": "ok",
+        "summary": "triage summary",
+        "likely_causes": [],
+        "recommended_action_ids": [],
+        "requested_probe_ids": [],
+        "triage": {
+            "status": "ok",
+            "summary": "triage summary",
+            "likely_causes": [],
+            "recommended_action_ids": [],
+            "requested_probe_ids": [],
+        },
+    }
+
+    apply_ai_incident_review(
+        report,
+        phase="final",
+        urlopen=lambda _request, timeout: FakeResponse({"choices": [{"message": {"content": "not-json"}}]}),
+    )
+
+    assert report.ai_review["status"] == "triage_only"
+    assert report.ai_review["summary"] == "triage summary"
+    assert report.eligible_actions == [action]
 
 
 def test_ai_response_requires_strict_top_level_types():
@@ -442,7 +532,22 @@ def test_report_persistence_permissions_history_and_marker_privacy(tmp_path):
     assert "private-package" not in marker_text
     marker_payloads = pending_markers(uid=1000, root=marker_root)
     assert {item["uid_scope"] for item in marker_payloads} == {"global", "1000"}
-    assert all(set(item) == {"marker_type", "scan_id", "boot_id", "uid_scope", "severity", "categories", "count", "repeated"} for item in marker_payloads)
+    expected_keys = {
+        "schema",
+        "marker_type",
+        "scan_id",
+        "boot_id",
+        "uid_scope",
+        "severity",
+        "categories",
+        "category_severities",
+        "resolved_categories",
+        "auto_repair_state",
+        "count",
+        "repeated",
+        "active_categories",
+    }
+    assert all(set(item) == expected_keys for item in marker_payloads)
 
 
 def test_pending_notification_seen_state_is_per_user(tmp_path):
@@ -667,7 +772,7 @@ def test_json_yes_emits_post_repair_report_once(monkeypatch, tmp_path):
 
     payload = json.loads(stdout.getvalue())
     assert status == 0
-    assert payload["schema"] == "incident_report/1.1"
+    assert payload["schema"] == "incident_report/1.3"
     assert payload["repair_results"][0]["status"] == "applied"
     assert payload["post_repair"]["collection_status"] == "complete"
 
@@ -759,16 +864,21 @@ def test_default_yes_is_disabled_for_truncated_or_unresolved_high_risk_reports()
     assert unavailable_dkms.apply_prompt_default_yes is False
 
 
-def test_incident_report_1_0_remains_loadable_after_schema_upgrade():
-    payload = minimal_report().to_dict()
-    payload["schema"] = "incident_report/1.0"
-    payload["schema_version"] = "1.0"
-    payload.pop("scan_window", None)
+def test_incident_report_1_0_and_1_1_remain_loadable_after_schema_upgrade():
+    for version in ("1.0", "1.1"):
+        payload = minimal_report().to_dict()
+        payload["schema"] = f"incident_report/{version}"
+        payload["schema_version"] = version
+        payload.pop("automation", None)
+        if version == "1.0":
+            payload.pop("scan_window", None)
 
-    loaded = IncidentReport.from_dict(payload)
+        loaded = IncidentReport.from_dict(payload)
 
-    assert loaded.schema_version == "1.0"
-    assert loaded.scan_window == {}
+        assert loaded.schema_version == version
+        assert loaded.automation == {}
+        if version == "1.0":
+            assert loaded.scan_window == {}
 
 
 def test_incremental_journal_uses_cursor_fixed_window_and_detects_backlog():

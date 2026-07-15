@@ -4,13 +4,34 @@ from pathlib import Path
 import sys
 from typing import List
 
-from aurascan.core.config import load_env
+from aurascan.core.config import load_env, user_env_path
 from aurascan.core.config_drift import run_config_drift
 from aurascan.core.engine import AuraScanEngine
 from aurascan.core.incidents import run_incidents
 from aurascan.core.upgrade_preflight import run_upgrade
 from aurascan.core.updater_tray import run_updater
 from aurascan.setup_wizard import run_doctor, run_init
+
+
+OFFLINE_INCIDENT_SERVICE_FLAGS = {
+    "--capture-monitor",
+    "--capture-maintenance",
+    "--capture-safe-autopilot",
+    "--safe-autopilot-enabled",
+    "--set-auto-repair-policy",
+    "--apply-request",
+}
+
+
+def load_command_environment(raw_argv: List[str]) -> None:
+    if raw_argv and raw_argv[0] == "incidents":
+        incident_args = set(raw_argv[1:])
+        if "--background-assist" in incident_args:
+            load_env(paths=[user_env_path()])
+            return
+        if incident_args & OFFLINE_INCIDENT_SERVICE_FLAGS:
+            return
+    load_env()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -102,7 +123,7 @@ def scan_pacman_hook_targets(engine: AuraScanEngine, targets: List[str], *, cach
 
 def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
-    load_env()
+    load_command_environment(raw_argv)
     if raw_argv and raw_argv[0] == "init":
         sys.exit(run_init(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "doctor":

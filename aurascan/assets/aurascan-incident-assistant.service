@@ -1,36 +1,30 @@
 [Unit]
-Description=AuraScan weekly incident maintenance scan
+Description=AuraScan logged-in background incident AI assistant
 Documentation=https://github.com/crizzler/AuraScan
-ConditionPathExists=/usr/bin/journalctl
-OnSuccess=aurascan-incident-safe-autopilot.service
+ConditionPathExists=/usr/bin/aurascan
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/aurascan incidents --current-boot --capture-maintenance
-User=root
-Group=root
+ExecStart=/usr/bin/aurascan incidents --background-assist
 UMask=0077
-UnsetEnvironment=AURASCAN_AI_KEY AURASCAN_OPENAI_API_KEY AURASCAN_ANTHROPIC_API_KEY AURASCAN_DEEPSEEK_API_KEY AURASCAN_GEMINI_API_KEY AURASCAN_OPENROUTER_API_KEY
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 PrivateTmp=yes
-PrivateNetwork=yes
 PrivateDevices=yes
 ProtectSystem=strict
-ProtectHome=yes
+ProtectHome=read-only
 ProtectClock=yes
 ProtectHostname=yes
 ProtectControlGroups=yes
 ProtectKernelLogs=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
-ProtectProc=invisible
+ProtectProc=ptraceable
 ProcSubset=pid
-ReadWritePaths=/var/lib/aurascan/incidents
-StateDirectory=aurascan/incidents
-StateDirectoryMode=0755
-RestrictAddressFamilies=AF_UNIX
+StateDirectory=aurascan
+StateDirectoryMode=0700
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
@@ -39,9 +33,9 @@ MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @privileged @raw-io @reboot @swap
 SystemCallErrorNumber=EPERM
-IPAddressDeny=any
-TimeoutStartSec=120
+TimeoutStartSec=300
 Nice=15
 CPUWeight=10
 IOWeight=10
 IOSchedulingClass=idle
+Environment=PYTHONDONTWRITEBYTECODE=1

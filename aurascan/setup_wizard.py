@@ -42,6 +42,7 @@ from aurascan.core.incidents import (
     INCIDENT_AI_ENABLED_ENV,
     INCIDENT_AI_EVIDENCE_ENV,
     INCIDENT_AI_EVIDENCE_VALUES,
+    INCIDENT_BACKGROUND_AI_ENV,
     INCIDENT_MONITOR_ENABLED_ENV,
     INCIDENT_MAINTENANCE_SERVICE,
     INCIDENT_MAINTENANCE_TIMER,
@@ -53,6 +54,21 @@ from aurascan.core.incidents import (
     resolve_incident_config,
     run_bounded_command,
     set_incident_monitor_enabled,
+    user_incident_root,
+)
+from aurascan.core.incident_automation import (
+    INCIDENT_AUTO_REPAIR_POLICY_PATH,
+    INCIDENT_AUTO_REPAIR_VALUES,
+    INCIDENT_SAFE_AUTOPILOT_SERVICE,
+    INCIDENT_USER_UNIT_ROOT,
+    background_result_path,
+    background_state_path,
+    background_unit_status,
+    configure_auto_repair_policy,
+    load_private_json,
+    read_auto_repair_policy,
+    safe_automation_paths,
+    set_background_ai_enabled,
 )
 from aurascan.core.upgrade_preflight import (
     UPGRADE_AUR_HELPERS,
@@ -141,6 +157,10 @@ def build_init_parser() -> argparse.ArgumentParser:
     incident_ai.add_argument("--enable-incident-ai", action="store_true", help="enable AI explanation for user-opened incident scans")
     incident_ai.add_argument("--disable-incident-ai", action="store_true", help="disable AI explanation for incident scans")
     parser.add_argument("--incident-ai-evidence", choices=sorted(INCIDENT_AI_EVIDENCE_VALUES), help="evidence policy for user-opened incident AI reviews")
+    incident_background_ai = parser.add_mutually_exclusive_group()
+    incident_background_ai.add_argument("--enable-incident-background-ai", action="store_true", help="enable logged-in background incident AI analysis")
+    incident_background_ai.add_argument("--disable-incident-background-ai", action="store_true", help="disable logged-in background incident AI analysis")
+    parser.add_argument("--incident-auto-repair", choices=sorted(INCIDENT_AUTO_REPAIR_VALUES), help="system-wide deterministic incident repair policy")
     updater = parser.add_mutually_exclusive_group()
     updater.add_argument("--enable-updater-tray", action="store_true", help="enable the AuraScan Updater tray icon")
     updater.add_argument("--disable-updater-tray", action="store_true", help="disable the AuraScan Updater tray icon")
@@ -247,6 +267,9 @@ def run_init(
         or args.enable_incident_ai
         or args.disable_incident_ai
         or args.incident_ai_evidence is not None
+        or args.enable_incident_background_ai
+        or args.disable_incident_background_ai
+        or args.incident_auto_repair is not None
         or args.install_hook
         or args.no_install_hook
     )
@@ -336,9 +359,15 @@ def run_init(
         or args.enable_incident_ai
         or args.disable_incident_ai
         or args.incident_ai_evidence is not None
+        or args.enable_incident_background_ai
+        or args.disable_incident_background_ai
+        or args.incident_auto_repair is not None
     )
     should_prompt_incidents = should_prompt_upgrade
     incident_monitor_action = ""
+    incident_background_action = ""
+    incident_auto_repair_action = ""
+    incident_previous_auto_repair = "off"
     if configure_incidents or should_prompt_incidents:
         existing_incidents = resolve_incident_config(existing)
         monitor_service_installed = (Path("/usr/lib/systemd/system") / INCIDENT_MONITOR_SERVICE).exists()
@@ -379,9 +408,46 @@ def run_init(
 
         evidence_policy = existing_incidents.ai_evidence if not existing_incidents.error else "redacted"
         evidence_policy = args.incident_ai_evidence or evidence_policy
+        background_ai_enabled = existing_incidents.background_ai_enabled if not existing_incidents.error else False
+        if args.enable_incident_background_ai:
+            background_ai_enabled = True
+            incident_background_action = "enable"
+        elif args.disable_incident_background_ai:
+            background_ai_enabled = False
+            incident_background_action = "disable"
+        elif should_prompt_incidents and incident_ai_enabled:
+            background_ai_enabled = _prompt_yes_no(
+                "Analyze new incident findings with AI in the background while you are logged in?",
+                input_func,
+                default=background_ai_enabled,
+            )
+            if background_ai_enabled:
+                incident_background_action = "enable"
+            elif existing_incidents.background_ai_enabled:
+                incident_background_action = "disable"
+        elif not incident_ai_enabled:
+            background_ai_enabled = False
+            if existing_incidents.background_ai_enabled:
+                incident_background_action = "disable"
+
+        current_auto_repair = read_auto_repair_policy()
+        incident_previous_auto_repair = current_auto_repair.policy if not current_auto_repair.error else "off"
+        auto_repair_policy = current_auto_repair.policy if not current_auto_repair.error else "off"
+        if args.incident_auto_repair is not None:
+            auto_repair_policy = args.incident_auto_repair
+            incident_auto_repair_action = auto_repair_policy
+        elif should_prompt_incidents and monitor_enabled:
+            auto_repair_policy = "safe" if _prompt_yes_no(
+                "Allow Safe Autopilot to apply only reversible stale-lock and mirrorlist repairs?",
+                input_func,
+                default=auto_repair_policy == "safe",
+            ) else "off"
+            if auto_repair_policy != current_auto_repair.policy or current_auto_repair.error:
+                incident_auto_repair_action = auto_repair_policy
         updates[INCIDENT_MONITOR_ENABLED_ENV] = "1" if monitor_enabled else "0"
         updates[INCIDENT_AI_ENABLED_ENV] = "1" if incident_ai_enabled else "0"
         updates[INCIDENT_AI_EVIDENCE_ENV] = evidence_policy
+        updates[INCIDENT_BACKGROUND_AI_ENV] = "1" if background_ai_enabled else "0"
         print("Configured Incident Recovery Assistant defaults.", file=stdout)
 
     configure_updater = (
@@ -432,6 +498,12 @@ def run_init(
     write_user_env(updates, path=target_env)
     print(f"Wrote user config: {target_env}", file=stdout)
 
+    if incident_auto_repair_action:
+        auto_ok, auto_message = configure_auto_repair_policy(incident_auto_repair_action, runner=runner)
+        print(auto_message, file=stdout if auto_ok else stderr)
+        if not auto_ok:
+            return 1
+
     if incident_monitor_action:
         desired = incident_monitor_action == "enable"
         monitor_ok, monitor_message = set_incident_monitor_enabled(desired, runner=runner)
@@ -439,6 +511,17 @@ def run_init(
         if not monitor_ok:
             previous = existing.get(INCIDENT_MONITOR_ENABLED_ENV, "0")
             write_user_env({INCIDENT_MONITOR_ENABLED_ENV: previous}, path=target_env)
+            if incident_auto_repair_action and incident_auto_repair_action != incident_previous_auto_repair:
+                configure_auto_repair_policy(incident_previous_auto_repair, runner=runner)
+            return 1
+
+    if incident_background_action:
+        desired = incident_background_action == "enable"
+        background_ok, background_message = set_background_ai_enabled(desired, runner=runner, env_path=target_env)
+        print(background_message, file=stdout if background_ok else stderr)
+        if not background_ok:
+            previous = existing.get(INCIDENT_BACKGROUND_AI_ENV, "0")
+            write_user_env({INCIDENT_BACKGROUND_AI_ENV: previous}, path=target_env)
             return 1
 
     updater_paths = updater_desktop_paths(config_home=updater_config_home, data_home=updater_data_home)
@@ -507,6 +590,11 @@ def run_doctor(
     incident_maintenance_service_path: Path = Path("/usr/lib/systemd/system") / INCIDENT_MAINTENANCE_SERVICE,
     incident_maintenance_timer_path: Path = Path("/usr/lib/systemd/system") / INCIDENT_MAINTENANCE_TIMER,
     incident_system_root: Path = INCIDENT_SYSTEM_ROOT,
+    incident_background_unit_root: Path = INCIDENT_USER_UNIT_ROOT,
+    incident_safe_service_path: Path = Path("/usr/lib/systemd/system") / INCIDENT_SAFE_AUTOPILOT_SERVICE,
+    incident_auto_repair_policy_path: Path = INCIDENT_AUTO_REPAIR_POLICY_PATH,
+    incident_auto_repair_policy_uid: int = 0,
+    incident_user_root: Optional[Path] = None,
     journal_root: Path = Path("/var/log/journal"),
     pstore_root: Path = Path("/sys/fs/pstore"),
 ) -> int:
@@ -530,6 +618,11 @@ def run_doctor(
         incident_maintenance_service_path=incident_maintenance_service_path,
         incident_maintenance_timer_path=incident_maintenance_timer_path,
         incident_system_root=incident_system_root,
+        incident_background_unit_root=incident_background_unit_root,
+        incident_safe_service_path=incident_safe_service_path,
+        incident_auto_repair_policy_path=incident_auto_repair_policy_path,
+        incident_auto_repair_policy_uid=incident_auto_repair_policy_uid,
+        incident_user_root=incident_user_root,
         journal_root=journal_root,
         pstore_root=pstore_root,
     )
@@ -565,6 +658,11 @@ def build_doctor_checks(
     incident_maintenance_service_path: Path = Path("/usr/lib/systemd/system") / INCIDENT_MAINTENANCE_SERVICE,
     incident_maintenance_timer_path: Path = Path("/usr/lib/systemd/system") / INCIDENT_MAINTENANCE_TIMER,
     incident_system_root: Path = INCIDENT_SYSTEM_ROOT,
+    incident_background_unit_root: Path = INCIDENT_USER_UNIT_ROOT,
+    incident_safe_service_path: Path = Path("/usr/lib/systemd/system") / INCIDENT_SAFE_AUTOPILOT_SERVICE,
+    incident_auto_repair_policy_path: Path = INCIDENT_AUTO_REPAIR_POLICY_PATH,
+    incident_auto_repair_policy_uid: int = 0,
+    incident_user_root: Optional[Path] = None,
     journal_root: Path = Path("/var/log/journal"),
     pstore_root: Path = Path("/sys/fs/pstore"),
 ) -> List[DoctorCheck]:
@@ -719,6 +817,7 @@ def build_doctor_checks(
                 "ai_review_enabled": incident_config.ai_enabled,
                 "ai_evidence": incident_config.ai_evidence,
                 "monitor_config_enabled": incident_config.monitor_enabled,
+                "background_ai_enabled": incident_config.background_ai_enabled,
             },
         ))
         if incident_config.monitor_enabled and monitor_state["installed"] and monitor_state["enabled"] in {"enabled", "enabled-runtime", "linked"}:
@@ -782,6 +881,121 @@ def build_doctor_checks(
         else:
             checks.append(DoctorCheck("incident_maintenance_health", "ok", "Weekly incident maintenance health is inactive"))
 
+        background_units = background_unit_status(runner=runner, unit_root=incident_background_unit_root)
+        report_root = incident_user_root or user_incident_root(effective_env)
+        background_state = load_private_json(background_state_path(report_root))
+        background_result = load_private_json(background_result_path(report_root))
+        raw_marker_retries = background_state.get("markers", {})
+        marker_retries = raw_marker_retries.values() if isinstance(raw_marker_retries, Mapping) else []
+        retry_times = [
+            int(item.get("next_retry_usec") or 0)
+            for item in marker_retries
+            if isinstance(item, Mapping) and int(item.get("next_retry_usec") or 0) > 0
+        ]
+        provider_ready = bool(
+            not ai_config.error
+            and ai_config.enabled
+            and ai_config.api_key_present
+            and incident_config.ai_enabled
+        )
+        background_details = {
+            "enabled": incident_config.background_ai_enabled,
+            "provider_ready": provider_ready,
+            "evidence_mode": incident_config.ai_evidence,
+            "units": background_units,
+            "last_status": background_state.get("last_status", "never"),
+            "last_attempt_usec": int(background_state.get("last_attempt_usec") or 0),
+            "last_success_usec": int(background_state.get("last_success_usec") or 0),
+            "last_error": str(background_state.get("last_error") or "")[:500],
+            "next_retry_usec": min(retry_times) if retry_times else 0,
+            "last_prepared_repair_count": int(background_result.get("prepared_repair_count") or 0),
+            "last_planner_status": str(background_result.get("planner_status") or "never"),
+            "last_provider_requests": int(background_result.get("provider_requests") or 0),
+            "last_completed_probe_count": int(background_result.get("completed_probe_count") or 0),
+            "last_analysis_fingerprint_present": bool(background_result.get("analysis_fingerprint")),
+            "last_plan_fingerprint_present": bool(background_result.get("repair_plan_fingerprint")),
+        }
+        timer_ready = bool(
+            background_units.get("installed")
+            and background_units.get("timer_enabled") in {"enabled", "enabled-runtime", "linked"}
+            and background_units.get("timer_active") == "active"
+        )
+        if not incident_config.background_ai_enabled:
+            checks.append(DoctorCheck(
+                "incident_background_ai",
+                "ok",
+                "Background incident AI is disabled (separate opt-in)",
+                background_details,
+            ))
+        elif provider_ready and timer_ready:
+            checks.append(DoctorCheck(
+                "incident_background_ai",
+                "ok",
+                "Background incident AI is provider-ready and its user timer is active",
+                background_details,
+            ))
+        elif not provider_ready:
+            checks.append(DoctorCheck(
+                "incident_background_ai",
+                "warn",
+                "Background incident AI is enabled, but the incident AI provider or API key is not ready",
+                background_details,
+            ))
+        else:
+            checks.append(DoctorCheck(
+                "incident_background_ai",
+                "warn",
+                "Background incident AI is enabled, but its user service and timer are not fully ready",
+                background_details,
+            ))
+
+        auto_policy = read_auto_repair_policy(
+            incident_auto_repair_policy_path,
+            required_uid=incident_auto_repair_policy_uid,
+        )
+        _safe_state_path, safe_status_path, _safe_lock_path = safe_automation_paths(incident_system_root)
+        safe_status = load_private_json(safe_status_path)
+        auto_details = {
+            "policy": auto_policy.policy,
+            "policy_path": str(auto_policy.path),
+            "service_path": str(incident_safe_service_path),
+            "service_installed": incident_safe_service_path.is_file(),
+            "last_state": safe_status.get("state", "never"),
+            "last_attempt_usec": int(safe_status.get("last_attempt_usec") or 0),
+            "last_success_usec": int(safe_status.get("last_success_usec") or 0),
+            "last_action_count": int(safe_status.get("action_count") or 0),
+        }
+        if auto_policy.error:
+            checks.append(DoctorCheck("incident_safe_autopilot", "error", auto_policy.error, auto_details))
+        elif auto_policy.policy == "off":
+            checks.append(DoctorCheck(
+                "incident_safe_autopilot",
+                "ok",
+                "Incident Safe Autopilot is disabled (default)",
+                auto_details,
+            ))
+        elif not incident_safe_service_path.is_file():
+            checks.append(DoctorCheck(
+                "incident_safe_autopilot",
+                "warn",
+                f"Incident Safe Autopilot is enabled, but {incident_safe_service_path} is not installed",
+                auto_details,
+            ))
+        elif safe_status.get("state") == "failed":
+            checks.append(DoctorCheck(
+                "incident_safe_autopilot",
+                "warn",
+                "Incident Safe Autopilot is enabled, but its last reversible repair did not verify successfully",
+                auto_details,
+            ))
+        else:
+            checks.append(DoctorCheck(
+                "incident_safe_autopilot",
+                "ok",
+                "Incident Safe Autopilot is ready for stale-lock and verified mirrorlist recovery",
+                auto_details,
+            ))
+
     if which("journalctl"):
         journal_probe = run_bounded_command(runner, ["journalctl", "--list-boots", "--no-pager"], max_chars=16000, timeout=15)
         journal_access = journal_probe.returncode == 0
@@ -825,6 +1039,21 @@ def build_doctor_checks(
         "ok" if "pacman" in repair_tools and "systemctl" in repair_tools else "warn",
         "Incident repair tools found: " + (", ".join(repair_tools) if repair_tools else "none"),
         {"found": repair_tools},
+    ))
+    guided_probe_tools = [name for name in ("pacman", "pacman-key", "systemctl", "dkms", "mkinitcpio", "dracut", "paccache") if which(name)]
+    guided_ready = "pacman" in guided_probe_tools and "systemctl" in guided_probe_tools
+    checks.append(DoctorCheck(
+        "incident_ai_repair_planner",
+        "ok" if guided_ready else "warn",
+        "AI-guided repair probes are ready for two-pass incident analysis"
+        if guided_ready else
+        "AI-guided repair probes have limited coverage because pacman or systemctl is unavailable",
+        {
+            "two_pass_enabled_with_incident_ai": True,
+            "background_prepare_only": True,
+            "probe_tools": guided_probe_tools,
+            "maximum_provider_requests": 2,
+        },
     ))
 
     updater_status = build_updater_status(

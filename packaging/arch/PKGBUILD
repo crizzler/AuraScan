@@ -1,7 +1,7 @@
 # Maintainer: AuraScan maintainers
 
 pkgname=aurascan
-pkgver=0.4.0
+pkgver=0.5.0
 pkgrel=1
 pkgdesc="AI-assisted safety layer for Arch-family package, AUR, and upgrade workflows"
 arch=('any')
@@ -23,7 +23,7 @@ optdepends=(
   'pacman-contrib: bounded package-cache cleanup for incident recovery'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('86df978d45a13368550a78a06504b9557f19d3dc103f7276b18082aefc292a92')
+sha256sums=('SKIP')
 
 build() {
   cd "AuraScan-$pkgver"
@@ -47,8 +47,12 @@ package() {
   install -Dm644 aurascan/assets/aurascan-incident-monitor.service "$pkgdir/usr/lib/systemd/system/aurascan-incident-monitor.service"
   install -Dm644 aurascan/assets/aurascan-incident-maintenance.service "$pkgdir/usr/lib/systemd/system/aurascan-incident-maintenance.service"
   install -Dm644 aurascan/assets/aurascan-incident-maintenance.timer "$pkgdir/usr/lib/systemd/system/aurascan-incident-maintenance.timer"
+  install -Dm644 aurascan/assets/aurascan-incident-safe-autopilot.service "$pkgdir/usr/lib/systemd/system/aurascan-incident-safe-autopilot.service"
+  install -Dm644 aurascan/assets/aurascan-incident-assistant.service "$pkgdir/usr/lib/systemd/user/aurascan-incident-assistant.service"
+  install -Dm644 aurascan/assets/aurascan-incident-assistant.timer "$pkgdir/usr/lib/systemd/user/aurascan-incident-assistant.timer"
   install -Dm644 aurascan/assets/aurascan-incidents.conf "$pkgdir/usr/lib/tmpfiles.d/aurascan-incidents.conf"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 DEVELOPING.md "$pkgdir/usr/share/doc/$pkgname/DEVELOPING.md"
   install -Dm644 docs/RELEASE_CHECKLIST.md "$pkgdir/usr/share/doc/$pkgname/RELEASE_CHECKLIST.md"
+  install -Dm644 docs/PRIVACY.md "$pkgdir/usr/share/doc/$pkgname/PRIVACY.md"
 }

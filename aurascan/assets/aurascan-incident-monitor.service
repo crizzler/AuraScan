@@ -4,6 +4,7 @@ Documentation=https://github.com/crizzler/AuraScan
 After=systemd-journal-flush.service
 Wants=systemd-journal-flush.service
 ConditionPathExists=/usr/bin/journalctl
+OnSuccess=aurascan-incident-safe-autopilot.service
 
 [Service]
 Type=oneshot
@@ -11,6 +12,7 @@ ExecStart=/usr/bin/aurascan incidents --last-boot --capture-monitor
 User=root
 Group=root
 UMask=0077
+UnsetEnvironment=AURASCAN_AI_KEY AURASCAN_OPENAI_API_KEY AURASCAN_ANTHROPIC_API_KEY AURASCAN_DEEPSEEK_API_KEY AURASCAN_GEMINI_API_KEY AURASCAN_OPENROUTER_API_KEY
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=

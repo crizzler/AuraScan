@@ -64,6 +64,40 @@ def test_stale_lock_plan_requires_age_and_no_package_manager(tmp_path):
     assert plan_stale_lock(lock, proc_root=proc) is None
 
 
+def test_background_repository_restore_refuses_an_active_package_manager(monkeypatch, tmp_path):
+    action = make_action(
+        "repository_restore",
+        "Restore mirrors",
+        "verified",
+        Severity.MEDIUM,
+        {
+            "pacman_conf_path": "/etc/pacman.conf",
+            "targets": ["/etc/pacman.d/mirrorlist"],
+            "category": "repository",
+        },
+        [["install", "backup", "target"]],
+        reversible=True,
+    )
+    monkeypatch.setattr(incident_repairs, "is_background_safe_action", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(incident_repairs, "package_manager_processes", lambda *_args, **_kwargs: ["pacman"])
+    monkeypatch.setattr(
+        incident_repairs,
+        "apply_repository_health_repairs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("repository files were changed")),
+    )
+
+    result = execute_repository_restore(
+        action,
+        runner=FakeRunner(),
+        which=fake_which({"pacman"}),
+        run_root=tmp_path / "repair",
+        background_safe=True,
+    )
+
+    assert result.status == "refused"
+    assert "package manager is active" in result.message
+
+
 def test_service_restart_denylist_blocks_critical_and_malformed_units():
     assert plan_service_restart("display-manager.service") is None
     assert plan_service_restart("sddm.service") is None

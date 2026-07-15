@@ -49,21 +49,35 @@ candidate.
 - Pacman hook failure recovery is documented.
 - `aurascan-makepkg` is documented as build-time protection.
 - Pacman hook is documented as archive/install-stage protection.
-- Incident monitor is installed disabled and has no network access.
-- Incident monitor performs no background AI requests or repairs.
+- Incident root collectors are installed disabled, have no network access, and
+  perform no AI requests or repairs themselves.
 - Weekly incident timer is installed disabled, persistent, randomized, and
   coupled to the wizard's incident-monitor setting.
+- Background incident AI has a separate per-user opt-in, runs only in a user
+  session, and has no privilege escalation or writable system paths.
+- AI-guided incident planning accepts only locally generated opaque probe IDs,
+  runs no more than 12 bounded read-only probes, and makes no more than two
+  provider requests per incident.
+- Background prepared plans remain private, expire after six hours, and refresh
+  probes plus root-side preconditions before any confirmed execution.
+- Safe Autopilot defaults to `off`, has no network or AI credentials, and
+  accepts only stale-lock and verified mirrorlist restoration recipes.
+- AI output cannot authorize, create, execute, or mark a repair successful.
+- Safe Autopilot refuses incomplete/HIGH-risk reports, limits each run to two
+  actions, and enforces a 24-hour identical-action cooldown.
 - Weekly checkpoint is root-only; public status contains timing and collection
   health only.
 - Incident pending markers contain only marker type, scan ID, boot ID, UID
-  scope, severity, categories, count, and repeated state; no crash evidence,
-  package names, application names, or commands.
+  scope, category severities, resolved categories, coarse repair state, count,
+  and repeated state; no evidence, paths, AI text, package/application names,
+  or commands.
 - Clean weekly scans are silent; only HIGH/CRITICAL or repeated crashes notify.
 - The tray exposes one incident-resolution action and clearly distinguishes
   repaired findings from reviewed historical evidence.
 - Incident repair actions are allowlisted and freshly revalidated as root.
 - AI-generated commands and fabricated incident evidence/action IDs are
   rejected.
+- Fabricated diagnostic probe IDs and provider-supplied targets are rejected.
 
 ## Defaults
 
@@ -94,6 +108,8 @@ candidate.
   are installed without enabling per-user autostart automatically.
 - If the incident monitor is packaged, its systemd service and tmpfiles rules
   are installed without enabling or starting the service automatically.
+- User AI and Safe Autopilot units are packaged without enabling either, and
+  package scripts never write the system repair policy.
 - Package data or package files include the hook template only when intended.
 - Root-level development hooks are not accidentally packaged.
 

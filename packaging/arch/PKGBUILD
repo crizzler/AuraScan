@@ -23,7 +23,7 @@ optdepends=(
   'pacman-contrib: bounded package-cache cleanup for incident recovery'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('9094d43441320e33f8b2372dd746d49b8e5a00b8987a0a476817bf71c474609e')
 
 build() {
   cd "AuraScan-$pkgver"

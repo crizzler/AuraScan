@@ -22,6 +22,6 @@ pkgbase = aurascan
 	optdepends = python-pyqt6: AuraScan Updater tray applet
 	optdepends = pacman-contrib: bounded package-cache cleanup for incident recovery
 	source = aurascan-0.5.0.tar.gz::https://github.com/crizzler/AuraScan/archive/refs/tags/v0.5.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 9094d43441320e33f8b2372dd746d49b8e5a00b8987a0a476817bf71c474609e
 
 pkgname = aurascan

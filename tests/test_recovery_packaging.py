@@ -113,7 +113,7 @@ def test_iso_builder_layers_aurascan_onto_the_maintained_archiso_profile():
     assert 'cp -a "$archiso_base"/. "$profile"/' in builder
     assert 'cp -a "$profile_source"/airootfs/. "$profile"/airootfs/' in builder
     assert 'cat "$profile_source/profiledef.sh" >> "$profile/profiledef.sh"' in builder
-    assert "sed -i '/^linux$/d'" in builder
+    assert "sed -i -e '/^linux$/d' -e '/^broadcom-wl$/d'" in builder
     assert 'sort -u -o "$profile/packages.x86_64"' in builder
     assert "multi-user.target.wants/aurascan-recovery.service" in builder
     assert 'getty@tty1.service"' in builder

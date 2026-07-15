@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +46,7 @@ INCIDENT_MAX_LOCAL_EVIDENCE_CHARS = 256 * 1024
 INCIDENT_MAX_COREDUMPS = 200
 INCIDENT_MAX_AI_EVIDENCE = 80
 INCIDENT_MAX_AI_CHARS = 12000
+INCIDENT_AI_TIMEOUT_SECONDS = 60
 INCIDENT_COLLECTION_PROGRESS_STEPS = 7
 INCIDENT_ANALYSIS_PROGRESS_STEPS = 12
 INCIDENT_RETENTION_DAYS = 30
@@ -710,9 +712,37 @@ class IncidentReport:
             summary = str(self.ai_review.get("summary") or "")
             final_phase = self.ai_review.get("final", {})
             phase_label = "two-pass" if isinstance(final_phase, Mapping) and final_phase.get("status") == "ok" else "triage"
-            lines.append("\nAI review: " + status + (f", {phase_label}" if status in {"ok", "triage_only"} else "") + (f" ({provider})" if provider else ""))
+            status_label = {
+                "timeout": "timed out",
+                "provider_error": "provider unavailable",
+                "invalid_response": "response could not be validated",
+            }.get(status, status)
+            lines.append("\nAI review: " + status_label + (f", {phase_label}" if status in {"ok", "triage_only"} else "") + (f" ({provider})" if provider else ""))
             if summary:
                 lines.append(summary)
+            if status == "timeout":
+                lines.append(
+                    f"The AI provider did not answer within {INCIDENT_AI_TIMEOUT_SECONDS} seconds. "
+                    "Deterministic diagnostics and verified repair checks still completed; AuraScan accepted no AI-generated command."
+                )
+            elif status == "provider_error":
+                lines.append(
+                    "The AI provider could not complete this review. Deterministic diagnostics and verified repair checks remain available."
+                )
+            elif status == "invalid_response":
+                lines.append(
+                    "The AI response did not match AuraScan's guarded JSON contract and was ignored. Deterministic diagnostics remain authoritative."
+                )
+            elif status == "triage_only" and isinstance(final_phase, Mapping):
+                final_status = str(final_phase.get("status") or "")
+                if final_status == "timeout":
+                    lines.append(
+                        "The final AI explanation timed out; the successful triage and independently verified local checks remain available."
+                    )
+                elif final_status in {"provider_error", "invalid_response"}:
+                    lines.append(
+                        "The final AI explanation was unavailable; the successful triage and independently verified local checks remain available."
+                    )
             causes = self.ai_review.get("likely_causes", [])
             if isinstance(causes, list) and causes:
                 lines.append("AI-correlated causes:")
@@ -2100,11 +2130,20 @@ def collect_pstore_evidence(root: Path = Path("/sys/fs/pstore")) -> Tuple[List[I
     errors = []
     try:
         paths = [path for path in sorted(root.iterdir()) if path.is_file()][:20]
+    except PermissionError as exc:
+        if os.geteuid() != 0:
+            return [], [], []
+        return [], [], [f"pstore could not be read: {sanitize_error(str(exc))}"]
     except OSError as exc:
         return [], [], [f"pstore could not be read: {sanitize_error(str(exc))}"]
     for path in paths:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")[:16384]
+        except PermissionError as exc:
+            if os.geteuid() != 0:
+                continue
+            errors.append(f"pstore entry {path.name} could not be read: {sanitize_error(str(exc))}")
+            continue
         except OSError as exc:
             errors.append(f"pstore entry {path.name} could not be read: {sanitize_error(str(exc))}")
             continue
@@ -2129,6 +2168,23 @@ def collect_pstore_evidence(root: Path = Path("/sys/fs/pstore")) -> Tuple[List[I
             [item.evidence_id],
         ))
     return evidence, findings, errors
+
+
+def classify_incident_ai_failure(exc: Exception) -> str:
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return "timeout"
+    if isinstance(exc, urllib.error.HTTPError):
+        return "provider_error"
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower():
+            return "timeout"
+        return "provider_error"
+    if isinstance(exc, (json.JSONDecodeError, ValueError, TypeError, KeyError)):
+        return "invalid_response"
+    if isinstance(exc, OSError):
+        return "provider_error"
+    return "provider_error"
 
 
 def apply_ai_incident_review(
@@ -2162,7 +2218,7 @@ def apply_ai_incident_review(
         probe_results=probe_results,
     )
     try:
-        text = call_ai_provider(config, prompt, timeout=25, urlopen=urlopen)
+        text = call_ai_provider(config, prompt, timeout=INCIDENT_AI_TIMEOUT_SECONDS, urlopen=urlopen)
         data = json.loads(text)
         if not isinstance(data, dict):
             raise ValueError("AI response was not a JSON object")
@@ -2182,10 +2238,11 @@ def apply_ai_incident_review(
             action_ids=visible_action_ids,
         )
     except Exception as exc:
+        failure_status = classify_incident_ai_failure(exc)
         failed_phase = {
             "enabled": True,
             "provider": config.provider,
-            "status": "invalid_response",
+            "status": failure_status,
             "error": sanitize_error(str(exc)),
         }
         existing = dict(report.ai_review) if isinstance(report.ai_review, Mapping) else {}

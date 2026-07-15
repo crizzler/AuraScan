@@ -223,7 +223,7 @@ def test_background_ai_processes_one_marker_once_without_repair_authority(monkey
     assert all(path.stat().st_mode & 0o777 == 0o600 for path in (background_result_path(user_root), background_state_path(user_root)))
 
 
-def test_background_ai_provider_failure_obeys_retry_window(monkeypatch, tmp_path):
+def test_background_ai_timeout_obeys_retry_window(monkeypatch, tmp_path):
     system_root = tmp_path / "system"
     user_root = tmp_path / "user"
     write_user_marker(system_root)
@@ -232,7 +232,7 @@ def test_background_ai_provider_failure_obeys_retry_window(monkeypatch, tmp_path
     monkeypatch.setattr(repairs, "plan_repair_actions", lambda *_args, **_kwargs: [])
 
     def fail_ai(report, **_kwargs):
-        report.ai_review = {"enabled": True, "status": "invalid_response", "error": "offline"}
+        report.ai_review = {"enabled": True, "status": "timeout", "error": "The read operation timed out"}
 
     monkeypatch.setattr(automation, "apply_ai_incident_review", fail_ai)
 

@@ -3,11 +3,13 @@ import json
 import os
 import subprocess
 import time
+import urllib.error
 from pathlib import Path
 
 from aurascan.core.incidents import (
     INCIDENT_AI_ENABLED_ENV,
     INCIDENT_AI_EVIDENCE_ENV,
+    INCIDENT_AI_TIMEOUT_SECONDS,
     INCIDENT_BACKGROUND_AI_ENV,
     INCIDENT_MAINTENANCE_SERVICE,
     INCIDENT_MAINTENANCE_TIMER,
@@ -31,6 +33,7 @@ from aurascan.core.incidents import (
     collect_coredumps,
     collect_incident_system_facts,
     collect_pacman_history,
+    collect_pstore_evidence,
     current_boot_id,
     list_incident_reports,
     load_maintenance_checkpoint,
@@ -402,6 +405,43 @@ def test_ai_invalid_json_is_nonblocking(monkeypatch):
     assert report.ai_review["status"] == "invalid_response"
 
 
+def test_ai_timeout_is_classified_and_explained_without_blocking(monkeypatch):
+    monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
+    monkeypatch.setenv("AURASCAN_AI_PROVIDER", "deepseek")
+    monkeypatch.setenv("AURASCAN_DEEPSEEK_API_KEY", "fixture-only")
+    report = minimal_report()
+    timeouts = []
+
+    def timeout_response(_request, timeout):
+        timeouts.append(timeout)
+        raise TimeoutError("The read operation timed out")
+
+    apply_ai_incident_review(report, urlopen=timeout_response)
+    rendered = report.render_terminal()
+
+    assert timeouts == [INCIDENT_AI_TIMEOUT_SECONDS]
+    assert report.ai_review["status"] == "timeout"
+    assert "AI review: timed out (deepseek)" in rendered
+    assert "Deterministic diagnostics and verified repair checks still completed" in rendered
+    assert "invalid_response" not in rendered
+
+
+def test_ai_transport_failure_is_not_mislabeled_as_invalid_json(monkeypatch):
+    monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
+    monkeypatch.setenv("AURASCAN_AI_PROVIDER", "openai")
+    monkeypatch.setenv("AURASCAN_OPENAI_API_KEY", "fixture-only")
+    report = minimal_report()
+
+    def unavailable(_request, timeout):
+        assert timeout == INCIDENT_AI_TIMEOUT_SECONDS
+        raise urllib.error.URLError("temporary network failure")
+
+    apply_ai_incident_review(report, urlopen=unavailable)
+
+    assert report.ai_review["status"] == "provider_error"
+    assert "AI review: provider unavailable (openai)" in report.render_terminal()
+
+
 def test_final_ai_failure_keeps_valid_triage_and_verified_plan(monkeypatch):
     monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
     monkeypatch.setenv("AURASCAN_AI_PROVIDER", "openai")
@@ -434,6 +474,43 @@ def test_final_ai_failure_keeps_valid_triage_and_verified_plan(monkeypatch):
     assert report.ai_review["status"] == "triage_only"
     assert report.ai_review["summary"] == "triage summary"
     assert report.eligible_actions == [action]
+
+
+def test_final_ai_timeout_keeps_valid_triage_and_explains_fallback(monkeypatch):
+    monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
+    monkeypatch.setenv("AURASCAN_AI_PROVIDER", "deepseek")
+    monkeypatch.setenv("AURASCAN_DEEPSEEK_API_KEY", "fixture-only")
+    action = RepairAction("ira-known", "fixture", "Repair", "summary", Severity.LOW, eligible=True, verified=True)
+    report = minimal_report(repair_actions=[action])
+    report.ai_review = {
+        "enabled": True,
+        "provider": "deepseek",
+        "status": "ok",
+        "summary": "triage summary",
+        "likely_causes": [],
+        "recommended_action_ids": [],
+        "requested_probe_ids": [],
+        "triage": {
+            "status": "ok",
+            "summary": "triage summary",
+            "likely_causes": [],
+            "recommended_action_ids": [],
+            "requested_probe_ids": [],
+        },
+    }
+
+    def timeout_response(_request, timeout):
+        assert timeout == INCIDENT_AI_TIMEOUT_SECONDS
+        raise TimeoutError("The read operation timed out")
+
+    apply_ai_incident_review(report, phase="final", urlopen=timeout_response)
+    rendered = report.render_terminal()
+
+    assert report.ai_review["status"] == "triage_only"
+    assert report.ai_review["final"]["status"] == "timeout"
+    assert report.ai_review["summary"] == "triage summary"
+    assert report.eligible_actions == [action]
+    assert "final AI explanation timed out" in rendered
 
 
 def test_ai_response_requires_strict_top_level_types():
@@ -699,6 +776,29 @@ def test_build_report_bounds_journal_and_records_pstore_fixture(tmp_path):
     assert [step for step, _label in progress] == list(range(1, 8))
     assert progress[0][1] == "Reading bounded system journal records"
     assert progress[-1][1] == "Finalizing and bounding diagnostic evidence"
+
+
+def test_unprivileged_pstore_denial_is_optional_but_root_denial_is_reported(monkeypatch, tmp_path):
+    pstore = tmp_path / "pstore"
+    pstore.mkdir()
+    original_iterdir = Path.iterdir
+
+    def denied(path):
+        if path == pstore:
+            raise PermissionError(13, "Permission denied", str(path))
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", denied)
+    monkeypatch.setattr("aurascan.core.incidents.os.geteuid", lambda: 1000)
+    evidence, findings, errors = collect_pstore_evidence(pstore)
+
+    assert evidence == findings == errors == []
+
+    monkeypatch.setattr("aurascan.core.incidents.os.geteuid", lambda: 0)
+    _evidence, _findings, root_errors = collect_pstore_evidence(pstore)
+
+    assert len(root_errors) == 1
+    assert "pstore could not be read" in root_errors[0]
 
 
 def test_cli_dry_run_never_invokes_repair(monkeypatch, tmp_path):

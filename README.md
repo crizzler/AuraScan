@@ -436,6 +436,12 @@ Interactive incident scans keep a stage indicator and elapsed timer visible
 while AuraScan reads the journal and coredumps, verifies repair recipes, and
 performs optional AI correlation. These honest stages replace a guessed
 percentage; JSON output and unattended monitor captures remain quiet.
+Each incident AI request has a 60-second response timeout and is not retried
+immediately. Timeouts, provider/network failures, and responses that fail the
+strict JSON contract are reported separately. In every case deterministic
+diagnostics and independently verified repairs remain usable. An unprivileged
+foreground scan silently skips root-only pstore access; the root monitor still
+reports a pstore permission failure because that indicates a collector problem.
 
 The optional root monitor is installed disabled. Its weekly timer is also
 installed disabled, and both are enabled together only through

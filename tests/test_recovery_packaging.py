@@ -62,6 +62,7 @@ def test_archiso_profile_is_hybrid_and_contains_no_credentials():
 
     assert "bios.syslinux" in profile
     assert "uefi.systemd-boot" in profile
+    assert "airootfs_image_tool_options=('-comp' 'xz' '-Xbcj' 'x86' '-b' '1M')" in profile
     assert "aurascan" in packages
     assert not re.search(r"AURASCAN_(?:AI|OPENAI|ANTHROPIC|DEEPSEEK|GEMINI|OPENROUTER)_KEY=", material)
     assert manifest["version"] == "0.6.0"

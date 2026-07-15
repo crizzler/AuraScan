@@ -1,7 +1,7 @@
 # Maintainer: AuraScan maintainers
 
 pkgname=aurascan
-pkgver=0.3.0
+pkgver=0.4.0
 pkgrel=1
 pkgdesc="AI-assisted safety layer for Arch-family package, AUR, and upgrade workflows"
 arch=('any')
@@ -23,7 +23,7 @@ optdepends=(
   'pacman-contrib: bounded package-cache cleanup for incident recovery'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('8357f4cedeaa85d21a45272311abfa89749b765bab6bcf334fe7fe60a56c68b2')
+sha256sums=('SKIP')
 
 build() {
   cd "AuraScan-$pkgver"

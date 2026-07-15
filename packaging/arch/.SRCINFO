@@ -1,6 +1,6 @@
 pkgbase = aurascan
 	pkgdesc = AI-assisted safety layer for Arch-family package, AUR, and upgrade workflows
-	pkgver = 0.3.0
+	pkgver = 0.4.0
 	pkgrel = 1
 	url = https://github.com/crizzler/AuraScan
 	install = aurascan.install
@@ -21,7 +21,7 @@ pkgbase = aurascan
 	optdepends = shelly: optional Shelly update handoff for aurascan upgrade
 	optdepends = python-pyqt6: AuraScan Updater tray applet
 	optdepends = pacman-contrib: bounded package-cache cleanup for incident recovery
-	source = aurascan-0.3.0.tar.gz::https://github.com/crizzler/AuraScan/archive/refs/tags/v0.3.0.tar.gz
-	sha256sums = 8357f4cedeaa85d21a45272311abfa89749b765bab6bcf334fe7fe60a56c68b2
+	source = aurascan-0.4.0.tar.gz::https://github.com/crizzler/AuraScan/archive/refs/tags/v0.4.0.tar.gz
+	sha256sums = SKIP
 
 pkgname = aurascan

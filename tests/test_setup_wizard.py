@@ -3,6 +3,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import aurascan.core.recovery_cli as recovery_cli
 import aurascan.setup_wizard as setup_wizard
 from aurascan.setup_wizard import (
     build_doctor_checks,
@@ -168,7 +169,9 @@ def test_init_can_explicitly_install_recovery_with_separate_consent(tmp_path):
     assert "--refresh-policy" in install
 
 
-def test_doctor_reports_optional_recovery_state(tmp_path):
+def test_doctor_reports_optional_recovery_state(tmp_path, monkeypatch):
+    manifest = Path(__file__).resolve().parents[1] / "aurascan/assets/aurascan-recovery-iso.json"
+    monkeypatch.setattr(recovery_cli, "resolve_iso_manifest", lambda: manifest)
     checks = build_doctor_checks(
         env_path=tmp_path / "missing.env",
         env={},
@@ -186,7 +189,7 @@ def test_doctor_reports_optional_recovery_state(tmp_path):
     assert by_name["recovery_esp"].status == "warn"
     assert by_name["recovery_build_tools"].status == "warn"
     assert by_name["recovery_ai"].status == "warn"
-    assert by_name["recovery_iso"].status == "warn"
+    assert by_name["recovery_iso"].status == "ok"
     assert by_name["recovery_last_result"].status == "ok"
 
 

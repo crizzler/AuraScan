@@ -30,6 +30,9 @@ cat "$profile_source/profiledef.sh" >> "$profile/profiledef.sh"
 cp "$profile_source/pacman.conf" "$profile/pacman.conf"
 sed -i "/^\[options\]$/a CacheDir = $package_cache" "$profile/pacman.conf"
 cat "$profile_source/packages.x86_64" >> "$profile/packages.x86_64"
+# The releng base adds the standard kernel. AuraScan ships linux-lts as its
+# single recovery kernel so the ISO does not duplicate modules and initramfs.
+sed -i '/^linux$/d' "$profile/packages.x86_64"
 sort -u -o "$profile/packages.x86_64" "$profile/packages.x86_64"
 
 pkgver="$(sed -n 's/^pkgver=//p' "$repo_root/packaging/arch/PKGBUILD")"

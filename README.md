@@ -12,6 +12,9 @@ before routine upgrades. It can also inspect bounded crash evidence and prepare
 verified repair recipes without allowing AI to invent shell commands. Optional
 Assisted Background Recovery keeps networked AI analysis unprivileged and
 separate from the offline deterministic repair service.
+The optional AuraScan Recovery boot environment extends those guarded workflows
+to an installed OS that cannot boot normally, with deterministic offline
+diagnostics and separately consented network AI.
 
 AuraScan does not prove that a package is safe. A clean report, a clean ClamAV
 result, or a valid source signature is not a guarantee. The goal is to find risk
@@ -29,7 +32,7 @@ pre-1.0.
 
 ## What You Can Try Now
 
-AuraScan currently provides five practical entry points:
+AuraScan currently provides six practical entry points:
 
 - `aurascan --pkgbuild ./PKGBUILD` reviews package build metadata before trust.
 - `aurascan-makepkg` scans before handing control to `makepkg`.
@@ -39,6 +42,8 @@ AuraScan currently provides five practical entry points:
   prepares safe fixes with backups.
 - `aurascan incidents --dry-run` diagnoses system and application crashes from
   bounded local logs without applying repairs.
+- `aurascan recovery --status` manages an optional local recovery boot image;
+  plain `aurascan recovery` inside that image starts the guided recovery UI.
 
 ## Quickstart
 
@@ -108,7 +113,9 @@ wizard.
 The Arch/AUR packaging recipe installs `/usr/bin/aurascan`,
 `/usr/bin/aurascan-makepkg`, the pacman hook template, the optional updater
 desktop/icon assets, and disabled-by-default incident monitor, user assistant,
-and Safe Autopilot services. It
+Safe Autopilot services, recovery image profiles, and a disabled recovery
+refresh hook. It does not build a UKI, alter an ESP, or add a boot entry during
+package installation. It
 also installs a non-interactive post-install message that points users to
 `aurascan init` and `aurascan doctor`. Review it before publishing or installing
 it on a real system.
@@ -199,6 +206,7 @@ aurascan init --enable-config-drift --config-drift-ai-diffs ask
 aurascan init --enable-updater-tray --install-updater-autostart
 aurascan init --enable-incident-monitor --enable-incident-ai --incident-ai-evidence redacted
 aurascan init --enable-incident-background-ai --incident-auto-repair safe
+aurascan init --install-recovery --enable-recovery-ai --enable-recovery-auto-refresh --recovery-wifi-profiles ask
 aurascan init --disable-upgrade-preflight
 ```
 
@@ -507,6 +515,104 @@ The user config keys are `AURASCAN_INCIDENT_MONITOR_ENABLED`,
 `facts-only`. The root-owned `/etc/aurascan/incident-autopilot.conf` accepts
 only `AURASCAN_INCIDENT_AUTO_REPAIR=off|safe` and contains no API credential.
 
+## AuraScan Recovery Environment
+
+`aurascan recovery` manages an optional x86-64 recovery environment for Arch
+Linux, EndeavourOS, Manjaro, and CachyOS. It is intended for systems that cannot
+reach the normal desktop or console reliably enough to run the ordinary
+Incident Recovery Assistant.
+
+```bash
+aurascan recovery --status
+aurascan recovery --install
+aurascan recovery --refresh
+aurascan recovery --remove
+aurascan recovery --dry-run --install
+aurascan recovery --download-iso
+aurascan recovery --write-usb /dev/sdX
+```
+
+The internal image is built locally with mkosi's `mkosi-initrd` profile and `ukify` from an
+installed alternate/LTS kernel when available. AuraScan creates a
+credential-free zipapp containing the exact installed AuraScan code, builds in
+private staging, validates the complete image for forbidden key/profile
+material, signs it with an already enrolled sbctl-compatible owner key when
+Secure Boot is enabled, and then atomically installs
+`/boot/EFI/Linux/aurascan-recovery.efi`. Existing recovery image and
+bootloader configuration backups are retained. Secure Boot installation is
+refused when AuraScan cannot prove an enrolled signing key; USB recovery remains
+available.
+
+Limine uses an AuraScan-owned marked EFI chainload block, systemd-boot discovers
+the UKI under `EFI/Linux`, and GRUB uses an AuraScan-owned generated chainloader
+script. Internal installation requires x86-64 UEFI. The release USB image is a
+hybrid BIOS/UEFI Archiso build from `packaging/recovery/`; its packaged manifest
+must contain a pinned SHA-256 digest before download is enabled. The guided USB
+writer accepts only an unmounted removable whole disk, rejects the running/root
+disk, requires the exact device path to be typed, flushes the device, and
+verifies the written bytes.
+
+Package installation never installs a recovery boot entry. The wizard offers
+installation with default Yes only after UEFI, ESP space/mount, supported
+bootloader, kernel, `mkosi`, `ukify`, and any required enrolled Secure Boot key
+checks pass. The root-owned
+`/etc/aurascan/recovery.conf` records only enablement, adapter, refresh policy,
+opted-in UID, Wi-Fi-profile permission, image version, and refresh status. It
+contains no AI key or Wi-Fi credential. An enabled automatic refresh uses a
+post-transaction hook after relevant AuraScan, kernel, Python, firmware,
+networking, or storage packages change. Refresh failure leaves the previous
+image bootable, does not fail the completed pacman transaction, and appears in
+`aurascan doctor`.
+
+Inside recovery, AuraScan discovers Arch-family targets read-only across
+Btrfs, ext4, XFS, LUKS2, LVM2, and mdraid layouts. Filesystem checks remain
+read-only. NetworkManager starts automatically; Ethernet and USB tethering use
+DHCP. Saved Wi-Fi profiles are used only with recovery permission, and only
+regular root-owned `0600` NetworkManager profiles are copied into volatile
+`/run` storage. Manual open, WPA2, WPA3, and hidden networks are supported.
+Passwords travel through NetworkManager's secret-agent input, never command
+arguments or reports. Captive portals and enterprise/802.1X remain unsupported;
+use another network, phone tethering, or offline recovery.
+
+Offline deterministic diagnostics start first. AuraScan checks package locks,
+repository health, interrupted transactions, kernel/module trees, initramfs,
+boot-critical config drift, free space, snapshots, the ESP, and the detected
+bootloader. Network AI runs automatically only when recovery AI was separately
+enabled and a usable non-captive connection exists. AuraScan validates the
+opted-in user's `0600` provider config from the mounted target; otherwise it can
+accept a session-only key that is never persisted. Provider failure does not
+block the deterministic plan.
+
+Recovery reuses the two-pass guarded planner. AI can select only opaque local
+probe IDs and then prioritize only independently verified action IDs. It cannot
+provide package names, paths, units, arguments, file edits, or commands for
+execution. The combined plan can cover stale locks, mirror restoration, bounded
+cache cleanup, complete signed pacman transactions, matching kernel/header and
+DKMS recovery, backed-up initramfs rebuilds, boot config drift, exact signed
+cached packages, and a proven noncritical boot-blocking service. Every action is
+reconstructed from current target state and revalidated as root immediately
+before execution.
+
+Snapshot restoration always creates a pre-recovery snapshot first and requires
+typing `RESTORE SNAPSHOT <id>`. Full Limine, systemd-boot, or GRUB reinstallation
+requires positive loader/ESP detection, backups, post-validation, and typing
+`REINSTALL BOOTLOADER`. Reinstall recipes update loader files without changing
+firmware variables. `--yes` cannot bypass either phrase. AuraScan never
+formats filesystems, changes partitions, performs filesystem repair, enrolls
+Secure Boot keys, flashes firmware, changes authentication policy, deletes user
+data, runs arbitrary AI commands, or reboots automatically.
+
+Private redacted reports and repair manifests are stored under
+`/var/lib/aurascan/recovery/` with `0700` directories and `0600` files. If the
+target is not writable, the report remains in recovery RAM for export to
+removable media. A successful scan or AI explanation cannot guarantee that
+software, storage, firmware, or hardware damage is repairable.
+
+Recovery user settings are `AURASCAN_RECOVERY_AI_ENABLED`,
+`AURASCAN_RECOVERY_AUTO_REFRESH`, and
+`AURASCAN_RECOVERY_WIFI_PROFILES=auto|ask|never`. Recovery AI reuses
+`AURASCAN_INCIDENT_AI_EVIDENCE=redacted|facts-only`.
+
 ## Config Drift Assistant
 
 `aurascan config-drift` finds `.pacnew` and `.pacsave` files, explains what
@@ -670,6 +776,13 @@ weekly, and Safe Autopilot services have no network access and never load API
 credentials. Incident evidence is bounded and redacted before persistence or
 AI use, and `facts-only` mode omits raw evidence excerpts. See
 [`docs/PRIVACY.md`](docs/PRIVACY.md) for process and storage boundaries.
+
+Recovery AI has a separate consent bit. Neither the locally built UKI nor the
+release ISO contains an API key, user config, saved WLAN profile, hostname,
+home path, or incident evidence. A validated target-user provider config is
+read only after target mount and network setup; an optional session key remains
+in memory. Recovery AI receives the same bounded redacted/facts-only evidence
+and opaque probe/action IDs as foreground incident AI.
 
 Supported AI provider IDs are `openai`, `anthropic`, `deepseek`, `gemini`, and
 `openrouter`. Provider-specific keys use `AURASCAN_OPENAI_API_KEY`,

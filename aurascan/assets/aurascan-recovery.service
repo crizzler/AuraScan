@@ -1,0 +1,34 @@
+[Unit]
+Description=AuraScan AI-Assisted Recovery Environment
+Documentation=https://github.com/crizzler/AuraScan
+After=systemd-udev-settle.service NetworkManager.service
+Wants=systemd-udev-settle.service NetworkManager.service
+ConditionPathExists=/usr/bin/aurascan
+ConditionPathExists=/etc/aurascan/recovery-environment
+
+[Service]
+Type=idle
+ExecStartPre=/usr/bin/install -Dm600 /dev/null /run/aurascan-recovery/environment
+ExecStart=/usr/bin/aurascan recovery --runtime
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+Environment=HOME=/root
+Environment=AURASCAN_RECOVERY_RUNTIME=1
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

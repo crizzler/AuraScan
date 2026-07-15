@@ -1,0 +1,2 @@
+enable aurascan-recovery.service
+enable NetworkManager.service

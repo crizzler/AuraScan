@@ -8,6 +8,7 @@ from aurascan.core.config import load_env, user_env_path
 from aurascan.core.config_drift import run_config_drift
 from aurascan.core.engine import AuraScanEngine
 from aurascan.core.incidents import run_incidents
+from aurascan.core.recovery_cli import run_recovery
 from aurascan.core.upgrade_preflight import run_upgrade
 from aurascan.core.updater_tray import run_updater
 from aurascan.setup_wizard import run_doctor, run_init
@@ -24,6 +25,10 @@ OFFLINE_INCIDENT_SERVICE_FLAGS = {
 
 
 def load_command_environment(raw_argv: List[str]) -> None:
+    if raw_argv and raw_argv[0] == "recovery":
+        recovery_args = set(raw_argv[1:])
+        if recovery_args & {"--runtime", "--refresh-from-hook"}:
+            return
     if raw_argv and raw_argv[0] == "incidents":
         incident_args = set(raw_argv[1:])
         if "--background-assist" in incident_args:
@@ -48,7 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Maintenance command:\n"
             "  aurascan config-drift   Resolve .pacnew/.pacsave configuration drift with backups.\n\n"
             "Recovery command:\n"
-            "  aurascan incidents  Diagnose crashes and prepare guarded system repairs.\n\n"
+            "  aurascan incidents  Diagnose crashes and prepare guarded system repairs.\n"
+            "  aurascan recovery   Manage or enter the optional boot recovery environment.\n\n"
             "Desktop command:\n"
             "  aurascan updater   Run or configure the AuraScan Updater tray applet.\n\n"
             "Pacman hook mode: when no --pkg or --pkgbuild is supplied, AuraScan "
@@ -134,6 +140,8 @@ def main(argv=None):
         sys.exit(run_config_drift(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "incidents":
         sys.exit(run_incidents(raw_argv[1:]))
+    if raw_argv and raw_argv[0] == "recovery":
+        sys.exit(run_recovery(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "updater":
         sys.exit(run_updater(raw_argv[1:]))
 

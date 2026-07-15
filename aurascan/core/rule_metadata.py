@@ -319,6 +319,15 @@ RULE_METADATA: Dict[str, RuleMetadata] = {
     "INC-SYSTEMD-FAILED": RuleMetadata("INC-SYSTEMD-FAILED", RuleCategory.incident_recovery, Severity.MEDIUM, "incident-service", 65, True, "finding_fields", "A systemd unit is currently failed."),
     "INC-APPLICATION-COREDUMP": RuleMetadata("INC-APPLICATION-COREDUMP", RuleCategory.incident_recovery, Severity.LOW, "incident-application", 45, True, "finding_fields", "An application or desktop component produced a coredump."),
     "INC-PSTORE-CRASH": RuleMetadata("INC-PSTORE-CRASH", RuleCategory.incident_recovery, Severity.HIGH, "incident-kernel", 98, True, "finding_fields", "Persistent low-level crash evidence was found in pstore."),
+    "REC-UNSUPPORTED-TARGET": RuleMetadata("REC-UNSUPPORTED-TARGET", RuleCategory.incident_recovery, Severity.CRITICAL, "recovery-target", 100, True, "finding_fields", "The selected recovery target is not a supported Arch-family installation."),
+    "REC-PACMAN-LOCK": RuleMetadata("REC-PACMAN-LOCK", RuleCategory.incident_recovery, Severity.MEDIUM, "recovery-package-manager", 65, True, "finding_fields", "A package database lock remains on the offline target."),
+    "REC-REPOSITORY-BROKEN": RuleMetadata("REC-REPOSITORY-BROKEN", RuleCategory.incident_recovery, Severity.HIGH, "recovery-repository", 90, True, "finding_fields", "Package repository configuration has no active server."),
+    "REC-PACMAN-INTERRUPTED": RuleMetadata("REC-PACMAN-INTERRUPTED", RuleCategory.incident_recovery, Severity.HIGH, "recovery-package-manager", 90, True, "finding_fields", "The latest bounded package history ends with an unresolved transaction failure."),
+    "REC-INITRAMFS-MISSING": RuleMetadata("REC-INITRAMFS-MISSING", RuleCategory.incident_recovery, Severity.HIGH, "recovery-boot", 95, True, "finding_fields", "A matching kernel boot image could not be proven."),
+    "REC-KERNEL-MODULES-MISSING": RuleMetadata("REC-KERNEL-MODULES-MISSING", RuleCategory.incident_recovery, Severity.CRITICAL, "recovery-kernel-module", 100, True, "finding_fields", "Kernel packages exist without matching module trees."),
+    "REC-BOOT-CONFIG-DRIFT": RuleMetadata("REC-BOOT-CONFIG-DRIFT", RuleCategory.incident_recovery, Severity.HIGH, "recovery-boot", 90, True, "finding_fields", "Boot-critical packaged configuration changes remain unresolved."),
+    "REC-BOOTLOADER-UNKNOWN": RuleMetadata("REC-BOOTLOADER-UNKNOWN", RuleCategory.incident_recovery, Severity.HIGH, "recovery-bootloader", 95, True, "finding_fields", "No supported bootloader and ESP pair was positively detected."),
+    "REC-ROOT-SPACE": RuleMetadata("REC-ROOT-SPACE", RuleCategory.incident_recovery, Severity.HIGH, "recovery-disk-space", 85, True, "finding_fields", "The recovery target has critically low free space."),
 }
 
 

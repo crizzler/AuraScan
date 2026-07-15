@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aurascan"
 version = "0.5.0"
-description = "AI-assisted safety layer for Arch-family package, AUR, and upgrade workflows."
+description = "AI-assisted safety and recovery layer for Arch-family package, AUR, upgrade, and incident workflows."
 readme = "README.md"
 authors = [{name = "AuraScan Team"}]
 license = "MIT"
@@ -26,6 +26,7 @@ keywords = [
     "config-drift",
     "crash-diagnostics",
     "incident-recovery",
+    "boot-recovery",
     "system-maintenance",
     "ai",
     "system-tray",

@@ -32,6 +32,7 @@ from aurascan.core.incident_automation import (
     safe_automation_paths,
 )
 from aurascan.core.updater_tray import UPDATER_AUTOSTART_ENV, UPDATER_TERMINAL_ENV, UPDATER_TRAY_ENABLED_ENV
+from aurascan.core.recovery import RECOVERY_AI_ENABLED_ENV, RECOVERY_AUTO_REFRESH_ENV, RECOVERY_WIFI_PROFILES_ENV
 
 
 class FakeResponse:
@@ -129,6 +130,64 @@ def test_init_can_enable_kernel_module_autopilot(tmp_path):
     text = env_path.read_text(encoding="utf-8")
     assert "AURASCAN_UPGRADE_PREFLIGHT_ENABLED=1" in text
     assert f"{KERNEL_MODULE_AUTOPILOT_ENV}=1" in text
+
+
+def test_init_can_explicitly_install_recovery_with_separate_consent(tmp_path):
+    env_path = tmp_path / ".env"
+    executable = tmp_path / "usr/bin/aurascan"
+    calls = []
+
+    def runner(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "Recovery installed\n", "")
+
+    status = run_init(
+        [
+            "--disable-ai",
+            "--install-recovery",
+            "--enable-recovery-ai",
+            "--enable-recovery-auto-refresh",
+            "--recovery-wifi-profiles", "ask",
+            "--no-install-hook",
+        ],
+        stdout=io.StringIO(),
+        env_path=env_path,
+        executable_path=executable,
+        recovery_root=tmp_path / "fixture-root",
+        runner=runner,
+    )
+
+    text = env_path.read_text(encoding="utf-8")
+    assert status == 0
+    assert f"{RECOVERY_AI_ENABLED_ENV}=1" in text
+    assert f"{RECOVERY_AUTO_REFRESH_ENV}=1" in text
+    assert f"{RECOVERY_WIFI_PROFILES_ENV}=ask" in text
+    install = next(command for command in calls if "recovery" in command and "--install" in command)
+    assert install[:4] == ["sudo", str(executable), "recovery", "--install"]
+    assert "--opted-uid" in install
+    assert "--refresh-policy" in install
+
+
+def test_doctor_reports_optional_recovery_state(tmp_path):
+    checks = build_doctor_checks(
+        env_path=tmp_path / "missing.env",
+        env={},
+        executable_path=tmp_path / "usr/bin/aurascan",
+        local_hook_path=tmp_path / "local.hook",
+        packaged_hook_path=tmp_path / "packaged.hook",
+        recovery_root=tmp_path / "target",
+        which=lambda _name: None,
+        runner=lambda command, **_kwargs: subprocess.CompletedProcess(command, 1, "", ""),
+    )
+    by_name = {item.name: item for item in checks}
+
+    assert by_name["recovery_config"].status == "warn"
+    assert by_name["recovery_image"].status == "ok"
+    assert by_name["recovery_esp"].status == "warn"
+    assert by_name["recovery_build_tools"].status == "warn"
+    assert by_name["recovery_ai"].status == "warn"
+    assert by_name["recovery_iso"].status == "warn"
+    assert by_name["recovery_last_result"].status == "ok"
 
 
 def test_init_can_disable_config_drift_assistant(tmp_path):

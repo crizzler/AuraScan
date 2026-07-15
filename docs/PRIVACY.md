@@ -52,3 +52,36 @@ World-readable incident marker/status files may contain only boot/scan IDs, UID
 scope, category severities, resolved categories, coarse repair state, counts,
 and timestamps. They must not contain evidence text, commands, paths, package or
 application names, provider responses, credentials, or API keys.
+
+## Recovery Environment
+
+AuraScan Recovery is separately enabled and never created as a package-install
+side effect. The locally built UKI and release ISO must not contain API keys,
+provider configuration, saved NetworkManager profiles, hostnames, usernames,
+home paths, incident evidence, or recovery reports. Image validation scans the
+complete staged UKI for forbidden credential and user-profile markers before
+ESP replacement.
+
+The root-owned `/etc/aurascan/recovery.conf` contains only enablement,
+bootloader adapter, refresh policy, opted-in numeric UID, saved-Wi-Fi permission,
+image version, and coarse refresh status. It contains no provider key or WLAN
+credential.
+
+When saved Wi-Fi use is authorized, AuraScan accepts only regular root-owned
+`0600` NetworkManager Wi-Fi profiles from the mounted target. It copies them to
+volatile `/run` storage for that recovery session and never copies them into an
+image or report. Manually entered WLAN secrets travel through NetworkManager
+secret input rather than command arguments and are discarded after connection.
+
+Recovery AI runs only after separate recovery consent and usable network
+connectivity. The opted-in user's provider file is accepted only after regular
+file, owner, and `0600` checks. A session-only key may be entered when no valid
+file exists; it is never written to disk. The two provider requests receive at
+most 80 redacted evidence excerpts and 12,000 characters, plus opaque known
+probe/action IDs. AI cannot supply executable targets or commands.
+
+Private recovery reports, action manifests, backups, validation output, and
+rollback metadata are written under `/var/lib/aurascan/recovery/` with `0700`
+directories and `0600` files. Output is bounded and redacted. If the target is
+not writable, data remains in recovery RAM unless the user exports it to
+removable media.

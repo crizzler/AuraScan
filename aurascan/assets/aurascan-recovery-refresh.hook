@@ -1,0 +1,31 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = aurascan
+Target = linux
+Target = linux-lts
+Target = linux-zen
+Target = linux-hardened
+Target = linux-cachyos*
+Target = linux-firmware*
+Target = python
+Target = pacman
+Target = pacman-contrib
+Target = systemd
+Target = systemd-ukify
+Target = mkosi
+Target = arch-install-scripts
+Target = networkmanager
+Target = iwd
+Target = cryptsetup
+Target = lvm2
+Target = mdadm
+Target = btrfs-progs
+Target = snapper
+Target = xfsprogs
+
+[Action]
+Description = Refreshing enabled AuraScan Recovery image...
+When = PostTransaction
+Exec = /usr/bin/aurascan recovery --refresh-from-hook

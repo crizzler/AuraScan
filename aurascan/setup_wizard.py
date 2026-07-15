@@ -2,6 +2,7 @@ import argparse
 import getpass
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -70,6 +71,15 @@ from aurascan.core.incident_automation import (
     safe_automation_paths,
     set_background_ai_enabled,
 )
+from aurascan.core.recovery import (
+    RECOVERY_AI_ENABLED_ENV,
+    RECOVERY_AUTO_REFRESH_ENV,
+    RECOVERY_WIFI_PROFILES_ENV,
+    RECOVERY_WIFI_PROFILE_VALUES,
+    read_recovery_policy,
+    resolve_recovery_config,
+)
+from aurascan.core.recovery_cli import recovery_status
 from aurascan.core.upgrade_preflight import (
     UPGRADE_AUR_HELPERS,
     UPGRADE_PREFLIGHT_AI_ENV,
@@ -167,6 +177,16 @@ def build_init_parser() -> argparse.ArgumentParser:
     updater_autostart = parser.add_mutually_exclusive_group()
     updater_autostart.add_argument("--install-updater-autostart", action="store_true", help="install per-user AuraScan Updater autostart")
     updater_autostart.add_argument("--remove-updater-autostart", action="store_true", help="remove per-user AuraScan Updater autostart")
+    recovery = parser.add_mutually_exclusive_group()
+    recovery.add_argument("--install-recovery", action="store_true", help="build and install the optional AuraScan Recovery boot entry")
+    recovery.add_argument("--remove-recovery", action="store_true", help="remove the AuraScan-owned recovery boot entry")
+    recovery_ai = parser.add_mutually_exclusive_group()
+    recovery_ai.add_argument("--enable-recovery-ai", action="store_true", help="allow separately consented AI analysis inside AuraScan Recovery")
+    recovery_ai.add_argument("--disable-recovery-ai", action="store_true", help="keep network AI disabled inside AuraScan Recovery")
+    recovery_refresh = parser.add_mutually_exclusive_group()
+    recovery_refresh.add_argument("--enable-recovery-auto-refresh", action="store_true", help="refresh an enabled recovery image after relevant package changes")
+    recovery_refresh.add_argument("--disable-recovery-auto-refresh", action="store_true", help="require manual recovery image refreshes")
+    parser.add_argument("--recovery-wifi-profiles", choices=sorted(RECOVERY_WIFI_PROFILE_VALUES), help="permission for volatile use of saved NetworkManager Wi-Fi profiles")
     hook = parser.add_mutually_exclusive_group()
     hook.add_argument("--install-hook", action="store_true", help="install or repair a local pacman hook when no packaged hook is active")
     hook.add_argument("--no-install-hook", action="store_true", help="skip pacman hook setup")
@@ -199,6 +219,7 @@ def run_init(
     packaged_hook_path: Path = PACKAGED_HOOK_PATH,
     updater_config_home: Optional[Path] = None,
     updater_data_home: Optional[Path] = None,
+    recovery_root: Path = Path("/"),
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -270,6 +291,13 @@ def run_init(
         or args.enable_incident_background_ai
         or args.disable_incident_background_ai
         or args.incident_auto_repair is not None
+        or args.install_recovery
+        or args.remove_recovery
+        or args.enable_recovery_ai
+        or args.disable_recovery_ai
+        or args.enable_recovery_auto_refresh
+        or args.disable_recovery_auto_refresh
+        or args.recovery_wifi_profiles is not None
         or args.install_hook
         or args.no_install_hook
     )
@@ -495,6 +523,75 @@ def run_init(
         updates[UPDATER_TERMINAL_ENV] = updater_terminal or "auto"
         print("Configured AuraScan Updater tray defaults.", file=stdout)
 
+    configure_recovery = (
+        args.install_recovery
+        or args.remove_recovery
+        or args.enable_recovery_ai
+        or args.disable_recovery_ai
+        or args.enable_recovery_auto_refresh
+        or args.disable_recovery_auto_refresh
+        or args.recovery_wifi_profiles is not None
+    )
+    recovery_action = ""
+    recovery_ready = False
+    recovery_state: Dict[str, object] = {}
+    if should_prompt_upgrade or configure_recovery:
+        try:
+            recovery_state = recovery_status(root=recovery_root, runner=runner)
+            installation_state = recovery_state.get("installation", {})
+            recovery_ready = bool(
+                isinstance(installation_state, Mapping)
+                and installation_state.get("ready")
+                and installation_state.get("esp_space_ready")
+            )
+        except Exception:
+            recovery_ready = False
+        install_recovery = bool(args.install_recovery)
+        if args.remove_recovery:
+            install_recovery = False
+            recovery_action = "remove"
+        elif should_prompt_upgrade and recovery_ready:
+            installed = bool(recovery_state.get("policy", {}).get("enabled")) if isinstance(recovery_state.get("policy"), Mapping) else False
+            install_recovery = _prompt_yes_no(
+                "Install the optional AuraScan Recovery boot environment?",
+                input_func,
+                default=True,
+            )
+            if install_recovery and not installed:
+                recovery_action = "install"
+            elif not install_recovery and installed:
+                recovery_action = "remove"
+        elif args.install_recovery:
+            recovery_action = "install"
+
+        current_recovery = resolve_recovery_config(existing)
+        recovery_ai_enabled = current_recovery.ai_enabled if not current_recovery.error else False
+        if args.enable_recovery_ai:
+            recovery_ai_enabled = True
+        elif args.disable_recovery_ai:
+            recovery_ai_enabled = False
+        elif should_prompt_upgrade and install_recovery:
+            recovery_ai_enabled = _prompt_yes_no(
+                "Allow AuraScan Recovery to contact your configured AI provider after networking is available?",
+                input_func,
+                default=recovery_ai_enabled,
+            )
+        auto_refresh = current_recovery.auto_refresh if not current_recovery.error else True
+        if args.enable_recovery_auto_refresh:
+            auto_refresh = True
+        elif args.disable_recovery_auto_refresh:
+            auto_refresh = False
+        wifi_profiles = args.recovery_wifi_profiles or (current_recovery.wifi_profiles if not current_recovery.error else "ask")
+        if should_prompt_upgrade and install_recovery and args.recovery_wifi_profiles is None:
+            wifi_profiles = _prompt_recovery_wifi_profiles(input_func, wifi_profiles, stdout)
+        updates[RECOVERY_AI_ENABLED_ENV] = "1" if recovery_ai_enabled else "0"
+        updates[RECOVERY_AUTO_REFRESH_ENV] = "1" if auto_refresh else "0"
+        updates[RECOVERY_WIFI_PROFILES_ENV] = wifi_profiles
+        if install_recovery:
+            print("Configured AuraScan Recovery consent and refresh defaults.", file=stdout)
+        elif should_prompt_upgrade and not recovery_ready:
+            print("AuraScan Recovery installation is unavailable until UEFI, bootloader, mkosi, and ukify checks pass.", file=stdout)
+
     write_user_env(updates, path=target_env)
     print(f"Wrote user config: {target_env}", file=stdout)
 
@@ -534,6 +631,27 @@ def run_init(
         updater_result = remove_updater_autostart(paths=updater_paths)
         print(updater_result.message, file=stdout if updater_result.ok else stderr)
         if not updater_result.ok:
+            return 1
+
+    if recovery_action:
+        command = ["sudo", str(executable_path), "recovery", "--install" if recovery_action == "install" else "--remove"]
+        if recovery_action == "install":
+            command.extend([
+                "--opted-uid", str(os.getuid()),
+                "--wifi-profiles", updates.get(RECOVERY_WIFI_PROFILES_ENV, "ask"),
+                "--refresh-policy", "automatic" if updates.get(RECOVERY_AUTO_REFRESH_ENV, "1") == "1" else "manual",
+            ])
+        result = runner(command, capture_output=True, text=True, check=False)
+        message = (result.stdout or result.stderr or "").strip()
+        if message:
+            print(message, file=stdout if result.returncode == 0 else stderr)
+        if result.returncode != 0:
+            rollback = {
+                RECOVERY_AI_ENABLED_ENV: existing.get(RECOVERY_AI_ENABLED_ENV, "0"),
+                RECOVERY_AUTO_REFRESH_ENV: existing.get(RECOVERY_AUTO_REFRESH_ENV, "1"),
+                RECOVERY_WIFI_PROFILES_ENV: existing.get(RECOVERY_WIFI_PROFILES_ENV, "ask"),
+            }
+            write_user_env(rollback, path=target_env)
             return 1
 
     if args.check_ai:
@@ -597,6 +715,7 @@ def run_doctor(
     incident_user_root: Optional[Path] = None,
     journal_root: Path = Path("/var/log/journal"),
     pstore_root: Path = Path("/sys/fs/pstore"),
+    recovery_root: Path = Path("/"),
 ) -> int:
     stdout = stdout or sys.stdout
     args = build_doctor_parser().parse_args(argv)
@@ -625,6 +744,7 @@ def run_doctor(
         incident_user_root=incident_user_root,
         journal_root=journal_root,
         pstore_root=pstore_root,
+        recovery_root=recovery_root,
     )
     has_error = any(check.status == "error" for check in checks)
     if args.json_mode:
@@ -665,6 +785,7 @@ def build_doctor_checks(
     incident_user_root: Optional[Path] = None,
     journal_root: Path = Path("/var/log/journal"),
     pstore_root: Path = Path("/sys/fs/pstore"),
+    recovery_root: Path = Path("/"),
 ) -> List[DoctorCheck]:
     checks: List[DoctorCheck] = []
     file_values = _safe_read_env(env_path)
@@ -1056,6 +1177,115 @@ def build_doctor_checks(
         },
     ))
 
+    recovery_config = resolve_recovery_config(effective_env)
+    try:
+        recovery_state = recovery_status(root=recovery_root, runner=runner, which=which)
+    except Exception as exc:
+        recovery_state = {"error": str(exc), "policy": {}, "image": {}, "tools": {}}
+    recovery_policy = recovery_state.get("policy", {}) if isinstance(recovery_state.get("policy"), Mapping) else {}
+    recovery_image = recovery_state.get("image", {}) if isinstance(recovery_state.get("image"), Mapping) else {}
+    recovery_tools = recovery_state.get("tools", {}) if isinstance(recovery_state.get("tools"), Mapping) else {}
+    recovery_installation = recovery_state.get("installation", {}) if isinstance(recovery_state.get("installation"), Mapping) else {}
+    recovery_enabled = bool(recovery_policy.get("enabled"))
+    if recovery_config.error:
+        checks.append(DoctorCheck("recovery_config", "error", recovery_config.error))
+    elif recovery_policy.get("error"):
+        checks.append(DoctorCheck("recovery_config", "error", str(recovery_policy.get("error")), dict(recovery_policy)))
+    else:
+        checks.append(DoctorCheck(
+            "recovery_config",
+            "ok" if recovery_enabled else "warn",
+            "AuraScan Recovery is enabled" if recovery_enabled else "AuraScan Recovery is optional and not installed",
+            {"user": recovery_config.to_dict(), "system_policy": dict(recovery_policy)},
+        ))
+    image_ready = bool(recovery_image.get("installed") and recovery_image.get("valid_pe") and not recovery_image.get("errors"))
+    if recovery_enabled and image_ready and not recovery_image.get("stale"):
+        checks.append(DoctorCheck("recovery_image", "ok", f"Recovery image {recovery_image.get('version') or 'unknown'} is installed and current", dict(recovery_image)))
+    elif recovery_enabled and recovery_image.get("stale"):
+        checks.append(DoctorCheck("recovery_image", "warn", "Recovery image is stale and should be refreshed", dict(recovery_image)))
+    elif recovery_enabled:
+        checks.append(DoctorCheck("recovery_image", "error", "Recovery is enabled but its UKI is missing or invalid", dict(recovery_image)))
+    else:
+        checks.append(DoctorCheck("recovery_image", "ok", "No internal recovery image is expected while recovery is disabled", dict(recovery_image)))
+    bootloader = recovery_image.get("bootloader", {}) if isinstance(recovery_image.get("bootloader"), Mapping) else {}
+    checks.append(DoctorCheck(
+        "recovery_bootloader",
+        "ok" if bootloader.get("installed") else "warn",
+        f"Recovery bootloader adapter: {bootloader.get('name', 'Unknown')}" if bootloader.get("installed") else "No supported recovery bootloader adapter was detected",
+        dict(bootloader),
+    ))
+    secure_boot = str(recovery_image.get("secure_boot") or "unknown")
+    signed = bool(recovery_image.get("signed"))
+    secure_ok = secure_boot != "enabled" or signed or not recovery_enabled
+    checks.append(DoctorCheck(
+        "recovery_secure_boot",
+        "ok" if secure_ok else "error",
+        "Recovery Secure Boot signing is ready" if secure_boot == "enabled" and signed else f"Recovery Secure Boot state: {secure_boot}",
+        {"secure_boot": secure_boot, "signed": signed},
+    ))
+    esp_space_ready = bool(recovery_installation.get("esp_space_ready"))
+    checks.append(DoctorCheck(
+        "recovery_esp",
+        "ok" if esp_space_ready else "warn",
+        "Recovery ESP has the minimum free-space reserve" if esp_space_ready else "Recovery ESP space or mount readiness could not be proven",
+        {
+            "path": recovery_installation.get("esp_path"),
+            "free_bytes": recovery_installation.get("esp_free_bytes"),
+            "minimum_free_bytes": recovery_installation.get("minimum_esp_free_bytes"),
+            "installation_errors": list(recovery_installation.get("errors", [])) if isinstance(recovery_installation.get("errors"), list) else [],
+        },
+    ))
+    build_ready = bool(recovery_tools.get("mkosi") and recovery_tools.get("ukify") and recovery_state.get("profile_installed"))
+    checks.append(DoctorCheck(
+        "recovery_build_tools",
+        "ok" if build_ready else "warn",
+        "Recovery UKI build tools and profile are ready" if build_ready else "Recovery UKI build needs mkosi, ukify, and the packaged profile",
+        {"tools": dict(recovery_tools), "profile_installed": bool(recovery_state.get("profile_installed"))},
+    ))
+    network_ready = bool(recovery_tools.get("NetworkManager") and recovery_tools.get("nmcli"))
+    storage_ready = all(recovery_tools.get(name) for name in ("cryptsetup", "lvm", "mdadm"))
+    checks.append(DoctorCheck(
+        "recovery_runtime_tools",
+        "ok" if network_ready and storage_ready else "warn",
+        "Recovery networking and encrypted/storage discovery tools are ready" if network_ready and storage_ready else "Recovery runtime has partial networking or encrypted/storage coverage",
+        {"network_ready": network_ready, "storage_ready": storage_ready, "tools": dict(recovery_tools)},
+    ))
+    recovery_ai_ready = bool(recovery_config.ai_enabled and ai_config.api_key_present)
+    checks.append(DoctorCheck(
+        "recovery_ai",
+        "ok" if recovery_ai_ready else "warn",
+        "Recovery AI consent and provider key are ready" if recovery_ai_ready else "Recovery AI is separately disabled or has no configured provider key; offline recovery remains available",
+        {"enabled": recovery_config.ai_enabled, "provider": ai_config.provider, "key_present": ai_config.api_key_present, "maximum_provider_requests": 2},
+    ))
+    refresh_ready = bool(recovery_state.get("refresh_hook_installed"))
+    checks.append(DoctorCheck(
+        "recovery_refresh",
+        "ok" if (not recovery_enabled or refresh_ready) else "warn",
+        "Recovery refresh hook is installed" if refresh_ready else "Recovery refresh hook is missing",
+        {"installed": refresh_ready, "last_status": recovery_policy.get("last_refresh_status"), "last_error": recovery_policy.get("last_refresh_error")},
+    ))
+    recovery_iso = recovery_state.get("iso_manifest", {}) if isinstance(recovery_state.get("iso_manifest"), Mapping) else {}
+    iso_digest = str(recovery_iso.get("sha256") or "").lower()
+    iso_ready = bool(
+        re.fullmatch(r"[0-9a-f]{64}", iso_digest)
+        and str(recovery_iso.get("url") or "").startswith("https://github.com/crizzler/AuraScan/releases/download/")
+    )
+    checks.append(DoctorCheck(
+        "recovery_iso",
+        "ok" if iso_ready else "warn",
+        "Recovery USB ISO manifest has a pinned SHA-256 digest" if iso_ready else "Recovery USB ISO digest is not finalized for this release",
+        {"version": recovery_iso.get("version"), "digest_pinned": iso_ready},
+    ))
+    last_recovery = recovery_state.get("last_recovery", {}) if isinstance(recovery_state.get("last_recovery"), Mapping) else {}
+    repair_statuses = last_recovery.get("repair_statuses", []) if isinstance(last_recovery.get("repair_statuses"), list) else []
+    last_failed = any(item in {"failed", "refused", "rolled_back"} for item in repair_statuses)
+    checks.append(DoctorCheck(
+        "recovery_last_result",
+        "warn" if last_failed or last_recovery.get("error") else "ok",
+        "The last recovery run retained failed or refused actions" if last_failed else "No failed private recovery result is recorded",
+        dict(last_recovery),
+    ))
+
     updater_status = build_updater_status(
         env=effective_env,
         paths=updater_desktop_paths(config_home=updater_config_home, data_home=updater_data_home),
@@ -1189,6 +1419,24 @@ def _prompt_config_drift_ai_diffs(input_func: Callable[[str], str], default: str
         if answer.isdigit() and 1 <= int(answer) <= len(choices):
             return choices[int(answer) - 1]
         print("Please choose a listed policy.", file=stdout)
+
+
+def _prompt_recovery_wifi_profiles(input_func: Callable[[str], str], default: str, stdout) -> str:
+    choices = ["auto", "ask", "never"]
+    default = default if default in choices else "ask"
+    print("Recovery saved Wi-Fi profile permission:", file=stdout)
+    for index, policy in enumerate(choices, start=1):
+        marker = " default" if policy == default else ""
+        print(f"  {index}. {policy}{marker}", file=stdout)
+    while True:
+        answer = input_func(f"Recovery Wi-Fi profiles [{default}]: ").strip().lower()
+        if not answer:
+            return default
+        if answer in choices:
+            return answer
+        if answer.isdigit() and 1 <= int(answer) <= len(choices):
+            return choices[int(answer) - 1]
+        print("Please choose auto, ask, or never.", file=stdout)
 
 
 def _prompt_yes_no(prompt: str, input_func: Callable[[str], str], *, default: bool) -> bool:

@@ -20,6 +20,12 @@ diagnostic probes, then explain and prioritize the independently verified
 repair plan. The offline Safe Autopilot still handles only reversible
 lock/mirror repairs.
 
+The v0.6 work adds an optional `AuraScan Recovery` boot environment. It starts
+offline diagnostics when the installed OS cannot boot, helps connect Ethernet
+or WPA2/WPA3 Wi-Fi, and uses separately consented AI only to select opaque local
+checks and prioritize independently verified repairs. Internal UEFI recovery is
+installed only on request; a hybrid BIOS/UEFI USB image is the fallback.
+
 The new `aurascan upgrade` flow is designed as a native-feeling upgrade front
 door: it previews repo and AUR updates, checks kernel/module/initramfs/boot
 space/ignored-package/config-drift risks, optionally asks configured AI to
@@ -35,6 +41,7 @@ python -m aurascan init
 python -m aurascan upgrade --dry-run
 python -m aurascan config-drift --dry-run
 python -m aurascan incidents --dry-run --no-ai
+python -m aurascan recovery --status
 ```
 
 Important limits: AuraScan is a developer preview. A clean report is not proof
@@ -82,6 +89,14 @@ The newest work adds upgrade safety helpers:
 - The optional tray applet targets KDE first, should work on common
   tray-capable desktops, and may need AppIndicator/status-notifier support on
   GNOME.
+- `aurascan recovery` can build an optional local UKI, add an AuraScan-owned
+  Limine/systemd-boot/GRUB entry, or write a verified hybrid recovery ISO to an
+  eligible removable whole disk. Package installation never changes the ESP.
+- Recovery supports bounded Arch-family target discovery across Btrfs, ext4,
+  XFS, LUKS2, LVM2, and mdraid, with offline package/boot diagnostics first.
+- Recovery AI has separate consent, never receives executable targets, and
+  falls back cleanly when networking or a provider is unavailable. Snapshot
+  restore and bootloader reinstall require exact typed confirmations.
 
 What I would value most:
 
@@ -93,6 +108,8 @@ What I would value most:
 Repo: https://github.com/crizzler/AuraScan
 
 This is not a guarantee layer or a replacement for backups. Incident recovery
-does not automate filesystem repair, partition changes, bootloader edits, or
-reboots. It is an early attempt to make dangerous package and recovery work
+does not automate filesystem repair, partition changes, Secure Boot key
+enrollment, arbitrary AI commands, or reboots. Bootloader recovery is available
+only for a positively detected loader/ESP after a separate typed confirmation.
+It is an early attempt to make dangerous package and recovery work
 more visible before the user has to become an Arch expert.

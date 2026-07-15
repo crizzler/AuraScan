@@ -21,6 +21,19 @@ optdepends=(
   'shelly: optional Shelly update handoff for aurascan upgrade'
   'python-pyqt6: AuraScan Updater tray applet'
   'pacman-contrib: bounded package-cache cleanup for incident recovery'
+  'mkosi: build the optional local AuraScan Recovery UKI'
+  'systemd: systemd-boot integration and recovery runtime support'
+  'systemd-ukify: validate and assemble the optional recovery UKI'
+  'arch-install-scripts: run bounded package and repair commands in a recovery target'
+  'sbctl: sign the recovery UKI when Secure Boot is enabled'
+  'networkmanager: Ethernet, tethering, and Wi-Fi in AuraScan Recovery'
+  'iwd: WPA2/WPA3 Wi-Fi backend for AuraScan Recovery'
+  'cryptsetup: unlock LUKS2 recovery targets'
+  'lvm2: discover LVM recovery targets'
+  'mdadm: discover mdraid recovery targets'
+  'btrfs-progs: Btrfs diagnosis and snapshot recovery'
+  'snapper: snapshot test and confirmed restore workflows'
+  'xfsprogs: read-only XFS recovery diagnostics'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('9094d43441320e33f8b2372dd746d49b8e5a00b8987a0a476817bf71c474609e')
@@ -51,6 +64,14 @@ package() {
   install -Dm644 aurascan/assets/aurascan-incident-assistant.service "$pkgdir/usr/lib/systemd/user/aurascan-incident-assistant.service"
   install -Dm644 aurascan/assets/aurascan-incident-assistant.timer "$pkgdir/usr/lib/systemd/user/aurascan-incident-assistant.timer"
   install -Dm644 aurascan/assets/aurascan-incidents.conf "$pkgdir/usr/lib/tmpfiles.d/aurascan-incidents.conf"
+  install -Dm644 aurascan/assets/aurascan-recovery.service "$pkgdir/usr/lib/systemd/system/aurascan-recovery.service"
+  install -Dm644 aurascan/assets/aurascan-recovery-refresh.hook "$pkgdir/usr/share/libalpm/hooks/aurascan-recovery-refresh.hook"
+  install -Dm644 aurascan/assets/aurascan-recovery-mkosi.conf "$pkgdir/usr/lib/aurascan/recovery/mkosi.conf"
+  install -Dm644 aurascan/assets/aurascan-recovery-iso.json "$pkgdir/usr/share/aurascan/recovery/iso-manifest.json"
+  install -Dm644 aurascan/assets/aurascan-recovery-tmpfiles.conf "$pkgdir/usr/lib/tmpfiles.d/aurascan-recovery.conf"
+  install -Dm644 aurascan/assets/aurascan-recovery.service "$pkgdir/usr/lib/aurascan/recovery/rootfs/usr/lib/systemd/system/aurascan-recovery.service"
+  install -Dm644 packaging/recovery/rootfs/usr/lib/systemd/system-preset/90-aurascan-recovery.preset "$pkgdir/usr/lib/aurascan/recovery/rootfs/usr/lib/systemd/system-preset/90-aurascan-recovery.preset"
+  install -Dm644 packaging/recovery/rootfs/etc/issue "$pkgdir/usr/lib/aurascan/recovery/rootfs/etc/issue"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 DEVELOPING.md "$pkgdir/usr/share/doc/$pkgname/DEVELOPING.md"
   install -Dm644 docs/RELEASE_CHECKLIST.md "$pkgdir/usr/share/doc/$pkgname/RELEASE_CHECKLIST.md"

@@ -1,0 +1,8 @@
+{
+  "schema": "aurascan_recovery_iso/1.0",
+  "version": "0.6.0",
+  "architecture": "x86_64",
+  "url": "https://github.com/crizzler/AuraScan/releases/download/v0.6.0/aurascan-recovery-0.6.0-x86_64.iso",
+  "sha256": "",
+  "status": "release-build-required"
+}

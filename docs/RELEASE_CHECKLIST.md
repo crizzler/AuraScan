@@ -18,6 +18,17 @@ candidate.
 - Tests do not execute package code.
 - Tests do not require root.
 - Secret scan has been reviewed before publishing.
+- Internal recovery UKIs boot under QEMU/OVMF with Limine, systemd-boot, and
+  GRUB fixtures; the release ISO boots with both OVMF and SeaBIOS.
+- `packaging/recovery/qemu-smoke.sh` boots the finalized hybrid ISO in SeaBIOS
+  and ordinary OVMF UEFI modes after verifying its release checksum.
+- `packaging/recovery/qemu-uki-smoke.sh` boots the finalized local UKI under
+  OVMF in ordinary and enrolled-key Secure Boot modes.
+- Secure Boot recovery is tested with disposable OVMF owner keys, and unsigned
+  internal installation is refused when signing cannot be proven.
+- Recovery smoke tests cover Ethernet, saved and manual Wi-Fi, offline fallback,
+  provider failure, LUKS+Btrfs, ext4/LVM, interrupted pacman, broken initramfs,
+  snapshot confirmation, atomic refresh rollback, and removal.
 - No generated local artifacts are staged or committed.
 - No virtualenv, cache directory, local DB, generated report, keyring, or
   temporary signature/private-key material is committed.
@@ -78,6 +89,19 @@ candidate.
 - AI-generated commands and fabricated incident evidence/action IDs are
   rejected.
 - Fabricated diagnostic probe IDs and provider-supplied targets are rejected.
+- Recovery image installation is explicit, staged, fully validated, and atomic;
+  package installation never modifies an ESP or bootloader.
+- The complete UKI and ISO are scanned to ensure no API key, Wi-Fi profile,
+  username, home path, hostname, or incident evidence is embedded.
+- Recovery AI uses only separately consented bounded evidence and opaque probe
+  or action IDs; session keys are never persisted.
+- Snapshot restore and bootloader reinstall retain exact typed confirmations
+  that `--yes` cannot bypass.
+- USB writing rejects non-removable, mounted, partition, and running/root disks,
+  then verifies the written image hash.
+- Filesystem repair, partition changes, Secure Boot key enrollment, firmware,
+  authentication policy, user-data deletion, arbitrary AI commands, and
+  automatic reboot remain prohibited in recovery.
 
 ## Defaults
 
@@ -91,6 +115,8 @@ candidate.
   flows and can be disabled.
 - `--deep-static` overrides smart fast-path source-scan skipping.
 - "No new dependencies" is not treated as proof that scanning can be skipped.
+- Package installation does not build or enable AuraScan Recovery; the wizard
+  offers it only after compatibility checks pass.
 
 ## Packaging Metadata
 
@@ -110,6 +136,11 @@ candidate.
   are installed without enabling or starting the service automatically.
 - User AI and Safe Autopilot units are packaged without enabling either, and
   package scripts never write the system repair policy.
+- Recovery mkosi, systemd, bootloader, tmpfiles, refresh hook, ISO manifest, and
+  Archiso profile assets are installed without enabling a boot entry.
+- The hybrid ISO is built from a clean committed release candidate with an
+  empty self-download digest; the tested ISO digest is then pinned in the final
+  host/AUR package before tagging, avoiding a self-referential image hash.
 - Package data or package files include the hook template only when intended.
 - Root-level development hooks are not accidentally packaged.
 

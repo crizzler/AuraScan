@@ -34,6 +34,15 @@ cat "$profile_source/packages.x86_64" >> "$profile/packages.x86_64"
 # module. AuraScan ships linux-lts as its single recovery kernel and retains
 # the firmware plus in-kernel Broadcom drivers.
 sed -i -e '/^linux$/d' -e '/^broadcom-wl$/d' "$profile/packages.x86_64"
+rm -f "$profile/airootfs/etc/mkinitcpio.d/linux.preset"
+find "$profile/syslinux" "$profile/efiboot" "$profile/grub" -type f -exec sed -E -i \
+  -e 's#vmlinuz-linux([[:space:]]|$)#vmlinuz-linux-lts\1#g' \
+  -e 's#initramfs-linux\.img([[:space:]]|$)#initramfs-linux-lts.img\1#g' {} +
+if grep -R -E 'vmlinuz-linux([[:space:]]|$)|initramfs-linux\.img([[:space:]]|$)' \
+  "$profile/syslinux" "$profile/efiboot" "$profile/grub"; then
+  printf 'Recovery bootloader configuration still references the removed standard kernel\n' >&2
+  exit 1
+fi
 sort -u -o "$profile/packages.x86_64" "$profile/packages.x86_64"
 
 pkgver="$(sed -n 's/^pkgver=//p' "$repo_root/packaging/arch/PKGBUILD")"

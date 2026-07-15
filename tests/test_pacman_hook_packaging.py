@@ -96,10 +96,14 @@ def test_arch_package_metadata_targets_current_public_release():
     pkgbuild = read_text("packaging/arch/PKGBUILD")
     srcinfo = read_text("packaging/arch/.SRCINFO")
     release_notes = ROOT / "docs" / "releases" / f"v{version}.md"
+    is_git_checkout = (ROOT / ".git").exists()
 
     assert re.search(rf"^pkgver={re.escape(version)}$", pkgbuild, re.MULTILINE)
     assert f"v$pkgver.tar.gz" in pkgbuild
-    assert 'sha256sums=(\'SKIP\')' not in pkgbuild
+    # A tagged archive cannot contain the checksum of itself. The checkout
+    # metadata is finalized and validated immediately after the tag exists.
+    if is_git_checkout:
+        assert 'sha256sums=(\'SKIP\')' not in pkgbuild
     assert 'cd "AuraScan-$pkgver"' in pkgbuild
     assert 'cd "$pkgname-$pkgver"' not in pkgbuild
     assert 'python -m installer --destdir="$pkgdir" --prefix=/usr dist/*.whl' in pkgbuild
@@ -109,7 +113,8 @@ def test_arch_package_metadata_targets_current_public_release():
     assert "pkgdesc = AI-assisted safety layer for Arch-family package, AUR, and upgrade workflows" in srcinfo
     assert "optdepends = shelly: optional Shelly update handoff for aurascan upgrade" in srcinfo
     assert f"aurascan-{version}.tar.gz::https://github.com/crizzler/AuraScan/archive/refs/tags/v{version}.tar.gz" in srcinfo
-    assert "sha256sums = SKIP" not in srcinfo
+    if is_git_checkout:
+        assert "sha256sums = SKIP" not in srcinfo
     assert release_notes.exists()
 
 

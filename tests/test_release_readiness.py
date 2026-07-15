@@ -29,12 +29,14 @@ def test_entry_point_targets_import():
     from aurascan.cli import main as cli_main
     from aurascan.__main__ import main as module_main
     from aurascan.core.kernel_module_autopilot import build_kernel_module_check
+    from aurascan.core.incidents import run_incidents
     from aurascan.makepkg_wrapper import main as wrapper_main
     from aurascan.core.updater_tray import run_updater
 
     assert callable(cli_main)
     assert callable(module_main)
     assert callable(build_kernel_module_check)
+    assert callable(run_incidents)
     assert callable(wrapper_main)
     assert callable(run_updater)
 
@@ -59,14 +61,24 @@ def test_readme_contains_release_safety_boundaries():
         "python -m aurascan init",
         "python -m aurascan doctor",
         "python -m pip install -e \".[test]\" && python -m aurascan init",
-        "not currently published to the official arch/cachyos",
-        "the public arch/aur package recipe lives under `packaging/arch/`",
+        "not currently published to official distribution repositories",
+        "public arch/aur package recipe lives under `packaging/arch/`",
         "makepkg -si",
         "does not auto-run the wizard",
         "aurascan_ai_enabled",
         "provider-specific keys",
         "kernel/module autopilot is enabled by default",
         "aurascan_kernel_module_autopilot_enabled",
+        "| manjaro | supported with caveats |",
+        "gnome is fully supported for cli workflows",
+        "kde plasma on wayland or x11 is the best-supported",
+        "aurascan incidents --dry-run",
+        "the optional root monitor is installed disabled",
+        "the monitor has no network access",
+        "makes no background ai requests",
+        "ai cannot generate commands",
+        "does not automate filesystem repair",
+        "aurascan_incident_ai_evidence",
     ]
     for phrase in required_phrases:
         assert phrase in readme
@@ -93,6 +105,8 @@ def test_release_checklist_references_required_validation_and_safety_items():
         "Live AUR sampling is not part of normal pytest.",
         "MIT license is present.",
         "No generated local artifacts are staged or committed.",
+        "Incident monitor is installed disabled and has no network access.",
+        "Incident repair actions are allowlisted and freshly revalidated as root.",
     ]
     for phrase in required_phrases:
         assert phrase in checklist

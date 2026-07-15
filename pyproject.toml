@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aurascan"
 version = "0.3.0"
-description = "AI-assisted safety layer for Arch/CachyOS package, AUR, and upgrade workflows."
+description = "AI-assisted safety layer for Arch-family package, AUR, and upgrade workflows."
 readme = "README.md"
 authors = [{name = "AuraScan Team"}]
 license = "MIT"
@@ -14,6 +14,8 @@ dependencies = []
 requires-python = ">=3.8"
 keywords = [
     "arch-linux",
+    "endeavouros",
+    "manjaro",
     "cachyos",
     "pacman",
     "aur",
@@ -22,6 +24,9 @@ keywords = [
     "linux-security",
     "upgrade-preflight",
     "config-drift",
+    "crash-diagnostics",
+    "incident-recovery",
+    "system-maintenance",
     "ai",
     "system-tray",
 ]

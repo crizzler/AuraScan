@@ -73,10 +73,22 @@ Optional external tools:
 - `makepkg`: wrapper workflows through `aurascan-makepkg`;
 - `pacman`/`vercmp`: local package DB context proof for explicit `--scan-context auto` flows.
 - `python-pyqt6`: optional AuraScan Updater tray applet.
+- `pacman-contrib`: bounded `paccache` cleanup for a proven disk-exhaustion
+  incident.
 
-The package installs the reusable `aurascan-updater.desktop` launcher and icon.
+The package installs the reusable `aurascan-updater.desktop` launcher plus
+normal, maintenance-due, attention, and critical tray icons.
 Per-user autostart remains controlled by the wizard or `aurascan updater
 --install-autostart`; package install must not enable it automatically.
+
+The package also installs `aurascan-incident-monitor.service`, the hardened
+`aurascan-incident-maintenance.service`, its persistent weekly timer, and
+tmpfiles rules. Both remain disabled after installation. Users opt in through
+`aurascan init --enable-incident-monitor`; package installation must not call
+`systemctl enable`, scan logs, contact AI, or perform repairs. The hardened
+services are read-only, have no network access, and record only redacted
+reports, root-only checkpoints, public timing/health status, and non-sensitive
+UID-scoped pending markers for tray notification.
 
 Current hook failure behavior:
 

@@ -8,6 +8,8 @@ Run first-run setup:
 Check local configuration:
   aurascan doctor
 
+Run aurascan init to optionally enable the read-only boot monitor and weekly maintenance timer.
+
 For AUR build-time protection, configure your helper to use:
   aurascan-makepkg
 EOF
@@ -20,6 +22,8 @@ AuraScan upgraded.
 Review setup and local diagnostics when needed:
   aurascan init
   aurascan doctor
+
+Run aurascan init to review the optional boot monitor and weekly maintenance setting.
 
 For AUR build-time protection, configure your helper to use:
   aurascan-makepkg

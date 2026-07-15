@@ -103,7 +103,11 @@ def test_arch_package_metadata_targets_current_public_release():
     assert 'cd "AuraScan-$pkgver"' in pkgbuild
     assert 'cd "$pkgname-$pkgver"' not in pkgbuild
     assert 'python -m installer --destdir="$pkgdir" --prefix=/usr dist/*.whl' in pkgbuild
+    assert "Arch-family package, AUR, and upgrade workflows" in pkgbuild
+    assert "shelly: optional Shelly update handoff for aurascan upgrade" in pkgbuild
     assert f"pkgver = {version}" in srcinfo
+    assert "pkgdesc = AI-assisted safety layer for Arch-family package, AUR, and upgrade workflows" in srcinfo
+    assert "optdepends = shelly: optional Shelly update handoff for aurascan upgrade" in srcinfo
     assert f"aurascan-{version}.tar.gz::https://github.com/crizzler/AuraScan/archive/refs/tags/v{version}.tar.gz" in srcinfo
     assert "sha256sums = SKIP" not in srcinfo
     assert release_notes.exists()
@@ -118,7 +122,45 @@ def test_arch_pkgbuild_installs_updater_assets():
     assert "aurascan/assets/aurascan-updater.svg" in text
     assert "/usr/share/applications/aurascan-updater.desktop" in text
     assert "/usr/share/icons/hicolor/scalable/apps/aurascan-updater.svg" in text
+    assert "aurascan-updater-maintenance.svg" in text
+    assert "aurascan-updater-attention.svg" in text
+    assert "aurascan-updater-critical.svg" in text
     assert "python-pyqt6: AuraScan Updater tray applet" in srcinfo
+
+
+def test_arch_pkgbuild_installs_disabled_hardened_incident_monitor():
+    pkgbuild = read_text("packaging/arch/PKGBUILD")
+    srcinfo = read_text("packaging/arch/.SRCINFO")
+    service = read_text("aurascan/assets/aurascan-incident-monitor.service")
+    tmpfiles = read_text("aurascan/assets/aurascan-incidents.conf")
+    maintenance_service = read_text("aurascan/assets/aurascan-incident-maintenance.service")
+    maintenance_timer = read_text("aurascan/assets/aurascan-incident-maintenance.timer")
+
+    assert "aurascan/assets/aurascan-incident-monitor.service" in pkgbuild
+    assert "/usr/lib/systemd/system/aurascan-incident-monitor.service" in pkgbuild
+    assert "/usr/lib/systemd/system/aurascan-incident-maintenance.service" in pkgbuild
+    assert "/usr/lib/systemd/system/aurascan-incident-maintenance.timer" in pkgbuild
+    assert "aurascan/assets/aurascan-incidents.conf" in pkgbuild
+    assert "/usr/lib/tmpfiles.d/aurascan-incidents.conf" in pkgbuild
+    assert "pacman-contrib: bounded package-cache cleanup for incident recovery" in pkgbuild
+    assert "pacman-contrib: bounded package-cache cleanup for incident recovery" in srcinfo
+    assert "ExecStart=/usr/bin/aurascan incidents --last-boot --capture-monitor" in service
+    assert "PrivateNetwork=yes" in service
+    assert "NoNewPrivileges=yes" in service
+    assert "ProtectSystem=strict" in service
+    assert "StateDirectory=aurascan/incidents" in service
+    assert "ReadWritePaths=/var/lib/aurascan/incidents" in service
+    assert "ExecStart=/usr/bin/aurascan incidents --current-boot --capture-maintenance" in maintenance_service
+    assert "PrivateNetwork=yes" in maintenance_service
+    assert "CPUWeight=10" in maintenance_service
+    assert "IOWeight=10" in maintenance_service
+    assert "OnCalendar=weekly" in maintenance_timer
+    assert "Persistent=true" in maintenance_timer
+    assert "RandomizedDelaySec=2h" in maintenance_timer
+    assert "/var/lib/aurascan/incidents/pending" in tmpfiles
+    assert "systemctl enable" not in pkgbuild
+    assert "systemctl start" not in pkgbuild
+    assert "systemctl enable" not in maintenance_timer
 
 
 def test_updater_desktop_asset_is_release_safe():
@@ -203,6 +245,7 @@ def test_cli_help_mentions_pacman_hook_mode_boundary():
     assert "Pacman hook mode" in help_text
     assert "NeedsTargets" in help_text
     assert "aurascan updater" in help_text
+    assert "aurascan incidents" in help_text
     assert "not a replacement for aurascan-makepkg" in normalized
 
 

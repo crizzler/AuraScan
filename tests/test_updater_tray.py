@@ -1,15 +1,21 @@
 import io
+import json
 from pathlib import Path
 
 from aurascan.core.updater_tray import (
     UPDATER_AUTOSTART_ENV,
+    UPDATER_INCIDENT_REFRESH_MS,
+    UPDATER_MENU_GROUPS,
     UPDATER_TERMINAL_ENV,
     UPDATER_TRAY_ENABLED_ENV,
+    INCIDENT_REVIEW_COMMAND,
     build_terminal_invocation,
+    build_incident_notification,
     build_updater_status,
     install_updater_autostart,
     remove_updater_autostart,
     render_desktop_entry,
+    resolve_tray_incident_state,
     resolve_updater_config,
     run_updater,
     updater_desktop_paths,
@@ -90,6 +96,7 @@ def test_desktop_entry_rendering_and_autostart_lifecycle(tmp_path):
     assert paths.app_desktop.exists()
     assert paths.autostart_desktop.exists()
     assert paths.icon.exists()
+    assert all(path.exists() for path in paths.state_icons.values())
     assert "Exec=aurascan updater" in paths.app_desktop.read_text(encoding="utf-8")
     assert "X-GNOME-Autostart-enabled=true" in paths.autostart_desktop.read_text(encoding="utf-8")
     assert "<svg" in paths.icon.read_text(encoding="utf-8")
@@ -186,3 +193,137 @@ def test_updater_cli_no_tray_does_not_start_gui(tmp_path):
     assert status == 0
     assert "Qt binding: not found" in stdout.getvalue()
     assert "Terminal: not found" in stdout.getvalue()
+
+
+def test_updater_menu_exposes_one_guided_incident_resolution_workflow():
+    commands = {label: list(command) for group in UPDATER_MENU_GROUPS for label, command in group}
+
+    assert commands["Resolve System Findings"] == ["aurascan", "incidents", "--resolve"]
+    assert commands["Run System Maintenance Scan"] == ["aurascan", "incidents", "--run-maintenance"]
+    assert not {
+        "AuraScan Doctor",
+        "Config Drift Assistant",
+        "Diagnose System Problems",
+        "Dry-run Preflight",
+        "Review Last Crash",
+        "Review System Findings",
+        "Recent Incidents",
+    } & commands.keys()
+    assert list(INCIDENT_REVIEW_COMMAND) == ["aurascan", "incidents", "--resolve"]
+    assert UPDATER_INCIDENT_REFRESH_MS == 5_000
+
+
+def test_incident_notification_groups_markers_by_boot():
+    title, message = build_incident_notification([
+        {"boot_id": "a" * 32, "uid_scope": "global", "count": 2},
+        {"boot_id": "a" * 32, "uid_scope": "1000", "count": 1},
+    ])
+
+    assert title == "AuraScan found crash evidence"
+    assert "3 incident event(s)" in message
+
+
+def test_tray_state_is_due_when_maintenance_is_incomplete(tmp_path):
+    status_path = tmp_path / "status.json"
+    status_path.write_text(json.dumps({"collection_status": "partial", "last_success_usec": 1}), encoding="utf-8")
+
+    state = resolve_tray_incident_state(
+        marker_root=tmp_path / "pending",
+        notification_seen_path=tmp_path / "seen.json",
+        reviewed_path=tmp_path / "reviewed.json",
+        maintenance_status_path=status_path,
+        uid=1000,
+        now_usec=2,
+    )
+
+    assert state.state == "due"
+    assert state.notification_markers == []
+
+
+def test_tray_state_attention_and_notification_thresholds(tmp_path):
+    marker_root = tmp_path / "pending"
+    marker_root.mkdir()
+    medium = {
+        "marker_type": "maintenance",
+        "scan_id": "scan-medium",
+        "boot_id": "a" * 32,
+        "uid_scope": "1000",
+        "severity": "MEDIUM",
+        "categories": ["application_crash"],
+        "count": 1,
+        "repeated": False,
+    }
+    (marker_root / "medium.json").write_text(json.dumps(medium), encoding="utf-8")
+
+    state = resolve_tray_incident_state(
+        marker_root=marker_root,
+        notification_seen_path=tmp_path / "seen.json",
+        reviewed_path=tmp_path / "reviewed.json",
+        maintenance_status_path=tmp_path / "missing.json",
+        uid=1000,
+    )
+
+    assert state.state == "attention"
+    assert state.notification_markers == []
+
+    repeated = dict(medium, scan_id="scan-repeated", count=3, repeated=True)
+    (marker_root / "repeated.json").write_text(json.dumps(repeated), encoding="utf-8")
+    repeated_state = resolve_tray_incident_state(
+        marker_root=marker_root,
+        notification_seen_path=tmp_path / "seen.json",
+        reviewed_path=tmp_path / "reviewed.json",
+        maintenance_status_path=tmp_path / "missing.json",
+        uid=1000,
+    )
+    assert any(item["scan_id"] == "scan-repeated" for item in repeated_state.notification_markers)
+
+    critical = dict(medium, scan_id="scan-critical", severity="HIGH")
+    (marker_root / "critical.json").write_text(json.dumps(critical), encoding="utf-8")
+    critical_state = resolve_tray_incident_state(
+        marker_root=marker_root,
+        notification_seen_path=tmp_path / "seen.json",
+        reviewed_path=tmp_path / "reviewed.json",
+        maintenance_status_path=tmp_path / "missing.json",
+        uid=1000,
+    )
+
+    assert critical_state.state == "critical"
+    assert {item["scan_id"] for item in critical_state.notification_markers} == {"scan-critical", "scan-repeated"}
+
+
+def test_reviewed_marker_clears_attention_but_later_generation_returns(tmp_path):
+    marker_root = tmp_path / "pending"
+    marker_root.mkdir()
+    marker = {
+        "marker_type": "maintenance",
+        "scan_id": "scan-one",
+        "boot_id": "a" * 32,
+        "uid_scope": "1000",
+        "severity": "MEDIUM",
+        "categories": ["application_crash"],
+        "count": 3,
+        "repeated": True,
+    }
+    (marker_root / "one.json").write_text(json.dumps(marker), encoding="utf-8")
+    reviewed = tmp_path / "reviewed.json"
+    reviewed.write_text(json.dumps(["maintenance:scan-one:1000"]), encoding="utf-8")
+
+    state = resolve_tray_incident_state(
+        marker_root=marker_root,
+        notification_seen_path=tmp_path / "seen.json",
+        reviewed_path=reviewed,
+        maintenance_status_path=tmp_path / "missing.json",
+        uid=1000,
+    )
+    assert state.state == "normal"
+
+    marker["scan_id"] = "scan-two"
+    (marker_root / "two.json").write_text(json.dumps(marker), encoding="utf-8")
+    later = resolve_tray_incident_state(
+        marker_root=marker_root,
+        notification_seen_path=tmp_path / "seen.json",
+        reviewed_path=reviewed,
+        maintenance_status_path=tmp_path / "missing.json",
+        uid=1000,
+    )
+    assert later.state == "attention"

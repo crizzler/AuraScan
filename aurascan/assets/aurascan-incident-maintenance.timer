@@ -1,0 +1,13 @@
+[Unit]
+Description=Run AuraScan incident maintenance weekly
+Documentation=https://github.com/crizzler/AuraScan
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=2h
+AccuracySec=15m
+Unit=aurascan-incident-maintenance.service
+
+[Install]
+WantedBy=timers.target

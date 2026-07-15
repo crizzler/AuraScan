@@ -1,18 +1,21 @@
 # AuraScan Announcement Draft
 
-Use this as a starting point for CachyOS, Arch-adjacent, Reddit, Mastodon,
+Use this as a starting point for Arch-family communities, Reddit, Mastodon,
 Matrix, or Discord posts. Keep the tone transparent: AuraScan reduces risk, but
 it does not prove package safety.
 
 ## Short Post
 
-AuraScan is an early developer-preview safety layer for Arch Linux, CachyOS, and
-AUR workflows.
+AuraScan is an early developer-preview safety layer for Arch Linux,
+EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
 It can scan PKGBUILDs and package archives, wrap makepkg before build scripts
 run, preview risky upgrade conditions with `aurascan upgrade --dry-run`, and
 help explain `.pacnew`/`.pacsave` config drift with backups before applying
-safe fixes.
+safe fixes. The new `aurascan incidents --dry-run` command can also inspect
+bounded crash evidence and explain likely system or application failures.
+An optional weekly local scan can also catch recoverable errors during long
+uptime without contacting AI or applying repairs in the background.
 
 The new `aurascan upgrade` flow is designed as a native-feeling upgrade front
 door: it previews repo and AUR updates, checks kernel/module/initramfs/boot
@@ -28,6 +31,7 @@ python -m pip install -e ".[test]"
 python -m aurascan init
 python -m aurascan upgrade --dry-run
 python -m aurascan config-drift --dry-run
+python -m aurascan incidents --dry-run --no-ai
 ```
 
 Important limits: AuraScan is a developer preview. A clean report is not proof
@@ -37,7 +41,7 @@ positive reports.
 
 ## Longer Post
 
-I am building AuraScan, a security-focused assistant for Arch/CachyOS package
+I am building AuraScan, a security-focused assistant for Arch-family package
 workflows.
 
 The original goal was to make AUR package review less easy to skip. AuraScan
@@ -57,16 +61,32 @@ The newest work adds upgrade safety helpers:
   an upgrade safe or suppress deterministic findings.
 - `aurascan config-drift --dry-run` explains config drift and prepares safe
   fixes with backups before applying.
+- `aurascan incidents --dry-run` examines bounded journal, coredump, pstore,
+  package, and module evidence. AI can explain redacted evidence, but repair
+  commands come only from AuraScan's verified allowlist.
+- The optional boot monitor is disabled until the user enables it, performs no
+  background AI requests or repairs, and can notify through the tray when a
+  previous boot recorded crashes.
+- Enabling incident monitoring also enables a low-priority weekly current-boot
+  scan. Clean runs stay silent; the tray changes state for overdue or
+  unreviewed maintenance findings.
+- The tray exposes one guided **Resolve System Findings** action. Verified
+  AuraScan repairs can be confirmed there; historical findings without a safe
+  repair are explained and acknowledged without running AI-generated commands.
+- The optional tray applet targets KDE first, should work on common
+  tray-capable desktops, and may need AppIndicator/status-notifier support on
+  GNOME.
 
 What I would value most:
 
-- CachyOS/Arch users testing dry-run output.
+- Arch, EndeavourOS, Manjaro, and CachyOS users testing dry-run output.
 - Packaging feedback for a future AUR package.
 - False positive reports from real PKGBUILDs and upgrades.
 - Suggestions for making the terminal UX friendlier for non-expert Linux users.
 
 Repo: https://github.com/crizzler/AuraScan
 
-This is not a guarantee layer or a replacement for backups. It is an early
-attempt to make the dangerous parts of package management more visible before
-the user has to become an Arch expert.
+This is not a guarantee layer or a replacement for backups. Incident recovery
+does not automate filesystem repair, partition changes, bootloader edits, or
+reboots. It is an early attempt to make dangerous package and recovery work
+more visible before the user has to become an Arch expert.

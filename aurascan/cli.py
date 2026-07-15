@@ -7,6 +7,7 @@ from typing import List
 from aurascan.core.config import load_env
 from aurascan.core.config_drift import run_config_drift
 from aurascan.core.engine import AuraScanEngine
+from aurascan.core.incidents import run_incidents
 from aurascan.core.upgrade_preflight import run_upgrade
 from aurascan.core.updater_tray import run_updater
 from aurascan.setup_wizard import run_doctor, run_init
@@ -15,7 +16,7 @@ from aurascan.setup_wizard import run_doctor, run_init
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aurascan",
-        description="Scan Arch/CachyOS/AUR package metadata, PKGBUILDs, and package archives.",
+        description="Scan Arch-family/AUR package metadata, PKGBUILDs, and package archives.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Setup commands:\n"
@@ -25,6 +26,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  aurascan upgrade   Preflight a system upgrade, then hand off to pacman/paru/yay/shelly.\n\n"
             "Maintenance command:\n"
             "  aurascan config-drift   Resolve .pacnew/.pacsave configuration drift with backups.\n\n"
+            "Recovery command:\n"
+            "  aurascan incidents  Diagnose crashes and prepare guarded system repairs.\n\n"
             "Desktop command:\n"
             "  aurascan updater   Run or configure the AuraScan Updater tray applet.\n\n"
             "Pacman hook mode: when no --pkg or --pkgbuild is supplied, AuraScan "
@@ -108,6 +111,8 @@ def main(argv=None):
         sys.exit(run_upgrade(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "config-drift":
         sys.exit(run_config_drift(raw_argv[1:]))
+    if raw_argv and raw_argv[0] == "incidents":
+        sys.exit(run_incidents(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "updater":
         sys.exit(run_updater(raw_argv[1:]))
 

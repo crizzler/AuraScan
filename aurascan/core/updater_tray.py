@@ -1,5 +1,6 @@
 import argparse
 import importlib.util
+import json
 import os
 import shlex
 import shutil
@@ -11,6 +12,16 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence
 
 from aurascan.core.ai_provider import parse_bool as parse_config_bool
 from aurascan.core.config import read_env_file, user_env_path, write_user_env
+from aurascan.core.incidents import (
+    INCIDENT_MAINTENANCE_STATUS,
+    INCIDENT_MONITOR_MARKER_ROOT,
+    incident_reviewed_state_path,
+    incident_seen_state_path,
+    load_maintenance_status,
+    mark_pending_markers_seen,
+    pending_markers,
+    unseen_pending_markers,
+)
 
 
 UPDATER_TRAY_ENABLED_ENV = "AURASCAN_UPDATER_TRAY_ENABLED"
@@ -21,7 +32,27 @@ UPDATER_APP_ID = "aurascan-updater"
 UPDATER_DESKTOP_NAME = f"{UPDATER_APP_ID}.desktop"
 UPDATER_ICON_NAME = UPDATER_APP_ID
 UPDATER_TOOLTIP = "AuraScan Updater - guarded package upgrades"
+UPDATER_INCIDENT_REFRESH_MS = 5_000
+INCIDENT_REVIEW_COMMAND = ("aurascan", "incidents", "--resolve")
+UPDATER_STATE_ICONS = {
+    "normal": UPDATER_ICON_NAME,
+    "due": f"{UPDATER_ICON_NAME}-maintenance",
+    "attention": f"{UPDATER_ICON_NAME}-attention",
+    "critical": f"{UPDATER_ICON_NAME}-critical",
+}
 UPDATER_TERMINAL_ORDER = ["xdg-terminal-exec", "konsole", "alacritty", "kitty", "gnome-terminal", "xterm"]
+UPDATER_MENU_GROUPS = (
+    (
+        ("Run AuraScan Upgrade", ("aurascan", "upgrade")),
+    ),
+    (
+        ("Resolve System Findings", INCIDENT_REVIEW_COMMAND),
+        ("Run System Maintenance Scan", ("aurascan", "incidents", "--run-maintenance")),
+    ),
+    (
+        ("AuraScan Settings", ("aurascan", "init")),
+    ),
+)
 ASSET_DIR = Path(__file__).resolve().parents[1] / "assets"
 
 
@@ -45,10 +76,21 @@ class TerminalInvocation:
 
 
 @dataclass
+class TrayIncidentState:
+    state: str
+    icon_name: str
+    tooltip: str
+    unreviewed_markers: List[Dict[str, object]]
+    unseen_notification_markers: List[Dict[str, object]]
+    notification_markers: List[Dict[str, object]]
+
+
+@dataclass
 class UpdaterDesktopPaths:
     app_desktop: Path
     autostart_desktop: Path
     icon: Path
+    state_icons: Dict[str, Path]
 
 
 @dataclass
@@ -69,6 +111,7 @@ class UpdaterStatus:
     app_desktop_installed: bool = False
     autostart_installed: bool = False
     icon_installed: bool = False
+    state_icons_installed: bool = False
 
     def to_lines(self) -> List[str]:
         lines = [
@@ -81,6 +124,7 @@ class UpdaterStatus:
             f"Application launcher: {'installed' if self.app_desktop_installed else 'missing'} ({self.paths.app_desktop})",
             f"Autostart entry: {'installed' if self.autostart_installed else 'missing'} ({self.paths.autostart_desktop})",
             f"Icon: {'installed' if self.icon_installed else 'missing'} ({self.paths.icon})",
+            f"Attention icons: {'installed' if self.state_icons_installed else 'missing'}",
         ]
         if self.config.error:
             lines.append(f"Config error: {self.config.error}")
@@ -190,6 +234,11 @@ def updater_desktop_paths(
         app_desktop=data / "applications" / UPDATER_DESKTOP_NAME,
         autostart_desktop=cfg / "autostart" / UPDATER_DESKTOP_NAME,
         icon=data / "icons" / "hicolor" / "scalable" / "apps" / f"{UPDATER_ICON_NAME}.svg",
+        state_icons={
+            state: data / "icons" / "hicolor" / "scalable" / "apps" / f"{name}.svg"
+            for state, name in UPDATER_STATE_ICONS.items()
+            if state != "normal"
+        },
     )
 
 
@@ -202,6 +251,8 @@ def install_updater_autostart(*, paths: Optional[UpdaterDesktopPaths] = None) ->
         paths.app_desktop.write_text(render_desktop_entry(autostart=False), encoding="utf-8")
         paths.autostart_desktop.write_text(render_desktop_entry(autostart=True), encoding="utf-8")
         paths.icon.write_text(load_icon_svg(), encoding="utf-8")
+        for state, path in paths.state_icons.items():
+            path.write_text(load_icon_svg(UPDATER_STATE_ICONS[state]), encoding="utf-8")
     except OSError as exc:
         return UpdaterInstallResult(False, "error", f"Updater autostart install failed: {exc}", paths)
     return UpdaterInstallResult(True, "ok", f"Installed AuraScan Updater autostart at {paths.autostart_desktop}.", paths)
@@ -233,8 +284,8 @@ def render_desktop_entry(*, autostart: bool) -> str:
     return "\n".join(lines) + "\n"
 
 
-def load_icon_svg() -> str:
-    icon_path = ASSET_DIR / f"{UPDATER_ICON_NAME}.svg"
+def load_icon_svg(icon_name: str = UPDATER_ICON_NAME) -> str:
+    icon_path = ASSET_DIR / f"{icon_name}.svg"
     try:
         return icon_path.read_text(encoding="utf-8")
     except OSError:
@@ -279,6 +330,7 @@ def build_updater_status(
         app_desktop_installed=paths.app_desktop.exists(),
         autostart_installed=paths.autostart_desktop.exists(),
         icon_installed=paths.icon.exists(),
+        state_icons_installed=all(path.exists() for path in paths.state_icons.values()),
     )
 
 
@@ -344,6 +396,10 @@ def start_tray_app(
     which: Callable[[str], Optional[str]] = shutil.which,
     popen: Callable = subprocess.Popen,
     stderr=None,
+    incident_marker_root: Path = INCIDENT_MONITOR_MARKER_ROOT,
+    incident_seen_path: Optional[Path] = None,
+    incident_reviewed_path: Optional[Path] = None,
+    maintenance_status_path: Path = INCIDENT_MAINTENANCE_STATUS,
 ) -> int:
     stderr = stderr or sys.stderr
     config = resolve_updater_config(env)
@@ -351,7 +407,7 @@ def start_tray_app(
         print(f"[AuraScan] Updater configuration error: {config.error}", file=stderr)
         return 1
     try:
-        QtWidgets, QtGui = load_qt_modules()
+        QtCore, QtWidgets, QtGui = load_qt_modules()
     except ImportError as exc:
         print(f"[AuraScan] AuraScan Updater requires PyQt6 or PySide6: {exc}", file=stderr)
         return 1
@@ -363,10 +419,7 @@ def start_tray_app(
     app.setQuitOnLastWindowClosed(False)
 
     tray = QtWidgets.QSystemTrayIcon()
-    icon = QtGui.QIcon.fromTheme(UPDATER_ICON_NAME)
-    if icon.isNull():
-        icon = QtGui.QIcon.fromTheme("system-software-update")
-    tray.setIcon(icon)
+    tray.setIcon(load_state_icon(QtGui, "normal"))
     tray.setToolTip(UPDATER_TOOLTIP)
 
     menu = QtWidgets.QMenu()
@@ -376,35 +429,165 @@ def start_tray_app(
         action.triggered.connect(lambda _checked=False, cmd=list(command): launch_terminal(cmd, terminal=config.terminal, which=which, popen=popen))
         return action
 
-    add_action("Run AuraScan Upgrade", ["aurascan", "upgrade"])
-    add_action("Dry-run Preflight", ["aurascan", "upgrade", "--dry-run"])
-    add_action("Config Drift Assistant", ["aurascan", "config-drift"])
-    add_action("AuraScan Doctor", ["aurascan", "doctor"])
-    add_action("AuraScan Settings", ["aurascan", "init"])
+    for group_index, group in enumerate(UPDATER_MENU_GROUPS):
+        if group_index:
+            menu.addSeparator()
+        for label, command in group:
+            add_action(label, command)
     menu.addSeparator()
     quit_action = menu.addAction("Quit")
     quit_action.triggered.connect(app.quit)
     tray.setContextMenu(menu)
     tray.activated.connect(lambda reason: _handle_tray_activation(reason, tray, config.terminal, which, popen))
+    tray.messageClicked.connect(
+        lambda: launch_terminal(INCIDENT_REVIEW_COMMAND, terminal=config.terminal, which=which, popen=popen)
+    )
     tray.show()
+    seen_path = incident_seen_path or incident_seen_state_path(env)
+    reviewed_path = incident_reviewed_path or incident_reviewed_state_path(env)
+
+    def refresh_incident_state() -> None:
+        state = resolve_tray_incident_state(
+            marker_root=incident_marker_root,
+            notification_seen_path=seen_path,
+            reviewed_path=reviewed_path,
+            maintenance_status_path=maintenance_status_path,
+        )
+        tray.setIcon(load_state_icon(QtGui, state.state))
+        tray.setToolTip(state.tooltip)
+        if state.notification_markers:
+            title, message = build_incident_notification(state.notification_markers)
+            tray.showMessage(title, message)
+        mark_pending_markers_seen(state.unseen_notification_markers, seen_path=seen_path)
+
+    refresh_incident_state()
+    refresh_timer = QtCore.QTimer(tray)
+    refresh_timer.timeout.connect(refresh_incident_state)
+    refresh_timer.start(UPDATER_INCIDENT_REFRESH_MS)
     return int(app.exec())
 
 
 def load_qt_modules():
     try:
-        from PyQt6 import QtGui, QtWidgets
+        from PyQt6 import QtCore, QtGui, QtWidgets
 
-        return QtWidgets, QtGui
+        return QtCore, QtWidgets, QtGui
     except ImportError:
-        from PySide6 import QtGui, QtWidgets
+        from PySide6 import QtCore, QtGui, QtWidgets
 
-        return QtWidgets, QtGui
+        return QtCore, QtWidgets, QtGui
+
+
+def load_state_icon(QtGui, state: str):
+    state = state if state in UPDATER_STATE_ICONS else "normal"
+    icon_name = UPDATER_STATE_ICONS[state]
+    icon = QtGui.QIcon.fromTheme(icon_name)
+    if icon.isNull():
+        asset = ASSET_DIR / f"{icon_name}.svg"
+        if asset.exists():
+            icon = QtGui.QIcon(str(asset))
+    if icon.isNull():
+        fallback = {
+            "normal": "system-software-update",
+            "due": "view-refresh",
+            "attention": "dialog-warning",
+            "critical": "dialog-error",
+        }[state]
+        icon = QtGui.QIcon.fromTheme(fallback)
+    return icon
 
 
 def _handle_tray_activation(reason, tray, terminal: str, which: Callable, popen: Callable) -> None:
     activation = type(tray).ActivationReason
     if reason == activation.DoubleClick:
         launch_terminal(["aurascan", "upgrade"], terminal=terminal, which=which, popen=popen)
+
+
+def resolve_tray_incident_state(
+    *,
+    marker_root: Path = INCIDENT_MONITOR_MARKER_ROOT,
+    notification_seen_path: Optional[Path] = None,
+    reviewed_path: Optional[Path] = None,
+    maintenance_status_path: Path = INCIDENT_MAINTENANCE_STATUS,
+    uid: Optional[int] = None,
+    now_usec: Optional[int] = None,
+) -> TrayIncidentState:
+    notification_seen_path = notification_seen_path or incident_seen_state_path()
+    reviewed_path = reviewed_path or incident_reviewed_state_path()
+    all_markers = pending_markers(uid=uid, root=marker_root)
+    reviewed_keys = read_marker_keys(reviewed_path)
+    unreviewed = [marker for marker in all_markers if marker_identity(marker) not in reviewed_keys]
+    unseen_notifications = unseen_pending_markers(
+        uid=uid,
+        marker_root=marker_root,
+        seen_path=notification_seen_path,
+    )
+    notification_markers = [marker for marker in unseen_notifications if marker_needs_notification(marker)]
+    severity_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+    highest = max((severity_rank.get(str(marker.get("severity") or "LOW").upper(), 0) for marker in unreviewed), default=0)
+    repeated = any(bool(marker.get("repeated")) for marker in unreviewed)
+    maintenance = load_maintenance_status(maintenance_status_path, now_usec=now_usec)
+    if highest >= severity_rank["HIGH"]:
+        state = "critical"
+        tooltip = "AuraScan Updater - urgent system findings need resolution"
+    elif highest >= severity_rank["MEDIUM"] or repeated:
+        state = "attention"
+        tooltip = "AuraScan Updater - system findings are ready to resolve"
+    elif maintenance.get("overdue"):
+        state = "due"
+        tooltip = "AuraScan Updater - weekly system maintenance is due"
+    else:
+        state = "normal"
+        tooltip = UPDATER_TOOLTIP
+    return TrayIncidentState(
+        state=state,
+        icon_name=UPDATER_STATE_ICONS[state],
+        tooltip=tooltip,
+        unreviewed_markers=unreviewed,
+        unseen_notification_markers=unseen_notifications,
+        notification_markers=notification_markers,
+    )
+
+
+def read_marker_keys(path: Path) -> set:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {str(item) for item in data} if isinstance(data, list) else set()
+
+
+def marker_identity(marker: Mapping[str, object]) -> str:
+    marker_type = marker.get("marker_type") or "boot_incident"
+    boot = marker.get("boot_id") or marker.get("target_boot") or marker.get("incident_id")
+    scan = marker.get("scan_id") or ""
+    scope = marker.get("uid_scope") or marker.get("scope")
+    generation = scan if marker_type == "maintenance" and scan else boot
+    return f"{marker_type}:{generation}:{scope}"
+
+
+def marker_needs_notification(marker: Mapping[str, object]) -> bool:
+    severity = str(marker.get("severity") or "LOW").upper()
+    return severity in {"HIGH", "CRITICAL"} or bool(marker.get("repeated"))
+
+
+def build_incident_notification(markers: Sequence[Mapping[str, object]]) -> tuple:
+    boot_ids = {
+        str(marker.get("boot_id") or marker.get("target_boot") or marker.get("incident_id") or "")
+        for marker in markers
+    }
+    boot_ids.discard("")
+    event_count = sum(max(1, int(marker.get("count") or 1)) for marker in markers)
+    boot_count = len(boot_ids) or 1
+    maintenance_only = bool(markers) and all(str(marker.get("marker_type") or "") == "maintenance" for marker in markers)
+    title = "AuraScan maintenance found system issues" if maintenance_only else "AuraScan found crash evidence"
+    if maintenance_only:
+        message = f"AuraScan recorded {event_count} maintenance finding(s). Click to resolve or acknowledge them."
+    elif boot_count == 1:
+        message = f"AuraScan recorded {event_count} incident event(s). Click to resolve or acknowledge them."
+    else:
+        message = f"AuraScan recorded {event_count} incident event(s) across {boot_count} boots. Click to resolve them in one guided flow."
+    return title, message
 
 
 FALLBACK_ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">

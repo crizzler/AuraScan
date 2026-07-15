@@ -3,7 +3,7 @@
 pkgname=aurascan
 pkgver=0.3.0
 pkgrel=1
-pkgdesc="AI-assisted safety layer for Arch/CachyOS package, AUR, and upgrade workflows"
+pkgdesc="AI-assisted safety layer for Arch-family package, AUR, and upgrade workflows"
 arch=('any')
 url="https://github.com/crizzler/AuraScan"
 license=('MIT')
@@ -18,8 +18,9 @@ optdepends=(
   'base-devel: makepkg wrapper workflows'
   'paru: AUR update context for aurascan upgrade'
   'yay: AUR update context for aurascan upgrade'
-  'shelly: CachyOS/Arch update handoff for aurascan upgrade'
+  'shelly: optional Shelly update handoff for aurascan upgrade'
   'python-pyqt6: AuraScan Updater tray applet'
+  'pacman-contrib: bounded package-cache cleanup for incident recovery'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('8357f4cedeaa85d21a45272311abfa89749b765bab6bcf334fe7fe60a56c68b2')
@@ -40,6 +41,13 @@ package() {
   install -Dm644 packaging/arch/aurascan.hook "$pkgdir/usr/share/libalpm/hooks/aurascan.hook"
   install -Dm644 aurascan/assets/aurascan-updater.desktop "$pkgdir/usr/share/applications/aurascan-updater.desktop"
   install -Dm644 aurascan/assets/aurascan-updater.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/aurascan-updater.svg"
+  install -Dm644 aurascan/assets/aurascan-updater-maintenance.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/aurascan-updater-maintenance.svg"
+  install -Dm644 aurascan/assets/aurascan-updater-attention.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/aurascan-updater-attention.svg"
+  install -Dm644 aurascan/assets/aurascan-updater-critical.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/aurascan-updater-critical.svg"
+  install -Dm644 aurascan/assets/aurascan-incident-monitor.service "$pkgdir/usr/lib/systemd/system/aurascan-incident-monitor.service"
+  install -Dm644 aurascan/assets/aurascan-incident-maintenance.service "$pkgdir/usr/lib/systemd/system/aurascan-incident-maintenance.service"
+  install -Dm644 aurascan/assets/aurascan-incident-maintenance.timer "$pkgdir/usr/lib/systemd/system/aurascan-incident-maintenance.timer"
+  install -Dm644 aurascan/assets/aurascan-incidents.conf "$pkgdir/usr/lib/tmpfiles.d/aurascan-incidents.conf"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 DEVELOPING.md "$pkgdir/usr/share/doc/$pkgname/DEVELOPING.md"
   install -Dm644 docs/RELEASE_CHECKLIST.md "$pkgdir/usr/share/doc/$pkgname/RELEASE_CHECKLIST.md"

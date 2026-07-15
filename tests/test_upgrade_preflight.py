@@ -26,6 +26,7 @@ from aurascan.core.upgrade_preflight import (
     apply_ai_risk_raises,
     apply_ai_upgrade_review,
     build_repository_health_check,
+    build_upgrade_ai_prompt,
     build_upgrade_plan,
     collect_foreign_package_info,
     diagnose_upgrade_failure,
@@ -338,6 +339,18 @@ def test_no_kernel_module_autopilot_keeps_legacy_module_warning():
     assert "UPG-KERNEL-MODULES" in rule_ids
 
 
+def test_manjaro_snapshot_gets_low_severity_aur_timing_advisory():
+    plan = UpgradePlan(repo_packages=[UpgradePackage("glibc", "2.40-1")])
+    snap = base_snapshot(distro_info={"id": "manjaro", "support_tier": "supported_with_caveats"})
+
+    findings = analyze_upgrade_risks(plan, snap)
+    advisory = next(finding for finding in findings if finding.rule_id == "UPG-MANJARO-AUR-CAVEAT")
+
+    assert advisory.severity == Severity.LOW
+    assert "Manjaro" in advisory.title
+    assert "delays repository updates" in advisory.why_it_matters
+
+
 def test_replacement_metadata_only_does_not_create_high_risk_false_alarm():
     plan = UpgradePlan(
         repo_packages=[
@@ -369,6 +382,43 @@ def test_installed_replacement_target_is_reported_without_always_forcing_high():
     replacement = next(finding for finding in findings if finding.rule_id == "UPG-TRANSACTION-REPLACES")
     assert replacement.severity == Severity.MEDIUM
     assert "installed replacement targets=demo-old" in replacement.evidence
+
+
+def test_repository_conflict_is_explained_as_package_metadata_not_aurascan_error():
+    plan = UpgradePlan(
+        repo_packages=[UpgradePackage(
+            "gcc",
+            "16.1-5",
+            repo="cachyos-v3",
+            conflicts=["gcc-multilib"],
+            replaces=["gcc-multilib"],
+        )],
+        replacements=["gcc-multilib"],
+        conflicts=["gcc-multilib"],
+    )
+
+    findings = analyze_upgrade_risks(plan, base_snapshot(installed_packages=["gcc"]))
+    conflict = next(finding for finding in findings if finding.rule_id == "UPG-TRANSACTION-CONFLICTS")
+
+    assert conflict.title == "Repository package transition metadata was detected."
+    assert "not AuraScan" in conflict.summary
+    assert "cachyos-v3/gcc replaces gcc-multilib; conflicts with gcc-multilib" in conflict.evidence
+
+
+def test_ai_prompt_distinguishes_repository_transitions_from_aurascan_errors():
+    plan = UpgradePlan(
+        repo_packages=[UpgradePackage("gcc", "16.1-5", repo="cachyos-v3", conflicts=["gcc-multilib"])],
+        conflicts=["gcc-multilib"],
+    )
+    report = UpgradePreflightReport(plan=plan, snapshot=base_snapshot())
+    report.findings = analyze_upgrade_risks(plan, report.snapshot)
+
+    prompt = build_upgrade_ai_prompt(report)
+
+    assert '"declared_conflicts": ["gcc-multilib"]' in prompt
+    assert '"package_transitions": ["cachyos-v3/gcc conflicts with gcc-multilib"]' in prompt
+    assert "originate in repository package metadata, not AuraScan" in prompt
+    assert "Do not claim manual conflict resolution is required" in prompt
 
 
 def test_foreign_dependency_check_reports_concrete_missing_deps_and_conflicts():
@@ -557,6 +607,38 @@ def test_ai_vague_foreign_raise_is_ignored_when_rebuild_risk_already_exists():
     assert [finding.rule_id for finding in report.findings] == ["UPG-AUR-REBUILD-RISK"]
 
 
+def test_ai_cannot_escalate_metadata_only_transition_or_demand_manual_resolution(monkeypatch):
+    monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
+    monkeypatch.setenv("AURASCAN_AI_PROVIDER", "openai")
+    monkeypatch.setenv("AURASCAN_OPENAI_API_KEY", "fixture-only-value")
+    plan = UpgradePlan(
+        repo_packages=[UpgradePackage("gcc", "16.1-5", repo="cachyos-v3", conflicts=["gcc-multilib"])],
+        conflicts=["gcc-multilib"],
+    )
+    report = UpgradePreflightReport(plan=plan, snapshot=base_snapshot())
+    report.findings = analyze_upgrade_risks(plan, report.snapshot)
+
+    response = {
+        "summary": "Package conflicts need manual resolution.",
+        "risk_raises": [{
+            "target_rule_id": "UPG-TRANSACTION-CONFLICTS",
+            "severity": "HIGH",
+            "reason": "declared package conflict",
+        }],
+    }
+
+    def fake_urlopen(_req, timeout):
+        return FakeResponse({"choices": [{"message": {"content": json.dumps(response)}}]})
+
+    apply_ai_upgrade_review(report, urlopen=fake_urlopen)
+
+    conflict = next(finding for finding in report.findings if finding.rule_id == "UPG-TRANSACTION-CONFLICTS")
+    assert conflict.severity == Severity.MEDIUM
+    assert report.ai_review["raises_applied"] == 0
+    assert "metadata alone does not require manual conflict resolution" in report.ai_review["summary"]
+    assert "not AuraScan" in report.ai_review["summary"]
+
+
 def test_ai_invalid_json_is_non_blocking_note(monkeypatch):
     monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
     monkeypatch.setenv("AURASCAN_AI_PROVIDER", "openai")
@@ -701,6 +783,10 @@ def test_shelly_passing_preflight_uses_trusted_handoff_no_confirm():
     assert ["shelly", "upgrade-all", "--no-flatpak", "--no-appimage", "--no-confirm"] in runner.calls
     assert "Planned command: shelly upgrade-all --no-flatpak --no-appimage --no-confirm" in stdout.getvalue()
     assert "second default-no prompt" in stdout.getvalue()
+    assert "Package-manager handoff" in stdout.getvalue()
+    assert "configured repositories, not AuraScan" in stdout.getvalue()
+    assert "Upgrade transaction verified" in stdout.getvalue()
+    assert "mirror-specific NotFound/404 messages" in stdout.getvalue()
 
 
 def test_shelly_high_risk_preflight_keeps_helper_confirmation():
@@ -898,6 +984,7 @@ def test_upgrade_reported_success_but_versions_not_updated_skips_aftercare():
     assert "Kernel/module aftercare" not in stdout.getvalue()
     assert "planned package versions were not installed" in stderr.getvalue()
     assert "clamav expected 1.5.3-1, found 1.5.2-2" in stderr.getvalue()
+    assert "Upgrade transaction verified" not in stdout.getvalue()
 
 
 def test_failed_upgrade_diagnoses_mirror_notfound():

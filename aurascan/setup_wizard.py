@@ -28,10 +28,31 @@ from aurascan.core.config_drift import (
     CONFIG_DRIFT_ENABLED_ENV,
     resolve_config_drift_config,
 )
+from aurascan.core.compatibility import (
+    detect_desktop_session,
+    detect_distro,
+    detect_package_manager_capabilities,
+)
 from aurascan.core.kernel_module_autopilot import (
     KERNEL_MODULE_AUTOPILOT_ENV,
     detect_module_families,
     is_kernel_base_package,
+)
+from aurascan.core.incidents import (
+    INCIDENT_AI_ENABLED_ENV,
+    INCIDENT_AI_EVIDENCE_ENV,
+    INCIDENT_AI_EVIDENCE_VALUES,
+    INCIDENT_MONITOR_ENABLED_ENV,
+    INCIDENT_MAINTENANCE_SERVICE,
+    INCIDENT_MAINTENANCE_TIMER,
+    INCIDENT_MONITOR_SERVICE,
+    INCIDENT_SYSTEM_ROOT,
+    incident_monitor_status,
+    load_maintenance_status,
+    maintenance_paths,
+    resolve_incident_config,
+    run_bounded_command,
+    set_incident_monitor_enabled,
 )
 from aurascan.core.upgrade_preflight import (
     UPGRADE_AUR_HELPERS,
@@ -54,7 +75,17 @@ from aurascan.core.updater_tray import (
 LOCAL_HOOK_PATH = Path("/etc/pacman.d/hooks/aurascan.hook")
 PACKAGED_HOOK_PATH = Path("/usr/share/libalpm/hooks/aurascan.hook")
 INSTALLED_AURASCAN = Path("/usr/bin/aurascan")
-TEMPLATE_HOOK_PATH = Path(__file__).resolve().parents[1] / "packaging" / "arch" / "aurascan.hook"
+
+
+def resolve_hook_template_path(
+    module_path: Path = Path(__file__),
+    packaged_hook_path: Path = PACKAGED_HOOK_PATH,
+) -> Path:
+    source_template = module_path.resolve().parents[1] / "packaging" / "arch" / "aurascan.hook"
+    return source_template if source_template.is_file() else packaged_hook_path
+
+
+TEMPLATE_HOOK_PATH = resolve_hook_template_path()
 
 
 @dataclass
@@ -103,6 +134,13 @@ def build_init_parser() -> argparse.ArgumentParser:
     kernel_module_autopilot = parser.add_mutually_exclusive_group()
     kernel_module_autopilot.add_argument("--enable-kernel-module-autopilot", action="store_true", help="enable kernel/module autopilot during upgrades")
     kernel_module_autopilot.add_argument("--disable-kernel-module-autopilot", action="store_true", help="disable kernel/module autopilot during upgrades")
+    incident_monitor = parser.add_mutually_exclusive_group()
+    incident_monitor.add_argument("--enable-incident-monitor", action="store_true", help="enable read-only previous-boot and weekly incident detection")
+    incident_monitor.add_argument("--disable-incident-monitor", action="store_true", help="disable previous-boot and weekly incident detection")
+    incident_ai = parser.add_mutually_exclusive_group()
+    incident_ai.add_argument("--enable-incident-ai", action="store_true", help="enable AI explanation for user-opened incident scans")
+    incident_ai.add_argument("--disable-incident-ai", action="store_true", help="disable AI explanation for incident scans")
+    parser.add_argument("--incident-ai-evidence", choices=sorted(INCIDENT_AI_EVIDENCE_VALUES), help="evidence policy for user-opened incident AI reviews")
     updater = parser.add_mutually_exclusive_group()
     updater.add_argument("--enable-updater-tray", action="store_true", help="enable the AuraScan Updater tray icon")
     updater.add_argument("--disable-updater-tray", action="store_true", help="disable the AuraScan Updater tray icon")
@@ -110,7 +148,7 @@ def build_init_parser() -> argparse.ArgumentParser:
     updater_autostart.add_argument("--install-updater-autostart", action="store_true", help="install per-user AuraScan Updater autostart")
     updater_autostart.add_argument("--remove-updater-autostart", action="store_true", help="remove per-user AuraScan Updater autostart")
     hook = parser.add_mutually_exclusive_group()
-    hook.add_argument("--install-hook", action="store_true", help="offer sudo install of the local pacman hook")
+    hook.add_argument("--install-hook", action="store_true", help="install or repair a local pacman hook when no packaged hook is active")
     hook.add_argument("--no-install-hook", action="store_true", help="skip pacman hook setup")
     return parser
 
@@ -138,6 +176,7 @@ def run_init(
     executable_path: Path = INSTALLED_AURASCAN,
     hook_path: Path = LOCAL_HOOK_PATH,
     template_path: Path = TEMPLATE_HOOK_PATH,
+    packaged_hook_path: Path = PACKAGED_HOOK_PATH,
     updater_config_home: Optional[Path] = None,
     updater_data_home: Optional[Path] = None,
 ) -> int:
@@ -203,6 +242,11 @@ def run_init(
         args.provider
         or args.enable_ai
         or args.disable_ai
+        or args.enable_incident_monitor
+        or args.disable_incident_monitor
+        or args.enable_incident_ai
+        or args.disable_incident_ai
+        or args.incident_ai_evidence is not None
         or args.install_hook
         or args.no_install_hook
     )
@@ -286,6 +330,60 @@ def run_init(
         else:
             print("Config drift assistant will be disabled unless you enable it later.", file=stdout)
 
+    configure_incidents = (
+        args.enable_incident_monitor
+        or args.disable_incident_monitor
+        or args.enable_incident_ai
+        or args.disable_incident_ai
+        or args.incident_ai_evidence is not None
+    )
+    should_prompt_incidents = should_prompt_upgrade
+    incident_monitor_action = ""
+    if configure_incidents or should_prompt_incidents:
+        existing_incidents = resolve_incident_config(existing)
+        monitor_service_installed = (Path("/usr/lib/systemd/system") / INCIDENT_MONITOR_SERVICE).exists()
+        monitor_default = (
+            existing_incidents.monitor_enabled
+            if INCIDENT_MONITOR_ENABLED_ENV in existing and not existing_incidents.error
+            else monitor_service_installed
+        )
+        monitor_enabled = monitor_default
+        if args.enable_incident_monitor:
+            monitor_enabled = True
+            incident_monitor_action = "enable"
+        elif args.disable_incident_monitor:
+            monitor_enabled = False
+            incident_monitor_action = "disable"
+        elif should_prompt_incidents:
+            monitor_enabled = _prompt_yes_no(
+                "Enable automatic previous-boot and weekly incident maintenance scans?",
+                input_func,
+                default=monitor_default,
+            )
+            if monitor_enabled:
+                incident_monitor_action = "enable"
+            elif existing_incidents.monitor_enabled:
+                incident_monitor_action = "disable"
+
+        incident_ai_enabled = existing_incidents.ai_enabled if not existing_incidents.error else True
+        if args.enable_incident_ai:
+            incident_ai_enabled = True
+        elif args.disable_incident_ai:
+            incident_ai_enabled = False
+        elif should_prompt_incidents:
+            incident_ai_enabled = _prompt_yes_no(
+                "Allow AI explanation when you open an incident report?",
+                input_func,
+                default=incident_ai_enabled,
+            )
+
+        evidence_policy = existing_incidents.ai_evidence if not existing_incidents.error else "redacted"
+        evidence_policy = args.incident_ai_evidence or evidence_policy
+        updates[INCIDENT_MONITOR_ENABLED_ENV] = "1" if monitor_enabled else "0"
+        updates[INCIDENT_AI_ENABLED_ENV] = "1" if incident_ai_enabled else "0"
+        updates[INCIDENT_AI_EVIDENCE_ENV] = evidence_policy
+        print("Configured Incident Recovery Assistant defaults.", file=stdout)
+
     configure_updater = (
         args.enable_updater_tray
         or args.disable_updater_tray
@@ -334,6 +432,15 @@ def run_init(
     write_user_env(updates, path=target_env)
     print(f"Wrote user config: {target_env}", file=stdout)
 
+    if incident_monitor_action:
+        desired = incident_monitor_action == "enable"
+        monitor_ok, monitor_message = set_incident_monitor_enabled(desired, runner=runner)
+        print(monitor_message, file=stdout if monitor_ok else stderr)
+        if not monitor_ok:
+            previous = existing.get(INCIDENT_MONITOR_ENABLED_ENV, "0")
+            write_user_env({INCIDENT_MONITOR_ENABLED_ENV: previous}, path=target_env)
+            return 1
+
     updater_paths = updater_desktop_paths(config_home=updater_config_home, data_home=updater_data_home)
     if updater_autostart_action == "install":
         updater_result = install_updater_autostart(paths=updater_paths)
@@ -353,6 +460,16 @@ def run_init(
         print(_format_check_line(check), file=stdout)
 
     install_hook = args.install_hook
+    if not args.no_install_hook:
+        if is_release_safe_hook_template(hook_path):
+            print(f"Pacman hook is already active at {hook_path}.", file=stdout)
+            return 0
+        if not hook_path.exists() and is_release_safe_hook_template(packaged_hook_path):
+            print(
+                f"Pacman hook is already active at {packaged_hook_path}; no local override is needed.",
+                file=stdout,
+            )
+            return 0
     if not args.install_hook and not args.no_install_hook:
         install_hook = _prompt_yes_no("Install or repair the local pacman hook now?", input_func, default=False)
     if install_hook:
@@ -385,6 +502,13 @@ def run_doctor(
     which: Callable[[str], Optional[str]] = shutil.which,
     qt_binding_finder: Optional[Callable[[], str]] = None,
     runner: Callable = subprocess.run,
+    os_release_path: Path = Path("/etc/os-release"),
+    incident_service_path: Path = Path("/usr/lib/systemd/system") / INCIDENT_MONITOR_SERVICE,
+    incident_maintenance_service_path: Path = Path("/usr/lib/systemd/system") / INCIDENT_MAINTENANCE_SERVICE,
+    incident_maintenance_timer_path: Path = Path("/usr/lib/systemd/system") / INCIDENT_MAINTENANCE_TIMER,
+    incident_system_root: Path = INCIDENT_SYSTEM_ROOT,
+    journal_root: Path = Path("/var/log/journal"),
+    pstore_root: Path = Path("/sys/fs/pstore"),
 ) -> int:
     stdout = stdout or sys.stdout
     args = build_doctor_parser().parse_args(argv)
@@ -401,6 +525,13 @@ def run_doctor(
         which=which,
         qt_binding_finder=qt_binding_finder,
         runner=runner,
+        os_release_path=os_release_path,
+        incident_service_path=incident_service_path,
+        incident_maintenance_service_path=incident_maintenance_service_path,
+        incident_maintenance_timer_path=incident_maintenance_timer_path,
+        incident_system_root=incident_system_root,
+        journal_root=journal_root,
+        pstore_root=pstore_root,
     )
     has_error = any(check.status == "error" for check in checks)
     if args.json_mode:
@@ -429,11 +560,46 @@ def build_doctor_checks(
     which: Callable[[str], Optional[str]] = shutil.which,
     qt_binding_finder: Optional[Callable[[], str]] = None,
     runner: Callable = subprocess.run,
+    os_release_path: Path = Path("/etc/os-release"),
+    incident_service_path: Path = Path("/usr/lib/systemd/system") / INCIDENT_MONITOR_SERVICE,
+    incident_maintenance_service_path: Path = Path("/usr/lib/systemd/system") / INCIDENT_MAINTENANCE_SERVICE,
+    incident_maintenance_timer_path: Path = Path("/usr/lib/systemd/system") / INCIDENT_MAINTENANCE_TIMER,
+    incident_system_root: Path = INCIDENT_SYSTEM_ROOT,
+    journal_root: Path = Path("/var/log/journal"),
+    pstore_root: Path = Path("/sys/fs/pstore"),
 ) -> List[DoctorCheck]:
     checks: List[DoctorCheck] = []
     file_values = _safe_read_env(env_path)
     effective_env = dict(os.environ if env is None else env)
     effective_env.update(file_values)
+
+    distro = detect_distro(os_release_path)
+    distro_status = "ok" if distro.support_tier != "unsupported" else "warn"
+    tier_label = distro.support_tier.replace("_", " ")
+    checks.append(DoctorCheck(
+        "distro_compatibility",
+        distro_status,
+        f"Distro compatibility: {distro.name} ({tier_label})",
+        distro.to_dict(),
+    ))
+
+    capabilities = detect_package_manager_capabilities(which)
+    found_tools = capabilities.to_dict()["found"]
+    checks.append(DoctorCheck(
+        "package_manager_capabilities",
+        "ok" if capabilities.found("pacman") else "warn",
+        "Package-manager tools found: " + (", ".join(found_tools) if found_tools else "none"),
+        capabilities.to_dict(),
+    ))
+
+    desktop = detect_desktop_session(effective_env)
+    desktop_status = "warn" if desktop.tray_support in {"extension_required", "manual_tray_host", "unknown"} else "ok"
+    checks.append(DoctorCheck(
+        "desktop_session",
+        desktop_status,
+        f"Desktop session: {desktop.primary_desktop} ({desktop.session_type or 'unknown'}); tray support: {desktop.tray_support}",
+        desktop.to_dict(),
+    ))
 
     if env_path.exists():
         checks.append(DoctorCheck("config_file", "ok", f"User config found at {env_path}"))
@@ -535,6 +701,132 @@ def build_doctor_checks(
     else:
         checks.append(DoctorCheck("config_drift", "warn", "Config drift assistant is disabled", {"enabled": False}))
 
+    incident_config = resolve_incident_config(effective_env)
+    monitor_state = incident_monitor_status(
+        runner=runner,
+        service_path=incident_service_path,
+        maintenance_service_path=incident_maintenance_service_path,
+        maintenance_timer_path=incident_maintenance_timer_path,
+    )
+    if incident_config.error:
+        checks.append(DoctorCheck("incident_config", "error", incident_config.error))
+    else:
+        checks.append(DoctorCheck(
+            "incident_assistant",
+            "ok",
+            "Incident Recovery Assistant is available",
+            {
+                "ai_review_enabled": incident_config.ai_enabled,
+                "ai_evidence": incident_config.ai_evidence,
+                "monitor_config_enabled": incident_config.monitor_enabled,
+            },
+        ))
+        if incident_config.monitor_enabled and monitor_state["installed"] and monitor_state["enabled"] in {"enabled", "enabled-runtime", "linked"}:
+            checks.append(DoctorCheck("incident_monitor", "ok", "Incident boot monitor is installed and enabled", monitor_state))
+        elif incident_config.monitor_enabled and not monitor_state["installed"]:
+            checks.append(DoctorCheck("incident_monitor", "warn", f"Incident monitor is enabled in config but {incident_service_path} is not installed", monitor_state))
+        elif incident_config.monitor_enabled:
+            checks.append(DoctorCheck("incident_monitor", "warn", "Incident monitor is enabled in config but systemd does not report it enabled", monitor_state))
+        else:
+            checks.append(DoctorCheck("incident_monitor", "warn", "Automatic previous-boot and weekly incident detection is disabled", monitor_state))
+        maintenance_ready = bool(
+            monitor_state.get("maintenance_installed")
+            and monitor_state.get("maintenance_enabled") in {"enabled", "enabled-runtime", "linked"}
+        )
+        if incident_config.monitor_enabled and maintenance_ready:
+            schedule_bits = []
+            if monitor_state.get("maintenance_last_trigger"):
+                schedule_bits.append(f"last trigger: {monitor_state['maintenance_last_trigger']}")
+            if monitor_state.get("maintenance_next_run"):
+                schedule_bits.append(f"next run: {monitor_state['maintenance_next_run']}")
+            schedule_suffix = "; " + "; ".join(schedule_bits) if schedule_bits else ""
+            checks.append(DoctorCheck(
+                "incident_maintenance_timer",
+                "ok",
+                "Weekly incident maintenance timer is installed and enabled" + schedule_suffix,
+                monitor_state,
+            ))
+        elif incident_config.monitor_enabled:
+            checks.append(DoctorCheck(
+                "incident_maintenance_timer",
+                "warn",
+                "Incident monitoring is enabled, but weekly maintenance is not fully installed and enabled",
+                monitor_state,
+            ))
+        else:
+            checks.append(DoctorCheck("incident_maintenance_timer", "warn", "Weekly incident maintenance is disabled"))
+
+        _maintenance_state_path, maintenance_status_path = maintenance_paths(incident_system_root)
+        maintenance_status = load_maintenance_status(maintenance_status_path)
+        if incident_config.monitor_enabled and maintenance_status.get("overdue"):
+            checks.append(DoctorCheck(
+                "incident_maintenance_health",
+                "warn",
+                "Weekly incident maintenance is overdue or its last scan was incomplete",
+                maintenance_status,
+            ))
+        elif incident_config.monitor_enabled and maintenance_status.get("last_success_usec"):
+            checks.append(DoctorCheck(
+                "incident_maintenance_health",
+                "ok",
+                "Weekly incident maintenance has a successful checkpoint",
+                maintenance_status,
+            ))
+        elif incident_config.monitor_enabled:
+            checks.append(DoctorCheck(
+                "incident_maintenance_health",
+                "warn",
+                "Weekly incident maintenance has not completed its baseline scan",
+                maintenance_status,
+            ))
+        else:
+            checks.append(DoctorCheck("incident_maintenance_health", "ok", "Weekly incident maintenance health is inactive"))
+
+    if which("journalctl"):
+        journal_probe = run_bounded_command(runner, ["journalctl", "--list-boots", "--no-pager"], max_chars=16000, timeout=15)
+        journal_access = journal_probe.returncode == 0
+        journal_status = "ok" if journal_root.exists() and journal_access else "warn"
+        if not journal_access:
+            journal_message = "journalctl is installed, but AuraScan could not read the boot journal with the current permissions"
+        elif journal_root.exists():
+            journal_message = "Persistent system journal storage is available and readable"
+        else:
+            journal_message = "journalctl is readable, but persistent journal storage was not detected; previous-boot evidence may be unavailable"
+        checks.append(DoctorCheck("incident_journal", journal_status, journal_message, {"persistent_path": str(journal_root), "persistent": journal_root.exists(), "readable": journal_access}))
+    else:
+        checks.append(DoctorCheck("incident_journal", "warn", "journalctl is missing; system incident collection cannot run"))
+    if which("coredumpctl"):
+        coredump_probe = run_bounded_command(runner, ["coredumpctl", "--json=short", "--no-pager", "-n", "1", "list"], max_chars=16000, timeout=15)
+        coredump_access = coredump_probe.returncode in {0, 1}
+        checks.append(DoctorCheck(
+            "incident_coredumps",
+            "ok" if coredump_access else "warn",
+            "coredumpctl is available and readable for application crash metadata" if coredump_access else "coredumpctl is installed, but application crash metadata is not readable",
+            {"readable": coredump_access},
+        ))
+    else:
+        checks.append(DoctorCheck("incident_coredumps", "warn", "coredumpctl is missing; application crash metadata will be unavailable"))
+    if pstore_root.exists() and os.access(str(pstore_root), os.R_OK):
+        checks.append(DoctorCheck("incident_pstore", "ok", f"Persistent kernel crash storage is readable at {pstore_root}"))
+    elif pstore_root.exists():
+        checks.append(DoctorCheck("incident_pstore", "warn", f"Persistent kernel crash storage exists at {pstore_root} but requires monitor/root access"))
+    else:
+        checks.append(DoctorCheck("incident_pstore", "ok", "No pstore filesystem is exposed; other incident sources remain available"))
+    if incident_system_root.exists():
+        checks.append(DoctorCheck("incident_storage", "ok", f"Incident system storage exists at {incident_system_root}"))
+    elif not incident_config.error and incident_config.monitor_enabled:
+        checks.append(DoctorCheck("incident_storage", "warn", f"Incident monitor storage is missing at {incident_system_root}"))
+    else:
+        checks.append(DoctorCheck("incident_storage", "ok", "Incident system storage will be created when the monitor is enabled"))
+
+    repair_tools = [name for name in ("pacman", "systemctl", "dkms", "mkinitcpio", "dracut", "paccache", "pacman-key") if which(name)]
+    checks.append(DoctorCheck(
+        "incident_repair_tools",
+        "ok" if "pacman" in repair_tools and "systemctl" in repair_tools else "warn",
+        "Incident repair tools found: " + (", ".join(repair_tools) if repair_tools else "none"),
+        {"found": repair_tools},
+    ))
+
     updater_status = build_updater_status(
         env=effective_env,
         paths=updater_desktop_paths(config_home=updater_config_home, data_home=updater_data_home),
@@ -566,6 +858,14 @@ def build_doctor_checks(
         checks.append(DoctorCheck("updater_autostart", "warn", f"Updater autostart is enabled in config but missing at {updater_status.paths.autostart_desktop}"))
     else:
         checks.append(DoctorCheck("updater_autostart", "warn", "Updater autostart is not installed", {"installed": False}))
+
+    if not incident_config.error and incident_config.monitor_enabled:
+        if updater_status.config.tray_enabled and updater_status.autostart_installed and updater_status.qt_binding:
+            checks.append(DoctorCheck("incident_tray_notification", "ok", "Tray notifications are ready for newly recorded incidents"))
+        else:
+            checks.append(DoctorCheck("incident_tray_notification", "warn", "Incident monitoring is enabled, but the AuraScan tray is not fully ready to show automatic crash notifications"))
+    else:
+        checks.append(DoctorCheck("incident_tray_notification", "ok", "Incident tray notifications are inactive because the boot monitor is disabled"))
 
     for tool in ("clamscan", "bsdtar", "gpg", "makepkg", "pacman", "vercmp"):
         found = which(tool)

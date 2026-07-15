@@ -1,12 +1,15 @@
 # AuraScan
 
-AI-assisted package safety for Arch Linux, CachyOS, pacman, AUR, PKGBUILD,
-makepkg, and upgrade workflows.
+AI-assisted package safety for Arch-family Linux systems, pacman, AUR,
+PKGBUILD, makepkg, and upgrade workflows.
 
-AuraScan is a security-focused package scanner and upgrade preflight assistant
-for Arch, CachyOS, and AUR workflows. It is designed to catch obvious and
-moderately sophisticated malicious package behavior, explain risky package
-metadata clearly, and reduce breakage risk before routine upgrades.
+AuraScan is a security-focused package scanner, upgrade preflight assistant,
+and guarded incident recovery tool
+for Arch Linux, EndeavourOS, Manjaro, CachyOS, and AUR workflows. It is
+designed to catch obvious and moderately sophisticated malicious package
+behavior, explain risky package metadata clearly, and reduce breakage risk
+before routine upgrades. It can also inspect bounded crash evidence and prepare
+verified repair recipes without allowing AI to invent shell commands.
 
 AuraScan does not prove that a package is safe. A clean report, a clean ClamAV
 result, or a valid source signature is not a guarantee. The goal is to find risk
@@ -24,14 +27,16 @@ pre-1.0.
 
 ## What You Can Try Now
 
-AuraScan currently provides four practical entry points:
+AuraScan currently provides five practical entry points:
 
 - `aurascan --pkgbuild ./PKGBUILD` reviews package build metadata before trust.
 - `aurascan-makepkg` scans before handing control to `makepkg`.
-- `aurascan upgrade --dry-run` previews an Arch/CachyOS upgrade and reports
+- `aurascan upgrade --dry-run` previews an Arch-family upgrade and reports
   pacman, AUR helper, kernel/module, config drift, and AI-raised risks.
 - `aurascan config-drift --dry-run` explains `.pacnew` and `.pacsave` files and
   prepares safe fixes with backups.
+- `aurascan incidents --dry-run` diagnoses system and application crashes from
+  bounded local logs without applying repairs.
 
 ## Quickstart
 
@@ -53,8 +58,8 @@ Then verify the local setup:
 python -m aurascan doctor
 ```
 
-AuraScan is not currently published to the official Arch/CachyOS repositories.
-The public Arch/AUR package recipe lives under `packaging/arch/` and tracks the
+AuraScan is not currently published to official distribution repositories. The
+public Arch/AUR package recipe lives under `packaging/arch/` and tracks the
 latest tagged GitHub release with a fixed source checksum. Until an AUR package
 is published, build the package from this repository:
 
@@ -83,7 +88,7 @@ package behavior a clear review path.
 
 For routine system maintenance, `aurascan upgrade` is meant to feel like a
 native upgrade front door: it previews the pending transaction, checks common
-Arch/CachyOS pitfalls, optionally asks AI to raise correlated risks, and then
+Arch-family pitfalls, optionally asks AI to raise correlated risks, and then
 hands off to pacman, paru, yay, or Shelly.
 
 ## Installation
@@ -100,9 +105,36 @@ wizard.
 
 The Arch/AUR packaging recipe installs `/usr/bin/aurascan`,
 `/usr/bin/aurascan-makepkg`, the pacman hook template, the optional updater
-desktop/icon assets, and a non-interactive post-install message that points
-users to `aurascan init` and `aurascan doctor`. Review it before publishing or
-installing it on a real system.
+desktop/icon assets, and the disabled-by-default incident monitor service. It
+also installs a non-interactive post-install message that points users to
+`aurascan init` and `aurascan doctor`. Review it before publishing or installing
+it on a real system.
+
+## Compatibility
+
+AuraScan targets Arch-family systems where pacman is the system package
+manager. Core package scanning, `aurascan doctor`, `aurascan config-drift`,
+`aurascan incidents`, and `aurascan upgrade --dry-run` are CLI-first and work
+independently of the desktop environment.
+
+| Distribution | Support tier | Notes |
+| --- | --- | --- |
+| Arch Linux | Supported | Generic pacman behavior with optional `paru` or `yay` AUR context. |
+| EndeavourOS | Supported | Arch-compatible flow; `yay` is commonly available but not required. |
+| CachyOS | Supported | Includes Shelly handoff support and CachyOS kernel/module checks when CachyOS packages are present. |
+| Manjaro | Supported with caveats | Manjaro's delayed repositories can make AUR and mirror timing differ from Arch. Avoid partial upgrades and follow Manjaro's normal branch/update guidance. |
+| Unknown Arch-like | Best effort | AuraScan uses conservative pacman behavior and Doctor reports what it can prove locally. |
+
+Desktop support is intentionally layered:
+
+- KDE Plasma on Wayland or X11 is the best-supported target for the optional
+  AuraScan Updater tray icon.
+- XFCE, Cinnamon, MATE, LXQt, and Budgie are expected to work when their normal
+  tray/status-notifier support is enabled.
+- GNOME is fully supported for CLI workflows, but the tray icon may require an
+  AppIndicator/status-notifier extension.
+- Tiling window managers can use AuraScan normally from the terminal; the tray
+  applet needs a tray host such as the one provided by your panel/bar setup.
 
 ## What It Checks
 
@@ -146,10 +178,12 @@ python -m aurascan init
 python -m aurascan doctor
 ```
 
-`aurascan init` can configure an AI provider, save the API key in
-`~/.config/aurascan/.env`, and optionally install a local pacman hook at
-`/etc/pacman.d/hooks/aurascan.hook`. API keys are prompted with hidden input
-and the user config file is written with restrictive permissions.
+`aurascan init` can configure an AI provider and save the API key in
+`~/.config/aurascan/.env`. API keys are prompted with hidden input and the user
+config file is written with restrictive permissions. The wizard recognizes the
+release-safe hook installed by the Arch package and does not ask for a redundant
+local override. Source or development installs can still repair a local hook at
+`/etc/pacman.d/hooks/aurascan.hook` when needed.
 
 `aurascan init` can also configure upgrade preflight defaults. Upgrade
 preflight is enabled by default even without an explicit setting, but the
@@ -160,6 +194,7 @@ drift assistant policy:
 aurascan init --enable-upgrade-preflight --upgrade-aur-helper auto --enable-upgrade-ai
 aurascan init --enable-config-drift --config-drift-ai-diffs ask
 aurascan init --enable-updater-tray --install-updater-autostart
+aurascan init --enable-incident-monitor --enable-incident-ai --incident-ai-evidence redacted
 aurascan init --disable-upgrade-preflight
 ```
 
@@ -201,10 +236,10 @@ aurascan --deep-static --offline --no-auto-key-fetch --pkgbuild ./PKGBUILD
 
 ## Upgrade Preflight
 
-`aurascan upgrade` is an optional first-class upgrade front door for Arch and
-CachyOS systems. It previews the pending upgrade, checks local breakage risks,
-then hands off to pacman or a supported AUR helper when it is reasonable to
-continue.
+`aurascan upgrade` is an optional first-class upgrade front door for
+Arch-family systems. It previews the pending upgrade, checks local breakage
+risks, then hands off to pacman or a supported AUR helper when it is reasonable
+to continue.
 
 ```bash
 aurascan upgrade
@@ -226,27 +261,41 @@ sudo pacman -Syu
 When `paru`, `yay`, or `shelly` is selected or auto-detected, AuraScan also
 queries AUR updates and hands off to that helper. `paru` and `yay` use `-Syu`;
 Shelly uses `shelly upgrade-all --no-flatpak --no-appimage` so the handoff
-matches AuraScan's repo/AUR preflight scope. If no supported helper is
-available, AuraScan still warns about installed foreign packages that may need
-rebuilds after library, kernel, compiler, Python, Qt, or Electron updates.
+matches AuraScan's repo/AUR preflight scope. After a passing preflight, AuraScan
+may add the helper's no-confirm option so the already-approved upgrade does not
+ask a second default-no question; use `--no-trusted-handoff` to keep the helper
+confirmation prompt. If no supported helper is available, AuraScan still warns
+about installed foreign packages that may need rebuilds after library, kernel,
+compiler, Python, Qt, or Electron updates.
 
 Upgrade preflight is not a safety guarantee. It checks for practical pitfalls
-such as low `/boot` or root space, CachyOS kernel movement, initramfs or
+such as low `/boot` or root space, CachyOS kernel movement when CachyOS kernel
+packages are installed, initramfs or
 bootloader-sensitive updates, ignored packages that can create partial
 upgrades, replacements/conflicts, AUR rebuild risk, local foreign-package
 dependency/conflict metadata, and pending `.pacnew`/`.pacsave` config drift. A
 clean preflight means AuraScan did not find these signals; pacman, hooks,
 packages, or local configuration can still fail.
 
+Before handing control to Shelly or pacman, AuraScan labels the output boundary
+so mirror, download, conflict, and replacement messages are not mistaken for
+AuraScan errors. Repository conflicts and replacements are described as package
+transition metadata while remaining advisory. After a successful command,
+AuraScan verifies every planned repository version before explaining that any
+earlier mirror-specific `NotFound`/404 messages were recovered by fallback
+mirrors. A failed or unverifiable transaction never receives that reassurance.
+
 Kernel/Module Autopilot is enabled by default inside `aurascan upgrade`. It
-checks kernel package families, running-kernel mapping, CachyOS prebuilt NVIDIA
-module packages, DKMS headers/status, external module families, fallback kernel
-evidence, and reboot need. When AuraScan can prove the module state is covered,
-the terminal report says so directly. When a deterministic missing package fix
-is available, AuraScan shows the exact package command and asks before running
-it; `--yes` does not silently apply these extra fixes. After a successful
-upgrade handoff, AuraScan runs a post-upgrade kernel/module aftercare check and
-reports whether a reboot is expected. It never reboots automatically.
+checks kernel package families, running-kernel mapping, standard Arch kernel
+families such as `linux`, `linux-lts`, `linux-zen`, and `linux-hardened`,
+CachyOS prebuilt NVIDIA module packages when present, DKMS headers/status,
+external module families, fallback kernel evidence, and reboot need. When
+AuraScan can prove the module state is covered, the terminal report says so
+directly. When a deterministic missing package fix is available, AuraScan shows
+the exact package command and asks before running it; `--yes` does not silently
+apply these extra fixes. After a successful upgrade handoff, AuraScan runs a
+post-upgrade kernel/module aftercare check and reports whether a reboot is
+expected. It never reboots automatically.
 
 If HIGH or CRITICAL preflight risk is found, AuraScan asks for one extra
 confirmation before running the package-manager command:
@@ -291,10 +340,20 @@ aurascan updater --no-tray
 The tray menu opens terminal-native AuraScan flows:
 
 - Run AuraScan Upgrade: `aurascan upgrade`
-- Dry-run Preflight: `aurascan upgrade --dry-run`
-- Config Drift Assistant: `aurascan config-drift`
-- AuraScan Doctor: `aurascan doctor`
+- Resolve System Findings: `aurascan incidents --resolve`
+- Run System Maintenance Scan: `aurascan incidents --run-maintenance`
 - AuraScan Settings: `aurascan init`
+
+Config drift is handled automatically before and after `aurascan upgrade`, so
+it is intentionally omitted from the beginner-focused tray menu. The
+standalone `aurascan config-drift` command remains available for advanced or
+out-of-band maintenance.
+`aurascan doctor` remains available from a terminal for installation and
+configuration troubleshooting, but is intentionally omitted from the routine
+tray workflow.
+The report-only `aurascan upgrade --dry-run` command likewise remains available
+for advanced terminal use; the normal upgrade action always runs preflight
+before handing control to the package manager.
 
 Double-clicking the icon runs `aurascan upgrade` where the desktop environment
 delivers double-click activation. The right-click menu is the reliable fallback
@@ -306,8 +365,99 @@ launcher under `~/.local/share/applications/`; it does not modify
 Cachy-Update, Shelly, or system desktop files. PyQt6 or PySide6 is required only
 for the tray applet, not for normal AuraScan scans.
 
+The tray refreshes incident state every five seconds. Its normal icon changes to
+maintenance-due, attention, or critical variants when the weekly scan is
+overdue or unreviewed findings need attention. Clean scans are silent. Desktop
+notifications are reserved for HIGH/CRITICAL findings and repeated crashes;
+the icon remains changed until the guided resolution completes or report
+retention expires.
+
 The config keys are `AURASCAN_UPDATER_TRAY_ENABLED`,
 `AURASCAN_UPDATER_AUTOSTART`, and `AURASCAN_UPDATER_TERMINAL`.
+
+## Incident Recovery Assistant
+
+`aurascan incidents` diagnoses bounded system and application crash evidence,
+explains likely causes, and can apply a small set of AuraScan-owned repair
+recipes after confirmation.
+
+```bash
+aurascan incidents
+aurascan incidents --resolve
+aurascan incidents --last-boot --dry-run
+aurascan incidents --current-boot --no-ai
+aurascan incidents --history
+aurascan incidents --show INCIDENT_ID
+aurascan incidents --json
+aurascan incidents --run-maintenance
+aurascan incidents --maintenance-status
+```
+
+With no explicit target, AuraScan opens a pending previous-boot incident when
+one exists and otherwise scans the current boot. `--dry-run` never repairs.
+`--json` is report-only unless paired with `--yes`, and a truncated scan never
+gets a default-yes repair prompt.
+
+`--resolve` is the tray's single incident workflow. AuraScan opens the
+highest-priority pending evidence, uses AI only for bounded explanation and
+ranking of already-verified actions, applies eligible AuraScan-owned repairs
+after confirmation, and reruns deterministic checks. When no safe automatic
+repair exists, it explains that the evidence is historical and acknowledges
+the pending alert. The tray then returns to normal while reports remain in
+history. A normal icon means findings were handled or reviewed; it is not a
+claim that historical crashes were erased or that an unverified cause was
+fixed. Weekly maintenance advances bounded journal/coredump checkpoints, so
+acknowledged historical events do not create the same tray alert again. A new
+crash creates a new alert, while an explicit scan of an old boot can still show
+its preserved history.
+
+Interactive incident scans keep a stage indicator and elapsed timer visible
+while AuraScan reads the journal and coredumps, verifies repair recipes, and
+performs optional AI correlation. These honest stages replace a guessed
+percentage; JSON output and unattended monitor captures remain quiet.
+
+The optional root monitor is installed disabled. Its weekly timer is also
+installed disabled, and both are enabled together only through
+`aurascan init --enable-incident-monitor` or `aurascan incidents
+--enable-monitor`. The boot service performs one read-only previous-boot scan
+after journal flush. The persistent weekly timer incrementally scans the
+current boot, runs a bounded baseline when monitoring is first enabled, and
+stores root-only journal/coredump checkpoints so it does not repeatedly scan a
+long-running boot. The monitor has no network access and makes no background AI requests.
+It applies no repairs, and the weekly service has the same restrictions.
+
+Weekly collection uses the same evidence limits as manual diagnostics. A
+truncated scan advances only through its last processed cursor and marks
+maintenance due so the next run can continue. Public status contains only scan
+times and collection health. Pending markers contain only marker type, scan
+generation, boot ID, UID scope, severity, categories, count, and a repeated
+flag, never crash evidence, package names, application names, or commands.
+
+Evidence collection is bounded to 2,000 journal records, 256 KiB of local
+evidence, and 200 coredumps. AuraScan does not inspect core memory, process
+environments, arbitrary files, or complete command lines. Persisted reports are
+redacted and separated by user scope. When incident AI is enabled, AI runs only
+when a user opens an incident and receives at most 80 matched excerpts and
+12,000 redacted characters. `facts-only` mode sends structured findings without
+log excerpts.
+
+AI may explain findings and recommend existing action IDs. AI cannot generate commands.
+It also cannot suppress deterministic findings, approve repairs, or mark an
+incident repaired. AuraScan reconstructs every privileged command from trusted
+current state and reruns recipe preconditions as root. An AI correlation may
+not blame unrelated packages merely because they were updated in the same boot.
+
+Confirmed repair recipes cover a proven stale pacman lock, guarded repository
+mirror recovery, verified kernel/module support packages, DKMS autoinstall with
+matching headers, backed-up initramfs rebuilds with boot-space checks,
+noncritical service restart/reset, bounded package-cache cleanup, and exact
+official-package reinstall from a matching signed local archive. AuraScan does not automate filesystem repair.
+It also does not automate partition or bootloader edits, authentication
+configuration, firmware changes, user-data deletion, AUR rebuilds, or rebooting.
+
+The config keys are `AURASCAN_INCIDENT_MONITOR_ENABLED`,
+`AURASCAN_INCIDENT_AI_ENABLED`, and `AURASCAN_INCIDENT_AI_EVIDENCE`, where
+evidence mode is `redacted` or `facts-only`.
 
 ## Config Drift Assistant
 
@@ -386,7 +536,8 @@ transaction context provider for smart update fast paths.
 `pip install` does not install pacman hooks. Plainly, pip install does not install pacman hooks. Pacman hooks require root or
 package-manager installation. The preferred release path is an Arch package
 that installs the hook to `/usr/share/libalpm/hooks/aurascan.hook` and removes
-it when the package is uninstalled. Manual installation to
+it when the package is uninstalled. `aurascan init` treats that packaged hook as
+already active and does not copy it into `/etc`. Manual installation to
 `/etc/pacman.d/hooks/` is possible, but should be done carefully. Do not leave a
 hook behind that points to a missing executable; remove the hook or reinstall
 AuraScan before continuing pacman transactions.
@@ -465,6 +616,9 @@ wizard writes an explicit `AURASCAN_AI_ENABLED` value so the user's choice is
 clear. When enabled, package AI analysis may send package metadata, PKGBUILD
 text, and install-script text to the configured provider. Config drift diff
 review has an additional opt-in gate and sends only redacted bounded diffs.
+Incident AI runs only when the user opens an incident; the optional boot monitor
+has no network access. Incident evidence is bounded and redacted before
+persistence or AI use, and `facts-only` mode omits raw evidence excerpts.
 
 Supported AI provider IDs are `openai`, `anthropic`, `deepseek`, `gemini`, and
 `openrouter`. Provider-specific keys use `AURASCAN_OPENAI_API_KEY`,
@@ -525,5 +679,5 @@ dangerous static patterns, suspicious update drift, and known malware
 signatures when local scanners are available.
 
 It is a review and blocking layer, not a complete endpoint security system.
-Use it alongside normal Arch/CachyOS package trust practices, source review,
+Use it alongside normal Arch-family package trust practices, source review,
 maintainer reputation checks, and system backups.

@@ -551,9 +551,9 @@ def plan_config_drift_action(item: ConfigDriftFile) -> ConfigDriftAction:
             drift_file=item,
             action="merge_pacman_conf_safe_options" if pacman_candidate != target_text else "preserve_pacman_conf_local_policy",
             summary=(
-                "AuraScan can preserve the active CachyOS repository and local pacman settings while merging safe packaged pacman.conf defaults."
+                "AuraScan can preserve the active local repository and pacman settings while merging safe packaged pacman.conf defaults."
                 if pacman_candidate != target_text
-                else "AuraScan can preserve the active CachyOS pacman.conf because the packaged baseline would remove local repository policy."
+                else "AuraScan can preserve the active pacman.conf because the packaged baseline would remove local repository policy."
             ),
             candidate_text=pacman_candidate if pacman_candidate != target_text else "",
             applies=True,
@@ -715,7 +715,7 @@ def build_config_drift_ai_prompt(report: ConfigDriftReport) -> str:
         ]
     }
     return (
-        "You are AuraScan's config drift reviewer for Arch/CachyOS .pacnew files.\n"
+        "You are AuraScan's config drift reviewer for Arch-family .pacnew files.\n"
         "Use only the redacted bounded diffs below. Do not claim a merge is guaranteed safe.\n"
         "You may explain risks and suggest caution, but you cannot override AuraScan's deterministic action, backups, or sensitive-file confirmation rules.\n"
         "Return strict JSON only with this shape:\n"

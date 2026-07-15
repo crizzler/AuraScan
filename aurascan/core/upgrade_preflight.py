@@ -21,6 +21,7 @@ from aurascan.core.config_drift import (
     resolve_config_drift_config,
     run_config_drift,
 )
+from aurascan.core.compatibility import detect_distro
 from aurascan.core.kernel_module_autopilot import (
     KERNEL_MODULE_AUTOPILOT_ENV,
     KernelModuleCheck,
@@ -265,6 +266,7 @@ class _RepositoryEntry:
 @dataclass
 class SystemSnapshot:
     running_kernel: str = ""
+    distro_info: Dict[str, object] = field(default_factory=dict)
     installed_packages: List[str] = field(default_factory=list)
     foreign_packages: List[str] = field(default_factory=list)
     foreign_package_info: List[ForeignPackageInfo] = field(default_factory=list)
@@ -293,6 +295,7 @@ class SystemSnapshot:
 
         return cls(
             running_kernel=_command_text(runner, ["uname", "-r"]),
+            distro_info=detect_distro().to_dict(),
             installed_packages=installed_packages,
             foreign_packages=foreign_packages,
             foreign_package_info=collect_foreign_package_info(foreign_packages, runner=runner),
@@ -313,6 +316,7 @@ class SystemSnapshot:
     def to_dict(self) -> Dict[str, object]:
         return {
             "running_kernel": self.running_kernel,
+            "distro": dict(self.distro_info),
             "installed_package_count": len(self.installed_packages),
             "foreign_packages": list(self.foreign_packages),
             "foreign_package_info": [item.to_dict() for item in self.foreign_package_info],
@@ -541,7 +545,7 @@ class UpgradeOptions:
 def build_upgrade_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aurascan upgrade",
-        description="Preview and preflight Arch/CachyOS upgrades before handing off to pacman or an AUR helper.",
+        description="Preview and preflight Arch-family upgrades before handing off to pacman or an AUR helper.",
     )
     parser.add_argument("--dry-run", action="store_true", help="show the preflight report without running the upgrade command")
     parser.add_argument("--json", action="store_true", dest="json_output", help="emit a structured JSON preflight report")
@@ -743,7 +747,8 @@ def run_upgrade(
             return EXIT_USER_DECLINED
 
     run_upgrade_config_drift("before", options, input_func=input_func, stdout=stdout, stderr=stderr, root=config_drift_root, snapshot=snapshot, runner=config_drift_runner)
-    print_trusted_handoff_note(report, options, stdout=stdout)
+    print_trusted_handoff_note(report, options, stdout=stdout, stderr=stderr)
+    print_package_manager_handoff_context(report, options, stdout=stdout, stderr=stderr)
     try:
         result = runner(report.plan.final_command, check=False)
     except OSError as exc:
@@ -761,6 +766,7 @@ def run_upgrade(
             print_upgrade_failure_diagnosis(report.plan, options, runner=runner, urlopen=urlopen, stdout=stdout, stderr=stderr)
             print("[AuraScan] Skipping post-upgrade aftercare because the package transaction did not verify.", file=stderr)
             return EXIT_UPGRADE_VERIFICATION_FAILED
+        print_verified_upgrade_summary(report.plan, options, stdout=stdout, stderr=stderr)
         run_upgrade_kernel_module_aftercare(options, plan=report.plan, runner=runner, stdout=stdout, stderr=stderr, snapshot=snapshot, modules_root=modules_root)
         run_upgrade_config_drift("after", options, input_func=input_func, stdout=stdout, stderr=stderr, root=config_drift_root, snapshot=snapshot, runner=config_drift_runner)
     else:
@@ -916,9 +922,85 @@ def should_use_trusted_handoff(report: UpgradePreflightReport, options: UpgradeO
     return report.plan.selected_helper == "shelly"
 
 
-def print_trusted_handoff_note(report: UpgradePreflightReport, options: UpgradeOptions, *, stdout) -> None:
+def print_trusted_handoff_note(report: UpgradePreflightReport, options: UpgradeOptions, *, stdout, stderr=None) -> None:
     if should_use_trusted_handoff(report, options):
-        print("[AuraScan] Preflight passed; using Shelly --no-confirm so the approved upgrade continues without a second default-no prompt.", file=stdout)
+        stream = stderr if options.json_output and stderr is not None else stdout
+        print("[AuraScan] Preflight passed; using Shelly --no-confirm so the approved upgrade continues without a second default-no prompt.", file=stream)
+
+
+def print_package_manager_handoff_context(
+    report: UpgradePreflightReport,
+    options: UpgradeOptions,
+    *,
+    stdout,
+    stderr,
+) -> None:
+    stream = stderr if options.json_output else stdout
+    helper = "Shelly/pacman" if report.plan.selected_helper == "shelly" else "the package manager"
+    print("\n[AuraScan] Package-manager handoff", file=stream, flush=True)
+    print(
+        f"Download, mirror, and package-transition lines below come from {helper} and configured repositories, not AuraScan.",
+        file=stream,
+        flush=True,
+    )
+    print(
+        "A mirror-specific NotFound/404 can be recovered automatically by the next mirror. "
+        "AuraScan will verify every planned repository version before reporting success.",
+        file=stream,
+        flush=True,
+    )
+    transitions = package_transition_descriptions(report.plan)
+    if transitions:
+        print(f"Declared repository transition: {transitions[0]}", file=stream, flush=True)
+        if len(transitions) > 1:
+            print(f"Additional declared transitions: {len(transitions) - 1}", file=stream, flush=True)
+
+
+def print_verified_upgrade_summary(
+    plan: UpgradePlan,
+    options: UpgradeOptions,
+    *,
+    stdout,
+    stderr,
+) -> None:
+    stream = stderr if options.json_output else stdout
+    planned_count = len([pkg for pkg in plan.repo_packages if pkg.name and pkg.new_version])
+    print("\n[AuraScan] Upgrade transaction verified", file=stream)
+    if planned_count == 1:
+        print("The planned repository package version is installed.", file=stream)
+    elif planned_count > 1:
+        print(f"All {planned_count} planned repository package versions are installed.", file=stream)
+    else:
+        print("No repository package version required post-upgrade verification.", file=stream)
+    print(
+        "Any mirror-specific NotFound/404 messages shown during this successful run were recovered by package-manager fallback. "
+        "They came from repository infrastructure, not AuraScan, and require no action for this completed transaction.",
+        file=stream,
+    )
+    transitions = package_transition_descriptions(plan)
+    if transitions:
+        print(
+            "Declared conflicts/replacements were repository package metadata used to complete the transition; "
+            "AuraScan verified the resulting package versions.",
+            file=stream,
+        )
+
+
+def package_transition_descriptions(plan: UpgradePlan, *, limit: int = 12) -> List[str]:
+    descriptions: List[str] = []
+    for pkg in plan.repo_packages:
+        details: List[str] = []
+        if pkg.replaces:
+            details.append("replaces " + ", ".join(pkg.replaces))
+        if pkg.conflicts:
+            details.append("conflicts with " + ", ".join(pkg.conflicts))
+        if not details:
+            continue
+        source = f"{pkg.repo}/{pkg.name}" if pkg.repo else pkg.name
+        descriptions.append(f"{source} " + "; ".join(details))
+        if len(descriptions) >= limit:
+            break
+    return descriptions
 
 
 def run_kernel_module_autopilot_fixes(
@@ -1604,6 +1686,17 @@ def analyze_upgrade_risks(
             plan.helper_error,
         ))
 
+    if updated_names and is_manjaro_snapshot(snapshot):
+        findings.append(_finding(
+            "UPG-MANJARO-AUR-CAVEAT",
+            Severity.LOW,
+            "Manjaro upgrade compatibility has AUR timing caveats.",
+            "AuraScan detected Manjaro while an upgrade is pending.",
+            "Manjaro intentionally delays repository updates compared with Arch, so AUR packages and Arch-targeted advice may not line up exactly with the current Manjaro branch.",
+            "Prefer normal Manjaro update cadence, avoid partial upgrades, and rebuild affected AUR packages only after the repo transaction succeeds.",
+            f"distro={snapshot.distro_info.get('id', 'unknown')}; support_tier={snapshot.distro_info.get('support_tier', 'unknown')}",
+        ))
+
     if sensitive_updates and snapshot.boot_free_mib is not None and snapshot.boot_free_mib < 512:
         findings.append(_finding(
             "UPG-BOOT-SPACE",
@@ -1702,7 +1795,7 @@ def analyze_upgrade_risks(
             Severity.HIGH,
             "Ignored packages can create partial-upgrade risk.",
             "This system has IgnorePkg or IgnoreGroup entries while an upgrade is pending.",
-            "Arch and CachyOS do not support partial upgrades; holding core libraries, kernels, drivers, or desktop components can break dependencies.",
+            "Arch-family distributions do not support partial upgrades; holding core libraries, kernels, drivers, or desktop components can break dependencies.",
             "Review ignored packages/groups and remove holds unless you deliberately understand the compatibility impact.",
             f"IgnorePkg={', '.join(snapshot.ignored_packages) or '(none)'}; IgnoreGroup={', '.join(snapshot.ignored_groups) or '(none)'}",
         ))
@@ -1712,25 +1805,28 @@ def analyze_upgrade_risks(
         sensitive_changes = [name for name in plan.removals + replacement_targets if is_sensitive_transaction_change(name)]
         severity = Severity.HIGH if plan.removals or sensitive_changes else Severity.MEDIUM
         metadata_only = sorted(set(plan.replacements) - set(replacement_targets))
+        transition_details = package_transition_descriptions(plan)
         findings.append(_finding(
             "UPG-TRANSACTION-REPLACES",
             severity,
-            "Upgrade includes replacements or removals.",
-            "The package-manager preview contains installed replacement targets or removals.",
-            "Installed replacements/removals can change package names or remove files that local packages still expect.",
-            "Review the concrete replacement/removal list before accepting pacman's confirmation prompt.",
-            f"installed replacement targets={', '.join(replacement_targets) or '(none)'}; removals={', '.join(plan.removals) or '(none)'}; metadata-only replaces={', '.join(metadata_only[:16]) or '(none)'}",
+            "Upgrade includes an installed package transition or removal.",
+            "The repository transaction replaces an installed package name or explicitly removes a package. "
+            "This declaration comes from package metadata, not AuraScan.",
+            "Official repositories use replacement metadata for package renames and consolidations, but unrelated removals still deserve attention.",
+            "Continue when the named transition matches the expected repository packages; stop if the package manager proposes an unrelated removal.",
+            f"installed replacement targets={', '.join(replacement_targets) or '(none)'}; removals={', '.join(plan.removals) or '(none)'}; metadata-only replaces={', '.join(metadata_only[:16]) or '(none)'}; transitions={'; '.join(transition_details) or '(none)'}",
         ))
 
     if plan.conflicts:
+        transition_details = package_transition_descriptions(plan)
         findings.append(_finding(
             "UPG-TRANSACTION-CONFLICTS",
             Severity.MEDIUM,
-            "Upgrade preview includes package conflicts.",
-            "The pending transaction reports package conflicts.",
-            "Conflicts are often legitimate, but they can also cause package swaps or removals that affect a working system.",
-            "Review the conflicting package names before continuing.",
-            ", ".join(sorted(set(plan.conflicts))[:16]),
+            "Repository package transition metadata was detected.",
+            "One or more pending repository packages declare conflicts. These declarations come from repository package metadata, not AuraScan.",
+            "Package managers use conflicts for legitimate renames, replacements, and package consolidation; an unrelated conflict can still alter the transaction.",
+            "Let the package manager resolve the declared transition, but stop if it proposes removing an unrelated package. AuraScan verifies planned versions afterward.",
+            f"conflicts={', '.join(sorted(set(plan.conflicts))[:16])}; transitions={'; '.join(transition_details) or '(owner unavailable)'}",
         ))
 
     abi_updates = sorted(name for name in repo_names if name in ABI_SENSITIVE_PACKAGES or is_kernel_package(name))
@@ -1833,7 +1929,7 @@ def apply_ai_upgrade_review(
         "enabled": True,
         "provider": config.provider,
         "status": "ok",
-        "summary": str(data.get("summary") or ""),
+        "summary": normalize_upgrade_ai_summary(report, str(data.get("summary") or "")),
         "raises_applied": applied,
     }
 
@@ -1848,6 +1944,8 @@ def build_upgrade_ai_prompt(report: UpgradePreflightReport) -> str:
             "removals": list(report.plan.removals),
             "installed_replacement_targets": replacement_targets,
             "metadata_only_replaces": sorted(set(report.plan.replacements) - set(replacement_targets))[:30],
+            "declared_conflicts": sorted(set(report.plan.conflicts))[:30],
+            "package_transitions": package_transition_descriptions(report.plan, limit=20),
         },
         "system_facts": {
             "running_kernel": report.snapshot.running_kernel,
@@ -1880,7 +1978,7 @@ def build_upgrade_ai_prompt(report: UpgradePreflightReport) -> str:
         ],
     }
     return (
-        "You are AuraScan's upgrade preflight reviewer for Arch/CachyOS.\n"
+        "You are AuraScan's upgrade preflight reviewer for Arch-family systems.\n"
         "Use only the JSON data below. Do not claim the upgrade is safe.\n"
         "You may only suggest risk raises, never risk reductions. Do not suggest hard blocking.\n"
         "Do not create package commands or package-fix plans; AuraScan's deterministic kernel/module autopilot owns those decisions.\n"
@@ -1888,6 +1986,8 @@ def build_upgrade_ai_prompt(report: UpgradePreflightReport) -> str:
         "Do not tell the user to manually verify kernel/module compatibility when kernel_module_check status is ok.\n"
         "Do not raise fallback-kernel risk when kernel_module_check.fallback_kernel.available is true.\n"
         "Do not raise replacement/removal risk solely from transaction_changes.metadata_only_replaces; those are package metadata, not installed removals.\n"
+        "Declared conflicts, replacements, and package transitions originate in repository package metadata, not AuraScan. Explain that distinction plainly.\n"
+        "Do not claim manual conflict resolution is required merely because declared_conflicts or package_transitions are present; the package manager resolves declared transitions and AuraScan verifies planned versions afterward.\n"
         "Do not raise risk merely because foreign/AUR packages exist when AuraScan's foreign package dependency check reports no issues and the helper query succeeded.\n"
         "Avoid telling the user to manually verify compatibility unless AuraScan found a concrete issue or a named check could not run.\n"
         "For .pacnew/.pacsave config drift, do not recommend rebooting or restarting services merely because files exist; recommend merging config and restarting only affected services when config actually changes.\n"
@@ -1914,6 +2014,8 @@ def apply_ai_risk_raises(report: UpgradePreflightReport, data: Mapping[str, obje
         reason = str(item.get("reason") or "").strip()
         action = str(item.get("recommended_action") or "Review this risk before upgrading.").strip()
         if _is_vague_foreign_ai_raise(report, target, reason):
+            continue
+        if _is_metadata_only_transition_ai_raise(report, target, reason):
             continue
         if target and target in by_rule:
             finding = by_rule[target]
@@ -1954,6 +2056,34 @@ def _is_vague_foreign_ai_raise(report: UpgradePreflightReport, target: str, reas
     return helper_succeeded and not has_foreign_coverage_gap and not local_issues
 
 
+def _is_metadata_only_transition_ai_raise(report: UpgradePreflightReport, target: str, reason: str) -> bool:
+    if not report.plan.conflicts:
+        return False
+    if report.plan.removals or applicable_replacements(report.plan, report.snapshot):
+        return False
+    if target == "UPG-TRANSACTION-CONFLICTS":
+        return True
+    text = reason.lower()
+    return not target and any(token in text for token in ("package conflict", "declared conflict", "replacement", "package transition"))
+
+
+def normalize_upgrade_ai_summary(report: UpgradePreflightReport, summary: str) -> str:
+    text = summary.strip()
+    lowered = text.lower()
+    manual_transition_claim = (
+        any(token in lowered for token in ("manual resolution", "resolve manually", "manually resolve"))
+        and any(token in lowered for token in ("conflict", "replacement", "transition"))
+    )
+    concrete_change = bool(report.plan.removals or applicable_replacements(report.plan, report.snapshot))
+    if manual_transition_claim and report.plan.conflicts and not concrete_change:
+        return (
+            "AI noted repository package transition metadata. These declarations come from the repository, not AuraScan; "
+            "metadata alone does not require manual conflict resolution. The package manager will resolve the transaction "
+            "and AuraScan will verify the planned versions afterward."
+        )
+    return text
+
+
 def _ai_severity(value: str) -> Optional[Severity]:
     normalized = value.strip().upper()
     if normalized == "CRITICAL":
@@ -1978,6 +2108,10 @@ def applicable_replacements(plan: UpgradePlan, snapshot: SystemSnapshot) -> List
 
 def is_sensitive_transaction_change(name: str) -> bool:
     return is_kernel_package(name) or is_boot_sensitive_package(name) or name in ABI_SENSITIVE_PACKAGES
+
+
+def is_manjaro_snapshot(snapshot: SystemSnapshot) -> bool:
+    return str(snapshot.distro_info.get("id", "")).lower() == "manjaro"
 
 
 def expected_running_kernel_package(running_kernel: str) -> str:

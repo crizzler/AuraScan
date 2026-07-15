@@ -58,11 +58,37 @@ def write_module(root: Path, release: str, pkgbase: str) -> None:
 def test_kernel_family_detection_from_uname_modules_and_package_names(tmp_path):
     write_module(tmp_path, "7.1.3-1-cachyos", "linux-cachyos")
 
+    for package in ("linux", "linux-lts", "linux-zen", "linux-hardened"):
+        assert is_kernel_base_package(package)
     assert is_kernel_base_package("linux-cachyos")
     assert is_kernel_base_package("linux-cachyos-lts")
     assert not is_kernel_base_package("linux-cachyos-headers")
     assert not is_kernel_base_package("linux-cachyos-nvidia-open")
     assert expected_running_kernel_package("7.1.3-1-cachyos", module_dirs={"7.1.3-1-cachyos": "linux-cachyos"}) == "linux-cachyos"
+
+
+def test_standard_arch_kernel_headers_and_fallback_are_supported(tmp_path):
+    write_module(tmp_path, "6.10.1-arch1-1", "linux")
+    write_module(tmp_path, "6.6.40-1-lts", "linux-lts")
+    plan = UpgradePlan(repo_packages=[UpgradePackage("linux", "6.10.2.arch1-1"), UpgradePackage("linux-headers", "6.10.2.arch1-1")])
+
+    check = build_kernel_module_check(
+        plan,
+        snapshot(
+            running_kernel="6.10.1-arch1-1",
+            installed_packages=["linux", "linux-headers", "linux-lts", "nvidia-dkms"],
+            dkms_packages=["nvidia-dkms"],
+            nvidia_packages=["nvidia-dkms"],
+        ),
+        modules_root=tmp_path,
+        runner=FakeRunner({("dkms", "status"): completed("nvidia/610, 6.10.1-arch1-1, x86_64: installed\n")}),
+    )
+
+    assert check.running_kernel_package == "linux"
+    assert check.headers_status[0]["header_package"] == "linux-headers"
+    assert check.headers_status[0]["ok"] is True
+    assert check.fallback_kernel["available"] is True
+    assert check.fallback_kernel["fallback_kernel_packages"] == ["linux-lts"]
 
 
 def test_cachyos_nvidia_pairing_passes_when_module_package_matches(tmp_path):

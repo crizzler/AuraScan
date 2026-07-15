@@ -43,10 +43,27 @@ candidate.
 - Release pacman hook template does not pass `--scan-context update`.
 - Release pacman hook template does not enable smart fast path.
 - Release pacman hook install path is checked.
+- The installed wizard recognizes an active packaged hook without creating a
+  redundant local override.
 - Pacman hook uninstall path is documented.
 - Pacman hook failure recovery is documented.
 - `aurascan-makepkg` is documented as build-time protection.
 - Pacman hook is documented as archive/install-stage protection.
+- Incident monitor is installed disabled and has no network access.
+- Incident monitor performs no background AI requests or repairs.
+- Weekly incident timer is installed disabled, persistent, randomized, and
+  coupled to the wizard's incident-monitor setting.
+- Weekly checkpoint is root-only; public status contains timing and collection
+  health only.
+- Incident pending markers contain only marker type, scan ID, boot ID, UID
+  scope, severity, categories, count, and repeated state; no crash evidence,
+  package names, application names, or commands.
+- Clean weekly scans are silent; only HIGH/CRITICAL or repeated crashes notify.
+- The tray exposes one incident-resolution action and clearly distinguishes
+  repaired findings from reviewed historical evidence.
+- Incident repair actions are allowlisted and freshly revalidated as root.
+- AI-generated commands and fabricated incident evidence/action IDs are
+  rejected.
 
 ## Defaults
 
@@ -75,6 +92,8 @@ candidate.
   checked for the target package format.
 - If the AuraScan Updater tray applet is packaged, the desktop file and icon
   are installed without enabling per-user autostart automatically.
+- If the incident monitor is packaged, its systemd service and tmpfiles rules
+  are installed without enabling or starting the service automatically.
 - Package data or package files include the hook template only when intended.
 - Root-level development hooks are not accidentally packaged.
 
@@ -97,6 +116,8 @@ candidate.
 - README explains why dependency stability is not enough to skip scans.
 - README explains local package DB context proof and `--scan-context auto`.
 - README explains privacy expectations.
+- README explains incident evidence bounds, redaction, AI opt-in behavior, and
+  the repair allowlist boundary.
 - README explains false positives and manual review.
 - Generated report hygiene is documented.
 - MIT license is present.
@@ -111,7 +132,8 @@ candidate.
 
 - GitHub release is published for the tag.
 - Release is marked as the latest release when appropriate.
-- Repository topics include Arch/CachyOS/AUR/pacman/security discovery terms.
+- Repository topics include Arch-family/AUR/pacman/security discovery terms,
+  including Arch Linux, EndeavourOS, Manjaro, and CachyOS where appropriate.
 - AUR packaging source URL points at the public GitHub repo before publication.
 - AUR publication has a generated `.SRCINFO` and real checksums, or the package
   remains clearly documented as a skeleton.

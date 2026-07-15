@@ -18,6 +18,7 @@ class RuleCategory:
     ai_review = "ai_review"
     sandbox_runtime = "sandbox_runtime"
     archive_safety = "archive_safety"
+    incident_recovery = "incident_recovery"
     unknown = "unknown"
 
 
@@ -301,6 +302,23 @@ RULE_METADATA: Dict[str, RuleMetadata] = {
     "ARCHIVE-TOO-MANY-FILES": RuleMetadata("ARCHIVE-TOO-MANY-FILES", RuleCategory.archive_safety, Severity.HIGH, "archive-limits", 90, True, None, "Archive exceeds file count limit."),
     "ARCHIVE-OVERSIZED": RuleMetadata("ARCHIVE-OVERSIZED", RuleCategory.archive_safety, Severity.HIGH, "archive-limits", 90, True, None, "Archive exceeds decompressed size limit."),
     "ARCHIVE-NESTED-DEPTH": RuleMetadata("ARCHIVE-NESTED-DEPTH", RuleCategory.archive_safety, Severity.HIGH, "archive-limits", 90, True, None, "Nested archive depth limit exceeded."),
+    "INC-KERNEL-PANIC": RuleMetadata("INC-KERNEL-PANIC", RuleCategory.incident_recovery, Severity.CRITICAL, "incident-kernel", 100, True, "finding_fields", "Kernel panic evidence was recorded."),
+    "INC-WATCHDOG": RuleMetadata("INC-WATCHDOG", RuleCategory.incident_recovery, Severity.HIGH, "incident-kernel", 95, True, "finding_fields", "A watchdog reset or CPU lockup was recorded."),
+    "INC-OOM": RuleMetadata("INC-OOM", RuleCategory.incident_recovery, Severity.HIGH, "incident-memory", 85, True, "finding_fields", "The kernel or systemd killed a process to recover memory."),
+    "INC-NVIDIA-ALLOCATION": RuleMetadata("INC-NVIDIA-ALLOCATION", RuleCategory.incident_recovery, Severity.MEDIUM, "incident-graphics", 70, True, "finding_fields", "The NVIDIA driver reported a memory-allocation failure that is not, by itself, proof of a system OOM event."),
+    "INC-GPU-RESET": RuleMetadata("INC-GPU-RESET", RuleCategory.incident_recovery, Severity.HIGH, "incident-graphics", 85, True, "finding_fields", "The graphics driver reported a GPU reset or failure."),
+    "INC-STORAGE-IO": RuleMetadata("INC-STORAGE-IO", RuleCategory.incident_recovery, Severity.CRITICAL, "incident-storage", 100, True, "finding_fields", "Storage I/O errors were recorded."),
+    "INC-FILESYSTEM": RuleMetadata("INC-FILESYSTEM", RuleCategory.incident_recovery, Severity.HIGH, "incident-storage", 95, True, "finding_fields", "A filesystem reported corruption or forced read-only behavior."),
+    "INC-THERMAL": RuleMetadata("INC-THERMAL", RuleCategory.incident_recovery, Severity.HIGH, "incident-hardware", 90, True, "finding_fields", "Thermal, power, or hardware-fault evidence was recorded."),
+    "INC-PACKAGE-INTERRUPTED": RuleMetadata("INC-PACKAGE-INTERRUPTED", RuleCategory.incident_recovery, Severity.MEDIUM, "incident-package-manager", 70, True, "finding_fields", "A package transaction appears to have been interrupted."),
+    "INC-DKMS": RuleMetadata("INC-DKMS", RuleCategory.incident_recovery, Severity.HIGH, "incident-kernel-module", 90, True, "finding_fields", "A kernel module or DKMS operation failed."),
+    "INC-INITRAMFS": RuleMetadata("INC-INITRAMFS", RuleCategory.incident_recovery, Severity.HIGH, "incident-boot", 95, True, "finding_fields", "Initramfs generation failed."),
+    "INC-DISK-FULL": RuleMetadata("INC-DISK-FULL", RuleCategory.incident_recovery, Severity.HIGH, "incident-disk-space", 85, True, "finding_fields", "A filesystem ran out of usable space."),
+    "INC-REPOSITORY": RuleMetadata("INC-REPOSITORY", RuleCategory.incident_recovery, Severity.MEDIUM, "incident-repository", 65, True, "finding_fields", "Package repository access failed."),
+    "INC-BOOT-UNCLEAN": RuleMetadata("INC-BOOT-UNCLEAN", RuleCategory.incident_recovery, Severity.MEDIUM, "incident-boot", 60, True, "finding_fields", "A previous boot may have ended unexpectedly."),
+    "INC-SYSTEMD-FAILED": RuleMetadata("INC-SYSTEMD-FAILED", RuleCategory.incident_recovery, Severity.MEDIUM, "incident-service", 65, True, "finding_fields", "A systemd unit is currently failed."),
+    "INC-APPLICATION-COREDUMP": RuleMetadata("INC-APPLICATION-COREDUMP", RuleCategory.incident_recovery, Severity.LOW, "incident-application", 45, True, "finding_fields", "An application or desktop component produced a coredump."),
+    "INC-PSTORE-CRASH": RuleMetadata("INC-PSTORE-CRASH", RuleCategory.incident_recovery, Severity.HIGH, "incident-kernel", 98, True, "finding_fields", "Persistent low-level crash evidence was found in pstore."),
 }
 
 

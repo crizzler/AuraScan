@@ -1225,7 +1225,10 @@ def run_incidents(
         from aurascan.core.incident_diagnostics import prepare_ai_guided_repair_plan
 
         activity.update(8, "Verifying safe repair recipes")
-        ai_disabled = options.no_ai or not options.config.ai_enabled
+        expired_historical_evidence = bool(
+            options.resolve_pending and historical_boot_evidence_expired(report)
+        )
+        ai_disabled = options.no_ai or not options.config.ai_enabled or expired_historical_evidence
         report.repair_actions = plan_repair_actions(
             report,
             runner=runner,
@@ -1266,6 +1269,15 @@ def run_incidents(
     if not report.evidence and report.collection_status == "unavailable":
         if options.json_output:
             print(report.to_json(), file=stdout)
+        if should_acknowledge_resolution(options, report):
+            acknowledge_incident_resolution(
+                unreviewed_markers,
+                seen_path=reviewed_path,
+                report=report,
+                stdout=stdout,
+                quiet=options.json_output,
+            )
+            return 0
         return EXIT_INCIDENT_UNAVAILABLE
     if not report.eligible_actions or options.dry_run or (options.json_output and not options.yes):
         if options.json_output:
@@ -3117,12 +3129,37 @@ def highest_priority_pending_marker(markers: Sequence[Mapping[str, object]]) -> 
     return marker
 
 
+def historical_boot_evidence_expired(report: IncidentReport) -> bool:
+    if (
+        report.collection_status != "unavailable"
+        or report.boot_id
+        or report.truncated
+        or report.evidence
+        or report.findings
+        or report.coredumps
+    ):
+        return False
+    target = report.target_boot.replace("-", "").lower()
+    if re.fullmatch(r"[0-9a-f]{32}", target) is None:
+        return False
+    errors = [str(item).strip().lower() for item in report.collection_errors if str(item).strip()]
+    missing_boot = "no journal boot entry found for the specified boot"
+    coredump_unbound = "coredump metadata could not be bound to the selected boot"
+    return bool(errors) and any(missing_boot in item for item in errors) and all(
+        missing_boot in item or coredump_unbound in item
+        for item in errors
+    )
+
+
 def should_acknowledge_resolution(options: IncidentOptions, report: IncidentReport) -> bool:
     return bool(
         options.resolve_pending
         and not options.dry_run
         and (not options.json_output or options.yes)
-        and report.collection_status != "unavailable"
+        and (
+            report.collection_status != "unavailable"
+            or historical_boot_evidence_expired(report)
+        )
     )
 
 
@@ -3141,6 +3178,13 @@ def acknowledge_incident_resolution(
     if repairs_applied:
         print("\n[AuraScan] Repair complete", file=stdout)
         print("Verified AuraScan repairs were applied and checked again.", file=stdout)
+    elif historical_boot_evidence_expired(report):
+        print("\n[AuraScan] Historical alert acknowledged - source evidence expired", file=stdout)
+        print(
+            "The original boot is no longer retained in the system journal, so AuraScan cannot re-analyze it. "
+            "No repair was claimed or applied; the reviewed historical marker was safely cleared.",
+            file=stdout,
+        )
     elif report.findings or report.coredumps:
         print("\n[AuraScan] Review complete - no automatic repair applied", file=stdout)
         print(

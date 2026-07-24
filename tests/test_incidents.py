@@ -727,6 +727,101 @@ def test_resolve_flow_acknowledges_all_pending_alerts_without_unsafe_repair(monk
     assert "normal icon means the findings were handled or reviewed" in stdout.getvalue()
 
 
+def test_resolve_acknowledges_historical_marker_after_journal_evidence_expires(monkeypatch, tmp_path):
+    monkeypatch.setattr(os, "getuid", lambda: 1000)
+    system_root = tmp_path / "system"
+    pending_report = minimal_report(
+        findings=[IncidentFinding(
+            "INC-BOOT-UNCLEAN",
+            Severity.MEDIUM,
+            Confidence.MEDIUM,
+            "Unclean shutdown",
+            "summary",
+            "why",
+            "action",
+            "unclean_shutdown",
+        )],
+    )
+    write_pending_markers(pending_report, root=system_root / "pending")
+    expired_report = minimal_report(
+        target_boot="a" * 32,
+        boot_id="",
+        collection_status="unavailable",
+        collection_errors=[
+            "journalctl collection failed: No journal boot entry found for the specified boot (fixture+0).",
+            "Coredump metadata could not be bound to the selected boot.",
+        ],
+    )
+    monkeypatch.setattr("aurascan.core.incidents.build_incident_report", lambda *_args, **_kwargs: expired_report)
+    monkeypatch.setattr("aurascan.core.incident_repairs.plan_repair_actions", lambda *_args, **_kwargs: [])
+    guided_disabled = []
+
+    def fake_guided_plan(report, *, disabled, **_kwargs):
+        guided_disabled.append(disabled)
+        report.ai_review = {"enabled": not disabled, "status": "disabled" if disabled else "not_run"}
+
+    monkeypatch.setattr("aurascan.core.incident_diagnostics.prepare_ai_guided_repair_plan", fake_guided_plan)
+    user_root = tmp_path / "user" / "incidents"
+    stdout = io.StringIO()
+
+    status = run_incidents(
+        ["--resolve"],
+        stdout=stdout,
+        user_root=user_root,
+        system_root=system_root,
+        env={},
+    )
+
+    reviewed_path = user_root.parent / "incident_reviewed.json"
+    assert status == 0
+    assert guided_disabled == [True]
+    assert unseen_pending_markers(uid=1000, marker_root=system_root / "pending", seen_path=reviewed_path) == []
+    assert "Historical alert acknowledged - source evidence expired" in stdout.getvalue()
+    assert "No repair was claimed or applied" in stdout.getvalue()
+    assert "tray icon will return to normal" in stdout.getvalue()
+
+
+def test_resolve_keeps_alert_active_for_generic_collection_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(os, "getuid", lambda: 1000)
+    system_root = tmp_path / "system"
+    pending_report = minimal_report(
+        findings=[IncidentFinding(
+            "INC-BOOT-UNCLEAN",
+            Severity.MEDIUM,
+            Confidence.MEDIUM,
+            "Unclean shutdown",
+            "summary",
+            "why",
+            "action",
+            "unclean_shutdown",
+        )],
+    )
+    write_pending_markers(pending_report, root=system_root / "pending")
+    unavailable_report = minimal_report(
+        target_boot="a" * 32,
+        boot_id="",
+        collection_status="unavailable",
+        collection_errors=["journalctl collection failed: Permission denied"],
+    )
+    monkeypatch.setattr("aurascan.core.incidents.build_incident_report", lambda *_args, **_kwargs: unavailable_report)
+    monkeypatch.setattr("aurascan.core.incident_repairs.plan_repair_actions", lambda *_args, **_kwargs: [])
+    user_root = tmp_path / "user" / "incidents"
+    stdout = io.StringIO()
+
+    status = run_incidents(
+        ["--resolve", "--no-ai"],
+        stdout=stdout,
+        user_root=user_root,
+        system_root=system_root,
+        env={},
+    )
+
+    reviewed_path = user_root.parent / "incident_reviewed.json"
+    assert status != 0
+    assert unseen_pending_markers(uid=1000, marker_root=system_root / "pending", seen_path=reviewed_path)
+    assert "Historical alert acknowledged" not in stdout.getvalue()
+
+
 def test_resolve_dry_run_does_not_acknowledge_pending_alert(monkeypatch, tmp_path):
     monkeypatch.setattr(os, "getuid", lambda: 1000)
     system_root = tmp_path / "system"

@@ -1,5 +1,7 @@
 # AuraScan
 
+[![AUR package](https://img.shields.io/aur/version/aurascan?label=AUR&logo=archlinux)](https://aur.archlinux.org/packages/aurascan)
+
 AI-assisted package safety for Arch-family Linux systems, pacman, AUR,
 PKGBUILD, makepkg, and upgrade workflows.
 
@@ -47,40 +49,48 @@ AuraScan currently provides six practical entry points:
 
 ## Quickstart
 
-For the latest public source checkpoint, use the GitHub releases page:
-
-```text
-https://github.com/crizzler/AuraScan/releases
-```
-
-For a development checkout, install AuraScan and launch the setup wizard:
+AuraScan is published as [`aurascan`](https://aur.archlinux.org/packages/aurascan)
+on the Arch User Repository. Review the `PKGBUILD`, then install it with an AUR
+helper:
 
 ```bash
-python -m pip install -e ".[test]" && python -m aurascan init
+paru -S aurascan
+# or
+yay -S aurascan
 ```
 
-Then verify the local setup:
+To build directly from the AUR Git repository:
 
 ```bash
-python -m aurascan doctor
-```
-
-AuraScan is not currently published to official distribution repositories. The
-public Arch/AUR package recipe lives under `packaging/arch/` and tracks the
-latest tagged GitHub release with a fixed source checksum. Until an AUR package
-is published, build the package from this repository:
-
-```bash
-git clone https://github.com/crizzler/AuraScan.git
-cd AuraScan/packaging/arch
+git clone https://aur.archlinux.org/aurascan.git
+cd aurascan
 makepkg -si
+```
+
+After installation, launch the setup wizard and verify the system integration:
+
+```bash
 aurascan init
 aurascan doctor
 ```
 
+For a development checkout:
+
+```bash
+git clone https://github.com/crizzler/AuraScan.git
+cd AuraScan
+python -m pip install -e ".[test]"
+python -m aurascan init
+python -m aurascan doctor
+```
+
+Release notes and recovery-image artifacts are available from the
+[GitHub releases page](https://github.com/crizzler/AuraScan/releases).
+
 Installation does not auto-run the wizard, collect API keys, write user config,
-or install local `/etc` hooks as a side effect. Setup starts only when you run
-`aurascan init` or `python -m aurascan init`.
+enable monitoring or repair services, install tray autostart, or add a recovery
+boot entry as a side effect. Setup starts only when you run `aurascan init` or
+`python -m aurascan init`.
 
 ## Why AuraScan Is Useful For Arch Users
 
@@ -100,6 +110,26 @@ hands off to pacman, paru, yay, or Shelly.
 
 ## Installation
 
+AuraScan is available from the AUR as
+[`aurascan`](https://aur.archlinux.org/packages/aurascan). It is not currently
+part of Arch Linux's official binary repositories. The AUR recipe builds the
+versioned GitHub source release, verifies fixed source checksums, and applies
+any explicitly listed packaging patches before running the test suite.
+
+Install with an AUR helper:
+
+```bash
+paru -S aurascan
+# or
+yay -S aurascan
+```
+
+The public package recipe and history can be reviewed independently:
+
+```text
+https://aur.archlinux.org/cgit/aur.git/tree/PKGBUILD?h=aurascan
+```
+
 For development:
 
 ```bash
@@ -115,10 +145,11 @@ The Arch/AUR packaging recipe installs `/usr/bin/aurascan`,
 desktop/icon assets, and disabled-by-default incident monitor, user assistant,
 Safe Autopilot services, recovery image profiles, and a disabled recovery
 refresh hook. It does not build a UKI, alter an ESP, or add a boot entry during
-package installation. It
-also installs a non-interactive post-install message that points users to
-`aurascan init` and `aurascan doctor`. Review it before publishing or installing
-it on a real system.
+package installation. It also installs a non-interactive post-install message
+that points users to `aurascan init` and `aurascan doctor`.
+
+The source-tree reference recipe remains under `packaging/arch/`. The AUR Git
+repository is the canonical public package history used by AUR clients.
 
 ## Compatibility
 

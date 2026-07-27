@@ -1,7 +1,7 @@
 # Maintainer: AuraScan maintainers
 
 pkgname=aurascan
-pkgver=0.6.0
+pkgver=0.7.0
 pkgrel=1
 pkgdesc="AI-assisted safety and recovery layer for Arch-family systems"
 arch=('any')
@@ -20,6 +20,7 @@ optdepends=(
   'yay: AUR update context for aurascan upgrade'
   'shelly: optional Shelly update handoff for aurascan upgrade'
   'python-pyqt6: AuraScan Updater tray applet'
+  'pyside6: alternative Qt binding for the AuraScan Updater tray applet'
   'pacman-contrib: bounded package-cache cleanup for incident recovery'
   'pciutils: readable GPU model names in hardware-aware follow-up'
   'dmidecode: DIMM type and configured-speed context when privilege is already available'
@@ -41,7 +42,7 @@ optdepends=(
   'xfsprogs: read-only XFS recovery diagnostics'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('8709199a16ec96382ba7995ef817a53109050baf5511a7a162877ad87eb9ed91')
+sha256sums=('SKIP')
 
 build() {
   cd "AuraScan-$pkgver"

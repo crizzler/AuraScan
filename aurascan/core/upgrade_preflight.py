@@ -651,6 +651,8 @@ def run_upgrade(
     modules_root: Path = Path("/usr/lib/modules"),
     pacman_conf_path: Path = Path("/etc/pacman.conf"),
     repository_repair_backup_root: Path = REPOSITORY_HEALTH_BACKUP_ROOT,
+    followup_context_root: Optional[Path] = None,
+    followup_interactive: Optional[bool] = None,
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -716,10 +718,67 @@ def run_upgrade(
     else:
         print(report.render_terminal(verbose=options.verbose), file=stdout)
 
+    followup_context = None
+    followup_runtime = None
+    followup_disabled = options.json_output or options.yes or options.no_ai
+    if not followup_disabled:
+        from aurascan.core.followup import build_upgrade_runtime, context_from_upgrade
+
+        followup_context = context_from_upgrade(
+            report,
+            phase="preflight",
+            metadata={
+                "selected_helper": report.plan.selected_helper,
+                "config_drift_enabled": options.config_drift_enabled,
+                "kernel_module_autopilot_enabled": options.kernel_module_autopilot_enabled,
+            },
+        )
+        followup_runtime = build_upgrade_runtime(
+            followup_context,
+            runner=runner,
+            which=which,
+            urlopen=urlopen,
+            context_root=followup_context_root,
+        )
+
     if not report.plan.available:
+        if followup_context is not None:
+            from aurascan.core.followup import build_upgrade_runtime
+
+            unavailable_runtime = build_upgrade_runtime(
+                followup_context,
+                runner=runner,
+                which=which,
+                urlopen=urlopen,
+                context_root=followup_context_root,
+            )
+            _offer_upgrade_followup(
+                followup_context,
+                runtime=unavailable_runtime,
+                input_func=input_func,
+                stdout=stdout,
+                stderr=stderr,
+                urlopen=urlopen,
+                context_root=followup_context_root,
+                force_interactive=followup_interactive,
+            )
         return EXIT_PREFLIGHT_UNAVAILABLE
     if options.dry_run:
         run_upgrade_config_drift("dry-run", options, input_func=input_func, stdout=stdout, stderr=stderr, root=config_drift_root, snapshot=snapshot, runner=config_drift_runner)
+        if followup_context is not None:
+            from aurascan.core.followup import FollowUpRuntime
+
+            dry_runtime = FollowUpRuntime(run_probes=followup_runtime.run_probes)
+            _offer_upgrade_followup(
+                followup_context,
+                runtime=dry_runtime,
+                input_func=input_func,
+                stdout=stdout,
+                stderr=stderr,
+                urlopen=urlopen,
+                context_root=followup_context_root,
+                force_interactive=followup_interactive,
+            )
         return 0
     if options.json_output and not options.yes:
         return 0
@@ -741,7 +800,26 @@ def run_upgrade(
         if fix_status is not None:
             return fix_status
     if report.requires_confirmation and not options.yes:
-        answer = input_func("AuraScan found upgrade risks. Continue anyway? [y/N] ").strip().lower()
+        if followup_context is not None:
+            from aurascan.core.followup import prompt_with_followup
+
+            answer, session = prompt_with_followup(
+                "AuraScan found upgrade risks. Continue anyway? [y/N] ",
+                followup_context,
+                runtime=followup_runtime,
+                input_func=input_func,
+                stdout=stdout,
+                stderr=stderr,
+                urlopen=urlopen,
+                context_root=followup_context_root,
+                force_interactive=followup_interactive,
+            )
+            if session.action_outcome.source_changed:
+                print("[AuraScan] Upgrade support state changed; run a fresh preflight before upgrading.", file=stderr)
+                return EXIT_USER_DECLINED
+            answer = answer.strip().lower()
+        else:
+            answer = input_func("AuraScan found upgrade risks. Continue anyway? [y/N] ").strip().lower()
         if answer not in {"y", "yes"}:
             print("[AuraScan] Upgrade not run.", file=stderr)
             return EXIT_USER_DECLINED
@@ -753,6 +831,21 @@ def run_upgrade(
         result = runner(report.plan.final_command, check=False)
     except OSError as exc:
         print(f"[AuraScan] Upgrade command failed to start: {exc}", file=stderr)
+        if followup_context is not None:
+            _offer_upgrade_followup_outcome(
+                report,
+                followup_context,
+                {"status": "failed_to_start", "summary": str(exc), "severity": "HIGH"},
+                options=options,
+                runner=runner,
+                which=which,
+                input_func=input_func,
+                stdout=stdout,
+                stderr=stderr,
+                urlopen=urlopen,
+                context_root=followup_context_root,
+                force_interactive=followup_interactive,
+            )
         return EXIT_UPGRADE_COMMAND_FAILED_TO_START
     result_code = int(getattr(result, "returncode", 0))
     if result_code == 0:
@@ -765,13 +858,131 @@ def run_upgrade(
                 print(f"[AuraScan] {len(verification) - 12} additional planned packages did not verify.", file=stderr)
             print_upgrade_failure_diagnosis(report.plan, options, runner=runner, urlopen=urlopen, stdout=stdout, stderr=stderr)
             print("[AuraScan] Skipping post-upgrade aftercare because the package transaction did not verify.", file=stderr)
+            if followup_context is not None:
+                _offer_upgrade_followup_outcome(
+                    report,
+                    followup_context,
+                    {
+                        "status": "verification_failed",
+                        "summary": "; ".join(verification[:12]),
+                        "severity": "HIGH",
+                    },
+                    options=options,
+                    runner=runner,
+                    which=which,
+                    input_func=input_func,
+                    stdout=stdout,
+                    stderr=stderr,
+                    urlopen=urlopen,
+                    context_root=followup_context_root,
+                    force_interactive=followup_interactive,
+                )
             return EXIT_UPGRADE_VERIFICATION_FAILED
         print_verified_upgrade_summary(report.plan, options, stdout=stdout, stderr=stderr)
         run_upgrade_kernel_module_aftercare(options, plan=report.plan, runner=runner, stdout=stdout, stderr=stderr, snapshot=snapshot, modules_root=modules_root)
         run_upgrade_config_drift("after", options, input_func=input_func, stdout=stdout, stderr=stderr, root=config_drift_root, snapshot=snapshot, runner=config_drift_runner)
     else:
         print_upgrade_failure_diagnosis(report.plan, options, runner=runner, urlopen=urlopen, stdout=stdout, stderr=stderr)
+    if followup_context is not None:
+        _offer_upgrade_followup_outcome(
+            report,
+            followup_context,
+            {
+                "status": "success" if result_code == 0 else "package_manager_failed",
+                "summary": (
+                    "The planned package versions were installed and post-upgrade aftercare completed."
+                    if result_code == 0
+                    else f"The selected package manager exited with status {result_code}."
+                ),
+                "severity": "LOW" if result_code == 0 else "HIGH",
+            },
+            options=options,
+            runner=runner,
+            which=which,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+            urlopen=urlopen,
+            context_root=followup_context_root,
+            force_interactive=followup_interactive,
+        )
     return result_code
+
+
+def _offer_upgrade_followup(
+    context,
+    *,
+    runtime,
+    input_func: Callable[[str], str],
+    stdout,
+    stderr,
+    urlopen: Optional[Callable],
+    context_root: Optional[Path],
+    force_interactive: Optional[bool],
+) -> None:
+    from aurascan.core.followup import offer_followup
+
+    offer_followup(
+        context,
+        runtime=runtime,
+        input_func=input_func,
+        stdout=stdout,
+        stderr=stderr,
+        urlopen=urlopen,
+        context_root=context_root,
+        force_interactive=force_interactive,
+    )
+
+
+def _offer_upgrade_followup_outcome(
+    report: UpgradePreflightReport,
+    previous_context,
+    outcome: Mapping[str, object],
+    *,
+    options: UpgradeOptions,
+    runner: Callable,
+    which: Callable,
+    input_func: Callable[[str], str],
+    stdout,
+    stderr,
+    urlopen: Optional[Callable],
+    context_root: Optional[Path],
+    force_interactive: Optional[bool],
+) -> None:
+    from aurascan.core.followup import (
+        build_upgrade_runtime,
+        context_from_upgrade,
+        offer_followup,
+    )
+
+    context = context_from_upgrade(
+        report,
+        phase="aftercare",
+        outcome=outcome,
+        context_id=previous_context.context_id,
+        metadata={
+            "selected_helper": report.plan.selected_helper,
+            "config_drift_enabled": options.config_drift_enabled,
+            "kernel_module_autopilot_enabled": options.kernel_module_autopilot_enabled,
+        },
+    )
+    runtime = build_upgrade_runtime(
+        context,
+        runner=runner,
+        which=which,
+        urlopen=urlopen,
+        context_root=context_root,
+    )
+    offer_followup(
+        context,
+        runtime=runtime,
+        input_func=input_func,
+        stdout=stdout,
+        stderr=stderr,
+        urlopen=urlopen,
+        context_root=context_root,
+        force_interactive=force_interactive,
+    )
 
 
 def verify_upgrade_handoff(plan: UpgradePlan, *, runner: Callable = subprocess.run) -> List[str]:
@@ -1116,7 +1327,15 @@ def run_upgrade_config_drift(
         args.append("--dry-run")
     print(f"\n[AuraScan] Config drift check ({stage})", file=stdout)
     try:
-        return int(runner(args, input_func=input_func, stdout=stdout, stderr=stderr))
+        return int(
+            runner(
+                args,
+                input_func=input_func,
+                stdout=stdout,
+                stderr=stderr,
+                followup_interactive=False,
+            )
+        )
     except TypeError:
         return int(runner(args))
 

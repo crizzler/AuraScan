@@ -4,9 +4,11 @@ from pathlib import Path
 import sys
 from typing import List
 
+from aurascan.core.agent import run_agent
 from aurascan.core.config import load_env, user_env_path
 from aurascan.core.config_drift import run_config_drift
 from aurascan.core.engine import AuraScanEngine
+from aurascan.core.followup import run_ask
 from aurascan.core.incidents import run_incidents
 from aurascan.core.recovery_cli import run_recovery
 from aurascan.core.upgrade_preflight import run_upgrade
@@ -23,6 +25,13 @@ OFFLINE_INCIDENT_SERVICE_FLAGS = {
     "--apply-request",
 }
 
+OFFLINE_AGENT_HELPER_FLAGS = {
+    "--set-root-policy",
+    "--issue-root-session",
+    "--execute-request",
+    "--revoke-root-session",
+}
+
 
 def load_command_environment(raw_argv: List[str]) -> None:
     if raw_argv and raw_argv[0] == "recovery":
@@ -35,6 +44,9 @@ def load_command_environment(raw_argv: List[str]) -> None:
             load_env(paths=[user_env_path()])
             return
         if incident_args & OFFLINE_INCIDENT_SERVICE_FLAGS:
+            return
+    if raw_argv and raw_argv[0] == "agent":
+        if set(raw_argv[1:]) & OFFLINE_AGENT_HELPER_FLAGS:
             return
     load_env()
 
@@ -55,6 +67,10 @@ def build_parser() -> argparse.ArgumentParser:
             "Recovery command:\n"
             "  aurascan incidents  Diagnose crashes and prepare guarded system repairs.\n"
             "  aurascan recovery   Manage or enter the optional boot recovery environment.\n\n"
+            "Follow-up command:\n"
+            "  aurascan ask        Ask AI about the latest retained AuraScan result.\n\n"
+            "Repair agent command:\n"
+            "  aurascan agent      Open the foreground contextual repair agent.\n\n"
             "Desktop command:\n"
             "  aurascan updater   Run or configure the AuraScan Updater tray applet.\n\n"
             "Pacman hook mode: when no --pkg or --pkgbuild is supplied, AuraScan "
@@ -144,6 +160,10 @@ def main(argv=None):
         sys.exit(run_recovery(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "updater":
         sys.exit(run_updater(raw_argv[1:]))
+    if raw_argv and raw_argv[0] == "ask":
+        sys.exit(run_ask(raw_argv[1:]))
+    if raw_argv and raw_argv[0] == "agent":
+        sys.exit(run_agent(raw_argv[1:]))
 
     args = build_parser().parse_args(raw_argv)
     engine = AuraScanEngine(

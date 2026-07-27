@@ -28,6 +28,9 @@ def test_pyproject_console_scripts_are_registered():
 def test_entry_point_targets_import():
     from aurascan.cli import main as cli_main
     from aurascan.__main__ import main as module_main
+    from aurascan.core.agent import run_agent
+    from aurascan.core.followup import run_ask
+    from aurascan.core.hardware_health import collect_hardware_health
     from aurascan.core.kernel_module_autopilot import build_kernel_module_check
     from aurascan.core.incidents import run_incidents
     from aurascan.makepkg_wrapper import main as wrapper_main
@@ -35,6 +38,9 @@ def test_entry_point_targets_import():
 
     assert callable(cli_main)
     assert callable(module_main)
+    assert callable(run_agent)
+    assert callable(run_ask)
+    assert callable(collect_hardware_health)
     assert callable(build_kernel_module_check)
     assert callable(run_incidents)
     assert callable(wrapper_main)
@@ -85,6 +91,22 @@ def test_readme_contains_release_safety_boundaries():
         "ai cannot generate commands",
         "does not automate filesystem repair",
         "aurascan_incident_ai_evidence",
+        "aurascan ask --latest",
+        "eight questions and twelve provider requests",
+        "questions and ai answers stay in memory",
+        "parent `--yes` flags never authorize follow-up actions",
+        "aurascan agent --latest",
+        "ai cannot generate commands in guarded mode",
+        "grant ai full root control",
+        "user-authorized remote code execution",
+        "aurascan_agent_access",
+        "/etc/aurascan/agent.conf",
+        "share full terminal output",
+        "continue without rollback",
+        "foreground-only",
+        "hardware, memory pressure, temperatures, cooling, drivers",
+        "serial numbers",
+        "raw firmware tables",
     ]
     for phrase in required_phrases:
         assert phrase in readme
@@ -96,6 +118,26 @@ def test_license_is_mit_for_public_release():
     assert license_text.startswith("MIT License")
     assert "Copyright (c) 2026 Arawn" in license_text
     assert "THE SOFTWARE IS PROVIDED \"AS IS\"" in license_text
+
+
+def test_privacy_document_covers_full_control_agent_boundaries():
+    privacy = read_text("docs/PRIVACY.md").lower()
+
+    required = [
+        "foreground full-control repair agent",
+        "grant ai full root control",
+        "share full terminal output",
+        "continue without rollback",
+        "/run/aurascan-agent/",
+        "~/.local/state/aurascan/agent/",
+        "/var/lib/aurascan/agent/",
+        "user-authorized remote code execution",
+        "can defeat these software boundaries",
+        "hardware-related questions can trigger a foreground read-only hardware probe",
+        "does not read or transmit system serial numbers",
+    ]
+    for phrase in required:
+        assert phrase in privacy
 
 
 def test_release_checklist_references_required_validation_and_safety_items():
@@ -115,6 +157,12 @@ def test_release_checklist_references_required_validation_and_safety_items():
         "Background incident AI has a separate per-user opt-in",
         "Safe Autopilot defaults to `off`",
         "Incident repair actions are allowlisted and freshly revalidated as root.",
+        "Follow-up contexts are private, fingerprinted, redacted before persistence",
+        "Follow-up AI accepts only known fact, probe, and action IDs",
+        "Repair Agent defaults to `guarded`",
+        "Root-shell also requires a safe root-owned policy",
+        "user-authorized remote code execution",
+        "Hardware-aware follow-up runs only in an opted-in foreground AI workflow",
     ]
     for phrase in required_phrases:
         assert phrase in checklist

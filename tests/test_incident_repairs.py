@@ -10,6 +10,8 @@ from aurascan.core.incident_repairs import (
     execute_kernel_headers,
     execute_repository_restore,
     execute_repair_request,
+    execute_service_restart,
+    is_transient_application_unit,
     make_action,
     package_manager_processes,
     parse_repair_response,
@@ -117,6 +119,37 @@ def test_user_service_restart_is_non_root_action():
     assert action.recipe_id == "restart_user_service"
     assert action.requires_root is False
     assert action.command_preview[0][:2] == ["systemctl", "--user"]
+
+
+def test_transient_desktop_application_unit_is_not_treated_as_restartable_service(tmp_path):
+    unit = "app-chromium@a9c0020e71574cab9a7e6c9aef0e798e.service"
+    assert is_transient_application_unit(unit)
+    assert plan_service_restart(unit, user_service=True) is None
+
+    stale_action = make_action(
+        "restart_user_service",
+        "Restart transient fixture",
+        "stale prepared action",
+        Severity.MEDIUM,
+        {"unit": unit, "user_service": True, "category": "failed_service"},
+        [["systemctl", "--user", "restart", unit]],
+        requires_root=False,
+    )
+    runner = FakeRunner({
+        ("systemctl", "--user", "is-failed", unit): Completed("failed\n"),
+        ("systemctl", "--user", "is-enabled", unit): Completed("transient\n"),
+    })
+
+    result = execute_service_restart(
+        stale_action,
+        runner=runner,
+        which=fake_which({"systemctl"}),
+        run_root=tmp_path,
+    )
+
+    assert result.status == "refused"
+    assert "transient desktop application unit" in result.message
+    assert not any(call[-2:-1] == ["restart"] for call in runner.calls)
 
 
 def test_exact_package_reinstall_requires_missing_immutable_file_and_signed_exact_cache(tmp_path):

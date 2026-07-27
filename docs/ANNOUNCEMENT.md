@@ -31,6 +31,26 @@ door: it previews repo and AUR updates, checks kernel/module/initramfs/boot
 space/ignored-package/config-drift risks, optionally asks configured AI to
 raise risk severity, then hands off to pacman, paru, yay, or Shelly.
 
+After a foreground upgrade, incident, maintenance, or config-drift result, users
+can now ask a bounded follow-up question in the same terminal. `aurascan ask
+--latest` reopens the newest retained result. AI can select only AuraScan-owned
+local probes and verified actions; it cannot create commands, and every action
+is refreshed, previewed, and confirmed separately.
+
+Hardware-related questions now gather a fresh, read-only local summary before
+AI answers. Supported systems can contribute CPU/GPU/RAM/mainboard/BIOS facts,
+temperatures and fan state, driver and microcode versions, current-boot
+hardware-error categories, repository update comparisons, and `fwupd` firmware
+availability. AuraScan explicitly reports missing coverage and excludes
+serials, UUIDs, and raw SPD/firmware data.
+
+An experimental foreground `aurascan agent` keeps that guarded behavior by
+default but can be configured for arbitrary user-shell or unrestricted
+root-shell commands. Root mode requires a root-owned policy, a typed grant for
+every session, and a snapshot or typed rollback waiver. It is user-authorized
+remote code execution and should be used only when the exact displayed commands
+are understood; background services and Recovery v1 cannot start it.
+
 Repo: https://github.com/crizzler/AuraScan
 
 Try:
@@ -42,6 +62,8 @@ python -m aurascan upgrade --dry-run
 python -m aurascan config-drift --dry-run
 python -m aurascan incidents --dry-run --no-ai
 python -m aurascan recovery --status
+python -m aurascan ask --latest
+python -m aurascan agent --latest
 ```
 
 Important limits: AuraScan is a developer preview. A clean report is not proof
@@ -97,6 +119,13 @@ The newest work adds upgrade safety helpers:
 - Recovery AI has separate consent, never receives executable targets, and
   falls back cleanly when networking or a provider is unavailable. Snapshot
   restore and bootloader reinstall require exact typed confirmations.
+- Foreground result screens can open contextual follow-up. Sessions are limited
+  to eight questions and twelve provider requests; conversations remain
+  ephemeral, while only bounded redacted source contexts are retained.
+- The optional foreground Repair Agent defaults to guarded tools. User-shell
+  and root-shell require separate settings and live consent; unrestricted root
+  commands can defeat AuraScan's own safeguards and are never available to
+  background services, hooks, JSON runs, or Recovery v1.
 
 What I would value most:
 

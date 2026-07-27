@@ -87,6 +87,8 @@ class ConfigDriftOptions:
     enabled: bool = True
     config_ai_diffs: str = "ask"
     config_error: str = ""
+    action_ids: List[str] = field(default_factory=list)
+    explicit_no_ai: bool = False
 
 
 @dataclass
@@ -263,6 +265,7 @@ def build_config_drift_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-ai", action="store_true", help="disable AI config-diff review for this run")
     parser.add_argument("--ai-diffs", action="store_true", help="allow network AI to inspect redacted bounded config diffs")
     parser.add_argument("--root", default="/etc", help="configuration root to scan")
+    parser.add_argument("--action-id", action="append", default=[], help=argparse.SUPPRESS)
     return parser
 
 
@@ -294,6 +297,8 @@ def config_drift_options_from_args(args: argparse.Namespace, env: Optional[Mappi
         enabled=config.enabled,
         config_ai_diffs=config.ai_diffs,
         config_error=config.error,
+        action_ids=[str(item) for item in args.action_id if str(item)],
+        explicit_no_ai=bool(args.no_ai),
     )
 
 
@@ -306,6 +311,8 @@ def run_config_drift(
     runner: Callable = subprocess.run,
     urlopen: Optional[Callable] = None,
     backup_root: Path = CONFIG_DRIFT_BACKUP_ROOT,
+    followup_context_root: Optional[Path] = None,
+    followup_interactive: Optional[bool] = None,
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -322,10 +329,62 @@ def run_config_drift(
         return 0
 
     report = build_config_drift_report(options.root)
+    if options.action_ids:
+        by_id = {config_drift_action_id(item): item for item in report.actions}
+        requested = list(dict.fromkeys(options.action_ids))
+        missing = [item for item in requested if item not in by_id]
+        if missing:
+            report.errors.append(
+                "one or more selected config drift actions changed or are no longer available"
+            )
+            report.actions = []
+            report.files = []
+            _emit_config_report(report, options, stdout)
+            return EXIT_CONFIG_DRIFT_APPLY_FAILED
+        report.actions = [by_id[item] for item in requested]
+        report.files = [item.drift_file for item in report.actions]
     apply_ai_config_drift_review(report, disabled=options.no_ai or not options.ai_diffs, urlopen=urlopen)
+    followup_context = None
+    followup_runtime = None
+    followup_disabled = options.json_output or options.yes or options.explicit_no_ai
+    if not followup_disabled:
+        from aurascan.core.followup import (
+            FollowUpRuntime,
+            build_config_drift_runtime,
+            context_from_config_drift,
+        )
+
+        followup_context = context_from_config_drift(
+            report,
+            ai_diffs_allowed=options.ai_diffs,
+        )
+        followup_runtime = (
+            FollowUpRuntime()
+            if options.dry_run
+            else build_config_drift_runtime(
+                followup_context,
+                runner=runner,
+                context_root=followup_context_root,
+                defer_actions=True,
+            )
+        )
 
     if not report.apply_actions or options.dry_run:
         _emit_config_report(report, options, stdout)
+        if followup_context is not None:
+            from aurascan.core.followup import offer_followup
+
+            offer_followup(
+                followup_context,
+                runtime=followup_runtime,
+                input_func=input_func,
+                stdout=stdout,
+                stderr=stderr,
+                urlopen=urlopen,
+                context_root=followup_context_root,
+                disabled=followup_disabled,
+                force_interactive=followup_interactive,
+            )
         return 0
     if options.json_output and not options.yes:
         _emit_config_report(report, options, stdout)
@@ -335,7 +394,23 @@ def run_config_drift(
     if not options.yes:
         default_yes = report.apply_prompt_default_yes
         suffix = "[Y/n]" if default_yes else "[y/N]"
-        answer = input_func(f"AuraScan prepared config drift fixes. Apply now? {suffix} ").strip().lower()
+        if followup_context is not None:
+            from aurascan.core.followup import prompt_with_followup
+
+            answer, _session = prompt_with_followup(
+                f"AuraScan prepared config drift fixes. Apply now? {suffix} ",
+                followup_context,
+                runtime=followup_runtime,
+                input_func=input_func,
+                stdout=stdout,
+                stderr=stderr,
+                urlopen=urlopen,
+                context_root=followup_context_root,
+                force_interactive=followup_interactive,
+            )
+            answer = answer.strip().lower()
+        else:
+            answer = input_func(f"AuraScan prepared config drift fixes. Apply now? {suffix} ").strip().lower()
         declined = answer in {"n", "no"} if default_yes else answer not in {"y", "yes"}
         if declined:
             print("[AuraScan] Config drift fixes were not applied.", file=stderr)
@@ -349,6 +424,18 @@ def run_config_drift(
         stderr=stderr,
     )
     if sudo_status is not None:
+        if sudo_status == 0 and followup_context is not None:
+            _offer_config_followup_after_apply(
+                options,
+                input_func=input_func,
+                stdout=stdout,
+                stderr=stderr,
+                runner=runner,
+                urlopen=urlopen,
+                context_id=followup_context.context_id,
+                context_root=followup_context_root,
+                force_interactive=followup_interactive,
+            )
         return sudo_status
 
     ok = apply_config_drift_actions(report, backup_root=backup_root)
@@ -356,7 +443,61 @@ def run_config_drift(
         print(report.to_json(include_preview=True), file=stdout)
     elif report.applied or report.errors:
         print(report.render_terminal(include_preview=False), file=stdout)
+    if ok and followup_context is not None:
+        _offer_config_followup_after_apply(
+            options,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+            runner=runner,
+            urlopen=urlopen,
+            context_id=followup_context.context_id,
+            context_root=followup_context_root,
+            force_interactive=followup_interactive,
+        )
     return 0 if ok else EXIT_CONFIG_DRIFT_APPLY_FAILED
+
+
+def _offer_config_followup_after_apply(
+    options: ConfigDriftOptions,
+    *,
+    input_func: Callable[[str], str],
+    stdout,
+    stderr,
+    runner: Callable,
+    urlopen: Optional[Callable],
+    context_id: str,
+    context_root: Optional[Path],
+    force_interactive: Optional[bool],
+) -> None:
+    from aurascan.core.followup import (
+        build_config_drift_runtime,
+        context_from_config_drift,
+        offer_followup,
+    )
+
+    refreshed_report = build_config_drift_report(options.root)
+    context = context_from_config_drift(
+        refreshed_report,
+        context_id=context_id,
+        ai_diffs_allowed=options.ai_diffs,
+        metadata={"completed": True},
+    )
+    runtime = build_config_drift_runtime(
+        context,
+        runner=runner,
+        context_root=context_root,
+    )
+    offer_followup(
+        context,
+        runtime=runtime,
+        input_func=input_func,
+        stdout=stdout,
+        stderr=stderr,
+        urlopen=urlopen,
+        context_root=context_root,
+        force_interactive=force_interactive,
+    )
 
 
 def maybe_reexec_config_drift_with_sudo(
@@ -400,6 +541,21 @@ def build_config_drift_report(root: Path = Path("/etc"), *, max_entries: int = 2
         scan_truncated=truncated,
         ai_review={"enabled": False, "status": "not_run"},
     )
+
+
+def config_drift_action_id(action: ConfigDriftAction) -> str:
+    material = {
+        "path": str(action.drift_file.path),
+        "target_path": str(action.drift_file.target_path),
+        "kind": action.drift_file.kind,
+        "action": action.action,
+        "candidate_sha256": sha256_text(action.candidate_text) if action.candidate_text else "",
+        "remove_drift": action.remove_drift,
+    }
+    digest = hashlib.sha256(
+        json.dumps(material, sort_keys=True).encode("utf-8", "replace")
+    ).hexdigest()[:16]
+    return "cda-" + digest
 
 
 def discover_config_drift_files(root: Path, *, max_entries: int = 20000) -> Tuple[List[ConfigDriftFile], bool]:

@@ -32,6 +32,9 @@ from aurascan.core.upgrade_preflight import (
 
 SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9@._+:-]{1,200}$")
 SAFE_UNIT_RE = re.compile(r"^[a-zA-Z0-9@_.:-]+\.(?:service|socket|timer|mount)$")
+TRANSIENT_APPLICATION_UNIT_RE = re.compile(
+    r"^app-[A-Za-z0-9_.:+-]+@[A-Za-z0-9_-]+\.service$"
+)
 PACMAN_CACHE_ROOT = Path("/var/cache/pacman/pkg")
 PACKAGE_MANAGER_NAMES = {
     "pacman",
@@ -143,6 +146,8 @@ def plan_repair_actions(
     failed_units = sorted({item.unit for item in report.evidence if item.source in {"systemctl", "systemctl-user"} and item.unit})
     for unit in failed_units[:20]:
         user_service = any(item.unit == unit and item.source == "systemctl-user" for item in report.evidence)
+        if user_service and is_transient_application_unit(unit):
+            continue
         action = plan_service_restart(unit, user_service=user_service)
         if action:
             actions.append(action)
@@ -300,7 +305,11 @@ def plan_initramfs_rebuild(*, which: Callable[[str], Optional[str]], target_boot
 
 
 def plan_service_restart(unit: str, *, user_service: bool = False) -> Optional[RepairAction]:
-    if not SAFE_UNIT_RE.fullmatch(unit) or is_critical_unit(unit):
+    if (
+        not SAFE_UNIT_RE.fullmatch(unit)
+        or is_critical_unit(unit)
+        or user_service and is_transient_application_unit(unit)
+    ):
         return None
     recipe = "restart_user_service" if user_service else "restart_system_service"
     prefix = ["systemctl", "--user"] if user_service else ["systemctl"]
@@ -925,6 +934,14 @@ def execute_service_restart(action: RepairAction, *, runner: Callable, which: Ca
     if failed_state.stdout.strip() != "failed":
         return refused(action, "The unit is no longer in a failed state.")
     enabled_state = run_bounded_command(runner, prefix + ["is-enabled", unit], max_chars=4000, timeout=15).stdout.strip()
+    if enabled_state == "transient" or user_service and is_transient_application_unit(unit):
+        return refused(
+            action,
+            (
+                f"{unit} is a transient desktop application unit. Its historical failure "
+                "can be reviewed, but it is not a persistent service AuraScan should restart."
+            ),
+        )
     run_bounded_command(runner, prefix + ["reset-failed", unit], max_chars=8000, timeout=30)
     restarted = run_bounded_command(runner, prefix + ["restart", unit], max_chars=64000, timeout=120)
     active = run_bounded_command(runner, prefix + ["is-active", unit], max_chars=4000, timeout=30)
@@ -942,6 +959,10 @@ def parse_repair_response(text: str, returncode: int) -> Tuple[List[RepairResult
         return [RepairResult("", "", "failed", "Privileged repair helper returned invalid output.")], False
     results = [RepairResult.from_dict(item) for item in data.get("results", []) if isinstance(item, dict)]
     return results, bool(data.get("ok", False)) and returncode == 0
+
+
+def is_transient_application_unit(unit: str) -> bool:
+    return bool(TRANSIENT_APPLICATION_UNIT_RE.fullmatch(str(unit or "")))
 
 
 def package_manager_processes(proc_root: Path = Path("/proc")) -> List[str]:

@@ -1031,6 +1031,8 @@ def run_incidents(
     user_root: Optional[Path] = None,
     system_root: Path = INCIDENT_SYSTEM_ROOT,
     urlopen: Optional[Callable] = None,
+    followup_context_root: Optional[Path] = None,
+    followup_interactive: Optional[bool] = None,
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -1128,13 +1130,61 @@ def run_incidents(
     if args.maintenance_status:
         return print_maintenance_status(system_root=system_root, runner=runner, stdout=stdout, json_output=bool(args.json_output))
     if args.run_maintenance:
-        return run_maintenance_now(
+        maintenance_result = run_maintenance_now(
             system_root=system_root,
             runner=runner,
             stdout=stdout,
             stderr=stderr,
             json_output=bool(args.json_output),
         )
+        if (
+            maintenance_result == 0
+            and not options.json_output
+            and not options.yes
+            and not options.no_ai
+        ):
+            from aurascan.core.followup import (
+                build_maintenance_runtime,
+                context_from_maintenance,
+                offer_followup,
+            )
+
+            _state_path, status_path = maintenance_paths(system_root)
+            maintenance_status = load_maintenance_status(status_path)
+            maintenance_report_root = user_root or user_incident_root(effective_env)
+            maintenance_reviewed_path = incident_reviewed_state_path(
+                effective_env,
+                report_root=maintenance_report_root,
+            )
+            maintenance_markers = unseen_pending_markers(
+                uid=current_user_uid(),
+                marker_root=system_root / "pending",
+                seen_path=maintenance_reviewed_path,
+            )
+            marker = highest_priority_pending_marker(maintenance_markers)
+            context = context_from_maintenance(maintenance_status, marker)
+            runtime = build_maintenance_runtime(
+                context,
+                env=effective_env,
+                runner=runner,
+                which=which,
+                context_root=followup_context_root,
+                incident_root=maintenance_report_root,
+                system_root=system_root,
+            )
+            offer_followup(
+                context,
+                runtime=runtime,
+                input_func=input_func,
+                stdout=stdout,
+                stderr=stderr,
+                env=effective_env,
+                facts_only=options.facts_only or options.config.ai_evidence == "facts-only",
+                urlopen=urlopen,
+                context_root=followup_context_root,
+                force_interactive=followup_interactive,
+            )
+        return maintenance_result
 
     if args.enable_monitor or args.disable_monitor or args.monitor_status:
         return handle_incident_monitor_action(
@@ -1266,9 +1316,55 @@ def run_incidents(
     if not options.json_output:
         print(report.render_terminal(verbose=options.verbose), file=stdout)
 
+    followup_context = None
+    followup_runtime = None
+    followup_disabled = (
+        options.json_output
+        or options.yes
+        or options.no_ai
+        or options.capture_monitor
+        or not options.config.ai_enabled
+    )
+    if not followup_disabled:
+        from aurascan.core.followup import (
+            build_incident_runtime,
+            context_from_incident,
+        )
+
+        privacy_mode = "facts-only" if options.facts_only or options.config.ai_evidence == "facts-only" else "redacted"
+        followup_context = context_from_incident(
+            report,
+            metadata={"resolve_pending": options.resolve_pending},
+            privacy_mode=privacy_mode,
+        )
+        followup_runtime = build_incident_runtime(
+            followup_context,
+            env=effective_env,
+            runner=runner,
+            which=which,
+            context_root=followup_context_root,
+            incident_root=report_root,
+            system_root=system_root,
+            report_override=report,
+            defer_actions=True,
+        )
+
     if not report.evidence and report.collection_status == "unavailable":
         if options.json_output:
             print(report.to_json(), file=stdout)
+        if followup_context is not None:
+            _offer_incident_followup(
+                followup_context,
+                runtime=followup_runtime,
+                options=options,
+                input_func=input_func,
+                stdout=stdout,
+                stderr=stderr,
+                env=effective_env,
+                urlopen=urlopen,
+                context_root=followup_context_root,
+                force_interactive=followup_interactive,
+            )
         if should_acknowledge_resolution(options, report):
             acknowledge_incident_resolution(
                 unreviewed_markers,
@@ -1279,24 +1375,98 @@ def run_incidents(
             )
             return 0
         return EXIT_INCIDENT_UNAVAILABLE
-    if not report.eligible_actions or options.dry_run or (options.json_output and not options.yes):
+    if options.dry_run or (options.json_output and not options.yes):
         if options.json_output:
             print(report.to_json(), file=stdout)
-        if should_acknowledge_resolution(options, report):
-            acknowledge_incident_resolution(
-                unreviewed_markers,
-                seen_path=reviewed_path,
-                report=report,
+        elif followup_context is not None:
+            from aurascan.core.followup import FollowUpRuntime
+
+            dry_runtime = FollowUpRuntime(run_probes=followup_runtime.run_probes)
+            _offer_incident_followup(
+                followup_context,
+                runtime=dry_runtime,
+                options=options,
+                input_func=input_func,
                 stdout=stdout,
-                quiet=options.json_output,
+                stderr=stderr,
+                env=effective_env,
+                urlopen=urlopen,
+                context_root=followup_context_root,
+                force_interactive=followup_interactive,
             )
         return 0
+
+    if not report.eligible_actions:
+        if followup_context is not None:
+            _offer_incident_followup(
+                followup_context,
+                runtime=followup_runtime,
+                options=options,
+                input_func=input_func,
+                stdout=stdout,
+                stderr=stderr,
+                env=effective_env,
+                urlopen=urlopen,
+                context_root=followup_context_root,
+                force_interactive=followup_interactive,
+            )
+        if not report.eligible_actions:
+            if should_acknowledge_resolution(options, report):
+                acknowledge_incident_resolution(
+                    unreviewed_markers,
+                    seen_path=reviewed_path,
+                    report=report,
+                    stdout=stdout,
+                    quiet=options.json_output,
+                )
+            return 0
+
     if not options.yes:
         suffix = "[Y/n]" if report.apply_prompt_default_yes else "[y/N]"
-        answer = input_func(
+        confirmation_prompt = (
             f"AuraScan prepared one locally verified repair plan with {len(report.eligible_actions)} action(s). "
             f"Apply now? {suffix} "
-        ).strip().lower()
+        )
+        if followup_context is not None:
+            from aurascan.core.followup import (
+                build_incident_runtime,
+                context_from_incident,
+                prompt_with_followup,
+            )
+
+            followup_context = context_from_incident(
+                report,
+                context_id=followup_context.context_id,
+                metadata={"resolve_pending": options.resolve_pending},
+                privacy_mode=followup_context.privacy_mode,
+            )
+            followup_runtime = build_incident_runtime(
+                followup_context,
+                env=effective_env,
+                runner=runner,
+                which=which,
+                context_root=followup_context_root,
+                incident_root=report_root,
+                system_root=system_root,
+                report_override=report,
+                defer_actions=True,
+            )
+            answer, _session = prompt_with_followup(
+                confirmation_prompt,
+                followup_context,
+                runtime=followup_runtime,
+                input_func=input_func,
+                stdout=stdout,
+                stderr=stderr,
+                env=effective_env,
+                facts_only=options.facts_only or options.config.ai_evidence == "facts-only",
+                urlopen=urlopen,
+                context_root=followup_context_root,
+                force_interactive=followup_interactive,
+            )
+            answer = answer.strip().lower()
+        else:
+            answer = input_func(confirmation_prompt).strip().lower()
         declined = answer in {"n", "no"} if report.apply_prompt_default_yes else answer not in {"y", "yes"}
         if declined:
             print("[AuraScan] Incident repairs were not applied.", file=stderr)
@@ -1340,6 +1510,40 @@ def run_incidents(
         resolved = len(report.post_repair.get("resolved_finding_keys", []))
         remaining = len(report.post_repair.get("remaining_finding_keys", []))
         print(f"[AuraScan] Deterministic aftercare: {resolved} finding(s) resolved, {remaining} still observed.", file=stdout)
+    if followup_context is not None and not options.json_output:
+        from aurascan.core.followup import (
+            build_incident_runtime,
+            context_from_incident,
+        )
+
+        followup_context = context_from_incident(
+            report,
+            context_id=followup_context.context_id,
+            metadata={"resolve_pending": options.resolve_pending, "post_repair": True},
+            privacy_mode=followup_context.privacy_mode,
+        )
+        followup_runtime = build_incident_runtime(
+            followup_context,
+            env=effective_env,
+            runner=runner,
+            which=which,
+            context_root=followup_context_root,
+            incident_root=report_root,
+            system_root=system_root,
+            report_override=report,
+        )
+        _offer_incident_followup(
+            followup_context,
+            runtime=followup_runtime,
+            options=options,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+            env=effective_env,
+            urlopen=urlopen,
+            context_root=followup_context_root,
+            force_interactive=followup_interactive,
+        )
     if ok and should_acknowledge_resolution(options, report):
         acknowledge_incident_resolution(
             unreviewed_markers,
@@ -1350,6 +1554,35 @@ def run_incidents(
             quiet=options.json_output,
         )
     return 0 if ok else EXIT_INCIDENT_REPAIR_FAILED
+
+
+def _offer_incident_followup(
+    context,
+    *,
+    runtime,
+    options: IncidentOptions,
+    input_func: Callable[[str], str],
+    stdout,
+    stderr,
+    env: Mapping[str, str],
+    urlopen: Optional[Callable],
+    context_root: Optional[Path],
+    force_interactive: Optional[bool],
+) -> None:
+    from aurascan.core.followup import offer_followup
+
+    offer_followup(
+        context,
+        runtime=runtime,
+        input_func=input_func,
+        stdout=stdout,
+        stderr=stderr,
+        env=env,
+        facts_only=options.facts_only or options.config.ai_evidence == "facts-only",
+        urlopen=urlopen,
+        context_root=context_root,
+        force_interactive=force_interactive,
+    )
 
 
 def build_incident_report(
@@ -1562,6 +1795,7 @@ def collect_incident_system_facts(
     etc_root: Path = Path("/etc"),
     modules_root: Path = Path("/usr/lib/modules"),
 ) -> Tuple[Dict[str, object], List[IncidentEvidence], List[IncidentFinding], List[str]]:
+    from aurascan.core.hardware_health import collect_static_hardware_facts
     from aurascan.core.kernel_module_autopilot import build_kernel_module_check
     from aurascan.core.upgrade_preflight import SystemSnapshot, UpgradePlan, build_repository_health_check
 
@@ -1575,6 +1809,12 @@ def collect_incident_system_facts(
     evidence: List[IncidentEvidence] = []
     findings: List[IncidentFinding] = []
     errors: List[str] = []
+    facts["hardware"] = redact_structure(collect_static_hardware_facts(
+        runner=runner,
+        which=which,
+        include_memory_devices=False,
+        allow_commands=False,
+    ))
 
     repository = build_repository_health_check(pacman_conf_path)
     facts["repository_health"] = redact_structure(repository.to_dict())
@@ -2449,6 +2689,17 @@ def build_incident_ai_prompt(
 def bounded_ai_system_facts(facts: Mapping[str, object]) -> Dict[str, object]:
     repository = facts.get("repository_health", {}) if isinstance(facts, Mapping) else {}
     kernel = facts.get("kernel_module", {}) if isinstance(facts, Mapping) else {}
+    hardware = facts.get("hardware", {}) if isinstance(facts, Mapping) else {}
+    hardware_inventory = (
+        hardware.get("inventory", {})
+        if isinstance(hardware, Mapping)
+        else {}
+    )
+    hardware_memory = (
+        hardware.get("memory", {})
+        if isinstance(hardware, Mapping)
+        else {}
+    )
     result = {
         "tools": facts.get("tools", {}) if isinstance(facts, Mapping) else {},
         "storage": facts.get("storage", {}) if isinstance(facts, Mapping) else {},
@@ -2467,6 +2718,52 @@ def bounded_ai_system_facts(facts: Mapping[str, object]) -> Dict[str, object]:
             "headers_status": list(kernel.get("headers_status", []))[:12],
             "dkms_status": kernel.get("dkms_status", {}),
         } if isinstance(kernel, Mapping) else {},
+        "hardware": {
+            "inventory": {
+                key: hardware_inventory.get(key)
+                for key in (
+                    "cpu_model",
+                    "cpu_vendor",
+                    "cpu_family",
+                    "cpu_model_number",
+                    "cpu_stepping",
+                    "active_microcode",
+                    "logical_cpus",
+                    "system_vendor",
+                    "system_model",
+                    "board_vendor",
+                    "board_model",
+                    "board_version",
+                    "bios_vendor",
+                    "bios_version",
+                    "bios_date",
+                )
+                if hardware_inventory.get(key) not in {"", None}
+            } if isinstance(hardware_inventory, Mapping) else {},
+            "memory": {
+                key: hardware_memory.get(key)
+                for key in (
+                    "total_mib",
+                    "available_mib",
+                    "swap_total_mib",
+                    "swap_free_mib",
+                    "detailed_timings_status",
+                )
+                if hardware_memory.get(key) not in {"", None}
+            } if isinstance(hardware_memory, Mapping) else {},
+            "gpus": [
+                {
+                    key: item.get(key)
+                    for key in ("pci_id", "name", "driver", "module_version")
+                    if item.get(key) not in {"", None}
+                }
+                for item in list(hardware.get("gpus", []))[:8]
+                if isinstance(item, Mapping)
+            ] if isinstance(hardware, Mapping) else [],
+            "advisories": list(hardware.get("advisories", []))[:8]
+            if isinstance(hardware, Mapping)
+            else [],
+        },
     }
     return redact_structure(result)
 

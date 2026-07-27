@@ -1,0 +1,2427 @@
+import argparse
+import hashlib
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from aurascan.core.ai_provider import call_ai_provider, resolve_ai_config
+from aurascan.core.hardware_health import (
+    HARDWARE_HEALTH_PROBE_ID,
+    question_requests_hardware_context,
+)
+from aurascan.core.followup import (
+    EXIT_FOLLOWUP_ACTION_FAILED,
+    EXIT_FOLLOWUP_PROVIDER_ERROR,
+    EXIT_FOLLOWUP_UNAVAILABLE,
+    FollowUpActionOutcome,
+    FollowUpContext,
+    FollowUpProbeResult,
+    FollowUpRuntime,
+    FollowUpTurn,
+    build_default_runtime,
+    classify_followup_failure,
+    context_from_latest_saved_incident,
+    context_from_saved_incident,
+    current_user_uid,
+    ensure_hardware_health_probe,
+    followup_context_fingerprint,
+    latest_followup_context,
+    load_followup_context,
+    persist_followup_context,
+    redact_followup_structure,
+    redact_followup_text,
+    user_followup_root,
+)
+
+
+AGENT_SCHEMA_VERSION = "1.0"
+AGENT_REPORT_TYPE = "agent_session"
+AGENT_ACCESS_ENV = "AURASCAN_AGENT_ACCESS"
+AGENT_APPROVAL_ENV = "AURASCAN_AGENT_APPROVAL"
+AGENT_OUTPUT_SHARING_ENV = "AURASCAN_AGENT_OUTPUT_SHARING"
+AGENT_SESSION_TIMEOUT_ENV = "AURASCAN_AGENT_SESSION_TIMEOUT"
+AGENT_ROOT_ALLOWED_ENV = "AURASCAN_AGENT_ROOT_ALLOWED"
+AGENT_ROOT_MAX_APPROVAL_ENV = "AURASCAN_AGENT_ROOT_MAX_APPROVAL"
+AGENT_ROOT_MAX_MINUTES_ENV = "AURASCAN_AGENT_ROOT_MAX_MINUTES"
+AGENT_ROOT_POLICY_PATH = Path("/etc/aurascan/agent.conf")
+AGENT_RUNTIME_ROOT = Path("/run/aurascan-agent")
+AGENT_ROOT_AUDIT_ROOT = Path("/var/lib/aurascan/agent")
+AGENT_RECOVERY_RUNTIME_MARKER = Path("/run/aurascan-recovery/environment")
+
+AGENT_ACCESS_VALUES = ("guarded", "user-shell", "root-shell")
+AGENT_APPROVAL_VALUES = ("each-command", "whole-plan", "session")
+AGENT_OUTPUT_VALUES = ("redacted", "full")
+AGENT_ACCESS_ORDER = {value: index for index, value in enumerate(AGENT_ACCESS_VALUES)}
+AGENT_APPROVAL_ORDER = {value: index for index, value in enumerate(AGENT_APPROVAL_VALUES)}
+
+AGENT_DEFAULT_SESSION_MINUTES = 30
+AGENT_MAX_SESSION_MINUTES = 120
+AGENT_DEFAULT_COMMAND_TIMEOUT = 120
+AGENT_MAX_COMMAND_TIMEOUT = 1800
+AGENT_MAX_COMMAND_CHARS = 8192
+AGENT_MAX_COMMANDS_PER_PLAN = 10
+AGENT_MAX_COMMANDS_PER_SESSION = 30
+AGENT_MAX_PROVIDER_REQUESTS = 40
+AGENT_MAX_QUESTIONS = 20
+AGENT_MAX_PROMPT_CHARS = 12000
+AGENT_MAX_AI_OUTPUT_PER_COMMAND = 32 * 1024
+AGENT_MAX_AI_OUTPUT_PER_SESSION = 128 * 1024
+AGENT_MAX_RETAINED_OUTPUT = 128 * 1024
+AGENT_MAX_REQUEST_BYTES = 256 * 1024
+AGENT_RETENTION_DAYS = 30
+AGENT_MAX_AUDITS = 50
+AGENT_ROOT_GRANT_PHRASE = "GRANT AI FULL ROOT CONTROL"
+AGENT_USER_SESSION_GRANT_PHRASE = "GRANT AI USER SHELL CONTROL"
+AGENT_RAW_OUTPUT_PHRASE = "SHARE FULL TERMINAL OUTPUT"
+AGENT_NO_SNAPSHOT_PHRASE = "CONTINUE WITHOUT ROLLBACK"
+
+EXIT_AGENT_CONFIG_ERROR = 73
+EXIT_AGENT_EXECUTION_FAILED = 74
+EXIT_AGENT_ROOT_REFUSED = 75
+
+SAFE_SESSION_ID_RE = re.compile(r"^agent-[a-f0-9]{32}$")
+CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+ANSI_ESCAPE_RE = re.compile(
+    r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~])"
+)
+
+
+@dataclass
+class AgentConfig:
+    access: str = "guarded"
+    approval: str = "each-command"
+    output_sharing: str = "redacted"
+    session_timeout_minutes: int = AGENT_DEFAULT_SESSION_MINUTES
+    error: str = ""
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "access": self.access,
+            "approval": self.approval,
+            "output_sharing": self.output_sharing,
+            "session_timeout_minutes": self.session_timeout_minutes,
+            "error": self.error,
+        }
+
+
+@dataclass
+class AgentRootPolicy:
+    allowed: bool = False
+    max_approval: str = "each-command"
+    max_minutes: int = AGENT_DEFAULT_SESSION_MINUTES
+    error: str = ""
+    path: Path = AGENT_ROOT_POLICY_PATH
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "allowed": self.allowed,
+            "max_approval": self.max_approval,
+            "max_minutes": self.max_minutes,
+            "error": self.error,
+            "path": str(self.path),
+        }
+
+
+@dataclass
+class AgentCommand:
+    command: str
+    reason: str
+    expected_result: str = ""
+    cwd: str = ""
+    timeout_seconds: int = AGENT_DEFAULT_COMMAND_TIMEOUT
+    requires_root: bool = False
+    command_id: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.command_id:
+            material = json.dumps(
+                [self.command, self.cwd, self.timeout_seconds, self.requires_root],
+                separators=(",", ":"),
+            )
+            self.command_id = "agent-cmd-" + hashlib.sha256(
+                material.encode("utf-8", "replace")
+            ).hexdigest()[:16]
+
+    def to_dict(self, *, include_command: bool = True) -> Dict[str, object]:
+        data = {
+            "command_id": self.command_id,
+            "reason": self.reason,
+            "expected_result": self.expected_result,
+            "cwd": self.cwd,
+            "timeout_seconds": self.timeout_seconds,
+            "requires_root": self.requires_root,
+        }
+        if include_command:
+            data["command"] = self.command
+        return data
+
+
+@dataclass
+class AgentCommandResult:
+    command_id: str
+    status: str
+    exit_code: int
+    output: str
+    duration_seconds: float
+    timed_out: bool = False
+    error: str = ""
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "command_id": self.command_id,
+            "status": self.status,
+            "exit_code": self.exit_code,
+            "output": self.output,
+            "duration_seconds": round(self.duration_seconds, 3),
+            "timed_out": self.timed_out,
+            "error": self.error,
+        }
+
+
+@dataclass
+class AgentAIResponse:
+    answer: str
+    requested_access: str = ""
+    referenced_fact_ids: List[str] = field(default_factory=list)
+    requested_probe_ids: List[str] = field(default_factory=list)
+    requested_action_ids: List[str] = field(default_factory=list)
+    commands: List[AgentCommand] = field(default_factory=list)
+    status: str = "ok"
+    error: str = ""
+
+
+@dataclass
+class AgentSession:
+    session_id: str
+    context_id: str
+    context_fingerprint: str
+    access: str
+    approval: str
+    output_sharing: str
+    created_at: int
+    expires_at: int
+    command_count: int = 0
+    provider_requests: int = 0
+    questions: int = 0
+    snapshot_id: str = ""
+    snapshot_waived: bool = False
+    root_capability: str = ""
+    tty: str = ""
+    active_plan_hash: str = ""
+    stopped: bool = False
+    audit_entries: List[Dict[str, object]] = field(default_factory=list)
+
+    def to_public_dict(self) -> Dict[str, object]:
+        return {
+            "schema": f"{AGENT_REPORT_TYPE}/{AGENT_SCHEMA_VERSION}",
+            "schema_version": AGENT_SCHEMA_VERSION,
+            "report_type": AGENT_REPORT_TYPE,
+            "session_id": self.session_id,
+            "context_id": self.context_id,
+            "context_fingerprint": self.context_fingerprint,
+            "access": self.access,
+            "approval": self.approval,
+            "output_sharing": self.output_sharing,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+            "command_count": self.command_count,
+            "provider_requests": self.provider_requests,
+            "questions": self.questions,
+            "snapshot_id": self.snapshot_id,
+            "snapshot_waived": self.snapshot_waived,
+            "stopped": self.stopped,
+            "audit_entries": list(self.audit_entries),
+        }
+
+
+@dataclass
+class AgentSessionResult:
+    questions: int = 0
+    provider_requests: int = 0
+    commands_run: int = 0
+    command_failed: bool = False
+    provider_failed: bool = False
+    stopped: bool = False
+    setup_failed: bool = False
+    action_outcome: FollowUpActionOutcome = field(default_factory=FollowUpActionOutcome)
+
+
+def resolve_agent_config(env: Optional[Mapping[str, str]] = None) -> AgentConfig:
+    source = os.environ if env is None else env
+    access = str(source.get(AGENT_ACCESS_ENV, "guarded") or "guarded").strip().lower()
+    approval = str(source.get(AGENT_APPROVAL_ENV, "each-command") or "each-command").strip().lower()
+    output = str(source.get(AGENT_OUTPUT_SHARING_ENV, "redacted") or "redacted").strip().lower()
+    raw_minutes = str(
+        source.get(AGENT_SESSION_TIMEOUT_ENV, str(AGENT_DEFAULT_SESSION_MINUTES))
+        or AGENT_DEFAULT_SESSION_MINUTES
+    ).strip()
+    errors = []
+    if access not in AGENT_ACCESS_VALUES:
+        errors.append(f"invalid {AGENT_ACCESS_ENV} value")
+        access = "guarded"
+    if approval not in AGENT_APPROVAL_VALUES:
+        errors.append(f"invalid {AGENT_APPROVAL_ENV} value")
+        approval = "each-command"
+    if output not in AGENT_OUTPUT_VALUES:
+        errors.append(f"invalid {AGENT_OUTPUT_SHARING_ENV} value")
+        output = "redacted"
+    try:
+        minutes = int(raw_minutes)
+    except ValueError:
+        minutes = AGENT_DEFAULT_SESSION_MINUTES
+        errors.append(f"invalid {AGENT_SESSION_TIMEOUT_ENV} value")
+    if minutes < 1 or minutes > AGENT_MAX_SESSION_MINUTES:
+        minutes = AGENT_DEFAULT_SESSION_MINUTES
+        errors.append(f"{AGENT_SESSION_TIMEOUT_ENV} must be between 1 and {AGENT_MAX_SESSION_MINUTES}")
+    return AgentConfig(access, approval, output, minutes, "; ".join(errors))
+
+
+def read_agent_root_policy(
+    path: Path = AGENT_ROOT_POLICY_PATH,
+    *,
+    required_uid: int = 0,
+) -> AgentRootPolicy:
+    if not path.exists():
+        return AgentRootPolicy(path=path)
+    try:
+        if path.is_symlink() or not path.is_file():
+            return AgentRootPolicy(error="agent root policy is not a regular file", path=path)
+        metadata = path.stat()
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return AgentRootPolicy(error=f"agent root policy could not be read: {exc}", path=path)
+    if metadata.st_uid != required_uid or metadata.st_mode & 0o022:
+        return AgentRootPolicy(
+            error="agent root policy ownership or permissions are unsafe",
+            path=path,
+        )
+    values: Dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip("\"'")
+    allowed_raw = values.get(AGENT_ROOT_ALLOWED_ENV, "0").strip().lower()
+    if allowed_raw not in {"0", "1"}:
+        return AgentRootPolicy(error=f"invalid {AGENT_ROOT_ALLOWED_ENV} value", path=path)
+    approval = values.get(AGENT_ROOT_MAX_APPROVAL_ENV, "each-command").strip().lower()
+    if approval not in AGENT_APPROVAL_VALUES:
+        return AgentRootPolicy(error=f"invalid {AGENT_ROOT_MAX_APPROVAL_ENV} value", path=path)
+    try:
+        minutes = int(values.get(AGENT_ROOT_MAX_MINUTES_ENV, str(AGENT_DEFAULT_SESSION_MINUTES)))
+    except ValueError:
+        return AgentRootPolicy(error=f"invalid {AGENT_ROOT_MAX_MINUTES_ENV} value", path=path)
+    if minutes < 1 or minutes > AGENT_MAX_SESSION_MINUTES:
+        return AgentRootPolicy(
+            error=f"{AGENT_ROOT_MAX_MINUTES_ENV} must be between 1 and {AGENT_MAX_SESSION_MINUTES}",
+            path=path,
+        )
+    return AgentRootPolicy(allowed_raw == "1", approval, minutes, path=path)
+
+
+def write_agent_root_policy(
+    allowed: bool,
+    max_approval: str,
+    max_minutes: int,
+    path: Path = AGENT_ROOT_POLICY_PATH,
+    *,
+    require_root: bool = True,
+) -> Tuple[bool, str]:
+    approval = str(max_approval or "").strip().lower()
+    if approval not in AGENT_APPROVAL_VALUES:
+        return False, f"Invalid agent root approval policy: {max_approval}"
+    try:
+        minutes = int(max_minutes)
+    except (TypeError, ValueError):
+        return False, "Agent root session duration must be an integer."
+    if minutes < 1 or minutes > AGENT_MAX_SESSION_MINUTES:
+        return False, f"Agent root session duration must be between 1 and {AGENT_MAX_SESSION_MINUTES} minutes."
+    if require_root and (not hasattr(os, "geteuid") or os.geteuid() != 0):
+        return False, "AuraScan agent root policy writes require root privileges."
+    content = (
+        f"{AGENT_ROOT_ALLOWED_ENV}={'1' if allowed else '0'}\n"
+        f"{AGENT_ROOT_MAX_APPROVAL_ENV}={approval}\n"
+        f"{AGENT_ROOT_MAX_MINUTES_ENV}={minutes}\n"
+    )
+    try:
+        path.parent.mkdir(parents=True, mode=0o755, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=".agent.", dir=str(path.parent), text=True)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+            os.chmod(tmp_name, 0o644)
+            os.replace(tmp_name, path)
+            os.chmod(path, 0o644)
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
+    except OSError as exc:
+        return False, f"Could not write AuraScan agent root policy: {exc}"
+    state = "allowed" if allowed else "disabled"
+    return True, f"AuraScan unrestricted root agent access is {state}."
+
+
+def configure_agent_root_policy(
+    allowed: bool,
+    max_approval: str,
+    max_minutes: int,
+    *,
+    runner: Callable = subprocess.run,
+    helper: Path = Path("/usr/bin/aurascan"),
+) -> Tuple[bool, str]:
+    if max_approval not in AGENT_APPROVAL_VALUES:
+        return False, f"Invalid agent root approval policy: {max_approval}"
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        return write_agent_root_policy(allowed, max_approval, max_minutes)
+    if not helper.is_file():
+        return False, "Agent root policy configuration requires package-managed /usr/bin/aurascan."
+    command = [
+        "sudo",
+        str(helper),
+        "agent",
+        "--set-root-policy",
+        "1" if allowed else "0",
+        "--root-max-approval",
+        max_approval,
+        "--root-max-minutes",
+        str(max_minutes),
+    ]
+    try:
+        result = runner(command, capture_output=True, text=True, check=False)
+    except OSError as exc:
+        return False, f"Could not configure AuraScan agent root policy: {exc}"
+    if int(getattr(result, "returncode", 1)) != 0:
+        detail = redact_followup_text((getattr(result, "stderr", "") or "").strip())[:500]
+        return False, detail or f"Agent root policy command failed with exit code {result.returncode}."
+    state = "allowed" if allowed else "disabled"
+    return True, f"AuraScan unrestricted root agent access is {state}."
+
+
+def build_agent_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="aurascan agent",
+        description="Open AuraScan's foreground contextual repair agent.",
+    )
+    parser.add_argument("context_id", nargs="?", help="retained follow-up context or incident report ID")
+    parser.add_argument("--latest", action="store_true", help="open the newest retained AuraScan context")
+    parser.add_argument("--access", choices=AGENT_ACCESS_VALUES, help="requested access for this session")
+    parser.add_argument("--approval", choices=AGENT_APPROVAL_VALUES, help="command approval mode")
+    parser.add_argument("--output-sharing", choices=AGENT_OUTPUT_VALUES, help="AI command-output sharing mode")
+    parser.add_argument("--session-timeout", type=int, metavar="MINUTES", help="session duration in minutes")
+    parser.add_argument("--facts-only", action="store_true", help="omit evidence excerpts from AI requests")
+    parser.add_argument("--set-root-policy", choices=("0", "1"), help=argparse.SUPPRESS)
+    parser.add_argument("--root-max-approval", choices=AGENT_APPROVAL_VALUES, help=argparse.SUPPRESS)
+    parser.add_argument("--root-max-minutes", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--issue-root-session", metavar="REQUEST", help=argparse.SUPPRESS)
+    parser.add_argument("--execute-request", metavar="REQUEST", help=argparse.SUPPRESS)
+    parser.add_argument("--revoke-root-session", metavar="REQUEST", help=argparse.SUPPRESS)
+    return parser
+
+
+def user_agent_root(env: Optional[Mapping[str, str]] = None) -> Path:
+    source = os.environ if env is None else env
+    state_home = str(source.get("XDG_STATE_HOME") or "").strip()
+    base = Path(state_home) if state_home else Path.home() / ".local" / "state"
+    return base / "aurascan" / "agent"
+
+
+def _ensure_private_dir(path: Path, *, mode: int = 0o700) -> None:
+    path.mkdir(parents=True, mode=mode, exist_ok=True)
+    if path.is_symlink() or not path.is_dir():
+        raise OSError(f"unsafe directory: {path}")
+    os.chmod(path, mode)
+
+
+def _atomic_private_json(path: Path, value: object, *, mode: int = 0o600) -> None:
+    _ensure_private_dir(path.parent)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent), text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+        os.chmod(path, mode)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
+def _redact_agent_text(value: object, env: Optional[Mapping[str, str]] = None) -> str:
+    text = redact_followup_text(value)
+    source = os.environ if env is None else env
+    for key, secret in source.items():
+        if (
+            len(str(secret)) >= 6
+            and any(token in key.upper() for token in ("KEY", "TOKEN", "SECRET", "PASSWORD"))
+        ):
+            text = text.replace(str(secret), "<redacted>")
+    return text
+
+
+def scrub_agent_helper_environment() -> None:
+    for key in list(os.environ):
+        upper = key.upper()
+        if (
+            upper == "AURASCAN_AI_KEY"
+            or upper.startswith("AURASCAN_") and any(
+                marker in upper for marker in ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
+            )
+        ):
+            os.environ.pop(key, None)
+
+
+def persist_agent_audit(
+    session: AgentSession,
+    *,
+    root: Optional[Path] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> Path:
+    audit_root = root or user_agent_root(env)
+    _ensure_private_dir(audit_root)
+    path = audit_root / f"{session.session_id}.json"
+    _atomic_private_json(path, redact_followup_structure(session.to_public_dict()))
+    prune_agent_audits(audit_root)
+    return path
+
+
+def prune_agent_audits(root: Path, *, now: Optional[float] = None) -> None:
+    now = time.time() if now is None else now
+    cutoff = now - AGENT_RETENTION_DAYS * 86400
+    try:
+        paths = sorted(root.glob("agent-*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+    except OSError:
+        return
+    for index, path in enumerate(paths):
+        try:
+            remove = index >= AGENT_MAX_AUDITS or path.stat().st_mtime < cutoff
+        except OSError:
+            continue
+        if remove:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def _known_ids(raw: object, known: set, limit: int) -> List[str]:
+    if not isinstance(raw, list):
+        return []
+    result = []
+    for item in raw:
+        value = str(item or "")
+        if value in known and value not in result:
+            result.append(value)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def validate_agent_command(data: Mapping[str, object], *, access: str) -> AgentCommand:
+    if access not in {"user-shell", "root-shell"}:
+        raise ValueError("shell command fields require an active shell grant")
+    command = data.get("command")
+    reason = data.get("reason")
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("agent command must be a non-empty string")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("agent command reason must be a non-empty string")
+    if CONTROL_RE.search(command) or len(command) > AGENT_MAX_COMMAND_CHARS:
+        raise ValueError("agent command is unsafe or too large")
+    cwd = str(data.get("cwd") or "")
+    if cwd:
+        candidate = Path(cwd)
+        if (
+            CONTROL_RE.search(cwd)
+            or any(value in cwd for value in ("\n", "\t"))
+            or len(cwd) > 4096
+            or not candidate.is_absolute()
+            or not candidate.is_dir()
+        ):
+            raise ValueError("agent command working directory is invalid")
+    try:
+        timeout = int(data.get("timeout_seconds") or AGENT_DEFAULT_COMMAND_TIMEOUT)
+    except (TypeError, ValueError):
+        raise ValueError("agent command timeout is invalid")
+    if timeout < 1 or timeout > AGENT_MAX_COMMAND_TIMEOUT:
+        raise ValueError("agent command timeout exceeds the allowed range")
+    requires_root = bool(data.get("requires_root", False))
+    if access == "user-shell" and requires_root:
+        raise ValueError("a user-shell session cannot accept a root command")
+    if access == "root-shell" and not requires_root:
+        requires_root = True
+    clean_reason = CONTROL_RE.sub("", reason)[:1000]
+    if not clean_reason.strip():
+        raise ValueError("agent command reason is unsafe or empty")
+    return AgentCommand(
+        command=command,
+        reason=clean_reason,
+        expected_result=CONTROL_RE.sub("", str(data.get("expected_result") or ""))[:1000],
+        cwd=cwd,
+        timeout_seconds=timeout,
+        requires_root=requires_root,
+    )
+
+
+def validate_agent_ai_response(
+    context: FollowUpContext,
+    data: Mapping[str, object],
+    *,
+    access: str,
+) -> AgentAIResponse:
+    if not isinstance(data.get("answer"), str):
+        raise ValueError("agent response answer must be a string")
+    for key in (
+        "referenced_fact_ids",
+        "requested_probe_ids",
+        "requested_action_ids",
+        "commands",
+    ):
+        if not isinstance(data.get(key), list):
+            raise ValueError(f"agent response {key} must be a list")
+    requested_access = str(data.get("requested_access") or "").strip().lower()
+    if requested_access and requested_access not in AGENT_ACCESS_VALUES:
+        raise ValueError("agent response requested_access is invalid")
+    raw_commands = data.get("commands", [])
+    if len(raw_commands) > AGENT_MAX_COMMANDS_PER_PLAN:
+        raise ValueError("agent response contains too many commands")
+    commands = []
+    for raw in raw_commands:
+        if not isinstance(raw, Mapping):
+            raise ValueError("agent response contains a malformed command")
+        commands.append(validate_agent_command(raw, access=access))
+    known_facts = {item.fact_id for item in context.facts}
+    known_probes = {item.probe_id for item in context.probes}
+    known_actions = {item.action_id for item in context.actions if item.verified}
+    return AgentAIResponse(
+        answer=CONTROL_RE.sub("", str(data.get("answer") or ""))[:4000],
+        requested_access=requested_access,
+        referenced_fact_ids=_known_ids(data.get("referenced_fact_ids"), known_facts, 20),
+        requested_probe_ids=_known_ids(data.get("requested_probe_ids"), known_probes, 6),
+        requested_action_ids=_known_ids(data.get("requested_action_ids"), known_actions, 20),
+        commands=commands,
+    )
+
+
+def build_agent_ai_prompt(
+    context: FollowUpContext,
+    question: str,
+    turns: Sequence[FollowUpTurn],
+    *,
+    access: str,
+    approval: str,
+    facts_only: bool,
+    command_results: Sequence[AgentCommandResult] = (),
+    probe_results: Sequence[FollowUpProbeResult] = (),
+) -> str:
+    shell_note = (
+        "No shell grant is active. commands MUST be empty. You may request user-shell or root-shell access, "
+        "but only the user can grant it."
+        if access == "guarded"
+        else (
+            f"An explicit {access} grant is active. You may request exact commands only when they materially "
+            "help answer or resolve the user's AuraScan context. Never conceal command effects or claim success "
+            "before reading a command result."
+        )
+    )
+    instructions = (
+        "You are AuraScan's foreground repair agent for an Arch-family Linux system.\n"
+        "Use only the supplied bounded context and terminal results. Be calm and explicit about uncertainty.\n"
+        f"{shell_note}\n"
+        "Known probe and action IDs may be requested. Do not fabricate IDs.\n"
+        "Return strict JSON only with this shape:\n"
+        "{\"answer\":\"plain-language response\",\"requested_access\":\"\","
+        "\"referenced_fact_ids\":[],\"requested_probe_ids\":[],\"requested_action_ids\":[],"
+        "\"commands\":[{\"command\":\"exact shell text\",\"cwd\":\"/absolute/path or empty\","
+        "\"timeout_seconds\":120,\"requires_root\":false,\"reason\":\"why\","
+        "\"expected_result\":\"what should happen\"}]}\n"
+        "Return at most ten commands. Commands are noninteractive and cannot receive passwords or model keystrokes.\n\n"
+    )
+    facts = [
+        {
+            "fact_id": item.fact_id,
+            "kind": item.kind,
+            "summary": redact_followup_text(item.summary)[:1000],
+            "details": (
+                ""
+                if facts_only and item.kind == "evidence"
+                else redact_followup_text(item.details)[:3000]
+            ),
+            "severity": item.severity,
+        }
+        for item in context.facts
+    ]
+    payload = {
+        "session": {
+            "access": access,
+            "approval": approval,
+            "command_limit": AGENT_MAX_COMMANDS_PER_SESSION,
+            "context_id": context.context_id,
+            "source_type": context.source_type,
+            "phase": context.phase,
+        },
+        "facts": facts,
+        "available_probes": [item.to_dict() for item in context.probes],
+        "available_actions": [item.to_dict() for item in context.actions if item.verified],
+        "probe_results": [item.to_dict() for item in probe_results],
+        "command_results": [item.to_dict() for item in command_results],
+        "conversation": [item.to_ai_dict() for item in turns],
+        "question": redact_followup_text(question)[:2000],
+        "input_truncated": False,
+    }
+    prompt = instructions + json.dumps(payload, sort_keys=True)
+    while len(prompt) > AGENT_MAX_PROMPT_CHARS:
+        payload["input_truncated"] = True
+        if payload["conversation"]:
+            payload["conversation"].pop(0)
+        elif payload["facts"] and len(payload["facts"]) > 1:
+            payload["facts"].pop()
+        elif payload["command_results"]:
+            payload["command_results"].pop(0)
+        elif payload["probe_results"]:
+            payload["probe_results"].pop()
+        else:
+            break
+        prompt = instructions + json.dumps(payload, sort_keys=True)
+    return prompt[:AGENT_MAX_PROMPT_CHARS]
+
+
+def ask_agent_ai(
+    context: FollowUpContext,
+    question: str,
+    turns: Sequence[FollowUpTurn],
+    *,
+    access: str,
+    approval: str,
+    facts_only: bool,
+    command_results: Sequence[AgentCommandResult] = (),
+    probe_results: Sequence[FollowUpProbeResult] = (),
+    env: Optional[Mapping[str, str]] = None,
+    urlopen: Optional[Callable] = None,
+) -> AgentAIResponse:
+    source = dict(os.environ if env is None else env)
+    config = resolve_ai_config(source)
+    if config.error or not config.enabled or not config.api_key_present:
+        return AgentAIResponse("", status="not_configured", error=config.error or "AI is not configured")
+    try:
+        text = call_ai_provider(
+            config,
+            build_agent_ai_prompt(
+                context,
+                question,
+                turns,
+                access=access,
+                approval=approval,
+                facts_only=facts_only,
+                command_results=command_results,
+                probe_results=probe_results,
+            ),
+            timeout=60,
+            urlopen=urlopen,
+        )
+        data = json.loads(text)
+        if not isinstance(data, Mapping):
+            raise ValueError("agent response was not a JSON object")
+        return validate_agent_ai_response(context, data, access=access)
+    except Exception as exc:
+        return AgentAIResponse(
+            "",
+            status=classify_followup_failure(exc),
+            error=_redact_agent_text(str(exc), source)[:500],
+        )
+
+
+def minimal_agent_environment(
+    env: Optional[Mapping[str, str]] = None,
+    *,
+    root: bool = False,
+) -> Dict[str, str]:
+    source = os.environ if env is None else env
+    result = {
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin",
+        "LANG": str(source.get("LANG") or "C.UTF-8"),
+        "LC_ALL": str(source.get("LC_ALL") or ""),
+        "TERM": str(source.get("TERM") or "xterm-256color"),
+        "HOME": "/root" if root else str(source.get("HOME") or str(Path.home())),
+    }
+    if not root:
+        for key in ("USER", "LOGNAME", "SHELL"):
+            if source.get(key):
+                result[key] = str(source[key])
+    return {key: value for key, value in result.items() if value}
+
+
+def sanitize_terminal_output(value: object) -> str:
+    return CONTROL_RE.sub("", ANSI_ESCAPE_RE.sub("", str(value or "")))
+
+
+def stream_shell_command(
+    command: AgentCommand,
+    *,
+    stdout=None,
+    stderr=None,
+    env: Optional[Mapping[str, str]] = None,
+    root: bool = False,
+    popen_factory: Callable = subprocess.Popen,
+) -> AgentCommandResult:
+    stdout = stdout or sys.stdout
+    stderr = stderr or sys.stderr
+    started = time.monotonic()
+    retained: List[str] = []
+    retained_size = [0]
+    try:
+        process = popen_factory(
+            ["/bin/bash", "--noprofile", "--norc", "-lc", command.command],
+            cwd=command.cwd or None,
+            env=minimal_agent_environment(env, root=root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return AgentCommandResult(
+            command.command_id,
+            "failed",
+            127,
+            "",
+            time.monotonic() - started,
+            error=_redact_agent_text(str(exc), env)[:500],
+        )
+
+    def consume() -> None:
+        if process.stdout is None:
+            return
+        for chunk in iter(process.stdout.readline, ""):
+            safe_chunk = sanitize_terminal_output(chunk)
+            print(safe_chunk, end="", file=stdout, flush=True)
+            if retained_size[0] < AGENT_MAX_RETAINED_OUTPUT:
+                remaining = AGENT_MAX_RETAINED_OUTPUT - retained_size[0]
+                kept = safe_chunk[:remaining]
+                retained.append(kept)
+                retained_size[0] += len(kept)
+
+    thread = threading.Thread(target=consume, daemon=True)
+    thread.start()
+    timed_out = False
+    interrupted = False
+
+    def terminate_process_group() -> None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                pass
+
+    try:
+        exit_code = process.wait(timeout=command.timeout_seconds)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        terminate_process_group()
+        exit_code = int(process.returncode if process.returncode is not None else 124)
+        print(
+            f"\n[AuraScan] Command exceeded {command.timeout_seconds}s and its process group was stopped.",
+            file=stderr,
+        )
+    except KeyboardInterrupt:
+        interrupted = True
+        terminate_process_group()
+        exit_code = int(process.returncode if process.returncode is not None else 130)
+        print("\n[AuraScan] Command interrupted; its process group was stopped.", file=stderr)
+    thread.join(timeout=2)
+    output = "".join(retained)
+    status = (
+        "interrupted"
+        if interrupted
+        else ("timeout" if timed_out else ("ok" if exit_code == 0 else "failed"))
+    )
+    return AgentCommandResult(
+        command.command_id,
+        status,
+        int(exit_code),
+        output,
+        time.monotonic() - started,
+        timed_out=timed_out,
+    )
+
+
+def _process_start_time(pid: int) -> str:
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
+        return fields[21] if len(fields) > 21 else ""
+    except OSError:
+        return ""
+
+
+def _process_uid(pid: int) -> Optional[int]:
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text(encoding="utf-8").splitlines():
+            if line.startswith("Uid:"):
+                return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _process_tty(pid: int) -> str:
+    try:
+        target = os.readlink(f"/proc/{pid}/fd/0")
+    except OSError:
+        return ""
+    if target.startswith("/dev/"):
+        return target
+    return ""
+
+
+def _tty_identity(stream=None) -> str:
+    stream = stream or sys.stdin
+    try:
+        return os.ttyname(stream.fileno())
+    except (AttributeError, OSError, ValueError):
+        return ""
+
+
+def validate_agent_request_file(path: Path) -> Tuple[bool, str]:
+    fd = -1
+    try:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(str(path), flags)
+        metadata = os.fstat(fd)
+    except OSError as exc:
+        return False, _redact_agent_text(str(exc))[:500]
+    try:
+        if not stat.S_ISREG(metadata.st_mode):
+            return False, "request is not a regular file"
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            return False, "request permissions must be exactly 0600"
+        allowed = {0}
+        sudo_uid = str(os.environ.get("SUDO_UID") or "")
+        if os.geteuid() == 0 and sudo_uid.isdigit():
+            allowed.add(int(sudo_uid))
+        if metadata.st_uid not in allowed:
+            return False, "request owner does not match the invoking user"
+        if metadata.st_size <= 0 or metadata.st_size > AGENT_MAX_REQUEST_BYTES:
+            return False, "request size is invalid"
+        return True, ""
+    finally:
+        os.close(fd)
+
+
+def _read_request(path: Path, expected_schema: str) -> Tuple[Optional[Dict[str, object]], str]:
+    fd = -1
+    try:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(str(path), flags)
+        metadata = os.fstat(fd)
+        allowed = {0}
+        sudo_uid = str(os.environ.get("SUDO_UID") or "")
+        if os.geteuid() == 0 and sudo_uid.isdigit():
+            allowed.add(int(sudo_uid))
+        if not stat.S_ISREG(metadata.st_mode):
+            return None, "request is not a regular file"
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            return None, "request permissions must be exactly 0600"
+        if metadata.st_uid not in allowed:
+            return None, "request owner does not match the invoking user"
+        if metadata.st_size <= 0 or metadata.st_size > AGENT_MAX_REQUEST_BYTES:
+            return None, "request size is invalid"
+        chunks = []
+        remaining = AGENT_MAX_REQUEST_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > AGENT_MAX_REQUEST_BYTES:
+            return None, "request exceeds the bounded size"
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return None, f"request JSON is invalid: {_redact_agent_text(str(exc))[:300]}"
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if not isinstance(data, dict) or data.get("schema") != expected_schema:
+        return None, "request schema is invalid"
+    return data, ""
+
+
+def _root_session_path(session_id: str, uid: int, root: Path = AGENT_RUNTIME_ROOT) -> Path:
+    if not SAFE_SESSION_ID_RE.fullmatch(session_id):
+        raise ValueError("unsafe agent session ID")
+    return root / str(uid) / f"{session_id}.json"
+
+
+def _write_root_state(path: Path, data: Mapping[str, object]) -> None:
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if path.parent.is_symlink() or not path.parent.is_dir():
+        raise OSError("unsafe agent runtime directory")
+    os.chmod(path.parent, 0o700)
+    _atomic_private_json(path, data)
+
+
+def cleanup_expired_root_sessions(
+    uid: int,
+    *,
+    runtime_root: Path = AGENT_RUNTIME_ROOT,
+    now: Optional[int] = None,
+) -> int:
+    current = int(time.time()) if now is None else int(now)
+    root = runtime_root / str(uid)
+    if not root.is_dir() or root.is_symlink():
+        return 0
+    removed = 0
+    for path in list(root.glob("agent-*.json"))[:100]:
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if int(data.get("expires_at") or 0) <= current:
+                path.unlink()
+                removed += 1
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+    return removed
+
+
+def _snapshot_capability(
+    *,
+    runner: Callable = subprocess.run,
+    which: Callable[[str], Optional[str]] = shutil.which,
+) -> Tuple[bool, str]:
+    if not which("findmnt") or not which("snapper"):
+        return False, "Btrfs/Snapper rollback tooling is unavailable"
+    try:
+        result = runner(
+            ["findmnt", "-n", "-o", "FSTYPE", "/"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, _redact_agent_text(str(exc))[:300]
+    if result.returncode != 0 or result.stdout.strip().lower() != "btrfs":
+        return False, "the root filesystem is not a detected Btrfs filesystem"
+    return True, ""
+
+
+def _create_agent_snapshot(
+    session_id: str,
+    *,
+    runner: Callable = subprocess.run,
+    which: Callable[[str], Optional[str]] = shutil.which,
+    snapshot_root: Path = Path("/.snapshots"),
+) -> Tuple[str, str]:
+    capable, reason = _snapshot_capability(runner=runner, which=which)
+    if not capable:
+        return "", reason
+    command = [
+        "snapper",
+        "-c",
+        "root",
+        "create",
+        "--type",
+        "single",
+        "--description",
+        f"AuraScan AI agent pre-session {session_id}",
+        "--print-number",
+    ]
+    try:
+        result = runner(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return "", _redact_agent_text(str(exc))[:300]
+    snapshot_id = result.stdout.strip()
+    if result.returncode != 0 or not snapshot_id.isdigit():
+        detail = _redact_agent_text(result.stderr.strip())[:300]
+        return "", detail or "Snapper did not return a valid snapshot ID"
+    snapshot = snapshot_root / snapshot_id / "snapshot"
+    try:
+        if snapshot.is_symlink() or not snapshot.is_dir():
+            return "", "Snapper returned an ID but the root snapshot could not be validated"
+    except OSError as exc:
+        return "", _redact_agent_text(str(exc))[:300]
+    return snapshot_id, ""
+
+
+def issue_root_session(
+    request_path: Path,
+    *,
+    policy_path: Path = AGENT_ROOT_POLICY_PATH,
+    runtime_root: Path = AGENT_RUNTIME_ROOT,
+    runner: Callable = subprocess.run,
+    which: Callable[[str], Optional[str]] = shutil.which,
+    now: Optional[int] = None,
+    policy_uid: int = 0,
+) -> Dict[str, object]:
+    request, error = _read_request(request_path, "agent_root_session_request/1.0")
+    if request is None:
+        return {"ok": False, "error": error}
+    policy = read_agent_root_policy(policy_path, required_uid=policy_uid)
+    if policy.error or not policy.allowed:
+        return {"ok": False, "error": policy.error or "unrestricted root agent policy is disabled"}
+    try:
+        uid = int(request.get("uid"))
+        pid = int(request.get("origin_pid"))
+        minutes = int(request.get("minutes"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "root session identity is invalid"}
+    sudo_uid = str(os.environ.get("SUDO_UID") or "")
+    if sudo_uid.isdigit() and uid != int(sudo_uid):
+        return {"ok": False, "error": "root session UID does not match sudo"}
+    if _process_uid(pid) != uid:
+        return {"ok": False, "error": "originating agent process is unavailable or belongs to another user"}
+    start_time = str(request.get("origin_start_time") or "")
+    if not start_time or _process_start_time(pid) != start_time:
+        return {"ok": False, "error": "originating agent process identity changed"}
+    tty = str(request.get("tty") or "")
+    if not tty.startswith("/dev/") or _process_tty(pid) != tty:
+        return {
+            "ok": False,
+            "error": "root session terminal does not match the originating process",
+        }
+    approval = str(request.get("approval") or "")
+    if approval not in AGENT_APPROVAL_VALUES:
+        return {"ok": False, "error": "root session approval mode is invalid"}
+    if AGENT_APPROVAL_ORDER[approval] > AGENT_APPROVAL_ORDER[policy.max_approval]:
+        return {"ok": False, "error": "requested approval mode exceeds the root policy ceiling"}
+    if minutes < 1 or minutes > min(policy.max_minutes, AGENT_MAX_SESSION_MINUTES):
+        return {"ok": False, "error": "requested root session duration exceeds the policy ceiling"}
+    session_id = str(request.get("session_id") or "")
+    capability = str(request.get("capability") or "")
+    fingerprint = str(request.get("context_fingerprint") or "")
+    if (
+        not SAFE_SESSION_ID_RE.fullmatch(session_id)
+        or len(capability) < 32
+        or not re.fullmatch(r"[a-f0-9]{64}", fingerprint)
+    ):
+        return {"ok": False, "error": "root session identifiers are invalid"}
+    snapshot_requested = bool(request.get("snapshot_requested", False))
+    snapshot_waived = bool(request.get("snapshot_waived", False))
+    if snapshot_requested == snapshot_waived:
+        return {"ok": False, "error": "root session requires either a snapshot or an explicit waiver"}
+    snapshot_id = ""
+    if snapshot_requested:
+        snapshot_id, snapshot_error = _create_agent_snapshot(
+            session_id,
+            runner=runner,
+            which=which,
+        )
+        if not snapshot_id:
+            return {
+                "ok": False,
+                "error": f"snapshot_unavailable: {snapshot_error}",
+                "snapshot_unavailable": True,
+            }
+    current = int(time.time()) if now is None else int(now)
+    cleanup_expired_root_sessions(uid, runtime_root=runtime_root, now=current)
+    state = {
+        "schema": "agent_root_session/1.0",
+        "session_id": session_id,
+        "uid": uid,
+        "origin_pid": pid,
+        "origin_start_time": start_time,
+        "tty": tty,
+        "context_fingerprint": fingerprint,
+        "approval": approval,
+        "created_at": current,
+        "expires_at": current + minutes * 60,
+        "capability_hash": hashlib.sha256(capability.encode("utf-8")).hexdigest(),
+        "snapshot_id": snapshot_id,
+        "snapshot_waived": snapshot_waived,
+        "command_count": 0,
+        "active_plan_hash": "",
+    }
+    try:
+        path = _root_session_path(session_id, uid, runtime_root)
+        _write_root_state(path, state)
+    except (OSError, ValueError) as exc:
+        retained = f" Snapshot {snapshot_id} was retained." if snapshot_id else ""
+        return {
+            "ok": False,
+            "error": _redact_agent_text(str(exc))[:500] + retained,
+            "snapshot_id": snapshot_id,
+        }
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "expires_at": state["expires_at"],
+        "snapshot_id": snapshot_id,
+        "snapshot_waived": snapshot_waived,
+    }
+
+
+def _load_root_session(
+    session_id: str,
+    uid: int,
+    capability: str,
+    *,
+    runtime_root: Path,
+    now: Optional[int] = None,
+) -> Tuple[Optional[Dict[str, object]], Optional[Path], str]:
+    try:
+        path = _root_session_path(session_id, uid, runtime_root)
+    except ValueError as exc:
+        return None, None, str(exc)
+    try:
+        if path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode) != 0o600:
+            return None, path, "root session record is missing or unsafe"
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, path, _redact_agent_text(str(exc))[:500]
+    if not isinstance(state, dict) or state.get("schema") != "agent_root_session/1.0":
+        return None, path, "root session record schema is invalid"
+    current = int(time.time()) if now is None else int(now)
+    if int(state.get("expires_at") or 0) <= current:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return None, path, "root session expired"
+    if int(state.get("uid") or -1) != uid:
+        return None, path, "root session UID mismatch"
+    pid = int(state.get("origin_pid") or 0)
+    if _process_uid(pid) != uid or _process_start_time(pid) != str(state.get("origin_start_time") or ""):
+        return None, path, "originating agent process is no longer valid"
+    if _process_tty(pid) != str(state.get("tty") or ""):
+        return None, path, "originating agent terminal is no longer valid"
+    digest = hashlib.sha256(capability.encode("utf-8")).hexdigest()
+    if not secrets.compare_digest(digest, str(state.get("capability_hash") or "")):
+        return None, path, "root session capability is invalid"
+    return state, path, ""
+
+
+def _root_audit_path(session_id: str, root: Path = AGENT_ROOT_AUDIT_ROOT) -> Path:
+    if not SAFE_SESSION_ID_RE.fullmatch(session_id):
+        raise ValueError("unsafe agent session ID")
+    return root / session_id / "manifest.json"
+
+
+def _append_root_audit(
+    session_id: str,
+    entry: Mapping[str, object],
+    *,
+    root: Path = AGENT_ROOT_AUDIT_ROOT,
+) -> None:
+    _ensure_private_dir(root)
+    path = _root_audit_path(session_id, root)
+    existing: Dict[str, object] = {
+        "schema": "agent_root_audit/1.0",
+        "session_id": session_id,
+        "commands": [],
+    }
+    if path.is_file() and not path.is_symlink():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict) and loaded.get("schema") == "agent_root_audit/1.0":
+                existing = loaded
+        except (OSError, json.JSONDecodeError):
+            pass
+    commands = existing.get("commands", [])
+    if not isinstance(commands, list):
+        commands = []
+    commands.append(redact_followup_structure(dict(entry)))
+    existing["commands"] = commands[-AGENT_MAX_COMMANDS_PER_SESSION:]
+    _atomic_private_json(path, existing)
+
+
+def execute_root_command_request(
+    request_path: Path,
+    *,
+    runtime_root: Path = AGENT_RUNTIME_ROOT,
+    audit_root: Path = AGENT_ROOT_AUDIT_ROOT,
+    stdout=None,
+    stderr=None,
+    env: Optional[Mapping[str, str]] = None,
+    popen_factory: Callable = subprocess.Popen,
+    now: Optional[int] = None,
+) -> Dict[str, object]:
+    stdout = stdout or sys.stdout
+    stderr = stderr or sys.stderr
+    request, error = _read_request(request_path, "agent_command_request/1.0")
+    if request is None:
+        return {"ok": False, "error": error}
+    try:
+        uid = int(request.get("uid"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "command request UID is invalid"}
+    sudo_uid = str(os.environ.get("SUDO_UID") or "")
+    if sudo_uid.isdigit() and uid != int(sudo_uid):
+        return {"ok": False, "error": "command request UID does not match sudo"}
+    state, state_path, error = _load_root_session(
+        str(request.get("session_id") or ""),
+        uid,
+        str(request.get("capability") or ""),
+        runtime_root=runtime_root,
+        now=now,
+    )
+    if state is None or state_path is None:
+        return {"ok": False, "error": error}
+    if str(request.get("context_fingerprint") or "") != str(state.get("context_fingerprint") or ""):
+        return {"ok": False, "error": "command context fingerprint does not match the root grant"}
+    if str(request.get("tty") or "") != str(state.get("tty") or ""):
+        return {"ok": False, "error": "command terminal does not match the root grant"}
+    if int(state.get("command_count") or 0) >= AGENT_MAX_COMMANDS_PER_SESSION:
+        return {"ok": False, "error": "root session command limit reached"}
+    raw_command = request.get("command")
+    if not isinstance(raw_command, Mapping):
+        return {"ok": False, "error": "command request does not contain a command object"}
+    try:
+        command = validate_agent_command(raw_command, access="root-shell")
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    plan_hash = str(request.get("plan_hash") or "")
+    if not re.fullmatch(r"[a-f0-9]{64}", plan_hash):
+        return {"ok": False, "error": "approved plan hash is invalid"}
+    if state.get("approval") == "whole-plan":
+        active_hash = str(state.get("active_plan_hash") or "")
+        approve_plan = bool(request.get("approve_plan", False))
+        if active_hash and not secrets.compare_digest(active_hash, plan_hash) and not approve_plan:
+            return {"ok": False, "error": "approved root plan changed"}
+        state["active_plan_hash"] = plan_hash
+    print(
+        f"[AuraScan root agent] Running approved command {command.command_id}.",
+        file=stderr,
+        flush=True,
+    )
+    result = stream_shell_command(
+        command,
+        stdout=stderr,
+        stderr=stderr,
+        env=env,
+        root=True,
+        popen_factory=popen_factory,
+    )
+    state["command_count"] = int(state.get("command_count") or 0) + 1
+    try:
+        _write_root_state(state_path, state)
+        _append_root_audit(
+            str(state["session_id"]),
+            {
+                "command_id": command.command_id,
+                "command_sha256": hashlib.sha256(command.command.encode("utf-8", "replace")).hexdigest(),
+                "command": str(request.get("audit_command") or "<redacted-command>")[:AGENT_MAX_COMMAND_CHARS],
+                "cwd": command.cwd,
+                "timeout_seconds": command.timeout_seconds,
+                "approval": state.get("approval"),
+                "started_at": int(time.time()),
+                "status": result.status,
+                "exit_code": result.exit_code,
+                "duration_seconds": round(result.duration_seconds, 3),
+                "snapshot_id": state.get("snapshot_id", ""),
+                "snapshot_waived": bool(state.get("snapshot_waived", False)),
+                "output": redact_followup_text(result.output)[:AGENT_MAX_AI_OUTPUT_PER_COMMAND],
+            },
+            root=audit_root,
+        )
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "error": f"root audit/state write failed: {_redact_agent_text(str(exc))[:300]}"}
+    return {"ok": True, "result": result.to_dict()}
+
+
+def revoke_root_session(
+    request_path: Path,
+    *,
+    runtime_root: Path = AGENT_RUNTIME_ROOT,
+    now: Optional[int] = None,
+) -> Dict[str, object]:
+    request, error = _read_request(request_path, "agent_root_revoke_request/1.0")
+    if request is None:
+        return {"ok": False, "error": error}
+    try:
+        uid = int(request.get("uid"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "revoke request UID is invalid"}
+    state, path, error = _load_root_session(
+        str(request.get("session_id") or ""),
+        uid,
+        str(request.get("capability") or ""),
+        runtime_root=runtime_root,
+        now=now,
+    )
+    if state is None or path is None:
+        return {"ok": False, "error": error}
+    try:
+        path.unlink()
+    except OSError as exc:
+        return {"ok": False, "error": _redact_agent_text(str(exc))[:300]}
+    return {"ok": True}
+
+
+def _temporary_request(data: Mapping[str, object]) -> str:
+    fd, name = tempfile.mkstemp(prefix="aurascan-agent-", suffix=".json")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(data, handle)
+    os.chmod(name, 0o600)
+    return name
+
+
+def _invoke_root_helper(
+    args: Sequence[str],
+    request: Mapping[str, object],
+    *,
+    helper: Path,
+    runner: Callable = subprocess.run,
+) -> Dict[str, object]:
+    name = _temporary_request(request)
+    try:
+        command = ["sudo", str(helper), "agent", *args, name]
+        if runner is subprocess.run:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=None,
+                text=True,
+            )
+            captured_stdout, _unused = process.communicate()
+            result = subprocess.CompletedProcess(
+                command,
+                int(process.returncode or 0),
+                captured_stdout,
+                "",
+            )
+        else:
+            result = runner(command, capture_output=True, text=True, check=False)
+        captured_stderr = str(getattr(result, "stderr", "") or "")
+        if captured_stderr:
+            print(captured_stderr, end="" if captured_stderr.endswith("\n") else "\n", file=sys.stderr)
+        raw = (getattr(result, "stdout", "") or "").strip()
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            detail = _redact_agent_text((getattr(result, "stderr", "") or raw).strip())[:500]
+            return {"ok": False, "error": detail or "privileged agent helper returned invalid output"}
+        if not isinstance(data, dict):
+            return {"ok": False, "error": "privileged agent helper returned invalid output"}
+        return data
+    except OSError as exc:
+        return {"ok": False, "error": _redact_agent_text(str(exc))[:500]}
+    finally:
+        try:
+            os.unlink(name)
+        except OSError:
+            pass
+
+
+def _issue_root_grant(
+    session: AgentSession,
+    *,
+    snapshot_requested: bool,
+    snapshot_waived: bool,
+    helper: Path,
+    runner: Callable,
+    tty: str,
+) -> Dict[str, object]:
+    capability = secrets.token_urlsafe(32)
+    request = {
+        "schema": "agent_root_session_request/1.0",
+        "session_id": session.session_id,
+        "capability": capability,
+        "uid": current_user_uid(),
+        "origin_pid": os.getpid(),
+        "origin_start_time": _process_start_time(os.getpid()),
+        "tty": tty,
+        "context_fingerprint": session.context_fingerprint,
+        "approval": session.approval,
+        "minutes": max(1, (session.expires_at - session.created_at) // 60),
+        "snapshot_requested": snapshot_requested,
+        "snapshot_waived": snapshot_waived,
+    }
+    response = _invoke_root_helper(
+        ["--issue-root-session"],
+        request,
+        helper=helper,
+        runner=runner,
+    )
+    if response.get("ok"):
+        session.root_capability = capability
+        session.snapshot_id = str(response.get("snapshot_id") or "")
+        session.snapshot_waived = bool(response.get("snapshot_waived", False))
+    return response
+
+
+def _execute_via_root_helper(
+    session: AgentSession,
+    command: AgentCommand,
+    plan_hash: str,
+    *,
+    approve_plan: bool,
+    helper: Path,
+    runner: Callable,
+    env: Mapping[str, str],
+) -> AgentCommandResult:
+    request = {
+        "schema": "agent_command_request/1.0",
+        "session_id": session.session_id,
+        "capability": session.root_capability,
+        "uid": current_user_uid(),
+        "tty": session.tty,
+        "context_fingerprint": session.context_fingerprint,
+        "plan_hash": plan_hash,
+        "approve_plan": approve_plan,
+        "audit_command": _redact_agent_text(command.command, env),
+        "command": command.to_dict(),
+    }
+    response = _invoke_root_helper(
+        ["--execute-request"],
+        request,
+        helper=helper,
+        runner=runner,
+    )
+    if not response.get("ok") or not isinstance(response.get("result"), Mapping):
+        return AgentCommandResult(
+            command.command_id,
+            "failed",
+            1,
+            "",
+            0.0,
+            error=_redact_agent_text(response.get("error") or "root helper refused the command", env)[:500],
+        )
+    data = response["result"]
+    return AgentCommandResult(
+        command_id=str(data.get("command_id") or command.command_id),
+        status=str(data.get("status") or "failed"),
+        exit_code=int(data.get("exit_code") or 0),
+        output=str(data.get("output") or "")[:AGENT_MAX_RETAINED_OUTPUT],
+        duration_seconds=float(data.get("duration_seconds") or 0.0),
+        timed_out=bool(data.get("timed_out", False)),
+        error=str(data.get("error") or "")[:500],
+    )
+
+
+def _revoke_root_grant(
+    session: AgentSession,
+    *,
+    helper: Path,
+    runner: Callable,
+) -> None:
+    if not session.root_capability:
+        return
+    request = {
+        "schema": "agent_root_revoke_request/1.0",
+        "session_id": session.session_id,
+        "capability": session.root_capability,
+        "uid": current_user_uid(),
+    }
+    _invoke_root_helper(["--revoke-root-session"], request, helper=helper, runner=runner)
+    session.root_capability = ""
+
+
+def _plan_hash(commands: Sequence[AgentCommand]) -> str:
+    payload = [item.to_dict() for item in commands]
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8", "replace")
+    ).hexdigest()
+
+
+def _print_agent_banner(session: AgentSession, stdout) -> None:
+    print("\n[AuraScan] Full-Control Repair Agent", file=stdout)
+    print("=" * 54, file=stdout)
+    if session.access == "root-shell":
+        print("ACCESS: UNRESTRICTED ROOT", file=stdout)
+    elif session.access == "user-shell":
+        print("ACCESS: UNRESTRICTED USER SHELL", file=stdout)
+    else:
+        print("ACCESS: GUARDED AURASCAN TOOLS", file=stdout)
+    print(
+        f"Approval: {session.approval} | AI output: {session.output_sharing} | "
+        f"Expires: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(session.expires_at))}",
+        file=stdout,
+    )
+    if session.access == "root-shell":
+        rollback = f"Snapper snapshot {session.snapshot_id}" if session.snapshot_id else "NO SNAPSHOT"
+        print(f"Rollback preparation: {rollback}", file=stdout)
+        print(
+            "Warning: root commands can alter disks, firmware, networking, security settings, "
+            "AuraScan itself, and the audit controls.",
+            file=stdout,
+        )
+    print("Commands: /status, /agent ACCESS, /stop", file=stdout)
+    print("-" * 54, file=stdout)
+
+
+def _print_agent_status(session: AgentSession, stdout) -> None:
+    remaining = max(0, session.expires_at - int(time.time()))
+    print(
+        f"[AuraScan] Agent status: access={session.access}, approval={session.approval}, "
+        f"output={session.output_sharing}, commands={session.command_count}/{AGENT_MAX_COMMANDS_PER_SESSION}, "
+        f"provider requests={session.provider_requests}/{AGENT_MAX_PROVIDER_REQUESTS}, "
+        f"remaining={remaining}s.",
+        file=stdout,
+    )
+
+
+def _display_plan(commands: Sequence[AgentCommand], stdout) -> None:
+    print("\n[AuraScan] AI-requested terminal plan", file=stdout)
+    for index, item in enumerate(commands, 1):
+        privilege = "root" if item.requires_root else "user"
+        reason_lines = item.reason.splitlines() or [item.reason]
+        print(f"{index}. [{privilege}] {reason_lines[0]}", file=stdout)
+        for line in reason_lines[1:]:
+            print(f"   {line}", file=stdout)
+        print(f"   Working directory: {item.cwd or os.getcwd()}", file=stdout)
+        print("   Exact command:", file=stdout)
+        for line in item.command.splitlines() or [item.command]:
+            print(f"     | {line}", file=stdout)
+        if item.expected_result:
+            expected_lines = item.expected_result.splitlines()
+            print(f"   Expected: {expected_lines[0]}", file=stdout)
+            for line in expected_lines[1:]:
+                print(f"   {line}", file=stdout)
+
+
+def _confirm_commands(
+    commands: Sequence[AgentCommand],
+    approval: str,
+    input_func: Callable[[str], str],
+    stdout,
+) -> List[AgentCommand]:
+    if approval == "session":
+        return list(commands)
+    if approval == "whole-plan":
+        _display_plan(commands, stdout)
+        answer = input_func("Run this exact command plan? [y/N] ").strip().lower()
+        return list(commands) if answer in {"y", "yes"} else []
+    approved = []
+    for command in commands:
+        _display_plan([command], stdout)
+        answer = input_func("Run this exact command? [y/N] ").strip().lower()
+        if answer in {"y", "yes"}:
+            approved.append(command)
+        else:
+            print("[AuraScan] Command declined. Remaining commands were not run.", file=stdout)
+            break
+    return approved
+
+
+def _agent_result_for_ai(
+    result: AgentCommandResult,
+    session: AgentSession,
+    env: Mapping[str, str],
+    used: int,
+) -> Tuple[AgentCommandResult, int]:
+    remaining = max(0, AGENT_MAX_AI_OUTPUT_PER_SESSION - used)
+    limit = min(AGENT_MAX_AI_OUTPUT_PER_COMMAND, remaining)
+    output = result.output[:limit]
+    if session.output_sharing != "full":
+        output = _redact_agent_text(output, env)
+    clone = AgentCommandResult(
+        result.command_id,
+        result.status,
+        result.exit_code,
+        output,
+        result.duration_seconds,
+        result.timed_out,
+        _redact_agent_text(result.error, env),
+    )
+    return clone, used + len(output)
+
+
+def _audit_command(
+    session: AgentSession,
+    command: AgentCommand,
+    result: AgentCommandResult,
+    *,
+    env: Mapping[str, str],
+) -> None:
+    session.audit_entries.append({
+        "command_id": command.command_id,
+        "command_sha256": hashlib.sha256(command.command.encode("utf-8", "replace")).hexdigest(),
+        "command": _redact_agent_text(command.command, env)[:AGENT_MAX_COMMAND_CHARS],
+        "reason": _redact_agent_text(command.reason, env)[:1000],
+        "cwd": command.cwd,
+        "requires_root": command.requires_root,
+        "approval": session.approval,
+        "status": result.status,
+        "exit_code": result.exit_code,
+        "duration_seconds": round(result.duration_seconds, 3),
+        "output": _redact_agent_text(result.output, env)[:AGENT_MAX_AI_OUTPUT_PER_COMMAND],
+    })
+
+
+def _handle_verified_requests(
+    context: FollowUpContext,
+    response: AgentAIResponse,
+    runtime: FollowUpRuntime,
+    input_func: Callable[[str], str],
+    stdout,
+    stderr,
+) -> Tuple[FollowUpContext, Sequence[FollowUpProbeResult], FollowUpActionOutcome]:
+    current = context
+    probe_results: Sequence[FollowUpProbeResult] = ()
+    outcome = FollowUpActionOutcome()
+    if response.requested_probe_ids and runtime.run_probes:
+        print(
+            f"[AuraScan] Running {len(response.requested_probe_ids)} guarded local verification check(s)...",
+            file=stdout,
+            flush=True,
+        )
+        try:
+            current, probe_results = runtime.run_probes(current, response.requested_probe_ids)
+        except Exception as exc:
+            probe_results = [
+                FollowUpProbeResult(
+                    response.requested_probe_ids[0],
+                    "failed",
+                    _redact_agent_text(str(exc))[:500],
+                )
+            ]
+    if response.requested_action_ids and runtime.run_actions:
+        print("[AuraScan] Refreshing and preparing AuraScan-owned repairs...", file=stdout, flush=True)
+        outcome = runtime.run_actions(
+            current,
+            response.requested_action_ids,
+            input_func,
+            stdout,
+            stderr,
+        )
+        if outcome.message:
+            print(outcome.message, file=stderr if outcome.failed else stdout)
+    return current, probe_results, outcome
+
+
+def run_agent_session(
+    context: FollowUpContext,
+    *,
+    access: str,
+    approval: str,
+    output_sharing: str,
+    session_timeout_minutes: int,
+    runtime: Optional[FollowUpRuntime] = None,
+    input_func: Callable[[str], str] = input,
+    stdout=None,
+    stderr=None,
+    env: Optional[Mapping[str, str]] = None,
+    facts_only: bool = False,
+    urlopen: Optional[Callable] = None,
+    context_root: Optional[Path] = None,
+    audit_root: Optional[Path] = None,
+    helper: Path = Path("/usr/bin/aurascan"),
+    runner: Callable = subprocess.run,
+    popen_factory: Callable = subprocess.Popen,
+    tty: Optional[str] = None,
+    root_policy_path: Path = AGENT_ROOT_POLICY_PATH,
+    root_policy_uid: int = 0,
+) -> AgentSessionResult:
+    stdout = stdout or sys.stdout
+    stderr = stderr or sys.stderr
+    source = dict(os.environ if env is None else env)
+    runtime = runtime or FollowUpRuntime()
+    now = int(time.time())
+    session = AgentSession(
+        session_id="agent-" + uuid.uuid4().hex,
+        context_id=context.context_id,
+        context_fingerprint=followup_context_fingerprint(context),
+        access=access,
+        approval=approval,
+        output_sharing=output_sharing,
+        created_at=now,
+        expires_at=now + session_timeout_minutes * 60,
+        tty=tty if tty is not None else _tty_identity(),
+    )
+    result = AgentSessionResult()
+    persist_followup_context(context, context_root)
+
+    if access == "user-shell":
+        if approval == "session":
+            phrase = input_func(
+                f"Type {AGENT_USER_SESSION_GRANT_PHRASE} to allow autonomous user commands: "
+            ).strip()
+            if phrase != AGENT_USER_SESSION_GRANT_PHRASE:
+                print("[AuraScan] User-shell session grant was not given.", file=stdout)
+                return result
+        else:
+            answer = input_func(
+                "Allow the AI to propose arbitrary commands as your current user for this session? [y/N] "
+            ).strip().lower()
+            if answer not in {"y", "yes"}:
+                print("[AuraScan] User-shell access was not enabled.", file=stdout)
+                return result
+
+    if output_sharing == "full":
+        phrase = input_func(
+            f"Type {AGENT_RAW_OUTPUT_PHRASE} to send bounded raw terminal output to AI: "
+        ).strip()
+        if phrase != AGENT_RAW_OUTPUT_PHRASE:
+            session.output_sharing = "redacted"
+            print("[AuraScan] Raw output sharing was not granted; using redacted output.", file=stdout)
+
+    if access == "root-shell":
+        policy = read_agent_root_policy(root_policy_path, required_uid=root_policy_uid)
+        if policy.error or not policy.allowed:
+            print(
+                f"[AuraScan] Root-shell access is unavailable: {policy.error or 'root policy is disabled'}.",
+                file=stderr,
+            )
+            result.setup_failed = True
+            return result
+        phrase = input_func(
+            "UNRESTRICTED ROOT lets AI-requested commands change any part of this system.\n"
+            f"Type {AGENT_ROOT_GRANT_PHRASE} to continue: "
+        ).strip()
+        if phrase != AGENT_ROOT_GRANT_PHRASE:
+            print("[AuraScan] Unrestricted root access was not granted.", file=stdout)
+            return result
+        if not helper.is_file():
+            print(
+                "[AuraScan] Root-shell access requires package-managed /usr/bin/aurascan.",
+                file=stderr,
+            )
+            result.setup_failed = True
+            return result
+        response = _issue_root_grant(
+            session,
+            snapshot_requested=True,
+            snapshot_waived=False,
+            helper=helper,
+            runner=runner,
+            tty=session.tty,
+        )
+        if response.get("snapshot_unavailable"):
+            print(
+                "[AuraScan] A validated Btrfs/Snapper snapshot could not be created. "
+                "A snapshot would not protect other disks, firmware, credentials, or remote systems.",
+                file=stdout,
+            )
+            waiver = input_func(f"Type {AGENT_NO_SNAPSHOT_PHRASE} to continue without it: ").strip()
+            if waiver != AGENT_NO_SNAPSHOT_PHRASE:
+                print(
+                    "[AuraScan] Root-shell session stopped because rollback preparation was unavailable.",
+                    file=stdout,
+                )
+                return result
+            response = _issue_root_grant(
+                session,
+                snapshot_requested=False,
+                snapshot_waived=True,
+                helper=helper,
+                runner=runner,
+                tty=session.tty,
+            )
+        if not response.get("ok"):
+            print(
+                f"[AuraScan] Root session broker refused the grant: "
+                f"{_redact_agent_text(response.get('error') or 'unknown error', source)}",
+                file=stderr,
+            )
+            result.setup_failed = True
+            return result
+
+    _print_agent_banner(session, stdout)
+    turns: List[FollowUpTurn] = []
+    current = context
+    ensure_hardware_health_probe(current)
+    hardware_opened = bool(current.metadata.get("hardware_health"))
+    ai_output_used = 0
+    pending_results: List[AgentCommandResult] = []
+    prompt = "Ask AuraScan what to investigate or fix, or press Enter to finish: "
+    try:
+        while (
+            not session.stopped
+            and session.questions < AGENT_MAX_QUESTIONS
+            and session.provider_requests < AGENT_MAX_PROVIDER_REQUESTS
+            and session.command_count < AGENT_MAX_COMMANDS_PER_SESSION
+            and int(time.time()) < session.expires_at
+        ):
+            try:
+                question = input_func(prompt).strip()
+            except (EOFError, KeyboardInterrupt):
+                print("", file=stdout)
+                break
+            if not question:
+                break
+            if question == "/stop":
+                session.stopped = True
+                result.stopped = True
+                print("[AuraScan] Agent session stopped and its grant was revoked.", file=stdout)
+                break
+            if question == "/status":
+                _print_agent_status(session, stdout)
+                continue
+            if question.startswith("/agent"):
+                requested = question.partition(" ")[2].strip()
+                if not requested:
+                    _print_agent_status(session, stdout)
+                elif requested != session.access:
+                    print(
+                        "[AuraScan] Access changes require a new agent session so consent and rollback checks "
+                        "cannot be inherited.",
+                        file=stdout,
+                    )
+                continue
+            session.questions += 1
+            initial_probe_results: Sequence[FollowUpProbeResult] = ()
+            if (
+                not hardware_opened
+                and question_requests_hardware_context(question)
+                and runtime.run_probes is not None
+                and any(
+                    item.probe_id == HARDWARE_HEALTH_PROBE_ID
+                    for item in current.probes
+                )
+            ):
+                hardware_opened = True
+                print(
+                    "[AuraScan] Checking CPU, GPU, memory, cooling, firmware, and driver context...",
+                    file=stdout,
+                    flush=True,
+                )
+                try:
+                    current, initial_probe_results = runtime.run_probes(
+                        current,
+                        [HARDWARE_HEALTH_PROBE_ID],
+                    )
+                except Exception as exc:
+                    initial_probe_results = [
+                        FollowUpProbeResult(
+                            HARDWARE_HEALTH_PROBE_ID,
+                            "failed",
+                            _redact_agent_text(str(exc), source)[:500],
+                        )
+                    ]
+                persist_followup_context(current, context_root)
+            print("[AuraScan] AI is reviewing the retained result and current request...", file=stdout, flush=True)
+            response = ask_agent_ai(
+                current,
+                question,
+                turns,
+                access=session.access,
+                approval=session.approval,
+                facts_only=facts_only or current.privacy_mode == "facts-only",
+                command_results=pending_results,
+                probe_results=initial_probe_results,
+                env=source,
+                urlopen=urlopen,
+            )
+            session.provider_requests += 1
+            pending_results = []
+            if response.status != "ok":
+                result.provider_failed = True
+                print(
+                    f"[AuraScan] Agent AI was unavailable ({response.status}). "
+                    "No terminal command was inferred or run.",
+                    file=stderr,
+                )
+                if response.error:
+                    print(f"[AuraScan] Provider detail: {response.error}", file=stderr)
+                break
+            print("\n[AuraScan] Agent answer", file=stdout)
+            print(response.answer or "AuraScan did not receive a usable answer.", file=stdout)
+            if (
+                response.requested_access
+                and AGENT_ACCESS_ORDER[response.requested_access]
+                > AGENT_ACCESS_ORDER[session.access]
+            ):
+                print(
+                    f"[AuraScan] AI requested {response.requested_access}. Only you can grant it; "
+                    f"start a new session with `aurascan agent --access {response.requested_access}`.",
+                    file=stdout,
+                )
+            current, probe_results, action_outcome = _handle_verified_requests(
+                current,
+                response,
+                runtime,
+                input_func,
+                stdout,
+                stderr,
+            )
+            if action_outcome.attempted:
+                result.action_outcome = action_outcome
+                if action_outcome.applied or action_outcome.source_changed:
+                    break
+            if probe_results and session.provider_requests < AGENT_MAX_PROVIDER_REQUESTS:
+                print("[AuraScan] AI is reviewing guarded local verification results...", file=stdout, flush=True)
+                response = ask_agent_ai(
+                    current,
+                    question,
+                    turns,
+                    access=session.access,
+                    approval=session.approval,
+                    facts_only=facts_only or current.privacy_mode == "facts-only",
+                    probe_results=probe_results,
+                    env=source,
+                    urlopen=urlopen,
+                )
+                session.provider_requests += 1
+                if response.status != "ok":
+                    result.provider_failed = True
+                    print("[AuraScan] Final AI review failed; local verification remains available.", file=stderr)
+                    break
+                print("\n[AuraScan] Agent verification review", file=stdout)
+                print(response.answer, file=stdout)
+
+            tool_rounds = 0
+            while (
+                response.commands
+                and tool_rounds < AGENT_MAX_COMMANDS_PER_SESSION
+                and session.provider_requests < AGENT_MAX_PROVIDER_REQUESTS
+                and session.command_count < AGENT_MAX_COMMANDS_PER_SESSION
+            ):
+                commands = response.commands[
+                    : max(0, AGENT_MAX_COMMANDS_PER_SESSION - session.command_count)
+                ]
+                approved = _confirm_commands(commands, session.approval, input_func, stdout)
+                if not approved:
+                    break
+                plan_hash = _plan_hash(commands)
+                if session.approval == "whole-plan":
+                    if session.active_plan_hash and session.active_plan_hash != plan_hash:
+                        print(
+                            "[AuraScan] The proposed plan changed; the approval above applies only "
+                            "to this new exact plan.",
+                            file=stdout,
+                        )
+                    session.active_plan_hash = plan_hash
+                pending_results = []
+                for command_index, command in enumerate(approved):
+                    if int(time.time()) >= session.expires_at:
+                        print("[AuraScan] Agent grant expired before the next command.", file=stderr)
+                        break
+                    print(
+                        f"\n[AuraScan] Running approved {'root' if command.requires_root else 'user'} command "
+                        f"{command.command_id}...",
+                        file=stdout,
+                        flush=True,
+                    )
+                    if session.access == "root-shell":
+                        command_result = _execute_via_root_helper(
+                            session,
+                            command,
+                            plan_hash,
+                            approve_plan=command_index == 0,
+                            helper=helper,
+                            runner=runner,
+                            env=source,
+                        )
+                    else:
+                        command_result = stream_shell_command(
+                            command,
+                            stdout=stdout,
+                            stderr=stderr,
+                            env=source,
+                            popen_factory=popen_factory,
+                        )
+                    session.command_count += 1
+                    result.commands_run += 1
+                    _audit_command(session, command, command_result, env=source)
+                    ai_result, ai_output_used = _agent_result_for_ai(
+                        command_result,
+                        session,
+                        source,
+                        ai_output_used,
+                    )
+                    pending_results.append(ai_result)
+                    persist_agent_audit(session, root=audit_root, env=source)
+                    if command_result.status != "ok":
+                        result.command_failed = True
+                        if command_result.status == "interrupted":
+                            session.stopped = True
+                            result.stopped = True
+                        print(
+                            f"[AuraScan] Command finished with {command_result.status} "
+                            f"(exit {command_result.exit_code}); remaining commands were stopped.",
+                            file=stderr,
+                        )
+                        break
+                tool_rounds += 1
+                if not pending_results or session.provider_requests >= AGENT_MAX_PROVIDER_REQUESTS:
+                    break
+                if result.command_failed:
+                    break
+                if pending_results:
+                    print("[AuraScan] AI is reviewing bounded terminal results...", file=stdout, flush=True)
+                    review = ask_agent_ai(
+                        current,
+                        question,
+                        turns,
+                        access=session.access,
+                        approval=session.approval,
+                        facts_only=facts_only or current.privacy_mode == "facts-only",
+                        command_results=pending_results,
+                        env=source,
+                        urlopen=urlopen,
+                    )
+                    session.provider_requests += 1
+                    if review.status == "ok":
+                        print("\n[AuraScan] Agent result review", file=stdout)
+                        print(review.answer, file=stdout)
+                        response = review
+                        current, _review_probes, review_outcome = _handle_verified_requests(
+                            current,
+                            response,
+                            runtime,
+                            input_func,
+                            stdout,
+                            stderr,
+                        )
+                        if review_outcome.attempted:
+                            result.action_outcome = review_outcome
+                            if review_outcome.applied or review_outcome.source_changed:
+                                break
+                    else:
+                        result.provider_failed = True
+                        print(
+                            "[AuraScan] Terminal results are shown above, but the AI result review failed.",
+                            file=stderr,
+                        )
+                        break
+                    pending_results = []
+            turns.append(FollowUpTurn(question, response.answer))
+            prompt = "Ask another question, or press Enter to finish: "
+    except KeyboardInterrupt:
+        print("\n[AuraScan] Stopping the active agent session...", file=stderr)
+        session.stopped = True
+        result.stopped = True
+    finally:
+        if session.access == "root-shell":
+            _revoke_root_grant(session, helper=helper, runner=runner)
+        session.stopped = True
+        result.questions = session.questions
+        result.provider_requests = session.provider_requests
+        try:
+            persist_agent_audit(session, root=audit_root, env=source)
+        except OSError as exc:
+            print(f"[AuraScan] Warning: agent audit could not be saved: {_redact_agent_text(str(exc))}", file=stderr)
+    if int(time.time()) >= session.expires_at:
+        print("[AuraScan] Agent session time limit reached.", file=stdout)
+    elif session.command_count >= AGENT_MAX_COMMANDS_PER_SESSION:
+        print("[AuraScan] Agent command limit reached.", file=stdout)
+    elif session.provider_requests >= AGENT_MAX_PROVIDER_REQUESTS:
+        print("[AuraScan] Agent provider request limit reached.", file=stdout)
+    return result
+
+
+def _load_agent_context(
+    context_id: str,
+    *,
+    latest: bool,
+    env: Mapping[str, str],
+    context_root: Path,
+    incident_root: Optional[Path],
+) -> Optional[FollowUpContext]:
+    context = None
+    if context_id and not latest:
+        context = load_followup_context(context_id, context_root)
+        if context is None:
+            context = context_from_saved_incident(
+                context_id,
+                env=env,
+                incident_root=incident_root,
+            )
+    else:
+        context = latest_followup_context(context_root)
+        if context is None:
+            context = context_from_latest_saved_incident(
+                env=env,
+                incident_root=incident_root,
+            )
+    if context is not None:
+        persist_followup_context(context, context_root)
+    return context
+
+
+def run_agent(
+    argv: Optional[Sequence[str]] = None,
+    *,
+    input_func: Callable[[str], str] = input,
+    stdout=None,
+    stderr=None,
+    env: Optional[Mapping[str, str]] = None,
+    urlopen: Optional[Callable] = None,
+    runner: Callable = subprocess.run,
+    popen_factory: Callable = subprocess.Popen,
+    which: Callable[[str], Optional[str]] = shutil.which,
+    context_root: Optional[Path] = None,
+    incident_root: Optional[Path] = None,
+    system_root: Optional[Path] = None,
+    audit_root: Optional[Path] = None,
+    helper: Path = Path("/usr/bin/aurascan"),
+    root_policy_path: Path = AGENT_ROOT_POLICY_PATH,
+    root_policy_uid: int = 0,
+    runtime_root: Path = AGENT_RUNTIME_ROOT,
+    root_audit_root: Path = AGENT_ROOT_AUDIT_ROOT,
+    force_interactive: Optional[bool] = None,
+) -> int:
+    stdout = stdout or sys.stdout
+    stderr = stderr or sys.stderr
+    args = build_agent_parser().parse_args(list(argv or []))
+    hidden = bool(
+        args.set_root_policy is not None
+        or args.issue_root_session
+        or args.execute_request
+        or args.revoke_root_session
+    )
+    if hidden:
+        scrub_agent_helper_environment()
+    source = dict(os.environ if env is None else env)
+    recovery_runtime = (
+        source.get("AURASCAN_RECOVERY_RUNTIME", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+        or AGENT_RECOVERY_RUNTIME_MARKER.exists()
+    )
+    if recovery_runtime:
+        if hidden:
+            print(json.dumps({"ok": False, "error": "agent helpers are disabled in recovery mode"}), file=stdout)
+        else:
+            print("[AuraScan] Full-Control Repair Agent is not available in recovery mode v1.", file=stderr)
+        return EXIT_FOLLOWUP_UNAVAILABLE
+
+    if args.set_root_policy is not None:
+        if os.geteuid() != 0:
+            print("[AuraScan] Agent root policy writes require root privileges.", file=stderr)
+            return EXIT_AGENT_ROOT_REFUSED
+        ok, message = write_agent_root_policy(
+            args.set_root_policy == "1",
+            args.root_max_approval or "each-command",
+            args.root_max_minutes or AGENT_DEFAULT_SESSION_MINUTES,
+            path=root_policy_path,
+        )
+        print(message, file=stdout if ok else stderr)
+        return 0 if ok else EXIT_AGENT_ROOT_REFUSED
+    if args.issue_root_session:
+        if os.geteuid() != 0:
+            print(json.dumps({"ok": False, "error": "root helper requires root"}), file=stdout)
+            return EXIT_AGENT_ROOT_REFUSED
+        response = issue_root_session(
+            Path(args.issue_root_session),
+            policy_path=root_policy_path,
+            runtime_root=runtime_root,
+            runner=runner,
+            which=which,
+            policy_uid=root_policy_uid,
+        )
+        print(json.dumps(response), file=stdout)
+        return 0 if response.get("ok") else EXIT_AGENT_ROOT_REFUSED
+    if args.execute_request:
+        if os.geteuid() != 0:
+            print(json.dumps({"ok": False, "error": "root helper requires root"}), file=stdout)
+            return EXIT_AGENT_ROOT_REFUSED
+        response = execute_root_command_request(
+            Path(args.execute_request),
+            runtime_root=runtime_root,
+            audit_root=root_audit_root,
+            stdout=stdout,
+            stderr=stderr,
+            env={},
+            popen_factory=popen_factory,
+        )
+        print(json.dumps(response), file=stdout)
+        return 0 if response.get("ok") else EXIT_AGENT_EXECUTION_FAILED
+    if args.revoke_root_session:
+        if os.geteuid() != 0:
+            print(json.dumps({"ok": False, "error": "root helper requires root"}), file=stdout)
+            return EXIT_AGENT_ROOT_REFUSED
+        response = revoke_root_session(
+            Path(args.revoke_root_session),
+            runtime_root=runtime_root,
+        )
+        print(json.dumps(response), file=stdout)
+        return 0 if response.get("ok") else EXIT_AGENT_ROOT_REFUSED
+
+    if force_interactive is None and not (
+        getattr(stdout, "isatty", lambda: False)()
+        and getattr(sys.stdin, "isatty", lambda: False)()
+    ):
+        print("[AuraScan] Repair Agent requires an interactive foreground terminal.", file=stderr)
+        return EXIT_FOLLOWUP_UNAVAILABLE
+    ai_config = resolve_ai_config(source)
+    if ai_config.error or not ai_config.enabled or not ai_config.api_key_present:
+        print("[AuraScan] Repair Agent requires configured foreground network AI.", file=stderr)
+        return EXIT_FOLLOWUP_UNAVAILABLE
+    config = resolve_agent_config(source)
+    if config.error:
+        print(f"[AuraScan] Repair Agent configuration error: {config.error}.", file=stderr)
+        return EXIT_AGENT_CONFIG_ERROR
+    requested_access = args.access or config.access
+    requested_approval = args.approval or config.approval
+    requested_output = args.output_sharing or config.output_sharing
+    requested_minutes = args.session_timeout or config.session_timeout_minutes
+    if requested_minutes < 1 or requested_minutes > AGENT_MAX_SESSION_MINUTES:
+        print(
+            f"[AuraScan] Session timeout must be between 1 and {AGENT_MAX_SESSION_MINUTES} minutes.",
+            file=stderr,
+        )
+        return EXIT_AGENT_CONFIG_ERROR
+    if AGENT_ACCESS_ORDER[requested_access] > AGENT_ACCESS_ORDER[config.access]:
+        print(
+            f"[AuraScan] Requested {requested_access} exceeds configured access {config.access}. "
+            "Change it through `aurascan init` first.",
+            file=stderr,
+        )
+        return EXIT_AGENT_CONFIG_ERROR
+    if requested_access == "root-shell":
+        policy = read_agent_root_policy(root_policy_path, required_uid=root_policy_uid)
+        if policy.error or not policy.allowed:
+            print(
+                f"[AuraScan] Root-shell policy is unavailable: {policy.error or 'disabled'}. "
+                "Enable it explicitly through `aurascan init --allow-agent-root`.",
+                file=stderr,
+            )
+            return EXIT_AGENT_ROOT_REFUSED
+        if AGENT_APPROVAL_ORDER[requested_approval] > AGENT_APPROVAL_ORDER[policy.max_approval]:
+            print("[AuraScan] Requested approval mode exceeds the root policy ceiling.", file=stderr)
+            return EXIT_AGENT_ROOT_REFUSED
+        requested_minutes = min(requested_minutes, policy.max_minutes)
+    root = context_root or user_followup_root(source)
+    context = _load_agent_context(
+        args.context_id or "",
+        latest=bool(args.latest),
+        env=source,
+        context_root=root,
+        incident_root=incident_root,
+    )
+    if context is None:
+        print("[AuraScan] No retained AuraScan result is available for the agent.", file=stderr)
+        return EXIT_FOLLOWUP_UNAVAILABLE
+    runtime = build_default_runtime(
+        context,
+        env=source,
+        runner=runner,
+        which=which,
+        urlopen=urlopen,
+        context_root=root,
+        incident_root=incident_root,
+        system_root=system_root,
+    )
+    if requested_access == "guarded":
+        from aurascan.core.followup import run_followup_session
+
+        guarded = run_followup_session(
+            context,
+            runtime=runtime,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+            env=source,
+            facts_only=bool(args.facts_only),
+            urlopen=urlopen,
+            context_root=root,
+        )
+        if guarded.action_outcome.failed:
+            return EXIT_FOLLOWUP_ACTION_FAILED
+        return EXIT_FOLLOWUP_PROVIDER_ERROR if guarded.provider_failed else 0
+    result = run_agent_session(
+        context,
+        access=requested_access,
+        approval=requested_approval,
+        output_sharing=requested_output,
+        session_timeout_minutes=requested_minutes,
+        runtime=runtime,
+        input_func=input_func,
+        stdout=stdout,
+        stderr=stderr,
+        env=source,
+        facts_only=bool(args.facts_only),
+        urlopen=urlopen,
+        context_root=root,
+        audit_root=audit_root,
+        helper=helper,
+        runner=runner,
+        popen_factory=popen_factory,
+        root_policy_path=root_policy_path,
+        root_policy_uid=root_policy_uid,
+    )
+    if result.action_outcome.failed or result.command_failed:
+        return EXIT_AGENT_EXECUTION_FAILED
+    if result.setup_failed:
+        return EXIT_AGENT_ROOT_REFUSED
+    if result.provider_failed:
+        return EXIT_FOLLOWUP_PROVIDER_ERROR
+    return 0
+
+
+def agent_doctor_status(
+    env: Optional[Mapping[str, str]] = None,
+    *,
+    policy_path: Path = AGENT_ROOT_POLICY_PATH,
+    policy_uid: int = 0,
+    audit_root: Optional[Path] = None,
+    runtime_root: Path = AGENT_RUNTIME_ROOT,
+    which: Callable[[str], Optional[str]] = shutil.which,
+    runner: Callable = subprocess.run,
+) -> Dict[str, object]:
+    source = dict(os.environ if env is None else env)
+    config = resolve_agent_config(source)
+    policy = read_agent_root_policy(policy_path, required_uid=policy_uid)
+    root = audit_root or user_agent_root(source)
+    storage_exists = root.exists()
+    storage_safe = True
+    storage_error = ""
+    if storage_exists:
+        try:
+            metadata = root.stat()
+            storage_safe = (
+                root.is_dir()
+                and not root.is_symlink()
+                and metadata.st_uid == current_user_uid()
+                and metadata.st_mode & 0o077 == 0
+            )
+        except OSError as exc:
+            storage_safe = False
+            storage_error = str(exc)
+    stale_sessions = 0
+    uid_dir = runtime_root / str(current_user_uid())
+    stale_sessions_checked = not uid_dir.exists() or os.geteuid() == 0
+    if os.geteuid() == 0 and uid_dir.is_dir() and not uid_dir.is_symlink():
+        for path in uid_dir.glob("agent-*.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if int(data.get("expires_at") or 0) <= int(time.time()):
+                    stale_sessions += 1
+            except (OSError, json.JSONDecodeError):
+                stale_sessions += 1
+    snapshot_ready, snapshot_detail = _snapshot_capability(which=which, runner=runner)
+    return {
+        "config": config.to_dict(),
+        "root_policy": policy.to_dict(),
+        "bash": which("bash") or "",
+        "sudo": which("sudo") or "",
+        "findmnt": which("findmnt") or "",
+        "snapper": which("snapper") or "",
+        "snapshot_ready": snapshot_ready,
+        "snapshot_detail": snapshot_detail,
+        "audit_root": str(root),
+        "audit_storage_exists": storage_exists,
+        "audit_storage_safe": storage_safe,
+        "audit_storage_error": storage_error,
+        "stale_root_sessions": stale_sessions,
+        "stale_root_sessions_checked": stale_sessions_checked,
+        "foreground_only": True,
+    }

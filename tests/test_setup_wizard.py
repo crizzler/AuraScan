@@ -1,10 +1,18 @@
 import io
 import json
+import os
 import subprocess
 from pathlib import Path
 
 import aurascan.core.recovery_cli as recovery_cli
 import aurascan.setup_wizard as setup_wizard
+from aurascan.core.agent import (
+    AGENT_ACCESS_ENV,
+    AGENT_APPROVAL_ENV,
+    AGENT_OUTPUT_SHARING_ENV,
+    AGENT_SESSION_TIMEOUT_ENV,
+    write_agent_root_policy,
+)
 from aurascan.setup_wizard import (
     build_doctor_checks,
     install_pacman_hook,
@@ -83,6 +91,101 @@ def test_init_can_write_disabled_local_only_config(tmp_path):
     assert status == 0
     assert "AURASCAN_AI_ENABLED=0" in env_path.read_text(encoding="utf-8")
     assert "local-only" not in stdout.getvalue().lower()
+
+
+def test_init_can_configure_foreground_repair_agent_defaults(tmp_path):
+    env_path = tmp_path / ".config" / "aurascan" / ".env"
+    stdout = io.StringIO()
+
+    status = run_init(
+        [
+            "--disable-ai",
+            "--agent-access",
+            "user-shell",
+            "--agent-approval",
+            "whole-plan",
+            "--agent-output-sharing",
+            "redacted",
+            "--agent-session-timeout",
+            "25",
+            "--no-install-hook",
+        ],
+        stdout=stdout,
+        env_path=env_path,
+    )
+
+    text = env_path.read_text(encoding="utf-8")
+    assert status == 0
+    assert f"{AGENT_ACCESS_ENV}=user-shell" in text
+    assert f"{AGENT_APPROVAL_ENV}=whole-plan" in text
+    assert f"{AGENT_OUTPUT_SHARING_ENV}=redacted" in text
+    assert f"{AGENT_SESSION_TIMEOUT_ENV}=25" in text
+    assert "Configured Repair Agent defaults" in stdout.getvalue()
+
+
+def test_init_configures_root_agent_policy_only_through_privileged_helper(monkeypatch, tmp_path):
+    env_path = tmp_path / ".env"
+    calls = []
+    monkeypatch.setattr(
+        setup_wizard,
+        "configure_agent_root_policy",
+        lambda allowed, approval, minutes, **_kwargs: (
+            calls.append((allowed, approval, minutes)) or (True, "configured")
+        ),
+    )
+
+    status = run_init(
+        [
+            "--disable-ai",
+            "--agent-access",
+            "root-shell",
+            "--agent-approval",
+            "each-command",
+            "--agent-session-timeout",
+            "20",
+            "--allow-agent-root",
+            "--no-install-hook",
+        ],
+        stdout=io.StringIO(),
+        env_path=env_path,
+    )
+
+    assert status == 0
+    assert calls == [(True, "each-command", 20)]
+    assert f"{AGENT_ACCESS_ENV}=root-shell" in env_path.read_text(encoding="utf-8")
+
+
+def test_init_rolls_back_agent_user_config_when_root_policy_write_fails(monkeypatch, tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"{AGENT_ACCESS_ENV}=guarded\n"
+        f"{AGENT_APPROVAL_ENV}=each-command\n"
+        f"{AGENT_OUTPUT_SHARING_ENV}=redacted\n"
+        f"{AGENT_SESSION_TIMEOUT_ENV}=30\n",
+        encoding="utf-8",
+    )
+    env_path.chmod(0o600)
+    monkeypatch.setattr(
+        setup_wizard,
+        "configure_agent_root_policy",
+        lambda *_args, **_kwargs: (False, "fixture failure"),
+    )
+
+    status = run_init(
+        [
+            "--disable-ai",
+            "--agent-access",
+            "root-shell",
+            "--allow-agent-root",
+            "--no-install-hook",
+        ],
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        env_path=env_path,
+    )
+
+    assert status == 1
+    assert f"{AGENT_ACCESS_ENV}=guarded" in env_path.read_text(encoding="utf-8")
 
 
 def test_init_can_write_upgrade_preflight_defaults(tmp_path):
@@ -766,6 +869,91 @@ def test_doctor_reports_bad_permissions_and_unsupported_provider(tmp_path):
     by_name = {check.name: check for check in checks}
     assert by_name["config_permissions"].status == "warn"
     assert by_name["ai_provider"].status == "error"
+
+
+def test_doctor_reports_contextual_followup_readiness_and_storage_permissions(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "AURASCAN_AI_ENABLED=1\n"
+        "AURASCAN_AI_PROVIDER=openai\n"
+        "AURASCAN_OPENAI_API_KEY=fixture-secret\n",
+        encoding="utf-8",
+    )
+    env_path.chmod(0o600)
+    followup_root = tmp_path / "follow-up"
+    followup_root.mkdir(mode=0o700)
+
+    checks = build_doctor_checks(
+        env_path=env_path,
+        env={},
+        executable_path=tmp_path / "aurascan",
+        local_hook_path=tmp_path / "local.hook",
+        packaged_hook_path=tmp_path / "packaged.hook",
+        followup_root=followup_root,
+    )
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["followup_assistant"].status == "ok"
+    assert by_name["followup_assistant"].details["provider_ready"] is True
+
+    followup_root.chmod(0o755)
+    checks = build_doctor_checks(
+        env_path=env_path,
+        env={},
+        executable_path=tmp_path / "aurascan",
+        local_hook_path=tmp_path / "local.hook",
+        packaged_hook_path=tmp_path / "packaged.hook",
+        followup_root=followup_root,
+    )
+    by_name = {check.name: check for check in checks}
+    assert by_name["followup_assistant"].status == "error"
+
+
+def test_doctor_reports_agent_access_root_policy_and_private_audit(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "AURASCAN_AI_ENABLED=1\n"
+        "AURASCAN_AI_PROVIDER=openai\n"
+        "AURASCAN_OPENAI_API_KEY=fixture-secret\n"
+        f"{AGENT_ACCESS_ENV}=root-shell\n"
+        f"{AGENT_APPROVAL_ENV}=each-command\n"
+        f"{AGENT_OUTPUT_SHARING_ENV}=redacted\n"
+        f"{AGENT_SESSION_TIMEOUT_ENV}=30\n",
+        encoding="utf-8",
+    )
+    env_path.chmod(0o600)
+    policy = tmp_path / "agent.conf"
+    assert write_agent_root_policy(
+        True,
+        "each-command",
+        30,
+        policy,
+        require_root=False,
+    )[0]
+    audit = tmp_path / "agent-audit"
+    audit.mkdir(mode=0o700)
+
+    checks = build_doctor_checks(
+        env_path=env_path,
+        env={},
+        executable_path=tmp_path / "aurascan",
+        local_hook_path=tmp_path / "local.hook",
+        packaged_hook_path=tmp_path / "packaged.hook",
+        agent_root_policy_path=policy,
+        agent_root_policy_uid=os.getuid(),
+        agent_audit_root=audit,
+        agent_runtime_root=tmp_path / "run",
+        which=lambda name: f"/usr/bin/{name}" if name in {"bash", "sudo", "findmnt", "snapper"} else None,
+        runner=lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "btrfs\n", ""),
+    )
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["repair_agent"].status == "ok"
+    assert by_name["repair_agent"].details["config"]["access"] == "root-shell"
+    assert by_name["repair_agent_root_policy"].status == "warn"
+    assert by_name["repair_agent_root_policy"].details["allowed"] is True
+    assert by_name["repair_agent_audit"].status == "ok"
+    assert by_name["repair_agent_sessions"].status == "ok"
 
 
 def test_doctor_check_ai_uses_mocked_provider(tmp_path):

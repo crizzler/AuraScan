@@ -22,6 +22,22 @@ from aurascan.core.ai_provider import (
     provider_choices,
     resolve_ai_config,
 )
+from aurascan.core.agent import (
+    AGENT_ACCESS_ENV,
+    AGENT_ACCESS_VALUES,
+    AGENT_APPROVAL_ENV,
+    AGENT_APPROVAL_VALUES,
+    AGENT_DEFAULT_SESSION_MINUTES,
+    AGENT_MAX_SESSION_MINUTES,
+    AGENT_OUTPUT_SHARING_ENV,
+    AGENT_OUTPUT_VALUES,
+    AGENT_ROOT_POLICY_PATH,
+    AGENT_SESSION_TIMEOUT_ENV,
+    agent_doctor_status,
+    configure_agent_root_policy,
+    read_agent_root_policy,
+    resolve_agent_config,
+)
 from aurascan.core.config import file_mode, read_env_file, user_env_path, write_user_env
 from aurascan.core.config_drift import (
     CONFIG_DRIFT_AI_DIFFS_ENV,
@@ -34,6 +50,8 @@ from aurascan.core.compatibility import (
     detect_distro,
     detect_package_manager_capabilities,
 )
+from aurascan.core.followup import followup_doctor_status
+from aurascan.core.hardware_health import hardware_health_doctor_status
 from aurascan.core.kernel_module_autopilot import (
     KERNEL_MODULE_AUTOPILOT_ENV,
     detect_module_families,
@@ -171,6 +189,15 @@ def build_init_parser() -> argparse.ArgumentParser:
     incident_background_ai.add_argument("--enable-incident-background-ai", action="store_true", help="enable logged-in background incident AI analysis")
     incident_background_ai.add_argument("--disable-incident-background-ai", action="store_true", help="disable logged-in background incident AI analysis")
     parser.add_argument("--incident-auto-repair", choices=sorted(INCIDENT_AUTO_REPAIR_VALUES), help="system-wide deterministic incident repair policy")
+    parser.add_argument("--agent-access", choices=AGENT_ACCESS_VALUES, help="maximum/default foreground AI agent access")
+    parser.add_argument("--agent-approval", choices=AGENT_APPROVAL_VALUES, help="foreground agent command approval mode")
+    parser.add_argument("--agent-output-sharing", choices=AGENT_OUTPUT_VALUES, help="foreground agent terminal-output sharing policy")
+    parser.add_argument("--agent-session-timeout", type=int, metavar="MINUTES", help="foreground agent session duration")
+    agent_root = parser.add_mutually_exclusive_group()
+    agent_root.add_argument("--allow-agent-root", action="store_true", help="allow separately consented unrestricted root agent sessions")
+    agent_root.add_argument("--deny-agent-root", action="store_true", help="disable unrestricted root agent sessions system-wide")
+    parser.add_argument("--agent-root-max-approval", choices=AGENT_APPROVAL_VALUES, help="system-wide root agent approval ceiling")
+    parser.add_argument("--agent-root-max-minutes", type=int, metavar="MINUTES", help="system-wide root agent duration ceiling")
     updater = parser.add_mutually_exclusive_group()
     updater.add_argument("--enable-updater-tray", action="store_true", help="enable the AuraScan Updater tray icon")
     updater.add_argument("--disable-updater-tray", action="store_true", help="disable the AuraScan Updater tray icon")
@@ -291,6 +318,14 @@ def run_init(
         or args.enable_incident_background_ai
         or args.disable_incident_background_ai
         or args.incident_auto_repair is not None
+        or args.agent_access is not None
+        or args.agent_approval is not None
+        or args.agent_output_sharing is not None
+        or args.agent_session_timeout is not None
+        or args.allow_agent_root
+        or args.deny_agent_root
+        or args.agent_root_max_approval is not None
+        or args.agent_root_max_minutes is not None
         or args.install_recovery
         or args.remove_recovery
         or args.enable_recovery_ai
@@ -478,6 +513,114 @@ def run_init(
         updates[INCIDENT_BACKGROUND_AI_ENV] = "1" if background_ai_enabled else "0"
         print("Configured Incident Recovery Assistant defaults.", file=stdout)
 
+    configure_agent = (
+        args.agent_access is not None
+        or args.agent_approval is not None
+        or args.agent_output_sharing is not None
+        or args.agent_session_timeout is not None
+        or args.allow_agent_root
+        or args.deny_agent_root
+        or args.agent_root_max_approval is not None
+        or args.agent_root_max_minutes is not None
+    )
+    should_prompt_agent = should_prompt_upgrade and updates.get(
+        AI_ENABLED_ENV,
+        existing.get(AI_ENABLED_ENV, "0"),
+    ) == "1"
+    agent_root_action: Optional[bool] = None
+    agent_root_max_approval = "each-command"
+    agent_root_max_minutes = AGENT_DEFAULT_SESSION_MINUTES
+    if configure_agent or should_prompt_agent:
+        existing_agent = resolve_agent_config(existing)
+        access = existing_agent.access if not existing_agent.error else "guarded"
+        approval = existing_agent.approval if not existing_agent.error else "each-command"
+        output_sharing = existing_agent.output_sharing if not existing_agent.error else "redacted"
+        session_minutes = (
+            existing_agent.session_timeout_minutes
+            if not existing_agent.error
+            else AGENT_DEFAULT_SESSION_MINUTES
+        )
+        if args.agent_access is not None:
+            access = args.agent_access
+        elif should_prompt_agent:
+            access = _prompt_agent_access(input_func, access, stdout)
+        if args.agent_approval is not None:
+            approval = args.agent_approval
+        elif should_prompt_agent and access != "guarded":
+            approval = _prompt_agent_approval(input_func, approval, stdout)
+        if args.agent_output_sharing is not None:
+            output_sharing = args.agent_output_sharing
+        elif should_prompt_agent and access != "guarded":
+            output_sharing = _prompt_agent_output(input_func, output_sharing, stdout)
+        if args.agent_session_timeout is not None:
+            session_minutes = args.agent_session_timeout
+        if session_minutes < 1 or session_minutes > AGENT_MAX_SESSION_MINUTES:
+            print(
+                f"Agent session timeout must be between 1 and {AGENT_MAX_SESSION_MINUTES} minutes.",
+                file=stderr,
+            )
+            return 1
+
+        current_root_policy = read_agent_root_policy()
+        root_allowed = current_root_policy.allowed if not current_root_policy.error else False
+        agent_root_max_approval = (
+            current_root_policy.max_approval
+            if not current_root_policy.error
+            else "each-command"
+        )
+        agent_root_max_minutes = (
+            current_root_policy.max_minutes
+            if not current_root_policy.error
+            else AGENT_DEFAULT_SESSION_MINUTES
+        )
+        if args.allow_agent_root:
+            root_allowed = True
+            agent_root_action = True
+        elif args.deny_agent_root:
+            root_allowed = False
+            agent_root_action = False
+        elif should_prompt_agent and access == "root-shell":
+            print(
+                "Unrestricted root mode is equivalent to user-authorized remote code execution. "
+                "It can change disks, firmware, networking, authentication, and AuraScan itself.",
+                file=stdout,
+            )
+            root_allowed = _prompt_yes_no(
+                "Allow separately consented unrestricted root agent sessions?",
+                input_func,
+                default=False,
+            )
+            if root_allowed != current_root_policy.allowed or current_root_policy.error:
+                agent_root_action = root_allowed
+        if args.agent_root_max_approval is not None:
+            agent_root_max_approval = args.agent_root_max_approval
+            agent_root_action = root_allowed
+        elif agent_root_action is True:
+            agent_root_max_approval = approval
+        if args.agent_root_max_minutes is not None:
+            agent_root_max_minutes = args.agent_root_max_minutes
+            agent_root_action = root_allowed
+        elif agent_root_action is True:
+            agent_root_max_minutes = session_minutes
+        if (
+            agent_root_max_minutes < 1
+            or agent_root_max_minutes > AGENT_MAX_SESSION_MINUTES
+        ):
+            print(
+                f"Agent root session ceiling must be between 1 and {AGENT_MAX_SESSION_MINUTES} minutes.",
+                file=stderr,
+            )
+            return 1
+
+        updates[AGENT_ACCESS_ENV] = access
+        updates[AGENT_APPROVAL_ENV] = approval
+        updates[AGENT_OUTPUT_SHARING_ENV] = output_sharing
+        updates[AGENT_SESSION_TIMEOUT_ENV] = str(session_minutes)
+        print(
+            f"Configured Repair Agent defaults: {access}, {approval}, {output_sharing}.",
+            file=stdout,
+        )
+
     configure_updater = (
         args.enable_updater_tray
         or args.disable_updater_tray
@@ -594,6 +737,28 @@ def run_init(
 
     write_user_env(updates, path=target_env)
     print(f"Wrote user config: {target_env}", file=stdout)
+
+    if agent_root_action is not None:
+        agent_ok, agent_message = configure_agent_root_policy(
+            agent_root_action,
+            agent_root_max_approval,
+            agent_root_max_minutes,
+            runner=runner,
+            helper=executable_path,
+        )
+        print(agent_message, file=stdout if agent_ok else stderr)
+        if not agent_ok:
+            rollback = {
+                AGENT_ACCESS_ENV: existing.get(AGENT_ACCESS_ENV, "guarded"),
+                AGENT_APPROVAL_ENV: existing.get(AGENT_APPROVAL_ENV, "each-command"),
+                AGENT_OUTPUT_SHARING_ENV: existing.get(AGENT_OUTPUT_SHARING_ENV, "redacted"),
+                AGENT_SESSION_TIMEOUT_ENV: existing.get(
+                    AGENT_SESSION_TIMEOUT_ENV,
+                    str(AGENT_DEFAULT_SESSION_MINUTES),
+                ),
+            }
+            write_user_env(rollback, path=target_env)
+            return 1
 
     if incident_auto_repair_action:
         auto_ok, auto_message = configure_auto_repair_policy(incident_auto_repair_action, runner=runner)
@@ -716,6 +881,11 @@ def run_doctor(
     journal_root: Path = Path("/var/log/journal"),
     pstore_root: Path = Path("/sys/fs/pstore"),
     recovery_root: Path = Path("/"),
+    followup_root: Optional[Path] = None,
+    agent_root_policy_path: Path = AGENT_ROOT_POLICY_PATH,
+    agent_root_policy_uid: int = 0,
+    agent_audit_root: Optional[Path] = None,
+    agent_runtime_root: Path = Path("/run/aurascan-agent"),
 ) -> int:
     stdout = stdout or sys.stdout
     args = build_doctor_parser().parse_args(argv)
@@ -745,6 +915,11 @@ def run_doctor(
         journal_root=journal_root,
         pstore_root=pstore_root,
         recovery_root=recovery_root,
+        followup_root=followup_root,
+        agent_root_policy_path=agent_root_policy_path,
+        agent_root_policy_uid=agent_root_policy_uid,
+        agent_audit_root=agent_audit_root,
+        agent_runtime_root=agent_runtime_root,
     )
     has_error = any(check.status == "error" for check in checks)
     if args.json_mode:
@@ -786,6 +961,11 @@ def build_doctor_checks(
     journal_root: Path = Path("/var/log/journal"),
     pstore_root: Path = Path("/sys/fs/pstore"),
     recovery_root: Path = Path("/"),
+    followup_root: Optional[Path] = None,
+    agent_root_policy_path: Path = AGENT_ROOT_POLICY_PATH,
+    agent_root_policy_uid: int = 0,
+    agent_audit_root: Optional[Path] = None,
+    agent_runtime_root: Path = Path("/run/aurascan-agent"),
 ) -> List[DoctorCheck]:
     checks: List[DoctorCheck] = []
     file_values = _safe_read_env(env_path)
@@ -850,6 +1030,137 @@ def build_doctor_checks(
 
     if check_ai:
         checks.append(_check_ai_connectivity(effective_env, urlopen=urlopen))
+
+    resolved_followup_root = (
+        followup_root
+        or (incident_user_root.parent / "follow-up" if incident_user_root is not None else None)
+    )
+    followup = followup_doctor_status(effective_env, root=resolved_followup_root)
+    if followup.get("error"):
+        checks.append(DoctorCheck(
+            "followup_assistant",
+            "error",
+            f"Contextual follow-up storage is unsafe: {followup['error']}",
+            followup,
+        ))
+    elif followup.get("provider_ready"):
+        latest_id = str(followup.get("latest_context_id") or "")
+        latest_note = f"; latest context: {latest_id}" if latest_id else ""
+        checks.append(DoctorCheck(
+            "followup_assistant",
+            "ok",
+            "Contextual AI follow-up is ready" + latest_note,
+            followup,
+        ))
+    else:
+        checks.append(DoctorCheck(
+            "followup_assistant",
+            "warn",
+            "Contextual AI follow-up is unavailable until network AI and its key are configured",
+            followup,
+        ))
+
+    resolved_agent_audit_root = (
+        agent_audit_root
+        or (incident_user_root.parent / "agent" if incident_user_root is not None else None)
+    )
+    agent = agent_doctor_status(
+        effective_env,
+        policy_path=agent_root_policy_path,
+        policy_uid=agent_root_policy_uid,
+        audit_root=resolved_agent_audit_root,
+        runtime_root=agent_runtime_root,
+        which=which,
+        runner=runner,
+    )
+    agent_config = agent["config"]
+    root_policy = agent["root_policy"]
+    if agent_config.get("error"):
+        checks.append(DoctorCheck(
+            "repair_agent",
+            "error",
+            f"Repair Agent configuration is invalid: {agent_config['error']}",
+            agent,
+        ))
+    elif agent_config.get("access") == "guarded":
+        checks.append(DoctorCheck(
+            "repair_agent",
+            "ok",
+            "Repair Agent is limited to guarded AuraScan-owned tools",
+            agent,
+        ))
+    elif not ai_config.enabled or not ai_config.api_key_present:
+        checks.append(DoctorCheck(
+            "repair_agent",
+            "warn",
+            "Repair Agent shell access is configured but foreground network AI is unavailable",
+            agent,
+        ))
+    else:
+        checks.append(DoctorCheck(
+            "repair_agent",
+            "ok",
+            f"Repair Agent foreground access is configured for {agent_config.get('access')}",
+            agent,
+        ))
+    if root_policy.get("error"):
+        checks.append(DoctorCheck(
+            "repair_agent_root_policy",
+            "error",
+            f"Repair Agent root policy is unsafe or invalid: {root_policy['error']}",
+            root_policy,
+        ))
+    elif root_policy.get("allowed"):
+        checks.append(DoctorCheck(
+            "repair_agent_root_policy",
+            "warn",
+            "Unrestricted root agent sessions are allowed but still require a typed per-session grant",
+            root_policy,
+        ))
+    else:
+        checks.append(DoctorCheck(
+            "repair_agent_root_policy",
+            "ok",
+            "Unrestricted root agent sessions are disabled",
+            root_policy,
+        ))
+    if agent.get("audit_storage_exists") and not agent.get("audit_storage_safe"):
+        checks.append(DoctorCheck(
+            "repair_agent_audit",
+            "error",
+            "Repair Agent audit storage ownership or permissions are unsafe",
+            agent,
+        ))
+    else:
+        checks.append(DoctorCheck(
+            "repair_agent_audit",
+            "ok",
+            "Repair Agent private audit storage is ready"
+            if agent.get("audit_storage_exists")
+            else "Repair Agent private audit storage will be created on first use",
+            agent,
+        ))
+    if int(agent.get("stale_root_sessions") or 0):
+        checks.append(DoctorCheck(
+            "repair_agent_sessions",
+            "warn",
+            f"Repair Agent found {agent['stale_root_sessions']} stale root session record(s)",
+            agent,
+        ))
+    elif not agent.get("stale_root_sessions_checked"):
+        checks.append(DoctorCheck(
+            "repair_agent_sessions",
+            "warn",
+            "Repair Agent root session cleanup status requires root while runtime records exist",
+            agent,
+        ))
+    else:
+        checks.append(DoctorCheck(
+            "repair_agent_sessions",
+            "ok",
+            "No stale Repair Agent root sessions were detected",
+            agent,
+        ))
 
     upgrade_config = resolve_upgrade_config(effective_env)
     if upgrade_config.error:
@@ -1176,6 +1487,40 @@ def build_doctor_checks(
             "maximum_provider_requests": 2,
         },
     ))
+    hardware_tools = hardware_health_doctor_status(which=which)
+    hardware_basic = bool(
+        hardware_tools.get("cpu_inventory")
+        and hardware_tools.get("memory_inventory")
+        and hardware_tools.get("dmi_inventory")
+    )
+    hardware_optional = bool(
+        hardware_tools.get("hwmon")
+        and hardware_tools.get("lspci")
+        and hardware_tools.get("fwupdmgr")
+    )
+    if hardware_basic and hardware_optional:
+        hardware_status = "ok"
+        hardware_message = (
+            "Hardware follow-up probes are ready for inventory, cooling, driver, and firmware checks"
+        )
+    elif hardware_basic:
+        hardware_status = "warn"
+        hardware_message = (
+            "Hardware inventory is available, but cooling, GPU naming, or firmware-update "
+            "coverage is limited by optional tools or kernel sensor support"
+        )
+    else:
+        hardware_status = "warn"
+        hardware_message = (
+            "Hardware follow-up context is limited because CPU, memory, or DMI inventory "
+            "is not readable"
+        )
+    checks.append(DoctorCheck(
+        "hardware_followup",
+        hardware_status,
+        hardware_message,
+        hardware_tools,
+    ))
 
     recovery_config = resolve_recovery_config(effective_env)
     try:
@@ -1463,6 +1808,60 @@ def _prompt_config_drift_ai_diffs(input_func: Callable[[str], str], default: str
         if answer.isdigit() and 1 <= int(answer) <= len(choices):
             return choices[int(answer) - 1]
         print("Please choose a listed policy.", file=stdout)
+
+
+def _prompt_agent_access(input_func: Callable[[str], str], default: str, stdout) -> str:
+    choices = list(AGENT_ACCESS_VALUES)
+    default = default if default in choices else "guarded"
+    print("Repair Agent access defaults:", file=stdout)
+    for index, value in enumerate(choices, start=1):
+        marker = " default" if value == default else ""
+        print(f"  {index}. {value}{marker}", file=stdout)
+    while True:
+        answer = input_func(f"Repair Agent access [{default}]: ").strip().lower()
+        if not answer:
+            return default
+        if answer in choices:
+            return answer
+        if answer.isdigit() and 1 <= int(answer) <= len(choices):
+            return choices[int(answer) - 1]
+        print("Please choose guarded, user-shell, or root-shell.", file=stdout)
+
+
+def _prompt_agent_approval(input_func: Callable[[str], str], default: str, stdout) -> str:
+    choices = list(AGENT_APPROVAL_VALUES)
+    default = default if default in choices else "each-command"
+    print("Repair Agent command approval defaults:", file=stdout)
+    for index, value in enumerate(choices, start=1):
+        marker = " default" if value == default else ""
+        print(f"  {index}. {value}{marker}", file=stdout)
+    while True:
+        answer = input_func(f"Repair Agent approval [{default}]: ").strip().lower()
+        if not answer:
+            return default
+        if answer in choices:
+            return answer
+        if answer.isdigit() and 1 <= int(answer) <= len(choices):
+            return choices[int(answer) - 1]
+        print("Please choose each-command, whole-plan, or session.", file=stdout)
+
+
+def _prompt_agent_output(input_func: Callable[[str], str], default: str, stdout) -> str:
+    choices = list(AGENT_OUTPUT_VALUES)
+    default = default if default in choices else "redacted"
+    print("Repair Agent terminal-output sharing defaults:", file=stdout)
+    for index, value in enumerate(choices, start=1):
+        marker = " default" if value == default else ""
+        print(f"  {index}. {value}{marker}", file=stdout)
+    while True:
+        answer = input_func(f"Repair Agent output sharing [{default}]: ").strip().lower()
+        if not answer:
+            return default
+        if answer in choices:
+            return answer
+        if answer.isdigit() and 1 <= int(answer) <= len(choices):
+            return choices[int(answer) - 1]
+        print("Please choose redacted or full.", file=stdout)
 
 
 def _prompt_recovery_wifi_profiles(input_func: Callable[[str], str], default: str, stdout) -> str:

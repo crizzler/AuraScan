@@ -32,6 +32,91 @@ preconditions are refreshed before execution. Its reports, retry state, and
 notification text are private to the user under
 `~/.local/state/aurascan/` with `0700` directories and `0600` files.
 
+## Foreground Contextual Follow-Up
+
+Interactive upgrade, incident, maintenance, and config-drift workflows may open
+the contextual assistant when ordinary network AI is enabled. A session allows
+at most eight questions and twelve provider requests. Each request contains no
+more than 12,000 characters assembled from a bounded redacted source result,
+the current redacted question, and a trimmed in-memory conversation.
+
+AuraScan accepts only known fact, probe, and verified action IDs from strict AI
+JSON. Provider-supplied commands, scripts, paths, package targets, service
+names, file edits, and unknown IDs are discarded. A requested action is rebuilt
+from current local state, previewed, and confirmed separately. Parent `--yes`
+options do not authorize follow-up actions.
+
+Redacted source contexts are stored under
+`~/.local/state/aurascan/follow-up/` in a `0700` directory with `0600` files.
+They are fingerprinted, retained for at most 30 days or 50 records, and rejected
+if their content or permissions change unexpectedly. Follow-up questions,
+answers, provider payloads, keys, and local command output are never persisted
+there.
+
+Config contents and diffs remain excluded unless the originating config-drift
+run explicitly allowed redacted AI diff sharing. JSON, `--yes`, `--no-ai`,
+non-interactive, pacman-hook, root-collector, background-service, and recovery
+runtime paths do not open contextual chat.
+
+Hardware-related questions can trigger a foreground read-only hardware probe
+before the first provider request. Its normalized facts may contain CPU, GPU,
+RAM capacity and DIMM topology, mainboard and BIOS model/version, driver and
+microcode versions, temperatures, fan states, memory pressure, repository
+version comparisons, `fwupd` update availability, and category counts for
+current-boot hardware errors. The existing AI consent and redacted/facts-only
+policy applies to these facts.
+
+AuraScan does not read or transmit system serial numbers, board serial numbers,
+UUIDs, asset tags, raw firmware tables, or raw SPD/I2C memory data. Exact RAM
+timings are marked unavailable when SMBIOS does not expose them. Hardware
+package and firmware checks are read-only; they do not synchronize pacman's
+active databases, flash firmware, or install drivers. Offline boot and weekly
+collectors gather only static `/proc` and `/sys` inventory and do not run these
+foreground commands or contact a network.
+
+## Foreground Full-Control Repair Agent
+
+The Repair Agent is disabled beyond `guarded` tools unless the user configures
+`user-shell` or `root-shell`. It runs only in an interactive foreground
+terminal. Root collectors, background services, pacman hooks, JSON workflows,
+and the recovery environment cannot invoke it.
+
+The model receives the retained redacted AuraScan context, the current
+redacted question, a bounded in-memory conversation, and bounded terminal
+results. Terminal output is redacted by default. Sending bounded raw output
+requires typing `SHARE FULL TERMINAL OUTPUT` for that session. The model sees
+at most 32 KiB per command and 128 KiB per session, within a 12,000-character
+request. API keys and other AuraScan secrets are omitted from the executor's
+minimal environment.
+
+`user-shell` commands run as the logged-in user. `root-shell` requires a
+root-owned policy opt-in plus the exact phrase
+`GRANT AI FULL ROOT CONTROL` for every session. The provider and unprivileged
+assistant keep the API credential; the root broker receives no provider
+configuration. Root capabilities are stored under `/run/aurascan-agent/`,
+expire quickly, and are bound to the UID, originating process/start time,
+terminal, retained-context fingerprint, and approval ceiling.
+
+Before root execution, AuraScan creates a validated Btrfs/Snapper snapshot when
+supported. Continuing without one requires typing
+`CONTINUE WITHOUT ROLLBACK`. Snapshots cannot protect other disks, firmware,
+credentials, networking, remote services, or every local configuration.
+
+User audit records are stored under `~/.local/state/aurascan/agent/`; root
+manifests are stored under `/var/lib/aurascan/agent/`. Directories use `0700`
+and files use `0600`. They contain command hashes, redacted command renderings,
+approval metadata, exit status, snapshot state, and bounded redacted output.
+They do not intentionally retain API keys, questions, or AI answers and are
+limited to 30 days or 50 sessions.
+
+Unrestricted root mode is user-authorized remote code execution. After a root
+command starts, it can alter AuraScan, read credentials, disable auditing,
+escape best-effort process controls, or send data over the network. No
+in-process policy can guarantee privacy or containment against authority that
+broad. The typed grants and audits prevent accidental activation; they do not
+make unrestricted root execution safe.
+Unrestricted root commands can defeat these software boundaries.
+
 ## Safe Autopilot
 
 `aurascan-incident-safe-autopilot.service` runs as root without network access

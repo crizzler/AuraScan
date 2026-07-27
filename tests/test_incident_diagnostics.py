@@ -76,6 +76,26 @@ def test_probe_discovery_is_opaque_bounded_and_round_trips_schema_13():
     assert restored.diagnostic_probes[0].to_dict() == probes[0].to_dict()
 
 
+def test_probe_discovery_keeps_transient_desktop_crash_evidence_without_restart_probe():
+    unit = "app-chromium@a9c0020e71574cab9a7e6c9aef0e798e.service"
+    report = minimal_report(evidence=[
+        IncidentEvidence(
+            "iev-transient",
+            "systemctl-user",
+            "failed",
+            unit=unit,
+        )
+    ])
+
+    probes = discover_diagnostic_probes(report)
+
+    assert not any(
+        probe.probe_type in {"failed_service", "service_package_integrity"}
+        and probe.target.get("unit") == unit
+        for probe in probes
+    )
+
+
 def test_schema_12_report_loads_without_probe_fields():
     payload = minimal_report().to_dict()
     payload["schema"] = "incident_report/1.2"

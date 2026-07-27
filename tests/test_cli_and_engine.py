@@ -130,6 +130,8 @@ def test_setup_commands_are_mentioned_in_help():
     assert "aurascan doctor" in help_text
     assert "aurascan upgrade" in help_text
     assert "aurascan config-drift" in help_text
+    assert "aurascan ask" in help_text
+    assert "aurascan agent" in help_text
 
 
 def test_init_subcommand_dispatches_before_scan_parser(monkeypatch):
@@ -171,6 +173,32 @@ def test_config_drift_subcommand_dispatches_before_scan_parser(monkeypatch):
     assert calls == [["--dry-run"]]
 
 
+def test_ask_subcommand_dispatches_before_scan_parser(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "load_env", lambda: None)
+    monkeypatch.setattr(cli, "run_ask", lambda argv: calls.append(argv) or 0)
+
+    try:
+        cli.main(["ask", "--latest"])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    assert calls == [["--latest"]]
+
+
+def test_agent_subcommand_dispatches_before_scan_parser(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "load_env", lambda: None)
+    monkeypatch.setattr(cli, "run_agent", lambda argv: calls.append(argv) or 0)
+
+    try:
+        cli.main(["agent", "--latest", "--access", "guarded"])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    assert calls == [["--latest", "--access", "guarded"]]
+
+
 def test_service_command_environment_keeps_ai_credentials_out_of_root_jobs(monkeypatch, tmp_path):
     calls = []
     user_config = tmp_path / ".env"
@@ -179,6 +207,9 @@ def test_service_command_environment_keeps_ai_credentials_out_of_root_jobs(monke
 
     cli.load_command_environment(["incidents", "--last-boot", "--capture-monitor"])
     cli.load_command_environment(["incidents", "--capture-safe-autopilot"])
+    cli.load_command_environment(["agent", "--issue-root-session", "/tmp/request"])
+    cli.load_command_environment(["agent", "--execute-request", "/tmp/request"])
+    cli.load_command_environment(["agent", "--set-root-policy", "1"])
     assert calls == []
 
     cli.load_command_environment(["incidents", "--background-assist"])

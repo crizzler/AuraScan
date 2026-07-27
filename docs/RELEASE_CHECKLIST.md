@@ -73,7 +73,8 @@ candidate.
   probes plus root-side preconditions before any confirmed execution.
 - Safe Autopilot defaults to `off`, has no network or AI credentials, and
   accepts only stale-lock and verified mirrorlist restoration recipes.
-- AI output cannot authorize, create, execute, or mark a repair successful.
+- Background, guarded incident, and Safe Autopilot AI output cannot authorize,
+  create, execute, or mark a repair successful.
 - Safe Autopilot refuses incomplete/HIGH-risk reports, limits each run to two
   actions, and enforces a 24-hour identical-action cooldown.
 - Weekly checkpoint is root-only; public status contains timing and collection
@@ -87,8 +88,43 @@ candidate.
   repaired findings from reviewed historical evidence.
 - Incident repair actions are allowlisted and freshly revalidated as root.
 - AI-generated commands and fabricated incident evidence/action IDs are
-  rejected.
+  rejected outside an explicitly granted foreground Repair Agent shell session.
 - Fabricated diagnostic probe IDs and provider-supplied targets are rejected.
+- Follow-up contexts are private, fingerprinted, redacted before persistence,
+  and retained for no more than 30 days or 50 records.
+- Follow-up AI accepts only known fact, probe, and action IDs; provider-supplied
+  executable fields and unknown IDs are discarded.
+- Hardware-aware follow-up runs only in an opted-in foreground AI workflow,
+  uses bounded read-only probes, excludes serials/UUIDs/raw SPD data, and does
+  not install drivers or firmware.
+- Offline incident collectors do not execute foreground hardware commands,
+  refresh firmware metadata, or contact the network.
+- Transient desktop application units are retained as crash evidence but are
+  never prepared as persistent service-restart repairs.
+- Follow-up sessions enforce eight-question, twelve-request, and
+  12,000-character request bounds.
+- Follow-up actions refresh deterministic state, show one separate
+  confirmation, and are never authorized by a parent `--yes`.
+- JSON, non-interactive, `--yes`, `--no-ai`, hook, root collector, background
+  service, and recovery runtime paths do not open follow-up chat.
+- Repair Agent defaults to `guarded`; user-shell and root-shell require explicit
+  user configuration and an interactive foreground terminal.
+- Root-shell also requires a safe root-owned policy, package-managed helper,
+  exact typed per-session grant, short-lived PID/start-time/TTY/context-bound
+  capability, and a snapshot or exact typed rollback waiver.
+- `--yes`, JSON, noninteractive, hook, collector, background, and recovery paths
+  cannot start Repair Agent command execution.
+- Root executor requests are regular `0600` files owned by the invoking user,
+  bounded in size, schema-validated, capability-bound, and limited to 30
+  commands per session.
+- Root broker environment contains no AI key or provider configuration. User
+  and root audits are private, bounded, redacted, and retention-limited.
+- Raw terminal output sharing requires a separate exact phrase and remains
+  bounded to 32 KiB per command and 128 KiB per session.
+- Documentation explicitly states that unrestricted root is user-authorized
+  remote code execution and can defeat AuraScan safeguards after execution.
+- The warning uses the phrase "user-authorized remote code execution" without
+  presenting snapshots, auditing, or process termination as containment.
 - Recovery image installation is explicit, staged, fully validated, and atomic;
   package installation never modifies an ESP or bootloader.
 - The complete UKI and ISO are scanned to ensure no API key, Wi-Fi profile,
@@ -117,6 +153,9 @@ candidate.
 - "No new dependencies" is not treated as proof that scanning can be skipped.
 - Package installation does not build or enable AuraScan Recovery; the wizard
   offers it only after compatibility checks pass.
+- Repair Agent access defaults to `guarded`, approval defaults to
+  `each-command`, output sharing defaults to `redacted`, and root policy
+  defaults to disabled.
 
 ## Packaging Metadata
 
@@ -165,6 +204,8 @@ candidate.
 - README explains privacy expectations.
 - README explains incident evidence bounds, redaction, AI opt-in behavior, and
   the repair allowlist boundary.
+- README and privacy documentation explain contextual follow-up retention,
+  request bounds, AI ID validation, and separate action confirmation.
 - README explains false positives and manual review.
 - Generated report hygiene is documented.
 - MIT license is present.

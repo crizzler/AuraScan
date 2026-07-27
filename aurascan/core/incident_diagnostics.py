@@ -10,6 +10,7 @@ from aurascan.core.incident_repairs import (
     RECIPE_ORDER,
     SAFE_NAME_RE,
     SAFE_UNIT_RE,
+    is_transient_application_unit,
     parse_package_owner,
     plan_dkms_autoinstall,
     plan_exact_package_reinstall,
@@ -143,6 +144,8 @@ def discover_diagnostic_probes(report: IncidentReport) -> List[DiagnosticProbe]:
         key = (item.unit, item.source == "systemctl-user")
         failed_units.setdefault(key, []).append(item.evidence_id)
     for (unit, user_service), evidence_ids in list(sorted(failed_units.items()))[:4]:
+        if user_service and is_transient_application_unit(unit):
+            continue
         target = {"unit": unit, "user_service": user_service}
         add(make_probe(
             "failed_service",
@@ -343,6 +346,21 @@ def _execute_probe(
             return "failed", f"systemctl could not verify the current failed state of {unit}.", []
         if state.stdout.strip() != "failed":
             return "no_action", f"{unit} is no longer in a failed state.", []
+        enabled = run_bounded_command(
+            runner,
+            prefix + ["is-enabled", unit],
+            max_chars=4000,
+            timeout=15,
+        ).stdout.strip()
+        if enabled == "transient" or user_service and is_transient_application_unit(unit):
+            return (
+                "no_action",
+                (
+                    f"{unit} is a transient desktop application unit. AuraScan retained "
+                    "the crash evidence but will not restart it as a persistent service."
+                ),
+                [],
+            )
         action = plan_service_restart(unit, user_service=user_service)
         if action:
             prepared.append(action)

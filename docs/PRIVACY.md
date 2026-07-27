@@ -11,6 +11,26 @@ do not load user AI configuration, contact a provider, or execute a repair.
 They persist bounded redacted reports under `/var/lib/aurascan/incidents/` and
 publish only non-sensitive marker/status fields needed by the tray.
 
+## Package Security Intelligence
+
+`aurascan security-audit` uses a packaged, SHA-256-validated snapshot of known
+AUR campaign package names. `--refresh` requests only the manifest's HTTPS
+plain-text list, caps it at 2 MiB and 20,000 valid names, rejects shell syntax,
+and stores the validated response under
+`~/.local/state/aurascan/security-intel/` with `0700`/`0600` permissions.
+AuraScan never executes the upstream incident script.
+
+The local audit reads installed package names/versions, at most the newest 4 MiB
+from each supported pacman history log, and only direct package-directory names
+from bounded AUR helper caches. It does not upload these facts to AI. Its JSON
+report contains matching package names and bounded matching history records, so
+users should treat that report as private system-security data.
+
+When installed, `arch-audit` contacts the Arch Security Tracker according to its
+own network behavior and returns official advisory JSON to AuraScan. `--offline`
+skips that request. Campaign and advisory findings remain separate, and neither
+source authorizes automatic package removal or host cleanup.
+
 ## Logged-In AI Assistant
 
 `aurascan-incident-assistant.timer` is disabled until a user explicitly enables

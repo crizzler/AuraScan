@@ -29,10 +29,12 @@ from aurascan.core.kernel_module_autopilot import (
     issues_to_findings,
     kernel_module_fix_command,
 )
+from aurascan.core.local_package_db import compare_versions_with_vercmp
 from aurascan.core.models import SCANNER_VERSION, Severity
+from aurascan.core.security_audit import SecurityAuditReport, build_security_audit
 
 
-UPGRADE_PREFLIGHT_SCHEMA_VERSION = "1.2"
+UPGRADE_PREFLIGHT_SCHEMA_VERSION = "1.3"
 EXIT_PREFLIGHT_UNAVAILABLE = 20
 EXIT_USER_DECLINED = 21
 EXIT_PREFLIGHT_DISABLED = 22
@@ -371,6 +373,7 @@ class UpgradePreflightReport:
     ai_review: Dict[str, object] = field(default_factory=dict)
     kernel_module_check: Optional[KernelModuleCheck] = None
     repository_health: Optional[RepositoryHealthCheck] = None
+    security_audit: Optional[SecurityAuditReport] = None
     schema_version: str = UPGRADE_PREFLIGHT_SCHEMA_VERSION
     scanner_version: str = SCANNER_VERSION
 
@@ -424,6 +427,7 @@ class UpgradePreflightReport:
             "system_snapshot": self.snapshot.to_dict(),
             "kernel_module_check": self.kernel_module_check.to_dict() if self.kernel_module_check else {"enabled": False, "status": "not_run"},
             "repository_health": self.repository_health.to_dict() if self.repository_health else {"enabled": False, "status": "not_run"},
+            "security_audit": self.security_audit.to_dict() if self.security_audit else {"enabled": False, "status": "not_run"},
             "findings": [finding.to_dict() for finding in self.findings],
             "ai_review": dict(self.ai_review),
         }
@@ -497,6 +501,15 @@ class UpgradePreflightReport:
         lines: List[str] = []
         if self.repository_health and self.repository_health.issues:
             lines.append(f"Repository health: {self.repository_health.summary}.")
+        if self.security_audit:
+            campaign_count = len(self.security_audit.campaign_findings)
+            advisory_count = len(self.security_audit.official_vulnerability_findings)
+            if campaign_count:
+                lines.append(f"Security audit: {campaign_count} known AUR campaign match(es) require attention.")
+            elif advisory_count:
+                lines.append(f"Security audit: no known AUR campaign match; {advisory_count} official package advisory finding(s).")
+            else:
+                lines.append("Security audit: no known AUR campaign match detected.")
         if self.kernel_module_check and self.kernel_module_check.enabled:
             lines.append(f"Kernel/module check: {self.kernel_module_check.summary}.")
         if self.snapshot.foreign_packages:
@@ -538,6 +551,7 @@ class UpgradeOptions:
     config_drift_ai_diffs: bool = False
     kernel_module_autopilot_enabled: bool = True
     trusted_handoff_enabled: bool = True
+    security_audit_enabled: bool = True
     config_error: str = ""
     config_drift_error: str = ""
 
@@ -555,6 +569,7 @@ def build_upgrade_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-config-drift", action="store_true", help="skip the config drift assistant before and after the upgrade")
     parser.add_argument("--no-kernel-module-autopilot", action="store_true", help="skip deterministic kernel/module compatibility autopilot checks")
     parser.add_argument("--no-trusted-handoff", action="store_true", help="keep the package manager's own confirmation prompt even after a passing AuraScan preflight")
+    parser.add_argument("--no-security-audit", action="store_true", help="skip known AUR campaign and optional arch-audit checks")
     parser.add_argument("--config-drift-ai-diffs", action="store_true", help="allow config drift assistant AI to inspect redacted bounded diffs")
     preflight = parser.add_mutually_exclusive_group()
     preflight.add_argument("--enable-preflight", action="store_true", help="run upgrade preflight even if disabled in config")
@@ -631,6 +646,7 @@ def options_from_args(args: argparse.Namespace, env: Optional[Mapping[str, str]]
         config_drift_ai_diffs=config_drift_ai_diffs,
         kernel_module_autopilot_enabled=kernel_module_autopilot_enabled,
         trusted_handoff_enabled=trusted_handoff_enabled,
+        security_audit_enabled=not bool(getattr(args, "no_security_audit", False)),
         config_error=config.error,
         config_drift_error=drift_config.error,
     )
@@ -1265,6 +1281,7 @@ def run_kernel_module_autopilot_fixes(
         report.ai_review = refreshed.ai_review
         report.kernel_module_check = refreshed.kernel_module_check
         report.repository_health = refreshed.repository_health
+        report.security_audit = refreshed.security_audit
         apply_trusted_handoff(report, options)
         print(report.render_terminal(verbose=options.verbose), file=stdout)
     else:
@@ -1639,6 +1656,40 @@ def build_upgrade_unavailable_report(reason: str) -> UpgradePreflightReport:
     )
 
 
+def security_audit_upgrade_findings(
+    security_report: SecurityAuditReport,
+    plan: UpgradePlan,
+    *,
+    version_compare: Callable[[str, str], Optional[int]] = compare_versions_with_vercmp,
+) -> List[UpgradeFinding]:
+    pending_repo = {pkg.name: pkg.new_version for pkg in plan.repo_packages}
+    findings: List[UpgradeFinding] = []
+    for item in security_report.findings:
+        if item.category == "official_vulnerability":
+            planned_version = pending_repo.get(item.package_name, "")
+            fixed_version = next(
+                (value.split("=", 1)[1] for value in item.evidence if value.startswith("fixed=")),
+                "",
+            )
+            if planned_version and fixed_version:
+                comparison = version_compare(planned_version, fixed_version)
+                if comparison is not None and comparison >= 0:
+                    continue
+            if item.severity not in {Severity.HIGH, Severity.CRITICAL}:
+                continue
+        findings.append(UpgradeFinding(
+            rule_id=item.rule_id,
+            severity=item.severity,
+            title=item.title,
+            summary=item.summary,
+            why_it_matters=item.why_it_matters,
+            recommended_action=item.recommended_action,
+            evidence="; ".join(item.evidence[:8]),
+            source=item.source,
+        ))
+    return findings
+
+
 def run_upgrade_preflight(
     options: UpgradeOptions,
     *,
@@ -1667,12 +1718,26 @@ def run_upgrade_preflight(
         kernel_module_autopilot_enabled=options.kernel_module_autopilot_enabled,
         repository_health=repository_health,
     )
+    security_report = None
+    if options.security_audit_enabled:
+        progress("Checking known AUR campaigns and official package advisories.")
+        security_report = build_security_audit(
+            runner=runner,
+            which=which,
+            installed_packages={name: "installed version not collected by upgrade snapshot" for name in system_snapshot.installed_packages},
+            pending_package_names=[pkg.name for pkg in plan.aur_packages],
+            home=None,
+            include_host_indicators=False,
+            include_arch_audit=True,
+        )
+        findings.extend(security_audit_upgrade_findings(security_report, plan))
     report = UpgradePreflightReport(
         plan=plan,
         snapshot=system_snapshot,
         findings=findings,
         kernel_module_check=kernel_module_check,
         repository_health=repository_health,
+        security_audit=security_report,
     )
     if not options.no_ai:
         progress("Requesting AI advisory review.")
@@ -2187,6 +2252,26 @@ def build_upgrade_ai_prompt(report: UpgradePreflightReport) -> str:
         },
         "kernel_module_check": report.kernel_module_check.to_dict() if report.kernel_module_check else {"enabled": False, "status": "not_run"},
         "repository_health": report.repository_health.to_dict() if report.repository_health else {"enabled": False, "status": "not_run"},
+        "security_audit": (
+            {
+                "enabled": True,
+                "status": report.security_audit.status,
+                "campaign": report.security_audit.campaign.to_dict() if report.security_audit.campaign else None,
+                "arch_audit_status": report.security_audit.arch_audit.status,
+                "findings": [
+                    {
+                        "rule_id": item.rule_id,
+                        "severity": item.severity.value,
+                        "category": item.category,
+                        "package_name": item.package_name,
+                        "title": item.title,
+                    }
+                    for item in report.security_audit.sorted_findings()[:20]
+                ],
+            }
+            if report.security_audit
+            else {"enabled": False, "status": "not_run"}
+        ),
         "deterministic_findings": [
             {
                 "rule_id": finding.rule_id,
@@ -2204,6 +2289,7 @@ def build_upgrade_ai_prompt(report: UpgradePreflightReport) -> str:
         "You may only suggest risk raises, never risk reductions. Do not suggest hard blocking.\n"
         "Do not create package commands or package-fix plans; AuraScan's deterministic kernel/module autopilot owns those decisions.\n"
         "Do not propose arbitrary pacman.conf or mirrorlist edits; AuraScan's deterministic repository_health repair owns mirrorlist recovery decisions.\n"
+        "Do not dismiss, lower, or reinterpret deterministic security_audit campaign matches or Arch security advisories.\n"
         "Do not tell the user to manually verify kernel/module compatibility when kernel_module_check status is ok.\n"
         "Do not raise fallback-kernel risk when kernel_module_check.fallback_kernel.available is true.\n"
         "Do not raise replacement/removal risk solely from transaction_changes.metadata_only_replaces; those are package metadata, not installed removals.\n"

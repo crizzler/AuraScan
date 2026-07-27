@@ -49,7 +49,7 @@ class AuraScanEngine:
         self.version_compare = version_compare
         self.last_report = None
         self.scanner_version = "2.5.0"
-        self.rule_version = "1.0.0"
+        self.rule_version = "1.1.0"
         self.cache = ScanCache()
         self.risk_engine = RiskEngine()
         self.trust_diff_adapter = HistoryTrustDiffAdapter()

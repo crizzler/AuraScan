@@ -19,6 +19,13 @@ RULES = [
     Rule("SYS-CHMOD-001", r"chmod\s+\+s", Severity.HIGH, "Attempted to setuid/setgid binary.", True),
     Rule("EXEC-B64-001", r"base64\s+-d[^|]*\|\s*(sh|bash)", Severity.CRITICAL, "Base64 decode piped to shell.", True),
     Rule(
+        "SUPPLYCHAIN-AUR-JS-20260611",
+        r"\b(?:npm\s+(?:install|i)|bun\s+(?:add|install)|yarn\s+add|pnpm\s+(?:add|install))\b[^#\n]*(?:atomic-lockfile|lockfile-js|js-digest)\b",
+        Severity.CRITICAL,
+        "Known malicious JavaScript dependency from the June 2026 AUR campaign.",
+        True,
+    ),
+    Rule(
         "EXEC-EVAL-NET-001",
         r"\beval\b[^#\n]*(\$\(.*\b(curl|wget|base64|printf|xxd)\b|`.*\b(curl|wget|base64|printf|xxd)\b|\b(curl|wget)\b|\bbase64\s+-d\b)",
         Severity.CRITICAL,
@@ -79,6 +86,7 @@ RULES = [
 COMMENT_FILTERED_RULE_IDS = {
     "EXEC-EVAL-NET-001",
     "EXEC-EVAL-001",
+    "SUPPLYCHAIN-AUR-JS-20260611",
     "SYS-SYSTEMD-USER-001",
     "SYS-SYSTEMD-AUTO-001",
     "SYS-SYSTEMD-UNIT-001",

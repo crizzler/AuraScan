@@ -70,6 +70,22 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
         "not_prove": "This does not prove malicious intent; it means the update has enough trust-related movement to deserve manual review.",
         "action": "Review the update before installing. Use --deep-static if you want AuraScan to fetch and inspect declared sources safely.",
     },
+    "SUPPLYCHAIN-AUR-JS-20260611": {
+        "title": "Package invokes a known June 2026 AUR campaign payload.",
+        "summary": "The PKGBUILD or install hook attempts to install a JavaScript package name tied to the June 2026 malicious AUR adoption campaign.",
+        "why": "The Arch AUR incident report identified these dependency names in malicious package changes. Executing the build or install hook could run attacker-controlled JavaScript.",
+        "checked": "AuraScan matched the command and dependency name locally without executing package code or contacting the threat-intelligence source.",
+        "not_prove": "The static match does not prove that the payload executed on this host, but it is strong enough to stop the build.",
+        "action": "Do not build or install this revision. Preserve the AUR commit details and investigate any earlier installation from trusted media.",
+    },
+    "DEEPSTATIC-SUPPLYCHAIN-AUR-JS-20260611": {
+        "title": "Downloaded source contains a known June 2026 AUR campaign payload.",
+        "summary": "A safely acquired source file attempts to install a JavaScript dependency name tied to the June 2026 malicious AUR adoption campaign.",
+        "why": "Source-side install commands can execute attacker-controlled package lifecycle scripts during a build.",
+        "checked": "AuraScan inspected the acquired source as bounded text and did not execute it.",
+        "not_prove": "This match does not prove execution on the host, but the source revision should not be trusted.",
+        "action": "Do not build this source revision. Preserve its provenance and investigate any earlier build from trusted media.",
+    },
     "ARCHIVE-PATH-TRAVERSAL": {
         "title": "Source archive contains unsafe paths.",
         "summary": "AuraScan found archive entries that could try to extract files outside the intended temporary directory.",

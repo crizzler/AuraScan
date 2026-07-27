@@ -11,6 +11,7 @@ from aurascan.core.engine import AuraScanEngine
 from aurascan.core.followup import run_ask
 from aurascan.core.incidents import run_incidents
 from aurascan.core.recovery_cli import run_recovery
+from aurascan.core.security_audit import run_security_audit
 from aurascan.core.upgrade_preflight import run_upgrade
 from aurascan.core.updater_tray import run_updater
 from aurascan.setup_wizard import run_doctor, run_init
@@ -67,6 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Recovery command:\n"
             "  aurascan incidents  Diagnose crashes and prepare guarded system repairs.\n"
             "  aurascan recovery   Manage or enter the optional boot recovery environment.\n\n"
+            "Security command:\n"
+            "  aurascan security-audit  Check known AUR campaigns and official package advisories.\n\n"
             "Follow-up command:\n"
             "  aurascan ask        Ask AI about the latest retained AuraScan result.\n\n"
             "Repair agent command:\n"
@@ -158,6 +161,8 @@ def main(argv=None):
         sys.exit(run_incidents(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "recovery":
         sys.exit(run_recovery(raw_argv[1:]))
+    if raw_argv and raw_argv[0] == "security-audit":
+        sys.exit(run_security_audit(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "updater":
         sys.exit(run_updater(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "ask":

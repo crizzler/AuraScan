@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "campaign_id": "AUR-2026-06-11-MASS-ADOPTION",
+  "title": "June 2026 AUR malicious adoption campaign",
+  "source_url": "https://cscs.pastes.sh/raw/aurvulnlist20260611.txt",
+  "official_reference": "https://archlinux.org/news/active-aur-malicious-packages-incident/",
+  "source_kind": "community-curated",
+  "window_start": "2026-06-09",
+  "window_end": "2026-06-14",
+  "payload_indicators": [
+    "atomic-lockfile",
+    "lockfile-js",
+    "js-digest"
+  ],
+  "source_entry_count": 1937,
+  "package_count": 1935,
+  "package_list_sha256": "37376737ba95c828c8b570ebc7b359fecb801f1cf512d210284de2c6d9372d73",
+  "retrieved_at": "2026-07-27T14:15:00+00:00"
+}

@@ -98,6 +98,7 @@ from aurascan.core.recovery import (
     resolve_recovery_config,
 )
 from aurascan.core.recovery_cli import recovery_status
+from aurascan.core.security_audit import bundled_campaign_doctor_status
 from aurascan.core.upgrade_preflight import (
     UPGRADE_AUR_HELPERS,
     UPGRADE_PREFLIGHT_AI_ENV,
@@ -1714,6 +1715,29 @@ def build_doctor_checks(
             checks.append(DoctorCheck("incident_tray_notification", "warn", "Incident monitoring is enabled, but the AuraScan tray is not fully ready to show automatic crash notifications"))
     else:
         checks.append(DoctorCheck("incident_tray_notification", "ok", "Incident tray notifications are inactive because the boot monitor is disabled"))
+
+    campaign_status = bundled_campaign_doctor_status()
+    if campaign_status.get("ready"):
+        checks.append(DoctorCheck(
+            "security_campaign_intel",
+            "ok",
+            f"Bundled AUR campaign intelligence is validated ({campaign_status.get('package_count')} package names)",
+            campaign_status,
+        ))
+    else:
+        checks.append(DoctorCheck(
+            "security_campaign_intel",
+            "error",
+            f"Bundled AUR campaign intelligence is invalid: {campaign_status.get('error')}",
+            campaign_status,
+        ))
+    arch_audit_path = which("arch-audit")
+    checks.append(DoctorCheck(
+        "security_arch_audit",
+        "ok" if arch_audit_path else "warn",
+        f"arch-audit found at {arch_audit_path}" if arch_audit_path else "arch-audit is not installed; official-package CVE checks are optional and will be skipped",
+        {"path": arch_audit_path, "scope": "official Arch Security Team advisories"},
+    ))
 
     for tool in ("clamscan", "bsdtar", "gpg", "makepkg", "pacman", "vercmp"):
         found = which(tool)

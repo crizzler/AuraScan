@@ -143,6 +143,7 @@ class DeepStaticAnalyzer(BaseAnalyzer):
             ("DEEPSTATIC-SUID-LOGIC", r"(chmod\s+[0-7]*[46][0-7]{2}|chmod\s+\+s|chown\s+root)", Severity.HIGH, "Source file contains suspicious chmod/chown or suid logic."),
             ("DEEPSTATIC-CRON-PERSISTENCE", r"(@reboot|crontab\s+-|/etc/cron)", Severity.HIGH, "Source file contains cron persistence indicators."),
             ("DEEPSTATIC-OBFUSCATED-CODE", r"(fromCharCode|atob\s*\(|\\x[0-9a-fA-F]{2}.*\\x[0-9a-fA-F]{2})", Severity.MEDIUM, "Source file contains obfuscation indicators."),
+            ("DEEPSTATIC-SUPPLYCHAIN-AUR-JS-20260611", r"\b(?:npm\s+(?:install|i)|bun\s+(?:add|install)|yarn\s+add|pnpm\s+(?:add|install))\b[^#\n]*(?:atomic-lockfile|lockfile-js|js-digest)\b", Severity.CRITICAL, "Source file invokes a known malicious JavaScript dependency from the June 2026 AUR campaign."),
         ]
         findings: List[Finding] = self._inspect_systemd_text(path, active_text)
         for rule_id, pattern, severity, explanation in rules:

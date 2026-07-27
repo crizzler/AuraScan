@@ -40,12 +40,15 @@ pre-1.0.
 
 ## What You Can Try Now
 
-AuraScan currently provides eight practical entry points:
+AuraScan currently provides nine practical entry points:
 
 - `aurascan --pkgbuild ./PKGBUILD` reviews package build metadata before trust.
 - `aurascan-makepkg` scans before handing control to `makepkg`.
 - `aurascan upgrade --dry-run` previews an Arch-family upgrade and reports
-  pacman, AUR helper, kernel/module, config drift, and AI-raised risks.
+  pacman, AUR helper, known campaign, kernel/module, config drift, and AI-raised
+  risks.
+- `aurascan security-audit` checks installed packages and pacman history against
+  validated AUR campaign intelligence, plus optional official Arch advisories.
 - `aurascan config-drift --dry-run` explains `.pacnew` and `.pacsave` files and
   prepares safe fixes with backups.
 - `aurascan incidents --dry-run` diagnoses system and application crashes from
@@ -193,7 +196,8 @@ The default scan is conservative and fast. It inspects package metadata,
 PKGBUILD text, declared local install hooks when available, local history, and
 available package archives. It can use deterministic rules, ClamAV when
 available, source metadata checks, local history diffing, and structured risk
-summaries.
+summaries. The separate security audit also checks a validated historical AUR
+campaign snapshot, bounded pacman history, and optional `arch-audit` advisories.
 
 Default scans do not download declared sources, clone upstream repositories,
 fetch PGP keys, run GPG, run makepkg, install packages, or execute package code.
@@ -287,6 +291,40 @@ aurascan --deep-static --pkgbuild ./PKGBUILD
 aurascan --deep-static --offline --no-auto-key-fetch --pkgbuild ./PKGBUILD
 ```
 
+## Security Audit
+
+`aurascan security-audit` correlates installed package names and bounded pacman
+history with packaged AUR campaign intelligence. AuraScan ships a validated
+snapshot of the community-maintained June 2026 incident list and labels its
+provenance clearly. It parses package names as data and never executes the
+upstream shell script.
+
+```bash
+aurascan security-audit
+aurascan security-audit --verbose
+aurascan security-audit --json
+aurascan security-audit --refresh
+aurascan security-audit --offline
+```
+
+`--refresh` downloads only the bounded HTTPS plain-text list, validates every
+package name, hashes it, and stores it in private user state. A failed refresh
+keeps the last validated packaged or cached list. Do not substitute a
+`curl | bash` workflow.
+
+When the optional `arch-audit` command is installed, AuraScan also imports its
+strict JSON output. Those findings are shown separately because `arch-audit`
+uses official Arch Security Team advisories for repository packages; it is not
+an AUR-malware list. During `aurascan upgrade`, known campaign checks run by
+default and official HIGH/CRITICAL advisories are raised only when the pending
+repository transaction does not already include the affected package.
+
+A package-name-only match is MEDIUM because cleaned packages can later be
+legitimate. A matching pacman install/upgrade event inside the campaign window
+is CRITICAL exposure evidence, but still not proof that the exact malicious
+commit executed. AuraScan does not automatically remove packages or claim to
+clean a potentially compromised host.
+
 ## Upgrade Preflight
 
 `aurascan upgrade` is an optional first-class upgrade front door for
@@ -303,6 +341,7 @@ aurascan upgrade --aur-helper shelly
 aurascan upgrade --no-ai
 aurascan upgrade --no-config-drift
 aurascan upgrade --no-kernel-module-autopilot
+aurascan upgrade --no-security-audit
 ```
 
 The repo-package preview uses pacman, and the final repo-only handoff is:
@@ -325,7 +364,8 @@ Upgrade preflight is not a safety guarantee. It checks for practical pitfalls
 such as low `/boot` or root space, CachyOS kernel movement when CachyOS kernel
 packages are installed, initramfs or
 bootloader-sensitive updates, ignored packages that can create partial
-upgrades, replacements/conflicts, AUR rebuild risk, local foreign-package
+upgrades, replacements/conflicts, known AUR campaign exposure, unresolved
+official HIGH/CRITICAL package advisories, AUR rebuild risk, local foreign-package
 dependency/conflict metadata, and pending `.pacnew`/`.pacsave` config drift. A
 clean preflight means AuraScan did not find these signals; pacman, hooks,
 packages, or local configuration can still fail.

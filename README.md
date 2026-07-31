@@ -352,13 +352,15 @@ sudo pacman -Syu
 
 When `paru`, `yay`, or `shelly` is selected or auto-detected, AuraScan also
 queries AUR updates and hands off to that helper. `paru` and `yay` use `-Syu`;
-Shelly uses `shelly upgrade-all --no-flatpak --no-appimage` so the handoff
-matches AuraScan's repo/AUR preflight scope. After a passing preflight, AuraScan
-may add the helper's no-confirm option so the already-approved upgrade does not
-ask a second default-no question; use `--no-trusted-handoff` to keep the helper
-confirmation prompt. If no supported helper is available, AuraScan still warns
-about installed foreign packages that may need rebuilds after library, kernel,
-compiler, Python, Qt, or Electron updates.
+Shelly 3 uses `shelly upgrade all --no-flatpak --no-appimage`; AuraScan detects
+and retains the older `shelly upgrade-all` syntax for Shelly 2 installations.
+This keeps the handoff aligned with AuraScan's repo/AUR preflight scope. After a
+passing preflight, AuraScan may add the helper's no-confirm option so the
+already-approved upgrade does not ask a second default-no question; use
+`--no-trusted-handoff` to keep the helper confirmation prompt. If no supported
+helper is available, AuraScan still warns about installed foreign packages that
+may need rebuilds after library, kernel, compiler, Python, Qt, or Electron
+updates.
 
 Upgrade preflight is not a safety guarantee. It checks for practical pitfalls
 such as low `/boot` or root space, CachyOS kernel movement when CachyOS kernel

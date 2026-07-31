@@ -231,9 +231,12 @@ def test_strict_response_discards_unknown_ids_and_command_fields():
 
 def test_two_pass_session_runs_known_probe_then_defers_known_action(tmp_path):
     calls = []
+    prompts = []
 
-    def urlopen(_request, timeout):
+    def urlopen(request, timeout):
         calls.append(timeout)
+        body = json.loads(request.data.decode("utf-8"))
+        prompts.append(body["messages"][0]["content"])
         if len(calls) == 1:
             return provider_response({
                 "answer": "I need one local check.",
@@ -272,7 +275,57 @@ def test_two_pass_session_runs_known_probe_then_defers_known_action(tmp_path):
     assert result.actions_prepared == ["action-one"]
     assert calls == [60, 60]
     assert "Running 1 bounded local verification check" in stdout.getvalue()
+    assert "Local verification result" in stdout.getvalue()
+    assert "Repair verified." in stdout.getvalue()
+    assert '"available_probes": []' in prompts[1]
+    assert "final review after the local probe_results" in prompts[1]
     assert "workflow confirmation that follows" in stdout.getvalue()
+
+
+def test_final_probe_review_rejects_a_repeated_probe_request(tmp_path):
+    calls = []
+
+    def urlopen(_request, timeout):
+        calls.append(timeout)
+        if len(calls) == 1:
+            return provider_response({
+                "answer": "I need one local check.",
+                "referenced_fact_ids": ["fact-one"],
+                "requested_probe_ids": ["probe-one"],
+                "requested_action_ids": [],
+            })
+        return provider_response({
+            "answer": "I will request the local check now.",
+            "referenced_fact_ids": ["fact-one"],
+            "requested_probe_ids": ["probe-one"],
+            "requested_action_ids": [],
+        })
+
+    def run_probes(current, probe_ids):
+        assert probe_ids == ["probe-one"]
+        return current, [
+            FollowUpProbeResult("probe-one", "ok", "The local check already completed.")
+        ]
+
+    answers = iter(["Investigate this.", ""])
+    stdout = io.StringIO()
+    result = run_followup_session(
+        context(),
+        runtime=FollowUpRuntime(run_probes=run_probes),
+        input_func=lambda _prompt: next(answers),
+        stdout=stdout,
+        stderr=stdout,
+        env=ai_env(tmp_path),
+        urlopen=urlopen,
+        context_root=tmp_path / "contexts",
+    )
+
+    output = stdout.getvalue()
+    assert result.provider_requests == 2
+    assert result.provider_failed is True
+    assert "The local check already completed." in output
+    assert "AI review did not complete, but AuraScan's local verification did." in output
+    assert "I will request the local check now." not in output
 
 
 def test_hardware_question_collects_local_context_before_first_ai_request(tmp_path):

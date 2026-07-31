@@ -178,7 +178,19 @@ def test_resolve_aur_helper_prefers_paru_then_yay():
 
 def test_resolve_aur_helper_auto_detects_shelly_after_paru_yay():
     assert resolve_aur_helper("auto", which=lambda name: "/usr/bin/shelly" if name == "shelly" else None) == ("shelly", "")
-    assert helper_upgrade_command("shelly") == ["shelly", "upgrade-all", "--no-flatpak", "--no-appimage"]
+    assert helper_upgrade_command("shelly") == [
+        "shelly",
+        "upgrade",
+        "all",
+        "--no-flatpak",
+        "--no-appimage",
+    ]
+    assert helper_upgrade_command("shelly", shelly_modern=False) == [
+        "shelly",
+        "upgrade-all",
+        "--no-flatpak",
+        "--no-appimage",
+    ]
 
 
 def test_upgrade_options_default_to_enabled_and_read_env():
@@ -259,14 +271,73 @@ def test_build_upgrade_plan_uses_helper_and_parses_aur_updates():
 def test_build_upgrade_plan_uses_shelly_and_parses_json_aur_updates():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
-        ("shelly", "check-updates", "--aur", "--json"): completed('{"Packages":[],"Aur":[{"Name":"demo-bin","OldVersion":"1","Version":"2"}]}\n'),
+        ("shelly", "--version"): completed("3.0.1\n"),
+        ("shelly", "list-updates", "aur", "--json"): completed('[{"Name":"demo-bin","OldVersion":"1","Version":"2"}]\n'),
     })
 
     plan = build_upgrade_plan(UpgradeOptions(aur_helper="shelly"), runner=runner, which=lambda name: "/usr/bin/shelly" if name == "shelly" else None)
 
     assert plan.selected_helper == "shelly"
-    assert plan.final_command == ["shelly", "upgrade-all", "--no-flatpak", "--no-appimage"]
+    assert plan.final_command == [
+        "shelly",
+        "upgrade",
+        "all",
+        "--no-flatpak",
+        "--no-appimage",
+    ]
     assert plan.aur_packages[0].name == "demo-bin"
+
+
+def test_build_upgrade_plan_supports_legacy_shelly_cli():
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+        ("shelly", "--version"): completed("2.4.0\n"),
+        ("shelly", "check-updates", "--aur", "--json"): completed(
+            '{"Packages":[],"Aur":[]}\n'
+        ),
+    })
+
+    plan = build_upgrade_plan(
+        UpgradeOptions(aur_helper="shelly"),
+        runner=runner,
+        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
+    )
+
+    assert plan.helper_error == ""
+    assert plan.final_command == [
+        "shelly",
+        "upgrade-all",
+        "--no-flatpak",
+        "--no-appimage",
+    ]
+
+
+def test_shelly_query_syntax_fallback_updates_final_handoff():
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+        ("shelly", "--version"): completed("version unavailable\n"),
+        ("shelly", "list-updates", "aur", "--json"): completed(
+            stderr="Unrecognized command 'list-updates'.",
+            returncode=1,
+        ),
+        ("shelly", "check-updates", "--aur", "--json"): completed(
+            '{"Packages":[],"Aur":[]}\n'
+        ),
+    })
+
+    plan = build_upgrade_plan(
+        UpgradeOptions(aur_helper="shelly"),
+        runner=runner,
+        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
+    )
+
+    assert plan.helper_error == ""
+    assert plan.final_command == [
+        "shelly",
+        "upgrade-all",
+        "--no-flatpak",
+        "--no-appimage",
+    ]
 
 
 def test_explicit_missing_helper_makes_preflight_unavailable():
@@ -765,8 +836,9 @@ def test_upgrade_yes_runs_final_command():
 def test_shelly_passing_preflight_uses_trusted_handoff_no_confirm():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
-        ("shelly", "check-updates", "--aur", "--json"): completed('{"Packages":[],"Aur":[]}\n'),
-        ("shelly", "upgrade-all", "--no-flatpak", "--no-appimage", "--no-confirm"): completed(returncode=0),
+        ("shelly", "--version"): completed("3.0.1\n"),
+        ("shelly", "list-updates", "aur", "--json"): completed("[]\n"),
+        ("shelly", "upgrade", "all", "--no-flatpak", "--no-appimage", "--no-confirm"): completed(returncode=0),
         installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
     })
     stdout = io.StringIO()
@@ -780,8 +852,8 @@ def test_shelly_passing_preflight_uses_trusted_handoff_no_confirm():
     )
 
     assert status == 0
-    assert ["shelly", "upgrade-all", "--no-flatpak", "--no-appimage", "--no-confirm"] in runner.calls
-    assert "Planned command: shelly upgrade-all --no-flatpak --no-appimage --no-confirm" in stdout.getvalue()
+    assert ["shelly", "upgrade", "all", "--no-flatpak", "--no-appimage", "--no-confirm"] in runner.calls
+    assert "Planned command: shelly upgrade all --no-flatpak --no-appimage --no-confirm" in stdout.getvalue()
     assert "second default-no prompt" in stdout.getvalue()
     assert "Package-manager handoff" in stdout.getvalue()
     assert "configured repositories, not AuraScan" in stdout.getvalue()
@@ -792,8 +864,9 @@ def test_shelly_passing_preflight_uses_trusted_handoff_no_confirm():
 def test_shelly_high_risk_preflight_keeps_helper_confirmation():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
-        ("shelly", "check-updates", "--aur", "--json"): completed('{"Packages":[],"Aur":[]}\n'),
-        ("shelly", "upgrade-all", "--no-flatpak", "--no-appimage"): completed(returncode=0),
+        ("shelly", "--version"): completed("3.0.1\n"),
+        ("shelly", "list-updates", "aur", "--json"): completed("[]\n"),
+        ("shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"): completed(returncode=0),
         installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
     })
 
@@ -806,15 +879,16 @@ def test_shelly_high_risk_preflight_keeps_helper_confirmation():
     )
 
     assert status == 0
-    assert ["shelly", "upgrade-all", "--no-flatpak", "--no-appimage"] in runner.calls
-    assert ["shelly", "upgrade-all", "--no-flatpak", "--no-appimage", "--no-confirm"] not in runner.calls
+    assert ["shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"] in runner.calls
+    assert ["shelly", "upgrade", "all", "--no-flatpak", "--no-appimage", "--no-confirm"] not in runner.calls
 
 
 def test_shelly_trusted_handoff_can_be_disabled():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
-        ("shelly", "check-updates", "--aur", "--json"): completed('{"Packages":[],"Aur":[]}\n'),
-        ("shelly", "upgrade-all", "--no-flatpak", "--no-appimage"): completed(returncode=0),
+        ("shelly", "--version"): completed("3.0.1\n"),
+        ("shelly", "list-updates", "aur", "--json"): completed("[]\n"),
+        ("shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"): completed(returncode=0),
         installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
     })
 
@@ -827,8 +901,8 @@ def test_shelly_trusted_handoff_can_be_disabled():
     )
 
     assert status == 0
-    assert ["shelly", "upgrade-all", "--no-flatpak", "--no-appimage"] in runner.calls
-    assert ["shelly", "upgrade-all", "--no-flatpak", "--no-appimage", "--no-confirm"] not in runner.calls
+    assert ["shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"] in runner.calls
+    assert ["shelly", "upgrade", "all", "--no-flatpak", "--no-appimage", "--no-confirm"] not in runner.calls
 
 
 def test_upgrade_yes_runs_config_drift_before_and_after_when_root_is_explicit():
@@ -995,7 +1069,7 @@ def test_failed_upgrade_diagnoses_mirror_notfound():
             if list(cmd) == preview_cmd():
                 self.calls.append(list(cmd))
                 return completed("luajit\t2.1-1\textra\t1\t\t\t\n")
-            if list(cmd) == ["shelly", "upgrade-all", "--no-flatpak", "--no-appimage", "--no-confirm"]:
+            if list(cmd) == ["shelly", "upgrade", "all", "--no-flatpak", "--no-appimage", "--no-confirm"]:
                 self.calls.append(list(cmd))
                 return completed(returncode=1)
             if len(cmd) >= 5 and list(cmd[:3]) == ["pacman", "-Sp", "--cachedir"]:
@@ -1007,7 +1081,8 @@ def test_failed_upgrade_diagnoses_mirror_notfound():
         raise HTTPError(req.full_url, 404, "Not Found", {}, None)
 
     runner = UrlRunner({
-        ("shelly", "check-updates", "--aur", "--json"): completed('{"Packages":[],"Aur":[]}\n'),
+        ("shelly", "--version"): completed("3.0.1\n"),
+        ("shelly", "list-updates", "aur", "--json"): completed("[]\n"),
     })
     stdout = io.StringIO()
 

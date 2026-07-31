@@ -1049,14 +1049,24 @@ def build_followup_ai_prompt(
     *,
     facts_only: bool = False,
     probe_results: Sequence[FollowUpProbeResult] = (),
+    allow_probe_requests: bool = True,
 ) -> str:
     instructions = (
         "You are AuraScan's contextual assistant for Arch-family Linux systems.\n"
         "Answer only from the supplied bounded redacted facts and conversation.\n"
         "Be calm, direct, and honest about uncertainty. Never claim that a system, package, or repair is guaranteed safe.\n"
-        "You may request only known opaque probe IDs and known verified action IDs supplied below.\n"
         "Never create or suggest shell commands, scripts, package targets, file paths, file edits, service names, bootloader changes, reboots, or arbitrary repairs.\n"
         "Do not claim an action ran or succeeded. AuraScan's deterministic code owns all validation, confirmation, and execution.\n"
+        + (
+            "You may request only known opaque probe IDs and known verified action IDs supplied below.\n"
+            if allow_probe_requests
+            else (
+                "This is the final review after the local probe_results below already ran. "
+                "Explain those completed results now, use requested_probe_ids=[], and never say that you will request or run another probe.\n"
+                "You may recommend only known verified action IDs supplied below.\n"
+            )
+        )
+        +
         "Return strict JSON only with this shape:\n"
         "{\"answer\":\"plain-language answer\",\"referenced_fact_ids\":[\"known fact id\"],\"requested_probe_ids\":[\"known probe id\"],\"requested_action_ids\":[\"known action id\"]}\n\n"
     )
@@ -1082,7 +1092,11 @@ def build_followup_ai_prompt(
             "privacy_mode": "facts-only" if facts_only else context.privacy_mode,
         },
         "facts": facts,
-        "available_probes": [item.to_dict() for item in context.probes],
+        "available_probes": (
+            [item.to_dict() for item in context.probes]
+            if allow_probe_requests
+            else []
+        ),
         "available_actions": [item.to_dict() for item in context.actions if item.verified],
         "probe_results": [item.to_dict() for item in probe_results],
         "conversation": [item.to_ai_dict() for item in turns],
@@ -1111,6 +1125,8 @@ def build_followup_ai_prompt(
 def validate_followup_ai_response(
     context: FollowUpContext,
     data: Mapping[str, object],
+    *,
+    allow_probe_requests: bool = True,
 ) -> FollowUpResponse:
     if not isinstance(data.get("answer"), str):
         raise ValueError("follow-up response answer must be a string")
@@ -1120,10 +1136,16 @@ def validate_followup_ai_response(
     known_facts = {item.fact_id for item in context.facts}
     known_probes = {item.probe_id for item in context.probes}
     known_actions = {item.action_id for item in context.actions if item.verified}
+    if not allow_probe_requests and data.get("requested_probe_ids"):
+        raise ValueError("final follow-up review cannot request additional probes")
     return FollowUpResponse(
         answer=redact_followup_text(str(data.get("answer") or ""))[:FOLLOWUP_MAX_ANSWER_CHARS],
         referenced_fact_ids=_known_unique_ids(data.get("referenced_fact_ids"), known_facts, 20),
-        requested_probe_ids=_known_unique_ids(data.get("requested_probe_ids"), known_probes, 6),
+        requested_probe_ids=(
+            _known_unique_ids(data.get("requested_probe_ids"), known_probes, 6)
+            if allow_probe_requests
+            else []
+        ),
         requested_action_ids=_known_unique_ids(data.get("requested_action_ids"), known_actions, 20),
     )
 
@@ -1135,6 +1157,7 @@ def ask_followup_ai(
     *,
     facts_only: bool = False,
     probe_results: Sequence[FollowUpProbeResult] = (),
+    allow_probe_requests: bool = True,
     env: Optional[Mapping[str, str]] = None,
     urlopen: Optional[Callable] = None,
 ) -> FollowUpResponse:
@@ -1150,6 +1173,7 @@ def ask_followup_ai(
         turns,
         facts_only=facts_only,
         probe_results=probe_results,
+        allow_probe_requests=allow_probe_requests,
     )
     try:
         text = call_ai_provider(
@@ -1161,7 +1185,11 @@ def ask_followup_ai(
         data = json.loads(text)
         if not isinstance(data, Mapping):
             raise ValueError("follow-up response was not a JSON object")
-        return validate_followup_ai_response(context, data)
+        return validate_followup_ai_response(
+            context,
+            data,
+            allow_probe_requests=allow_probe_requests,
+        )
     except Exception as exc:
         return FollowUpResponse(
             "",
@@ -1194,6 +1222,25 @@ def run_followup_session(
     ensure_hardware_health_probe(current)
     persist_followup_context(current, context_root)
     prompt = first_prompt
+
+    def print_probe_results(probe_results: Sequence[FollowUpProbeResult]) -> None:
+        if not probe_results:
+            return
+        labels = {item.probe_id: item.title for item in current.probes}
+        print("[AuraScan] Local verification result", file=stdout)
+        for item in probe_results:
+            status = {
+                "ok": "OK",
+                "no_action": "OK",
+                "action_ready": "READY",
+                "partial": "PARTIAL",
+                "timeout": "TIMEOUT",
+                "failed": "FAILED",
+            }.get(item.status, item.status.upper() or "UNKNOWN")
+            label = labels.get(item.probe_id, "Bounded local check")
+            summary = redact_followup_text(item.summary)[:1000]
+            print(f"- [{status}] {label}: {summary}", file=stdout)
+
     while result.questions < FOLLOWUP_MAX_QUESTIONS and result.provider_requests < FOLLOWUP_MAX_PROVIDER_REQUESTS:
         try:
             question = input_func(prompt).strip()
@@ -1324,6 +1371,7 @@ def run_followup_session(
                     redact_followup_text(str(exc))[:500],
                 ))
             persist_followup_context(current, context_root)
+        print_probe_results(initial_probe_results)
         print("[AuraScan] Asking AI about the current AuraScan result...", file=stdout, flush=True)
         response = ask_followup_ai(
             current,
@@ -1365,6 +1413,7 @@ def run_followup_session(
                 ]
             current = refreshed
             persist_followup_context(current, context_root)
+            print_probe_results(probe_results)
             if result.provider_requests < FOLLOWUP_MAX_PROVIDER_REQUESTS:
                 print("[AuraScan] Asking AI to review the locally verified results...", file=stdout, flush=True)
                 response = ask_followup_ai(
@@ -1373,6 +1422,7 @@ def run_followup_session(
                     turns,
                     facts_only=facts_only or current.privacy_mode == "facts-only",
                     probe_results=probe_results,
+                    allow_probe_requests=False,
                     env=env,
                     urlopen=urlopen,
                 )

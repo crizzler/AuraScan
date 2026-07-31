@@ -49,6 +49,22 @@ UPGRADE_PREFLIGHT_AI_ENV = "AURASCAN_UPGRADE_PREFLIGHT_AI"
 UPGRADE_TRUSTED_HANDOFF_ENV = "AURASCAN_UPGRADE_TRUSTED_HANDOFF"
 UPGRADE_AUR_HELPERS = {"auto", "paru", "yay", "shelly", "none"}
 REPOSITORY_HEALTH_BACKUP_ROOT = Path("/var/lib/aurascan/repo-health")
+SHELLY_MODERN_MAJOR = 3
+SHELLY_MODERN_UPGRADE_COMMAND = [
+    "shelly",
+    "upgrade",
+    "all",
+    "--no-flatpak",
+    "--no-appimage",
+]
+SHELLY_LEGACY_UPGRADE_COMMAND = [
+    "shelly",
+    "upgrade-all",
+    "--no-flatpak",
+    "--no-appimage",
+]
+SHELLY_MODERN_AUR_QUERY = ["shelly", "list-updates", "aur", "--json"]
+SHELLY_LEGACY_AUR_QUERY = ["shelly", "check-updates", "--aur", "--json"]
 
 KERNEL_PACKAGE_RE = re.compile(r"^(linux($|-)|linux-cachyos($|-)|linux-lts($|-)|linux-zen($|-)|linux-hardened($|-))")
 INITRAMFS_BOOT_PACKAGES = {
@@ -1133,7 +1149,10 @@ def apply_trusted_handoff(report: UpgradePreflightReport, options: UpgradeOption
 
 
 def trusted_handoff_command(report: UpgradePreflightReport, options: UpgradeOptions) -> List[str]:
-    command = helper_upgrade_command(report.plan.selected_helper)
+    command = list(
+        report.plan.final_command
+        or helper_upgrade_command(report.plan.selected_helper)
+    )
     if not should_use_trusted_handoff(report, options):
         return command
     if report.plan.selected_helper == "shelly":
@@ -1754,7 +1773,8 @@ def build_upgrade_plan(
 ) -> UpgradePlan:
     progress = progress or (lambda _message: None)
     helper, helper_error = resolve_aur_helper(options.aur_helper, which=which)
-    final_command = helper_upgrade_command(helper)
+    shelly_modern = shelly_uses_modern_cli(runner=runner) if helper == "shelly" else True
+    final_command = helper_upgrade_command(helper, shelly_modern=shelly_modern)
     preview_command = ["sudo", "pacman", "-Syu", "--print", "--print-format", PACMAN_PRINT_FORMAT]
     plan = UpgradePlan(
         selected_helper=helper,
@@ -1785,7 +1805,16 @@ def build_upgrade_plan(
 
     if helper != "none":
         progress(f"Checking AUR updates with {helper}.")
-        helper_result = query_helper_updates(helper, runner=runner)
+        helper_result = query_helper_updates(
+            helper,
+            runner=runner,
+            shelly_modern=shelly_modern,
+        )
+        if helper == "shelly" and isinstance(helper_result.get("shelly_modern"), bool):
+            plan.final_command = helper_upgrade_command(
+                helper,
+                shelly_modern=bool(helper_result["shelly_modern"]),
+            )
         if helper_result["ok"]:
             plan.aur_packages = helper_result["packages"]
         else:
@@ -1805,33 +1834,108 @@ def resolve_aur_helper(selection: str, *, which: Callable[[str], Optional[str]] 
     return "none", "no supported AUR helper found; foreign packages will be reported as advisory context only"
 
 
-def helper_upgrade_command(helper: str) -> List[str]:
+def shelly_uses_modern_cli(*, runner: Callable = subprocess.run) -> bool:
+    try:
+        result = runner(
+            ["shelly", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return True
+    if int(getattr(result, "returncode", 0)) != 0:
+        return True
+    output = "\n".join([
+        str(getattr(result, "stdout", "") or ""),
+        str(getattr(result, "stderr", "") or ""),
+    ])
+    match = re.search(r"(?<!\d)(\d+)(?:\.\d+){1,3}(?!\d)", output)
+    if not match:
+        return True
+    return int(match.group(1)) >= SHELLY_MODERN_MAJOR
+
+
+def helper_upgrade_command(helper: str, *, shelly_modern: bool = True) -> List[str]:
     if helper == "none":
         return ["sudo", "pacman", "-Syu"]
     if helper == "shelly":
-        return ["shelly", "upgrade-all", "--no-flatpak", "--no-appimage"]
+        command = (
+            SHELLY_MODERN_UPGRADE_COMMAND
+            if shelly_modern
+            else SHELLY_LEGACY_UPGRADE_COMMAND
+        )
+        return list(command)
     return [helper, "-Syu"]
 
 
-def query_helper_updates(helper: str, *, runner: Callable = subprocess.run) -> Dict[str, object]:
+def _shelly_syntax_error(output: str) -> bool:
+    lowered = output.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "unrecognized command",
+            "unrecognized argument",
+            "unknown command",
+            "unexpected argument",
+            "invalid command",
+        )
+    )
+
+
+def query_helper_updates(
+    helper: str,
+    *,
+    runner: Callable = subprocess.run,
+    shelly_modern: bool = True,
+) -> Dict[str, object]:
     if helper == "shelly":
-        cmd = ["shelly", "check-updates", "--aur", "--json"]
+        query_commands = (
+            [SHELLY_MODERN_AUR_QUERY, SHELLY_LEGACY_AUR_QUERY]
+            if shelly_modern
+            else [SHELLY_LEGACY_AUR_QUERY, SHELLY_MODERN_AUR_QUERY]
+        )
         parser = parse_shelly_updates
     else:
-        cmd = [helper, "-Qua"]
+        query_commands = [[helper, "-Qua"]]
         parser = parse_aur_updates
-    try:
-        result = runner(cmd, capture_output=True, text=True, check=False)
-    except OSError as exc:
-        return {"ok": False, "packages": [], "error": f"{helper} AUR update query failed: {exc}"}
-    if int(getattr(result, "returncode", 0)) != 0:
+    for index, cmd in enumerate(query_commands):
+        try:
+            result = runner(cmd, capture_output=True, text=True, check=False)
+        except OSError as exc:
+            return {"ok": False, "packages": [], "error": f"{helper} AUR update query failed: {exc}"}
+        stdout = str(getattr(result, "stdout", "") or "")
         stderr = str(getattr(result, "stderr", "") or "").strip()
-        return {"ok": False, "packages": [], "error": f"{helper} AUR update query failed" + (f": {stderr}" if stderr else ".")}
-    try:
-        packages = parser(str(getattr(result, "stdout", "") or ""))
-    except ValueError as exc:
-        return {"ok": False, "packages": [], "error": f"{helper} AUR update query output could not be parsed: {exc}"}
-    return {"ok": True, "packages": packages, "error": ""}
+        combined = "\n".join([stdout, stderr])
+        if int(getattr(result, "returncode", 0)) != 0:
+            if helper == "shelly" and index == 0 and _shelly_syntax_error(combined):
+                continue
+            return {
+                "ok": False,
+                "packages": [],
+                "error": f"{helper} AUR update query failed" + (f": {stderr}" if stderr else "."),
+            }
+        try:
+            packages = parser(stdout)
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "packages": [],
+                "error": f"{helper} AUR update query output could not be parsed: {exc}",
+            }
+        response: Dict[str, object] = {
+            "ok": True,
+            "packages": packages,
+            "error": "",
+        }
+        if helper == "shelly":
+            response["shelly_modern"] = list(cmd) == SHELLY_MODERN_AUR_QUERY
+        return response
+    return {
+        "ok": False,
+        "packages": [],
+        "error": f"{helper} AUR update query failed: no compatible command syntax was accepted.",
+    }
 
 
 def parse_pacman_preview(output: str) -> List[UpgradePackage]:

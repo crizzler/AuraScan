@@ -279,13 +279,15 @@ a last-minute package archive scanner, while upgrade preflight reasons about
 transaction and local system breakage risk.
 
 The default handoff is `sudo pacman -Syu`. Supported helper execution is limited
-to `paru -Syu`, `yay -Syu`, and
-`shelly upgrade-all --no-flatpak --no-appimage`; generic helper commands are out
-of scope until they can be validated safely. Repo package previews should come
-from pacman's `--print --print-format` path. AUR update context may come from
-helper `-Qua` or Shelly's `check-updates --aur --json`, but v1 must not run
-makepkg, build AUR packages, inspect AUR sources, or execute package code during
-preflight.
+to `paru -Syu`, `yay -Syu`, and Shelly's scoped upgrade command. Shelly 3 uses
+`shelly upgrade all --no-flatpak --no-appimage` and
+`shelly list-updates aur --json`; AuraScan keeps the corresponding
+`upgrade-all` and `check-updates --aur --json` forms for Shelly 2. Generic
+helper commands are out of scope until they can be validated safely. Repo
+package previews should come from pacman's `--print --print-format` path. AUR
+update context may come from helper `-Qua` or the version-matched Shelly query,
+but v1 must not run makepkg, build AUR packages, inspect AUR sources, or execute
+package code during preflight.
 
 Upgrade preflight is enabled by default. The wizard may write
 `AURASCAN_UPGRADE_PREFLIGHT_ENABLED`, `AURASCAN_UPGRADE_AUR_HELPER`,

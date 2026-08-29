@@ -1,0 +1,7 @@
+fixture_static_example() {
+  /usr/bin/sudo /usr/bin/curated-fixture-helper --fixture-only
+}
+
+post_install() {
+  echo "Defanged fixture: no privileged helper is run."
+}

@@ -14,6 +14,7 @@ from aurascan.core.agent import (
     AGENT_RAW_OUTPUT_PHRASE,
     AGENT_ROOT_GRANT_PHRASE,
     AgentCommand,
+    ask_agent_ai,
     AgentConfig,
     build_agent_ai_prompt,
     execute_root_command_request,
@@ -120,6 +121,38 @@ def command_response(command="", *, root=False, answer="I prepared one exact che
         "requested_action_ids": [],
         "commands": commands,
     }
+
+
+def test_keyless_local_ai_reaches_repair_agent_provider(tmp_path):
+    env = ai_env(
+        tmp_path,
+        AURASCAN_AI_PROVIDER="llamacpp",
+        AURASCAN_AI_MODEL="aurascan-local",
+        AURASCAN_AI_BASE_URL="http://127.0.0.1:8080/v1",
+        AURASCAN_OPENAI_API_KEY="",
+    )
+    seen = {}
+
+    def urlopen(request, timeout):
+        seen["url"] = request.full_url
+        seen["headers"] = dict(request.header_items())
+        return FakeResponse(command_response(answer="The local provider is ready."))
+
+    response = ask_agent_ai(
+        context(),
+        "Summarize the verified facts.",
+        [],
+        access="guarded",
+        approval="each-command",
+        facts_only=False,
+        env=env,
+        urlopen=urlopen,
+    )
+
+    assert response.status == "ok"
+    assert response.answer == "The local provider is ready."
+    assert seen["url"] == "http://127.0.0.1:8080/v1/chat/completions"
+    assert "Authorization" not in seen["headers"]
 
 
 def write_private_request(path: Path, data):

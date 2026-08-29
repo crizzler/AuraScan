@@ -1,5 +1,9 @@
 from pathlib import Path
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised by the Python 3.8 CI job
+    import tomli as tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,9 +22,10 @@ def test_pyproject_console_scripts_are_registered():
     assert scripts["aurascan-makepkg"] == "aurascan.makepkg_wrapper:main"
     assert data["project"]["requires-python"] == ">=3.8"
     assert data["project"]["dependencies"] == []
-    assert data["project"]["license"] == "MIT"
-    assert data["project"]["license-files"] == ["LICENSE"]
+    assert data["build-system"]["requires"] == ["setuptools>=61.0"]
+    assert data["project"]["license"] == {"file": "LICENSE"}
     assert "pytest>=8.0" in data["project"]["optional-dependencies"]["test"]
+    assert "tomli>=1.1.0; python_version < '3.11'" in data["project"]["optional-dependencies"]["test"]
     assert "PyQt6>=6.0" in data["project"]["optional-dependencies"]["updater"]
     assert data["tool"]["setuptools"]["package-data"]["aurascan"] == ["assets/*"]
 

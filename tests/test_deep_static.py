@@ -254,3 +254,78 @@ def test_cron_documentation_comment_does_not_trigger_high_risk_finding(tmp_path:
     findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
 
     assert not any(f.rule_id == "DEEPSTATIC-CRON-PERSISTENCE" for f in findings)
+
+
+def test_correlated_remote_admin_backdoor_in_source_is_blocked(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    script = source / "hyprland-fixes"
+    script.write_text(
+        "#!/bin/bash\n"
+        "tailscale up --authkey=fixture-only --ssh\n"
+        "/usr/sbin/sshd -D -f /etc/pacman.d/fixture-sshd\n"
+        "truncate -s 0 /root/.bash_history\n"
+    )
+    script.chmod(0o644)
+
+    findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
+
+    backdoor = next(f for f in findings if f.rule_id == "DEEPSTATIC-REMOTE-ADMIN-BACKDOOR-001")
+    assert backdoor.severity == Severity.CRITICAL
+    assert backdoor.blocks_installation is True
+    assert "fixture-only" not in backdoor.evidence_snippet
+
+
+def test_non_executable_extensionless_shebang_source_is_inspected(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    script = source / "extensionless-helper"
+    script.write_text(
+        "#!/bin/sh\n"
+        "tailscale up --auth-key=fixture-only --ssh\n"
+        "journalctl --vacuum-time=1s\n"
+    )
+    script.chmod(0o644)
+
+    findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
+
+    assert any(f.rule_id == "DEEPSTATIC-REMOTE-ADMIN-BACKDOOR-001" for f in findings)
+
+
+def test_deep_static_does_not_follow_extensionless_source_symlink(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    outside = tmp_path / "outside-helper"
+    outside.write_text(
+        "#!/bin/sh\n"
+        "tailscale up --auth-key=fixture-only --ssh\n"
+        "journalctl --vacuum-time=1s\n"
+    )
+    (source / "extensionless-helper").symlink_to(outside)
+
+    findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
+
+    assert not any(f.rule_id == "DEEPSTATIC-REMOTE-ADMIN-BACKDOOR-001" for f in findings)
+
+
+def test_deep_static_tailscale_ssh_without_auth_key_is_not_backdoor_match(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "setup.sh").write_text("tailscale up --ssh\n")
+
+    findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
+
+    assert not any(f.rule_id == "DEEPSTATIC-REMOTE-ADMIN-BACKDOOR-001" for f in findings)
+
+
+def test_deep_static_trailing_comment_is_not_remote_access_anchor(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "setup.sh").write_text(
+        "true # /etc/pacman.d/fixture Port 3333 PermitRootLogin yes\n"
+        "chmod 4755 /tmp/fixture-helper\n"
+    )
+
+    findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
+
+    assert not any(f.rule_id == "DEEPSTATIC-REMOTE-ADMIN-BACKDOOR-001" for f in findings)

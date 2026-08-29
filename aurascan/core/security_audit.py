@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -26,15 +27,47 @@ MAX_CAMPAIGN_PACKAGES = 20_000
 MAX_PACMAN_LOG_BYTES = 4 * 1024 * 1024
 MAX_CACHE_ENTRIES = 10_000
 DEFAULT_FEED_TIMEOUT = 20
+MAX_HOST_INDICATOR_BYTES = 128 * 1024
+MAX_HOST_INDICATOR_ENTRIES = 4096
 EXIT_SECURITY_ALERT = 1
 EXIT_SECURITY_AUDIT_UNAVAILABLE = 2
 PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9@._+][A-Za-z0-9@._+:-]{0,254}$")
 PACMAN_HISTORY_RE = re.compile(
     r"^\[(?P<timestamp>[^\]]+)\]\s+\[ALPM\]\s+"
-    r"(?P<action>installed|upgraded|downgraded|reinstalled)\s+"
+    r"(?P<action>installed|upgraded|downgraded|reinstalled|removed)\s+"
     r"(?P<package>\S+)\s+\((?P<version>[^)]*)\)"
 )
 SEVERITY_ORDER = [Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL]
+HYPRLAND_FIXES_INCIDENT_PACKAGE = "hyprland-fixes"
+HYPRLAND_FIXES_INCIDENT_REFERENCE = (
+    "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/"
+    "message/TAASU6LTO76UCKYLMG25OJPUY7ZONASN/"
+)
+HYPRLAND_FIXES_SOURCE_COMMIT_REFERENCE = (
+    "https://github.com/iusearch-hyprlandbtw/hyprland-fixes/"
+    "commit/d9812f5e31adbadd1027d9f578bbe28016fb139a"
+)
+HYPRLAND_FIXES_TAILSCALE_PEER = "100.70.123.108"
+HYPRLAND_FIXES_ARTIFACT_PATHS = (
+    "/etc/hyprland-fixes",
+    "/usr/lib/hyprland-fixes",
+    "/usr/bin/hyprland-fixes",
+    "/etc/systemd/system/hyprland-fixes.service",
+    "/etc/systemd/system/hyprland-fixes.timer",
+    "/usr/lib/systemd/system/arch-mirrorlist-criteria.service",
+    "/etc/systemd/system/arch-keyring-syncer.service",
+    "/etc/pacman.d/mirrorlist-criteria",
+    "/etc/pacman.d/keyring-syncer",
+    "/etc/userkeys",
+    "/etc/system-functions",
+    "/root/pamkeys",
+    "/etc/sudoers.d/hyprland-fixes-permissions",
+    "/etc/arch-mirror-sync",
+    "/usr/lib/arch-mirror-sync",
+    "/usr/local/bin/arch-mirror-sync",
+    "/etc/systemd/system/arch-mirror-sync.service",
+    "/etc/systemd/system/arch-mirror-sync.timer",
+)
 
 
 @dataclass
@@ -631,22 +664,274 @@ def scan_helper_cache_names(
     return matched, count, truncated
 
 
+def audit_hyprland_fixes_exposure(
+    installed_packages: Mapping[str, str],
+    history: Sequence[PacmanHistoryRecord],
+    *,
+    pending_package_names: Optional[Iterable[str]] = None,
+    helper_cache_names: Optional[Iterable[str]] = None,
+) -> List[SecurityFinding]:
+    """Correlate bounded package state with the reported malicious package."""
+
+    incident_records = [
+        record for record in history
+        if record.package == HYPRLAND_FIXES_INCIDENT_PACKAGE
+    ]
+    installed_version = installed_packages.get(HYPRLAND_FIXES_INCIDENT_PACKAGE, "")
+    pending = set(pending_package_names or ())
+    cache_names = set(helper_cache_names or ())
+    if incident_records:
+        return [SecurityFinding(
+            rule_id="SEC-AUR-HYPRLAND-FIXES-HISTORY",
+            severity=Severity.CRITICAL,
+            category="aur_campaign",
+            title="Pacman history records a hyprland-fixes package transaction.",
+            summary="AuraScan found a bounded package-manager transaction for the exact package reported with a root remote-access payload.",
+            why_it_matters="The malicious source history predates the public report. Package history cannot prove that its payload completed, but uninstalling the package would not establish that the host is clean.",
+            recommended_action="Disconnect the host, preserve evidence, and investigate from trusted recovery media. Revoke unexpected Tailscale nodes/keys and rotate credentials from a separate clean device.",
+            package_name=HYPRLAND_FIXES_INCIDENT_PACKAGE,
+            evidence=[
+                f"{record.action}={record.package} {record.version} at {record.timestamp}"
+                for record in incident_records[:8]
+            ] + [
+                f"reference={HYPRLAND_FIXES_INCIDENT_REFERENCE}",
+                f"source_commit={HYPRLAND_FIXES_SOURCE_COMMIT_REFERENCE}",
+            ],
+            confidence="high",
+            source="arch-aur-general",
+        )]
+    if installed_version:
+        return [SecurityFinding(
+            rule_id="SEC-AUR-HYPRLAND-FIXES-INSTALLED",
+            severity=Severity.HIGH,
+            category="aur_campaign",
+            title="The reported hyprland-fixes package is installed.",
+            summary="The installed package name matches the package reported for a Tailscale and root-SSH backdoor.",
+            why_it_matters="A name match alone cannot prove which revision ran, but this package should be treated as a potential host compromise until local artifacts are investigated.",
+            recommended_action="Do not run the package. Preserve package history and inspect the host from trusted recovery media before deciding on remediation.",
+            package_name=HYPRLAND_FIXES_INCIDENT_PACKAGE,
+            evidence=[
+                f"installed={HYPRLAND_FIXES_INCIDENT_PACKAGE} {installed_version}",
+                f"reference={HYPRLAND_FIXES_INCIDENT_REFERENCE}",
+            ],
+            confidence="medium",
+            source="arch-aur-general",
+        )]
+    if HYPRLAND_FIXES_INCIDENT_PACKAGE in pending:
+        return [SecurityFinding(
+            rule_id="SEC-AUR-HYPRLAND-FIXES-PENDING",
+            severity=Severity.HIGH,
+            category="aur_campaign",
+            title="A pending package matches the reported hyprland-fixes backdoor.",
+            summary="The pending package name is the package removed after the 28 August 2026 root remote-access report.",
+            why_it_matters="A package-name match is not proof that identical source content is pending, but this name requires fresh static and source review before any build.",
+            recommended_action="Do not build the pending revision. Preserve its PKGBUILD, install hook, source URL, and commit metadata for review.",
+            package_name=HYPRLAND_FIXES_INCIDENT_PACKAGE,
+            evidence=[
+                f"pending={HYPRLAND_FIXES_INCIDENT_PACKAGE}",
+                f"reference={HYPRLAND_FIXES_INCIDENT_REFERENCE}",
+            ],
+            confidence="medium",
+            source="arch-aur-general",
+        )]
+    if HYPRLAND_FIXES_INCIDENT_PACKAGE in cache_names:
+        return [SecurityFinding(
+            rule_id="SEC-AUR-HYPRLAND-FIXES-HELPER-CACHE",
+            severity=Severity.LOW,
+            category="aur_campaign",
+            title="An AUR helper cache contains hyprland-fixes.",
+            summary="A matching package directory remains in a bounded helper-cache scan.",
+            why_it_matters="A cache entry indicates retrieval, not installation or execution, but can preserve useful package provenance.",
+            recommended_action="Preserve and inspect the cached Git history and files as inert evidence; do not execute them.",
+            package_name=HYPRLAND_FIXES_INCIDENT_PACKAGE,
+            evidence=[
+                f"cached={HYPRLAND_FIXES_INCIDENT_PACKAGE}",
+                f"reference={HYPRLAND_FIXES_INCIDENT_REFERENCE}",
+            ],
+            confidence="low",
+            source="arch-aur-general",
+        )]
+    return []
+
+
+def _host_indicator_path_without_symlinks(root: Path, logical_path: str) -> Optional[Path]:
+    """Return an injected-root path only when no existing component is a symlink."""
+
+    candidate = root
+    try:
+        if candidate.is_symlink():
+            return None
+        for part in Path(logical_path.lstrip("/")).parts:
+            candidate = candidate / part
+            if candidate.is_symlink():
+                return None
+    except OSError:
+        return None
+    return candidate
+
+
+def _read_host_indicator_text(root: Path, logical_path: str) -> str:
+    path = _host_indicator_path_without_symlinks(root, logical_path)
+    if path is None:
+        return ""
+    try:
+        metadata = path.stat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_HOST_INDICATOR_BYTES:
+            return ""
+        with path.open("rb") as handle:
+            payload = handle.read(MAX_HOST_INDICATOR_BYTES + 1)
+        if len(payload) > MAX_HOST_INDICATOR_BYTES:
+            return ""
+        return payload.decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _existing_hyprland_fixes_artifacts(root: Path) -> List[str]:
+    existing: List[str] = []
+    for logical_path in HYPRLAND_FIXES_ARTIFACT_PATHS:
+        path = _host_indicator_path_without_symlinks(root, logical_path)
+        if path is None:
+            continue
+        try:
+            if path.is_file():
+                existing.append(logical_path)
+        except OSError:
+            continue
+    return existing
+
+
+def _hyprland_fixes_content_markers(root: Path) -> List[str]:
+    markers: List[str] = []
+    for logical_path in (
+        "/etc/pacman.d/mirrorlist-criteria",
+        "/etc/pacman.d/keyring-syncer",
+    ):
+        text = _read_host_indicator_text(root, logical_path)
+        if re.search(r"(?im)^\s*Port\s+(?:3333|4444)\s*$", text) and re.search(
+            r"(?im)^\s*PermitRootLogin\s+yes\s*$", text
+        ):
+            markers.append(f"root-sshd-config={logical_path}")
+
+    for logical_path in (
+        "/usr/lib/systemd/system/arch-mirrorlist-criteria.service",
+        "/etc/systemd/system/arch-keyring-syncer.service",
+    ):
+        text = _read_host_indicator_text(root, logical_path)
+        if re.search(r"/usr/sbin/sshd\s+-D\s+-f\s+/etc/pacman\.d/", text, re.IGNORECASE):
+            markers.append(f"disguised-sshd-service={logical_path}")
+
+    timer_text = _read_host_indicator_text(root, "/etc/systemd/system/hyprland-fixes.timer")
+    if re.search(r"(?im)^\s*OnCalendar\s*=\s*hourly\s*$", timer_text):
+        markers.append("hourly-persistence=/etc/systemd/system/hyprland-fixes.timer")
+
+    sudoers_text = _read_host_indicator_text(root, "/etc/sudoers.d/hyprland-fixes-permissions")
+    if "NOPASSWD:" in sudoers_text and "/usr/bin/hyprland-fixes" in sudoers_text:
+        markers.append("passwordless-sudo=/etc/sudoers.d/hyprland-fixes-permissions")
+
+    key_locations: Dict[str, List[str]] = {}
+    for logical_path in ("/etc/userkeys", "/etc/system-functions", "/root/pamkeys"):
+        text = _read_host_indicator_text(root, logical_path)
+        match = re.search(r"(?m)^\s*(ssh-ed25519\s+[A-Za-z0-9+/=]+)(?:\s|$)", text)
+        if not match:
+            continue
+        digest = hashlib.sha256(match.group(1).encode("utf-8")).hexdigest()
+        key_locations.setdefault(digest, []).append(logical_path)
+    duplicate_key_paths = max(key_locations.values(), key=len, default=[])
+    if len(duplicate_key_paths) >= 2:
+        markers.append("duplicated-root-ssh-key=" + ",".join(sorted(duplicate_key_paths)))
+
+    suid_paths: List[str] = []
+    for logical_path in (
+        "/etc/hyprland-fixes",
+        "/usr/lib/hyprland-fixes",
+        "/usr/bin/hyprland-fixes",
+        "/etc/arch-mirror-sync",
+        "/usr/lib/arch-mirror-sync",
+        "/usr/local/bin/arch-mirror-sync",
+    ):
+        path = _host_indicator_path_without_symlinks(root, logical_path)
+        if path is None:
+            continue
+        try:
+            metadata = path.stat()
+            if stat.S_ISREG(metadata.st_mode) and metadata.st_mode & stat.S_ISUID:
+                suid_paths.append(logical_path)
+        except OSError:
+            continue
+    if suid_paths:
+        markers.append("suid-payload=" + ",".join(suid_paths))
+
+    for logical_path in ("/etc/ufw/user.rules", "/etc/ufw/user6.rules"):
+        text = _read_host_indicator_text(root, logical_path)
+        if HYPRLAND_FIXES_TAILSCALE_PEER in text:
+            markers.append(f"reported-tailscale-peer-firewall-rule={logical_path}")
+
+    for logical_path in ("/etc/hyprland-fixes", "/usr/lib/hyprland-fixes", "/usr/bin/hyprland-fixes"):
+        text = _read_host_indicator_text(root, logical_path)
+        behavior_count = sum((
+            bool(re.search(r"\btailscale\s+up\b[^\n]*--auth-?key", text, re.IGNORECASE)),
+            bool(re.search(r"\bsshd\b[^\n]*-f\s+/etc/pacman\.d/", text, re.IGNORECASE)),
+            bool(re.search(r"\bjournalctl\b[^\n]*--vacuum-time\s*=\s*1s\b", text, re.IGNORECASE)),
+            bool(re.search(r"\bchmod\s+0?4[0-7]{3}\b", text, re.IGNORECASE)),
+        ))
+        if behavior_count >= 2:
+            markers.append(f"backdoor-behavior={logical_path}")
+    return markers
+
+
 def detect_host_campaign_indicators(root: Path = Path("/")) -> List[SecurityFinding]:
     findings: List[SecurityFinding] = []
-    try:
-        bpf_markers = list((root / "sys/fs/bpf").glob("hidden_*"))[:16]
-    except OSError:
-        bpf_markers = []
-    if bpf_markers:
+    artifacts = _existing_hyprland_fixes_artifacts(root)
+    markers = _hyprland_fixes_content_markers(root)
+    strong_markers = [
+        marker for marker in markers
+        if not marker.startswith("reported-tailscale-peer-firewall-rule=")
+    ]
+    if artifacts or strong_markers:
+        severity = Severity.CRITICAL if len(artifacts) >= 2 or strong_markers else Severity.HIGH
+        supporting_marker_count = len(markers) - len(strong_markers)
+        findings.append(SecurityFinding(
+            rule_id="SEC-AUR-HYPRLAND-FIXES-HOST-ARTIFACTS",
+            severity=severity,
+            category="aur_campaign",
+            title="Artifacts associated with the hyprland-fixes backdoor are present.",
+            summary=(
+                f"AuraScan found {len(artifacts)} reported path artifact(s), "
+                f"{len(strong_markers)} validated behavior marker(s), and "
+                f"{supporting_marker_count} supporting peer reference(s) under the selected root."
+            ),
+            why_it_matters="The reported artifact set was used for root SSH access, privilege persistence, or attacker-network access; a normal tailscaled service or matching Tailscale-range address by itself does not trigger this finding.",
+            recommended_action="Disconnect the host and preserve evidence. Investigate from trusted recovery media; do not execute or merely delete the reported files on the live system.",
+            package_name=HYPRLAND_FIXES_INCIDENT_PACKAGE,
+            evidence=[f"artifact={path}" for path in artifacts[:16]] + markers[:16],
+            confidence="high" if severity == Severity.CRITICAL else "medium",
+            source="deterministic-host-indicators",
+        ))
+    bpf_marker_names: List[str] = []
+    bpf_root = _host_indicator_path_without_symlinks(root, "/sys/fs/bpf")
+    if bpf_root is not None:
+        try:
+            with os.scandir(bpf_root) as entries:
+                for entry_count, entry in enumerate(entries, 1):
+                    if entry_count > MAX_HOST_INDICATOR_ENTRIES:
+                        break
+                    if entry.name.startswith("hidden_") and not entry.is_symlink():
+                        bpf_marker_names.append(entry.name)
+                        if len(bpf_marker_names) >= 16:
+                            break
+        except OSError:
+            bpf_marker_names = []
+    if bpf_marker_names:
         findings.append(SecurityFinding(
             rule_id="SEC-AUR-CAMPAIGN-BPF-PERSISTENCE",
             severity=Severity.CRITICAL,
             category="aur_campaign",
             title="A campaign-associated eBPF persistence marker exists.",
-            summary=f"AuraScan found {len(bpf_markers)} hidden_* object(s) under /sys/fs/bpf.",
+            summary=f"AuraScan found {len(bpf_marker_names)} hidden_* object(s) under /sys/fs/bpf.",
             why_it_matters="This is stronger host evidence than a package-name match and may indicate active persistence.",
             recommended_action="Disconnect the host and investigate from trusted recovery media; do not rely on package removal alone.",
-            evidence=[path.name for path in bpf_markers],
+            evidence=bpf_marker_names,
             confidence="high",
         ))
     return findings
@@ -763,12 +1048,12 @@ def audit_campaign_exposure(
                 rule_id="SEC-AUR-CAMPAIGN-HISTORY-WINDOW",
                 severity=Severity.CRITICAL,
                 category="aur_campaign",
-                title=f"{name} was installed or upgraded during the AUR campaign window.",
+                title=f"Pacman recorded a {name} transaction during the AUR campaign window.",
                 summary=(
                     f"Pacman history contains {len(records)} matching event(s) between "
                     f"{campaign.window_start.isoformat()} and {campaign.window_end.isoformat()}."
                 ),
-                why_it_matters="The package name and installation timing overlap the known campaign, creating credible exposure evidence even though the exact malicious commit is not proven.",
+                why_it_matters="The package name and transaction timing overlap the known campaign, creating credible exposure evidence even though the exact malicious commit is not proven. A later removal does not undo prior host changes.",
                 recommended_action="Disconnect the host, preserve the report, rotate credentials from a clean device, and investigate from trusted recovery media.",
                 package_name=name,
                 evidence=[
@@ -879,19 +1164,27 @@ def build_security_audit(
 
     history, history_truncated, history_notes = collect_pacman_history(root=root, log_paths=log_paths)
     notes.extend(history_notes)
-    cache_matches, cache_count, cache_truncated = scan_helper_cache_names(home, campaign.package_names if campaign else set())
+    cache_scan_names = set(campaign.package_names) if campaign else set()
+    cache_scan_names.add(HYPRLAND_FIXES_INCIDENT_PACKAGE)
+    cache_matches, cache_count, cache_truncated = scan_helper_cache_names(home, cache_scan_names)
     if cache_truncated:
         notes.append(f"AUR helper cache scan stopped after {MAX_CACHE_ENTRIES} entries.")
 
     campaign_findings: List[SecurityFinding] = []
+    campaign_findings.extend(audit_hyprland_fixes_exposure(
+        installed,
+        history,
+        pending_package_names=pending_package_names,
+        helper_cache_names=cache_matches,
+    ))
     if campaign is not None:
-        campaign_findings = audit_campaign_exposure(
+        campaign_findings.extend(audit_campaign_exposure(
             campaign,
             installed,
             history,
             pending_package_names=pending_package_names,
             helper_cache_names=cache_matches,
-        )
+        ))
     if include_host_indicators:
         campaign_findings.extend(detect_host_campaign_indicators(root))
 

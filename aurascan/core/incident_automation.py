@@ -391,8 +391,8 @@ def run_background_assistant(
             atomic_write_json(state_path, state, mode=0o600)
             return 0
         identity = marker_key(marker)
-        if ai_config.error or not ai_config.enabled or not ai_config.api_key_present:
-            error = ai_config.error or "configured AI provider or API key is unavailable"
+        if not ai_config.ready:
+            error = ai_config.error or "configured AI provider is unavailable"
             _record_background_wait(state, identity, status="not_configured", now_usec=now, error=error)
             atomic_write_json(state_path, state, mode=0o600)
             return 0
@@ -525,7 +525,7 @@ def print_background_ai_status(
         "enabled": config.background_ai_enabled if not config.error else False,
         "incident_ai_enabled": config.ai_enabled if not config.error else False,
         "evidence_mode": config.ai_evidence if not config.error else "unknown",
-        "provider_ready": not provider.error and provider.enabled and provider.api_key_present,
+        "provider_ready": provider.ready,
         "units": units,
         "state": state,
         "auto_repair": {"policy": policy.policy, "error": policy.error},

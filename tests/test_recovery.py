@@ -54,6 +54,14 @@ from aurascan.core.recovery_repairs import (
 )
 
 
+def path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
 class Response:
     def __init__(self, content):
         self.content = content
@@ -293,9 +301,14 @@ def test_recovery_report_schema_round_trip(tmp_path):
     assert loaded.repair_actions[0].recipe_id == "repository_restore"
 
 
-def test_two_pass_ai_can_select_probe_and_rank_only_known_action(tmp_path):
+@pytest.mark.parametrize("provider", ["openai", "llamacpp"])
+def test_two_pass_ai_can_select_probe_and_rank_only_known_action(tmp_path, provider):
     report = scan_recovery_target(inspect_target(make_target(tmp_path, broken_repo=True)))
-    report.network = RecoveryNetworkState(True, True, "full", "ethernet")
+    report.network = (
+        RecoveryNetworkState(True, True, "full", "ethernet")
+        if provider == "openai"
+        else RecoveryNetworkState(False, False, "none")
+    )
     probes = discover_recovery_probes(report)
     storage_probe = next(item.probe_id for item in probes if item.probe_type == "storage_space")
     action_id = report.eligible_actions[0].action_id
@@ -313,11 +326,11 @@ def test_two_pass_ai_can_select_probe_and_rank_only_known_action(tmp_path):
             "recommended_action_ids": [action_id, "invented-action"],
         },
     ])
-    env = {
-        "AURASCAN_AI_PROVIDER": "openai",
-        "AURASCAN_OPENAI_API_KEY": "fixture-secret-key",
-        "AURASCAN_AI_ENABLED": "1",
-    }
+    env = {"AURASCAN_AI_PROVIDER": provider, "AURASCAN_AI_ENABLED": "1"}
+    if provider == "openai":
+        env["AURASCAN_OPENAI_API_KEY"] = "fixture-secret-key"
+    else:
+        env["AURASCAN_AI_MODEL"] = "aurascan-local"
 
     apply_recovery_ai_plan(report, enabled=True, env=env, urlopen=urlopen)
 
@@ -329,6 +342,9 @@ def test_two_pass_ai_can_select_probe_and_rank_only_known_action(tmp_path):
     request_text = b"\n".join(item.data or b"" for item, _timeout in urlopen.requests)
     assert b"fixture-secret-key" not in request_text
     assert str(tmp_path).encode() not in request_text
+    if provider == "llamacpp":
+        assert urlopen.requests[0][0].full_url == "http://127.0.0.1:8080/v1/chat/completions"
+        assert "Authorization" not in dict(urlopen.requests[0][0].header_items())
 
 
 def test_recovery_ai_skips_second_request_when_selected_probe_is_unavailable(tmp_path):
@@ -423,7 +439,7 @@ def test_repeated_crash_can_prepare_only_an_exact_signed_cached_reinstall(tmp_pa
         lambda path, target_root, max_size: path.is_file()
         and not path.is_symlink()
         and path.stat().st_size <= max_size
-        and path.resolve().is_relative_to(target_root.resolve()),
+        and path_is_relative_to(path.resolve(), target_root.resolve()),
     )
     probe = next(item for item in discover_recovery_probes(report) if item.probe_type == "crashed_package_integrity")
 

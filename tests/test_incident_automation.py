@@ -202,14 +202,20 @@ def test_background_ai_processes_one_marker_once_without_repair_authority(monkey
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("background AI executed repairs")),
     )
 
+    local_ai_env = enabled_ai_env(
+        AURASCAN_AI_PROVIDER="llamacpp",
+        AURASCAN_AI_MODEL="aurascan-local",
+        AURASCAN_OPENAI_API_KEY="",
+    )
+
     first = run_background_assistant(
-        env=enabled_ai_env(**{INCIDENT_AI_EVIDENCE_ENV: "facts-only"}),
+        env={**local_ai_env, INCIDENT_AI_EVIDENCE_ENV: "facts-only"},
         system_root=system_root,
         user_root=user_root,
         now_usec=1_000_000,
     )
     second = run_background_assistant(
-        env=enabled_ai_env(**{INCIDENT_AI_EVIDENCE_ENV: "facts-only"}),
+        env={**local_ai_env, INCIDENT_AI_EVIDENCE_ENV: "facts-only"},
         system_root=system_root,
         user_root=user_root,
         now_usec=2_000_000,

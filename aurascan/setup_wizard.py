@@ -12,13 +12,16 @@ from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional
 
 from aurascan.core.ai_provider import (
+    AI_BASE_URL_ENV,
     AI_ENABLED_ENV,
     AI_MODEL_ENV,
     AI_PROVIDER_ENV,
+    AIProviderError,
     PROVIDERS,
     call_ai_provider,
     connectivity_prompt,
     get_provider_spec,
+    normalize_local_base_url,
     provider_choices,
     resolve_ai_config,
 )
@@ -161,9 +164,10 @@ def build_init_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--provider", choices=provider_choices(), help="AI provider to configure")
     parser.add_argument("--model", help="AI model override")
+    parser.add_argument("--base-url", help="loopback OpenAI-compatible base URL for a local AI provider")
     ai = parser.add_mutually_exclusive_group()
-    ai.add_argument("--enable-ai", action="store_true", help="enable configured network AI analysis")
-    ai.add_argument("--disable-ai", action="store_true", help="write config that keeps network AI disabled")
+    ai.add_argument("--enable-ai", action="store_true", help="enable configured AI analysis")
+    ai.add_argument("--disable-ai", action="store_true", help="write config that keeps AI analysis disabled")
     parser.add_argument("--check-ai", action="store_true", help="run one harmless provider connectivity check")
     upgrade = parser.add_mutually_exclusive_group()
     upgrade.add_argument("--enable-upgrade-preflight", action="store_true", help="enable aurascan upgrade preflight defaults")
@@ -210,7 +214,7 @@ def build_init_parser() -> argparse.ArgumentParser:
     recovery.add_argument("--remove-recovery", action="store_true", help="remove the AuraScan-owned recovery boot entry")
     recovery_ai = parser.add_mutually_exclusive_group()
     recovery_ai.add_argument("--enable-recovery-ai", action="store_true", help="allow separately consented AI analysis inside AuraScan Recovery")
-    recovery_ai.add_argument("--disable-recovery-ai", action="store_true", help="keep network AI disabled inside AuraScan Recovery")
+    recovery_ai.add_argument("--disable-recovery-ai", action="store_true", help="keep AI disabled inside AuraScan Recovery")
     recovery_refresh = parser.add_mutually_exclusive_group()
     recovery_refresh.add_argument("--enable-recovery-auto-refresh", action="store_true", help="refresh an enabled recovery image after relevant package changes")
     recovery_refresh.add_argument("--disable-recovery-auto-refresh", action="store_true", help="require manual recovery image refreshes")
@@ -256,16 +260,17 @@ def run_init(
     existing = _safe_read_env(target_env)
 
     print("AuraScan first-run setup", file=stdout)
-    print("Network AI analysis can send package metadata, PKGBUILD text, and install-script text to the selected provider.", file=stdout)
+    print("AI analysis can send package metadata, PKGBUILD text, and install-script text to the selected provider endpoint.", file=stdout)
+    print("LM Studio and llama.cpp presets are restricted to loopback and never fall back to a cloud provider.", file=stdout)
 
     updates: Dict[str, str] = {}
-    configure_ai = bool(args.provider)
+    configure_ai = bool(args.provider or args.base_url)
     if not configure_ai and not args.disable_ai:
-        configure_ai = _prompt_yes_no("Configure a network AI provider now?", input_func, default=False)
+        configure_ai = _prompt_yes_no("Configure an AI provider now?", input_func, default=False)
 
     if args.disable_ai or not configure_ai:
         updates[AI_ENABLED_ENV] = "0"
-        print("Network AI analysis will stay disabled unless you enable it later.", file=stdout)
+        print("AI analysis will stay disabled unless you enable it later.", file=stdout)
     else:
         provider = args.provider or _prompt_provider(input_func, existing.get(AI_PROVIDER_ENV, "openai"), stdout)
         spec = get_provider_spec(provider)
@@ -273,30 +278,63 @@ def run_init(
             print(f"Unsupported AI provider: {provider}", file=stderr)
             return 1
 
+        same_provider = existing.get(AI_PROVIDER_ENV, "").strip().lower() == provider
+        model_default = existing.get(AI_MODEL_ENV, "").strip() if same_provider else ""
+        model_default = model_default or spec.default_model
         model = args.model
         if model is None:
-            model = input_func(f"Model [{spec.default_model}]: ").strip() or spec.default_model
-        key = getpass_func(f"{spec.label} API key (input hidden): ").strip()
-        if not key:
-            print("No API key entered; leaving network AI disabled.", file=stdout)
-            updates[AI_ENABLED_ENV] = "0"
-        else:
+            prompt_label = "Model ID" if spec.local else "Model"
+            model = input_func(f"{prompt_label} [{model_default}]: ").strip() or model_default
+
+        if spec.local:
+            base_default = existing.get(AI_BASE_URL_ENV, "").strip() if same_provider else ""
+            base_candidate = args.base_url or base_default or spec.default_base_url
+            try:
+                base_url = normalize_local_base_url(base_candidate)
+            except AIProviderError as exc:
+                print(f"Invalid local AI base URL: {exc}", file=stderr)
+                return 1
             enabled = args.enable_ai
             if not args.enable_ai and not args.disable_ai:
                 enabled = _prompt_yes_no(
-                    "Enable network AI analysis for normal scans?",
+                    "Enable local AI analysis for normal scans?",
                     input_func,
                     default=False,
                 )
             updates.update({
                 AI_PROVIDER_ENV: provider,
                 AI_MODEL_ENV: model,
-                spec.key_env: key,
+                AI_BASE_URL_ENV: base_url,
                 AI_ENABLED_ENV: "1" if enabled else "0",
             })
-            print(f"Configured {spec.label}. API key saved without printing it.", file=stdout)
+            print(f"Configured {spec.label} at loopback endpoint {base_url}.", file=stdout)
             if not enabled:
-                print("Network AI analysis is configured but disabled.", file=stdout)
+                print("Local AI analysis is configured but disabled.", file=stdout)
+        else:
+            if args.base_url:
+                print("--base-url is available only for LM Studio and llama.cpp providers.", file=stderr)
+                return 1
+            key = getpass_func(f"{spec.label} API key (input hidden): ").strip()
+            if not key:
+                print("No API key entered; leaving AI analysis disabled.", file=stdout)
+                updates[AI_ENABLED_ENV] = "0"
+            else:
+                enabled = args.enable_ai
+                if not args.enable_ai and not args.disable_ai:
+                    enabled = _prompt_yes_no(
+                        "Enable provider AI analysis for normal scans?",
+                        input_func,
+                        default=False,
+                    )
+                updates.update({
+                    AI_PROVIDER_ENV: provider,
+                    AI_MODEL_ENV: model,
+                    spec.key_env: key,
+                    AI_ENABLED_ENV: "1" if enabled else "0",
+                })
+                print(f"Configured {spec.label}. API key saved without printing it.", file=stdout)
+                if not enabled:
+                    print("AI analysis is configured but disabled.", file=stdout)
 
     configure_upgrade = (
         args.enable_upgrade_preflight
@@ -309,6 +347,7 @@ def run_init(
     )
     should_prompt_upgrade = not configure_upgrade and not (
         args.provider
+        or args.base_url
         or args.enable_ai
         or args.disable_ai
         or args.enable_incident_monitor
@@ -366,7 +405,7 @@ def run_init(
                 upgrade_ai_enabled = False
             elif should_prompt_upgrade:
                 upgrade_ai_enabled = _prompt_yes_no(
-                    "Allow AI risk review during upgrade preflight when network AI is enabled?",
+                    "Allow AI risk review during upgrade preflight when AI is enabled?",
                     input_func,
                     default=upgrade_ai_enabled,
                 )
@@ -1017,17 +1056,37 @@ def build_doctor_checks(
         checks.append(DoctorCheck("ai_provider", "error", f"Unsupported AI provider: {ai_config.provider}"))
     elif ai_config.error == "invalid_enabled_value":
         checks.append(DoctorCheck("ai_enabled", "error", f"Invalid {AI_ENABLED_ENV} value"))
+    elif ai_config.error == "invalid_base_url":
+        checks.append(DoctorCheck("ai_provider", "error", f"Invalid loopback URL in {AI_BASE_URL_ENV}"))
     else:
         spec = get_provider_spec(ai_config.provider)
         label = spec.label if spec else ai_config.provider
-        checks.append(DoctorCheck("ai_provider", "ok", f"AI provider: {label}", {"provider": ai_config.provider, "model": ai_config.model}))
+        provider_details = {
+            "provider": ai_config.provider,
+            "model": ai_config.model,
+            "local": bool(spec and spec.local),
+        }
+        if spec and spec.local:
+            provider_details["base_url"] = ai_config.base_url
+        checks.append(DoctorCheck("ai_provider", "ok", f"AI provider: {label}", provider_details))
         if ai_config.enabled:
-            if ai_config.api_key_present:
+            if spec and spec.local:
+                checks.append(DoctorCheck(
+                    "ai_authentication",
+                    "ok",
+                    "Local AI endpoint is keyless" if not ai_config.api_key_present else "Optional local AI token is configured",
+                    {
+                        "authentication_required": False,
+                        "token_present": ai_config.api_key_present,
+                        "key_env": ai_config.key_env,
+                    },
+                ))
+            elif ai_config.api_key_present:
                 checks.append(DoctorCheck("ai_key", "ok", f"AI key present in {ai_config.key_env}", {"key_env": ai_config.key_env, "key_present": True}))
             else:
                 checks.append(DoctorCheck("ai_key", "error", f"AI is enabled but {ai_config.key_env} is not set", {"key_env": ai_config.key_env, "key_present": False}))
         else:
-            checks.append(DoctorCheck("ai_enabled", "warn", "Network AI analysis is disabled", {"enabled": False}))
+            checks.append(DoctorCheck("ai_enabled", "warn", "AI analysis is disabled", {"enabled": False}))
 
     if check_ai:
         checks.append(_check_ai_connectivity(effective_env, urlopen=urlopen))
@@ -1057,7 +1116,7 @@ def build_doctor_checks(
         checks.append(DoctorCheck(
             "followup_assistant",
             "warn",
-            "Contextual AI follow-up is unavailable until network AI and its key are configured",
+            "Contextual AI follow-up is unavailable until an AI provider is ready",
             followup,
         ))
 
@@ -1090,11 +1149,11 @@ def build_doctor_checks(
             "Repair Agent is limited to guarded AuraScan-owned tools",
             agent,
         ))
-    elif not ai_config.enabled or not ai_config.api_key_present:
+    elif not ai_config.ready:
         checks.append(DoctorCheck(
             "repair_agent",
             "warn",
-            "Repair Agent shell access is configured but foreground network AI is unavailable",
+            "Repair Agent shell access is configured but foreground AI is unavailable",
             agent,
         ))
     else:
@@ -1325,12 +1384,7 @@ def build_doctor_checks(
             for item in marker_retries
             if isinstance(item, Mapping) and int(item.get("next_retry_usec") or 0) > 0
         ]
-        provider_ready = bool(
-            not ai_config.error
-            and ai_config.enabled
-            and ai_config.api_key_present
-            and incident_config.ai_enabled
-        )
+        provider_ready = bool(ai_config.ready and incident_config.ai_enabled)
         background_details = {
             "enabled": incident_config.background_ai_enabled,
             "provider_ready": provider_ready,
@@ -1624,12 +1678,19 @@ def build_doctor_checks(
         "Recovery networking and encrypted/storage discovery tools are ready" if network_ready and storage_ready else "Recovery runtime has partial networking or encrypted/storage coverage",
         {"network_ready": network_ready, "storage_ready": storage_ready, "tools": dict(recovery_tools)},
     ))
-    recovery_ai_ready = bool(recovery_config.ai_enabled and ai_config.api_key_present)
+    recovery_provider_ready = bool(not ai_config.error and ai_config.authentication_ready)
+    recovery_ai_ready = bool(recovery_config.ai_enabled and recovery_provider_ready)
     checks.append(DoctorCheck(
         "recovery_ai",
         "ok" if recovery_ai_ready else "warn",
-        "Recovery AI consent and provider key are ready" if recovery_ai_ready else "Recovery AI is separately disabled or has no configured provider key; offline recovery remains available",
-        {"enabled": recovery_config.ai_enabled, "provider": ai_config.provider, "key_present": ai_config.api_key_present, "maximum_provider_requests": 2},
+        "Recovery AI consent and provider are ready" if recovery_ai_ready else "Recovery AI is separately disabled or its provider is not ready; offline recovery remains available",
+        {
+            "enabled": recovery_config.ai_enabled,
+            "provider": ai_config.provider,
+            "provider_ready": recovery_provider_ready,
+            "key_present": ai_config.api_key_present,
+            "maximum_provider_requests": 2,
+        },
     ))
     refresh_ready = bool(recovery_state.get("refresh_hook_installed"))
     if recovery_access_limited and refresh_ready:
@@ -1938,8 +1999,8 @@ def _check_ai_connectivity(env: Mapping[str, str], *, urlopen: Optional[Callable
     if config.error:
         return DoctorCheck("ai_connectivity", "error", f"AI connectivity check skipped: {config.error}")
     if not config.enabled:
-        return DoctorCheck("ai_connectivity", "warn", "AI connectivity check skipped because network AI is disabled")
-    if not config.api_key_present:
+        return DoctorCheck("ai_connectivity", "warn", "AI connectivity check skipped because AI is disabled")
+    if not config.authentication_ready:
         return DoctorCheck("ai_connectivity", "error", f"AI connectivity check skipped: {config.key_env} is missing")
     try:
         text = call_ai_provider(config, connectivity_prompt(), timeout=15, urlopen=urlopen)

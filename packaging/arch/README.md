@@ -16,6 +16,21 @@ updpkgsums
 Use `/usr/bin/makepkg` here so a local `aurascan-makepkg` wrapper cannot write
 diagnostic output into `.SRCINFO`.
 
+The public AUR package is a separate Git repository and uses SSH-key
+authentication rather than the GitHub remote:
+
+```bash
+git clone ssh://aur@aur.archlinux.org/aurascan.git
+git push origin master
+```
+
+Publish only after the matching GitHub tag is public and this recipe contains
+its fixed archive checksum. Preserve the AUR repository's maintainer/SPDX
+header, `.gitignore`, and 0BSD packaging `LICENSE`; do not replace those files
+with the upstream repository variants. Review the complete staged AUR diff and
+generated `.SRCINFO` before pushing. See the ArchWiki
+[AUR submission guidelines](https://wiki.archlinux.org/title/AUR_submission_guidelines).
+
 The package source URL is the tagged GitHub release archive:
 
 ```text

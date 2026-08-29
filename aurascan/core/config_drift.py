@@ -263,7 +263,7 @@ def build_config_drift_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", dest="json_output", help="emit a structured JSON report")
     parser.add_argument("--yes", action="store_true", help="apply planned safe fixes without prompting")
     parser.add_argument("--no-ai", action="store_true", help="disable AI config-diff review for this run")
-    parser.add_argument("--ai-diffs", action="store_true", help="allow network AI to inspect redacted bounded config diffs")
+    parser.add_argument("--ai-diffs", action="store_true", help="allow the configured AI provider to inspect redacted bounded config diffs")
     parser.add_argument("--root", default="/etc", help="configuration root to scan")
     parser.add_argument("--action-id", action="append", default=[], help=argparse.SUPPRESS)
     return parser
@@ -835,7 +835,7 @@ def apply_ai_config_drift_review(
     if config.error:
         report.ai_review = {"enabled": False, "status": "config_error", "error": config.error}
         return
-    if not config.enabled or not config.api_key_present:
+    if not config.ready:
         report.ai_review = {"enabled": False, "status": "not_configured"}
         return
     prompt = build_config_drift_ai_prompt(report)

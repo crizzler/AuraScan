@@ -2295,7 +2295,7 @@ def apply_ai_upgrade_review(
     if config.error:
         report.ai_review = {"enabled": False, "status": "config_error", "error": config.error}
         return
-    if not config.enabled or not config.api_key_present:
+    if not config.ready:
         report.ai_review = {"enabled": False, "status": "not_configured"}
         return
 

@@ -1,6 +1,12 @@
 import re
+import shlex
 from typing import List
 from aurascan.analyzers.base import BaseAnalyzer
+from aurascan.analyzers.remote_access import (
+    find_remote_access_backdoor_signals,
+    mask_shell_quoted_text,
+    shell_command_pattern,
+)
 from aurascan.core.models import AnalysisResult, Finding, Phase, Source, Severity, Confidence, EvidenceQuality
 
 class Rule:
@@ -16,7 +22,6 @@ RULES = [
     Rule("CRED-GPG-001", r"~\/\.gnupg\/", Severity.CRITICAL, "Attempted read of ~/.gnupg path.", True),
     Rule("CRED-ENV-001", r"~\/\.env", Severity.HIGH, "Attempted read of ~/.env file.", False),
     Rule("NET-EXEC-001", r"(curl|wget)[^|]*\|\s*(sh|bash)", Severity.CRITICAL, "Remote execution (curl|wget piped to shell).", True),
-    Rule("SYS-CHMOD-001", r"chmod\s+\+s", Severity.HIGH, "Attempted to setuid/setgid binary.", True),
     Rule("EXEC-B64-001", r"base64\s+-d[^|]*\|\s*(sh|bash)", Severity.CRITICAL, "Base64 decode piped to shell.", True),
     Rule(
         "SUPPLYCHAIN-AUR-JS-20260611",
@@ -37,6 +42,22 @@ RULES = [
         r"\beval\b\s*(\"?\$\(|`|['\"]?\$[{]?[A-Za-z_][A-Za-z0-9_]*[}]?|\$\{[^}]+})",
         Severity.HIGH,
         "Dynamic shell evaluation via eval.",
+        False,
+    ),
+    Rule(
+        "PRIV-SUDOERS-NOPASSWD-001",
+        r"(?:^|['\"])[ \t]*(?:%?[A-Za-z_][A-Za-z0-9_.-]*|ALL)[ \t]+[^=\s]+[ \t]*="
+        r"[ \t]*(?:\([^\n)]*\)[ \t]*)?NOPASSWD[ \t]*:",
+        Severity.CRITICAL,
+        "Package logic grants passwordless sudo execution.",
+        True,
+    ),
+    Rule(
+        "PRIV-SUDOERS-DROPIN-001",
+        r"(?:(?:\$pkgdir|\$\{pkgdir\})/etc/sudoers(?:\.d(?:/[^\s\"']*)?)?\b|"
+        r"\b(?:install|cp|mv|tee|chmod|chown)\b[^\n]*/etc/sudoers(?:\.d(?:/[^\s\"']*)?)?\b)",
+        Severity.HIGH,
+        "Package logic installs or references privileged sudo policy.",
         False,
     ),
     Rule(
@@ -87,6 +108,8 @@ COMMENT_FILTERED_RULE_IDS = {
     "EXEC-EVAL-NET-001",
     "EXEC-EVAL-001",
     "SUPPLYCHAIN-AUR-JS-20260611",
+    "PRIV-SUDOERS-NOPASSWD-001",
+    "PRIV-SUDOERS-DROPIN-001",
     "SYS-SYSTEMD-USER-001",
     "SYS-SYSTEMD-AUTO-001",
     "SYS-SYSTEMD-UNIT-001",
@@ -94,6 +117,25 @@ COMMENT_FILTERED_RULE_IDS = {
     "SYS-CRONTAB-001",
     "SYS-CRON-FILE-001",
 }
+
+SECRET_FREE_EVIDENCE = {
+    "PRIV-SUDOERS-NOPASSWD-001": "sudoers policy grants passwordless execution",
+    "PRIV-SUDOERS-DROPIN-001": "package logic targets a sudoers policy path",
+}
+
+_SUDO_COMMAND = shell_command_pattern("sudo")
+_CHMOD_COMMAND = shell_command_pattern("chmod")
+_SUID_MODE = re.compile(r"(?:0?4[0-7]{3}|u\+s|\+s)", re.IGNORECASE)
+_SOURCE_ASSIGNMENT_START = re.compile(
+    r"^[ \t]*source(?:_(?:x86_64|i686|pentium4|aarch64|armv7h|armv6h|riscv64|loong64))?"
+    r"[ \t]*=[ \t]*\(",
+    re.IGNORECASE | re.MULTILINE,
+)
+_HYPRLAND_FIXES_SOURCE = re.compile(
+    r"(?:https?|git\+https)://github\.com/iusearch-hyprlandbtw/hyprland-fixes"
+    r"(?:\.git)?(?:[#'\"\s]|$)",
+    re.IGNORECASE,
+)
 
 class DeterministicAnalyzer(BaseAnalyzer):
     def analyze_content(self, pkg_path: str, content: str, phase: Phase, pkg_name: str = "unknown", pkg_ver: str = "unknown") -> List[Finding]:
@@ -125,11 +167,205 @@ class DeterministicAnalyzer(BaseAnalyzer):
                         recommendation="Review the script to determine if this pattern is legitimate or malicious.",
                         blocks_installation=rule.blocks,
                         requires_manual_review=not rule.blocks,
-                        evidence_snippet=evidence_line.strip(),
+                        evidence_snippet=SECRET_FREE_EVIDENCE.get(rule.rule_id, evidence_line.strip()),
                         line_number=i+1
                     )
                     findings.append(finding)
+        findings.extend(self._inspect_suid_chmod(pkg_path, lines, phase, pkg_name, pkg_ver))
+        active_content = "\n".join(self._strip_shell_comment(line) for line in lines)
+        if phase == Phase.pkgbuild_static:
+            findings.extend(self._inspect_reported_source(pkg_path, active_content, pkg_name, pkg_ver))
+        signals = find_remote_access_backdoor_signals(active_content)
+        if len(signals) >= 2 and any(signal.remote_anchor for signal in signals):
+            findings.append(Finding(
+                rule_id="REMOTE-ADMIN-BACKDOOR-001",
+                package_name=pkg_name,
+                package_version=pkg_ver,
+                phase=phase,
+                source=Source.deterministic_rule,
+                severity=Severity.CRITICAL,
+                confidence=Confidence.CONFIRMED,
+                evidence_quality=EvidenceQuality.confirmed_static_pattern,
+                file_path=pkg_path,
+                explanation="Package logic combines multiple behaviors associated with a root remote-access backdoor.",
+                recommendation="Do not build or install this revision; preserve its provenance and investigate any prior installation from trusted media.",
+                blocks_installation=True,
+                requires_manual_review=False,
+                evidence_snippet="Correlated signals: " + "; ".join(signal.label for signal in signals),
+                line_number=min(signal.line_number for signal in signals),
+            ))
+        if phase == Phase.install_hook_static:
+            findings.extend(self._inspect_privileged_install_hook(pkg_path, lines, pkg_name, pkg_ver))
         return findings
+
+    def _inspect_privileged_install_hook(self, pkg_path: str, lines: List[str], pkg_name: str, pkg_ver: str) -> List[Finding]:
+        for index, line in enumerate(lines):
+            active_line = self._strip_shell_comment(line)
+            masked_line = mask_shell_quoted_text(active_line)
+            for match in _SUDO_COMMAND.finditer(masked_line):
+                segment_end = self._shell_segment_end(masked_line, match.end())
+                remainder = active_line[match.end():segment_end]
+                if self._has_explicit_non_root_sudo_user(remainder):
+                    continue
+                return [Finding(
+                    rule_id="EXEC-INSTALL-HOOK-SUDO-001",
+                    package_name=pkg_name,
+                    package_version=pkg_ver,
+                    phase=Phase.install_hook_static,
+                    source=Source.deterministic_rule,
+                    severity=Severity.CRITICAL,
+                    confidence=Confidence.CONFIRMED,
+                    evidence_quality=EvidenceQuality.confirmed_static_pattern,
+                    file_path=pkg_path,
+                    explanation="Install hook invokes sudo even though package install hooks already run with package-manager privileges.",
+                    recommendation="Do not install this package until the privileged hook and invoked executable have been fully reviewed.",
+                    blocks_installation=True,
+                    requires_manual_review=False,
+                    evidence_snippet="privileged sudo invocation in install hook",
+                    line_number=index + 1,
+                )]
+        return []
+
+    def _inspect_reported_source(
+        self,
+        pkg_path: str,
+        active_content: str,
+        pkg_name: str,
+        pkg_ver: str,
+    ) -> List[Finding]:
+        search_position = 0
+        while True:
+            assignment = _SOURCE_ASSIGNMENT_START.search(active_content, search_position)
+            if assignment is None:
+                return []
+            array_end = self._shell_array_end(active_content, assignment.end())
+            if array_end is None:
+                return []
+            source_match = _HYPRLAND_FIXES_SOURCE.search(active_content, assignment.end(), array_end)
+            if source_match is None:
+                search_position = array_end + 1
+                continue
+            return [Finding(
+                rule_id="SUPPLYCHAIN-AUR-HYPRLAND-FIXES-20260828",
+                package_name=pkg_name,
+                package_version=pkg_ver,
+                phase=Phase.pkgbuild_static,
+                source=Source.deterministic_rule,
+                severity=Severity.CRITICAL,
+                confidence=Confidence.CONFIRMED,
+                evidence_quality=EvidenceQuality.confirmed_static_pattern,
+                file_path=pkg_path,
+                explanation="Declared source points to the repository reported for the August 2026 hyprland-fixes root backdoor.",
+                recommendation="Do not build or install this revision; preserve its package and commit metadata for review.",
+                blocks_installation=True,
+                requires_manual_review=False,
+                evidence_snippet="reported hyprland-fixes source repository",
+                line_number=active_content[:source_match.start()].count("\n") + 1,
+            )]
+
+    def _shell_array_end(self, text: str, start: int) -> int:
+        depth = 1
+        quote = ""
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if quote == "'":
+                if char == "'":
+                    quote = ""
+                continue
+            if quote == '"':
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    quote = ""
+                continue
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char in {"'", '"'}:
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    return index
+        return None
+
+    def _inspect_suid_chmod(
+        self,
+        pkg_path: str,
+        lines: List[str],
+        phase: Phase,
+        pkg_name: str,
+        pkg_ver: str,
+    ) -> List[Finding]:
+        findings: List[Finding] = []
+        for index, line in enumerate(lines):
+            active_line = self._strip_shell_comment(line)
+            masked_line = mask_shell_quoted_text(active_line)
+            for match in _CHMOD_COMMAND.finditer(masked_line):
+                segment_end = self._shell_segment_end(masked_line, match.end())
+                try:
+                    arguments = shlex.split(active_line[match.end():segment_end], posix=True)
+                except ValueError:
+                    arguments = []
+                if not any(_SUID_MODE.fullmatch(argument) for argument in arguments):
+                    continue
+                findings.append(Finding(
+                    rule_id="SYS-CHMOD-001",
+                    package_name=pkg_name,
+                    package_version=pkg_ver,
+                    phase=phase,
+                    source=Source.deterministic_rule,
+                    severity=Severity.HIGH,
+                    confidence=Confidence.CONFIRMED,
+                    evidence_quality=EvidenceQuality.confirmed_static_pattern,
+                    file_path=pkg_path,
+                    explanation="Package logic applies a set-user-ID or set-group-ID permission mode.",
+                    recommendation="Review the script to determine if this pattern is legitimate or malicious.",
+                    blocks_installation=True,
+                    requires_manual_review=False,
+                    evidence_snippet="chmod command applies a set-user-ID permission mode",
+                    line_number=index + 1,
+                ))
+                break
+        return findings
+
+    def _has_explicit_non_root_sudo_user(self, remainder: str) -> bool:
+        try:
+            tokens = shlex.split(remainder, posix=True)
+        except ValueError:
+            return False
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            target = ""
+            if token in {"-u", "--user"}:
+                if index + 1 >= len(tokens):
+                    return False
+                target = tokens[index + 1]
+            elif token.startswith("--user="):
+                target = token.split("=", 1)[1]
+            elif token.startswith("-u") and len(token) > 2:
+                target = token[2:]
+            elif token == "--":
+                return False
+            elif not token.startswith("-"):
+                return False
+            if target:
+                if target.lower() in {"root", "#0", "0"}:
+                    return False
+                return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*|#[1-9][0-9]*", target))
+            index += 1
+        return False
+
+    def _shell_segment_end(self, masked_line: str, command_end: int) -> int:
+        separator = re.search(r"[;|&)]", masked_line[command_end:])
+        return len(masked_line) if separator is None else command_end + separator.start()
 
     def _strip_shell_comment(self, line: str) -> str:
         in_single = False
@@ -148,7 +384,12 @@ class DeterministicAnalyzer(BaseAnalyzer):
             if char == '"' and not in_single:
                 in_double = not in_double
                 continue
-            if char == "#" and not in_single and not in_double:
+            if (
+                char == "#"
+                and not in_single
+                and not in_double
+                and (index == 0 or line[index - 1].isspace() or line[index - 1] in ";|&(){}")
+            ):
                 return line[:index]
         return line
 

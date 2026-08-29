@@ -2218,18 +2218,18 @@ def apply_recovery_ai_plan(
         augment_recovery_actions_from_probes(report)
         report.ai_review = {"enabled": False, "status": "disabled", "provider_requests": 0}
         return
-    if not report.network.connected or report.network.captive_portal:
+    source = dict(os.environ if env is None else env)
+    source["AURASCAN_AI_ENABLED"] = "1"
+    config = resolve_ai_config(source)
+    if not config.is_local and (not report.network.connected or report.network.captive_portal):
         report.probe_results = execute_recovery_probes(report, [], runner=runner, which=which)
         augment_recovery_actions_from_probes(report)
         report.ai_review = {"enabled": True, "status": "offline", "provider_requests": 0, "summary": "AI was unavailable; deterministic recovery checks remain usable."}
         return
-    source = dict(os.environ if env is None else env)
-    source["AURASCAN_AI_ENABLED"] = "1"
-    config = resolve_ai_config(source)
-    if config.error or not config.api_key_present:
+    if not config.ready:
         report.probe_results = execute_recovery_probes(report, [], runner=runner, which=which)
         augment_recovery_actions_from_probes(report)
-        report.ai_review = {"enabled": True, "status": "not_configured", "provider_requests": 0, "summary": "No validated recovery-session AI key was available."}
+        report.ai_review = {"enabled": True, "status": "not_configured", "provider_requests": 0, "summary": "No ready recovery-session AI provider was available."}
         return
     triage: Dict[str, object] = {}
     try:

@@ -10,5 +10,9 @@ source=("https://example.invalid/curated-suid-chmod-1.0.tar.gz")
 sha256sums=("1111111111111111111111111111111111111111111111111111111111111111")
 
 package() {
-  echo "defanged static pattern: chmod +s /tmp/defanged-helper"
+  echo "defanged package step"
+}
+
+fixture_static_example() {
+  chmod +s /tmp/defanged-helper
 }

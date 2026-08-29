@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77.0"]
+requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,8 +8,7 @@ version = "0.7.2"
 description = "AI-assisted safety and recovery layer for Arch-family package, AUR, upgrade, and incident workflows."
 readme = "README.md"
 authors = [{name = "AuraScan Team"}]
-license = "MIT"
-license-files = ["LICENSE"]
+license = {file = "LICENSE"}
 dependencies = []
 requires-python = ">=3.8"
 keywords = [
@@ -48,7 +47,10 @@ Issues = "https://github.com/crizzler/AuraScan/issues"
 Releases = "https://github.com/crizzler/AuraScan/releases"
 
 [project.optional-dependencies]
-test = ["pytest>=8.0"]
+test = [
+    "pytest>=8.0",
+    "tomli>=1.1.0; python_version < '3.11'",
+]
 updater = ["PyQt6>=6.0"]
 
 [project.scripts]

@@ -413,6 +413,34 @@ def test_ai_invalid_json_is_nonblocking(monkeypatch):
     assert report.ai_review["status"] == "invalid_response"
 
 
+def test_keyless_local_ai_reaches_incident_review(monkeypatch):
+    monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
+    monkeypatch.setenv("AURASCAN_AI_PROVIDER", "lmstudio")
+    monkeypatch.setenv("AURASCAN_AI_MODEL", "fixture-local-model")
+    monkeypatch.delenv("AURASCAN_LOCAL_AI_API_KEY", raising=False)
+    report = minimal_report()
+    seen = {}
+
+    def fake_urlopen(request, timeout):
+        seen["url"] = request.full_url
+        seen["headers"] = dict(request.header_items())
+        return FakeResponse({
+            "choices": [{"message": {"content": json.dumps({
+                "summary": "Reviewed locally.",
+                "likely_causes": [],
+                "requested_probe_ids": [],
+                "recommended_action_ids": [],
+            })}}]
+        })
+
+    apply_ai_incident_review(report, urlopen=fake_urlopen)
+
+    assert report.ai_review["status"] == "ok"
+    assert report.ai_review["summary"] == "Reviewed locally."
+    assert seen["url"] == "http://127.0.0.1:1234/v1/chat/completions"
+    assert "Authorization" not in seen["headers"]
+
+
 def test_ai_timeout_is_classified_and_explained_without_blocking(monkeypatch):
     monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
     monkeypatch.setenv("AURASCAN_AI_PROVIDER", "deepseek")

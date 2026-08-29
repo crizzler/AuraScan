@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import List
 from aurascan.core.audit import log_audit
+from aurascan.core.ai_provider import resolve_ai_config
 from aurascan.core.config import MAX_SCRIPT_SIZE
 from aurascan.analyzers.clamav import ClamAVAnalyzer
 from aurascan.analyzers.ai_static import AIStaticAnalyzer
@@ -49,7 +50,7 @@ class AuraScanEngine:
         self.version_compare = version_compare
         self.last_report = None
         self.scanner_version = "2.5.0"
-        self.rule_version = "1.1.0"
+        self.rule_version = "1.2.0"
         self.cache = ScanCache()
         self.risk_engine = RiskEngine()
         self.trust_diff_adapter = HistoryTrustDiffAdapter()
@@ -338,14 +339,25 @@ class AuraScanEngine:
         return report
 
     def _cache_flags(self):
-        return {
+        ai_config = resolve_ai_config(os.environ)
+        flags = {
             "deep_static": self.deep_static,
             "update_scan_policy": self.update_scan_policy.value,
             "scan_context": self.scan_context.value,
             "scan_context_source": self.scan_context_source.value,
             "allow_user_asserted_update_context": self.allow_user_asserted_update_context,
             "local_package_db_root": str(self.local_package_db_root) if self.local_package_db_root is not None else "",
+            "ai_enabled": ai_config.enabled,
+            "ai_ready": ai_config.ready,
         }
+        if ai_config.enabled:
+            flags.update({
+                "ai_provider": ai_config.provider,
+                "ai_model": ai_config.model,
+                "ai_base_url": ai_config.base_url,
+                "ai_config_error": ai_config.error,
+            })
+        return flags
 
     def _filter_findings_for_mode(self, findings):
         if self.deep_static:

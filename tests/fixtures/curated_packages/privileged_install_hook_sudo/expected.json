@@ -1,0 +1,15 @@
+{
+  "scenario": "privileged_install_hook_sudo",
+  "category": "malicious_defanged",
+  "scan_modes": ["fast", "wrapper"],
+  "package_name": "curated-privileged-install-hook-sudo",
+  "package_version": "1.0",
+  "expected_rule_ids": ["EXEC-INSTALL-HOOK-SUDO-001"],
+  "expected_phases": ["install_hook_static"],
+  "expected_min_severity": "CRITICAL",
+  "expected_action": "block",
+  "expected_hard_blocker": true,
+  "expected_makepkg_invoked": false,
+  "expected_wrapper_action": "scan_blocked",
+  "expected_terminal_contains": ["Install hook launches a command through sudo."]
+}

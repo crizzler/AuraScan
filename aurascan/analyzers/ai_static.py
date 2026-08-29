@@ -20,9 +20,9 @@ class AIStaticAnalyzer(BaseAnalyzer):
             print("[AuraScan] AI reasoning is disabled or not configured. Skipping AI review.", file=sys.stderr)
             return AnalysisResult(True, "AI scan skipped (Disabled or not configured)")
 
-        if not config.api_key:
+        if not config.authentication_ready:
             print(f"[AuraScan] WARNING: {config.key_env or 'AURASCAN_AI_KEY'} environment variable not set. Skipping AI reasoning.", file=sys.stderr)
-            return AnalysisResult(True, "AI scan skipped (No API key)")
+            return AnalysisResult(True, "AI scan skipped (Provider authentication is not configured)")
 
         print(f"[AuraScan] Analyzing {content_type} with AI ({config.provider})...", file=sys.stderr)
 
@@ -73,16 +73,20 @@ CRITICAL INSTRUCTIONS:
                     package_version="unknown",
                     phase=Phase.pkgbuild_static,
                     source=Source.ai_review,
-                    severity=Severity.CRITICAL,
-                    confidence=Confidence.CONFIRMED,
-                    evidence_quality=EvidenceQuality.strong_heuristic,
+                    severity=Severity.MEDIUM,
+                    confidence=Confidence.LOW,
+                    evidence_quality=EvidenceQuality.ai_interpretation,
                     file_path=str(pkg_path if isinstance(pkg_path, str) else "content"),
-                    explanation=f"Output format violation (Possible prompt injection). Raw output: {text[:100]}...",
-                    recommendation="DO NOT INSTALL. Possible AI manipulation detected.",
+                    explanation=(
+                        "The AI provider did not follow AuraScan's response contract. "
+                        "This may indicate an incompatible or truncated model response; it does not confirm prompt injection. "
+                        f"Raw output: {text[:100]}..."
+                    ),
+                    recommendation="Retry with a compatible model and review the package manually before installation.",
                     blocks_installation=True,
-                    requires_manual_review=False
+                    requires_manual_review=True
                 )
-                return AnalysisResult(False, "Prompt injection detected", [finding])
+                return AnalysisResult(False, "AI response requires manual review", [finding])
 
         except urllib.error.URLError as e:
             if isinstance(e.reason, socket.timeout):

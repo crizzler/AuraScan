@@ -21,6 +21,7 @@ from aurascan.core.followup import (
     FollowUpProbe,
     FollowUpProbeResult,
     FollowUpRuntime,
+    ask_followup_ai,
     build_followup_ai_prompt,
     context_from_config_drift,
     context_from_maintenance,
@@ -100,6 +101,40 @@ def context(context_id="followup-test"):
         ],
     )
     return item
+
+
+def test_keyless_local_ai_reaches_contextual_followup(tmp_path):
+    env = ai_env(tmp_path)
+    env.update({
+        "AURASCAN_AI_PROVIDER": "lmstudio",
+        "AURASCAN_AI_MODEL": "fixture-local-model",
+        "AURASCAN_AI_BASE_URL": "http://127.0.0.1:1234/v1",
+        "AURASCAN_OPENAI_API_KEY": "",
+    })
+    seen = {}
+
+    def urlopen(request, timeout):
+        seen["url"] = request.full_url
+        seen["headers"] = dict(request.header_items())
+        return provider_response({
+            "answer": "The local model reviewed the saved context.",
+            "referenced_fact_ids": ["fact-one"],
+            "requested_probe_ids": [],
+            "requested_action_ids": [],
+        })
+
+    response = ask_followup_ai(
+        context(),
+        "What happened?",
+        [],
+        env=env,
+        urlopen=urlopen,
+    )
+
+    assert response.status == "ok"
+    assert response.referenced_fact_ids == ["fact-one"]
+    assert seen["url"] == "http://127.0.0.1:1234/v1/chat/completions"
+    assert "Authorization" not in seen["headers"]
 
 
 def test_context_persistence_is_private_and_latest_is_selected(tmp_path):

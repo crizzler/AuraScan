@@ -36,6 +36,14 @@ SIGNER_FINGERPRINT = "0123456789ABCDEF0123456789ABCDEF01234567"
 MISMATCH_FINGERPRINT = "FEDCBA9876543210FEDCBA9876543210FEDCBA98"
 
 
+def path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
 class FakeClamAV:
     def __init__(self):
         self.archive_paths = []
@@ -275,7 +283,7 @@ def assert_deep_static_safety(report, manifest, prepared, fake_home):
             env = kwargs["env"]
             assert env["GNUPGHOME"] != os.environ.get("GNUPGHOME")
             assert env["HOME"] != str(Path.home())
-            assert not Path(env["GNUPGHOME"]).is_relative_to(fake_home)
+            assert not path_is_relative_to(Path(env["GNUPGHOME"]), fake_home)
 
     if manifest["scenario"] == "archive_path_traversal":
         assert not (prepared.pkgbuild.parent.parent / "evil.txt").exists()

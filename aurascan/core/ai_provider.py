@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import os
 import urllib.parse
@@ -13,6 +14,9 @@ class AIProviderSpec:
     key_env: str
     default_model: str
     api_family: str
+    requires_api_key: bool = True
+    local: bool = False
+    default_base_url: str = ""
 
 
 @dataclass
@@ -22,6 +26,7 @@ class AIProviderConfig:
     enabled: bool
     api_key: str = ""
     key_env: str = ""
+    base_url: str = ""
     explicit_enabled: Optional[bool] = None
     error: str = ""
 
@@ -33,6 +38,20 @@ class AIProviderConfig:
     def supported(self) -> bool:
         return not self.error and self.provider in PROVIDERS
 
+    @property
+    def is_local(self) -> bool:
+        spec = get_provider_spec(self.provider)
+        return bool(spec and spec.local)
+
+    @property
+    def authentication_ready(self) -> bool:
+        spec = get_provider_spec(self.provider)
+        return bool(spec and (not spec.requires_api_key or self.api_key_present))
+
+    @property
+    def ready(self) -> bool:
+        return self.supported and self.enabled and self.authentication_ready
+
 
 PROVIDERS: Dict[str, AIProviderSpec] = {
     "openai": AIProviderSpec("openai", "OpenAI", "AURASCAN_OPENAI_API_KEY", "gpt-4o", "chat_completions"),
@@ -40,12 +59,35 @@ PROVIDERS: Dict[str, AIProviderSpec] = {
     "deepseek": AIProviderSpec("deepseek", "DeepSeek", "AURASCAN_DEEPSEEK_API_KEY", "deepseek-chat", "chat_completions"),
     "gemini": AIProviderSpec("gemini", "Gemini", "AURASCAN_GEMINI_API_KEY", "gemini-1.5-flash", "gemini_generate_content"),
     "openrouter": AIProviderSpec("openrouter", "OpenRouter", "AURASCAN_OPENROUTER_API_KEY", "~openai/gpt-latest", "chat_completions"),
+    "lmstudio": AIProviderSpec(
+        "lmstudio",
+        "LM Studio",
+        "AURASCAN_LOCAL_AI_API_KEY",
+        "local-model",
+        "chat_completions",
+        requires_api_key=False,
+        local=True,
+        default_base_url="http://127.0.0.1:1234/v1",
+    ),
+    "llamacpp": AIProviderSpec(
+        "llamacpp",
+        "llama.cpp",
+        "AURASCAN_LOCAL_AI_API_KEY",
+        "aurascan-local",
+        "chat_completions",
+        requires_api_key=False,
+        local=True,
+        default_base_url="http://127.0.0.1:8080/v1",
+    ),
 }
 
 LEGACY_KEY_ENV = "AURASCAN_AI_KEY"
 AI_ENABLED_ENV = "AURASCAN_AI_ENABLED"
 AI_PROVIDER_ENV = "AURASCAN_AI_PROVIDER"
 AI_MODEL_ENV = "AURASCAN_AI_MODEL"
+AI_BASE_URL_ENV = "AURASCAN_AI_BASE_URL"
+LOCAL_AI_KEY_ENV = "AURASCAN_LOCAL_AI_API_KEY"
+MAX_AI_RESPONSE_BYTES = 1024 * 1024
 
 TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 FALSE_VALUES = {"0", "false", "no", "n", "off"}
@@ -53,6 +95,11 @@ FALSE_VALUES = {"0", "false", "no", "n", "off"}
 
 class AIProviderError(RuntimeError):
     pass
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_args, **_kwargs):
+        raise AIProviderError("local AI redirects are disabled")
 
 
 def parse_bool(value: Optional[str]) -> Optional[bool]:
@@ -74,6 +121,44 @@ def get_provider_spec(provider: str) -> Optional[AIProviderSpec]:
     return PROVIDERS.get((provider or "").strip().lower())
 
 
+def normalize_local_base_url(value: str) -> str:
+    raw = (value or "").strip()
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+        port = parsed.port
+    except ValueError as exc:
+        raise AIProviderError("invalid local AI base URL") from exc
+
+    if parsed.scheme.lower() not in {"http", "https"}:
+        raise AIProviderError("local AI base URL must use http or https")
+    if not parsed.netloc or parsed.hostname is None:
+        raise AIProviderError("local AI base URL must include a loopback host")
+    if parsed.username is not None or parsed.password is not None:
+        raise AIProviderError("local AI base URL must not contain credentials")
+    if parsed.query or parsed.fragment:
+        raise AIProviderError("local AI base URL must not contain a query or fragment")
+    if port is not None and not 1 <= port <= 65535:
+        raise AIProviderError("local AI base URL has an invalid port")
+
+    host = parsed.hostname.lower()
+    is_loopback = host == "localhost"
+    if not is_loopback:
+        try:
+            is_loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            is_loopback = False
+    if not is_loopback:
+        raise AIProviderError("local AI base URL must use a loopback host")
+
+    path = parsed.path or ""
+    if path not in {"", "/", "/v1", "/v1/"}:
+        raise AIProviderError("local AI base URL path must be /v1")
+
+    normalized_host = f"[{host}]" if ":" in host else host
+    netloc = normalized_host if port is None else f"{normalized_host}:{port}"
+    return urllib.parse.urlunsplit((parsed.scheme.lower(), netloc, "/v1", "", ""))
+
+
 def resolve_ai_config(env: Optional[Mapping[str, str]] = None) -> AIProviderConfig:
     source = env if env is not None else os.environ
     provider = source.get(AI_PROVIDER_ENV, "gemini").strip().lower() or "gemini"
@@ -81,12 +166,20 @@ def resolve_ai_config(env: Optional[Mapping[str, str]] = None) -> AIProviderConf
     error = "" if spec else "unsupported_provider"
     model = source.get(AI_MODEL_ENV, "").strip() or (spec.default_model if spec else "")
 
+    base_url = ""
+    if spec and spec.local:
+        candidate = source.get(AI_BASE_URL_ENV, "").strip() or spec.default_base_url
+        try:
+            base_url = normalize_local_base_url(candidate)
+        except AIProviderError:
+            error = error or "invalid_base_url"
+
     api_key = ""
     key_env = ""
     if spec and source.get(spec.key_env):
         api_key = source.get(spec.key_env, "")
         key_env = spec.key_env
-    elif source.get(LEGACY_KEY_ENV):
+    elif spec and not spec.local and source.get(LEGACY_KEY_ENV):
         api_key = source.get(LEGACY_KEY_ENV, "")
         key_env = LEGACY_KEY_ENV
 
@@ -96,7 +189,7 @@ def resolve_ai_config(env: Optional[Mapping[str, str]] = None) -> AIProviderConf
         error = error or "invalid_enabled_value"
         enabled = False
     elif explicit_enabled is None:
-        enabled = bool(api_key)
+        enabled = bool(api_key) if spec and spec.requires_api_key else False
     else:
         enabled = explicit_enabled
 
@@ -106,22 +199,33 @@ def resolve_ai_config(env: Optional[Mapping[str, str]] = None) -> AIProviderConf
         enabled=enabled,
         api_key=api_key,
         key_env=key_env or (spec.key_env if spec else ""),
+        base_url=base_url,
         explicit_enabled=explicit_enabled,
         error=error,
     )
 
 
 def build_request(config: AIProviderConfig, prompt: str) -> urllib.request.Request:
+    if config.error:
+        raise AIProviderError(f"invalid AI provider configuration: {config.error}")
+    if not config.enabled:
+        raise AIProviderError("AI provider is disabled")
     spec = get_provider_spec(config.provider)
     if spec is None:
         raise AIProviderError(f"unsupported AI provider: {config.provider}")
-    if not config.api_key:
+    if spec.requires_api_key and not config.api_key:
         raise AIProviderError("missing AI API key")
 
     headers = {"Content-Type": "application/json"}
     payload = {}
 
-    if config.provider == "openai":
+    if spec.local:
+        base_url = normalize_local_base_url(config.base_url or spec.default_base_url)
+        url = f"{base_url}/chat/completions"
+        if config.api_key:
+            headers["Authorization"] = f"Bearer {config.api_key}"
+        payload = _chat_payload(config.model, prompt, max_tokens=1024)
+    elif config.provider == "openai":
         url = "https://api.openai.com/v1/chat/completions"
         headers["Authorization"] = f"Bearer {config.api_key}"
         payload = _chat_payload(config.model, prompt)
@@ -156,12 +260,38 @@ def build_request(config: AIProviderConfig, prompt: str) -> urllib.request.Reque
     return urllib.request.Request(url, data=data, headers=headers)
 
 
-def _chat_payload(model: str, prompt: str) -> Dict[str, object]:
-    return {
+def _chat_payload(model: str, prompt: str, *, max_tokens: Optional[int] = None) -> Dict[str, object]:
+    payload: Dict[str, object] = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.0,
+        "stream": False,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    return payload
+
+
+def _read_json_response(response) -> Mapping[str, object]:
+    try:
+        raw = response.read(MAX_AI_RESPONSE_BYTES + 1)
+    except TypeError:
+        # Compatibility for small test doubles and response-like integrations.
+        raw = response.read()
+    if len(raw) > MAX_AI_RESPONSE_BYTES:
+        raise AIProviderError("AI provider response exceeded the size limit")
+    result = json.loads(raw.decode("utf-8"))
+    if not isinstance(result, Mapping):
+        raise AIProviderError("AI provider response was not a JSON object")
+    return result
+
+
+def _local_urlopen(request: urllib.request.Request, *, timeout: int):
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _NoRedirectHandler(),
+    )
+    return opener.open(request, timeout=timeout)
 
 
 def call_ai_provider(
@@ -171,15 +301,18 @@ def call_ai_provider(
     timeout: int = 30,
     urlopen: Optional[Callable] = None,
 ) -> str:
-    opener = urlopen or urllib.request.urlopen
+    opener = urlopen
+    if opener is None:
+        opener = _local_urlopen if config.is_local else urllib.request.urlopen
     req = build_request(config, prompt)
     with opener(req, timeout=timeout) as response:
-        result = json.loads(response.read().decode("utf-8"))
+        result = _read_json_response(response)
     return extract_response_text(config.provider, result)
 
 
 def extract_response_text(provider: str, result: Mapping[str, object]) -> str:
-    if provider in {"openai", "deepseek", "openrouter"}:
+    spec = get_provider_spec(provider)
+    if spec and spec.api_family == "chat_completions":
         choices = result.get("choices", [])
         if not choices:
             return ""

@@ -1,0 +1,15 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-privileged-install-hook-sudo
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged privileged install-hook fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-privileged-install-hook-sudo"
+license=("MIT")
+install=curated-privileged-install-hook-sudo.install
+source=("https://example.invalid/curated-privileged-install-hook-sudo-1.0.tar.gz")
+sha256sums=("7777777777777777777777777777777777777777777777777777777777777777")
+
+package() {
+  echo "defanged package step"
+}

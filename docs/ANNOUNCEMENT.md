@@ -9,6 +9,17 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
+The v0.8 release adds blocking behavior-chain detection for root remote-access
+backdoors such as the reported `hyprland-fixes` package. It correlates
+privileged Tailscale enrollment or hidden root SSH with persistence,
+passwordless sudo/SUID changes, or anti-forensics instead of flagging an
+ordinary `tailscaled` service. `aurascan security-audit` also checks bounded
+package history and exact reported host artifacts without executing them.
+
+Optional AI can now stay on the same machine through LM Studio or llama.cpp.
+These providers are explicitly enabled, restricted to loopback, may be keyless,
+and never fall back to a cloud provider.
+
 It can scan PKGBUILDs and package archives, wrap makepkg before build scripts
 run, preview risky upgrade conditions with `aurascan upgrade --dry-run`, and
 help explain `.pacnew`/`.pacsave` config drift with backups before applying
@@ -58,6 +69,7 @@ Try:
 ```bash
 python -m pip install -e ".[test]"
 python -m aurascan init
+python -m aurascan security-audit
 python -m aurascan upgrade --dry-run
 python -m aurascan config-drift --dry-run
 python -m aurascan incidents --dry-run --no-ai
@@ -67,7 +79,7 @@ python -m aurascan agent --latest
 ```
 
 Important limits: AuraScan is a developer preview. A clean report is not proof
-that a package or upgrade is safe. Network AI is optional and advisory. The
+that a package or upgrade is safe. Provider AI is optional and advisory. The
 project is looking for testing, packaging feedback, and real-world false
 positive reports.
 
@@ -82,6 +94,13 @@ behavior, checksum/signature drift, local history changes, and optional ClamAV
 or AI signals. It can also be used through `aurascan-makepkg` so the review
 happens before makepkg runs package functions.
 
+The v0.8 security update adds exact `hyprland-fixes` source and exposure
+intelligence plus generic correlated detection for privileged Tailscale SSH,
+alternate-port root SSH, systemd/SUID/sudo persistence, and log or history
+erasure. Common legitimate Tailscale state is not an alert by itself. Static
+matches show suspicious code or artifacts, not proof that attacker access
+succeeded.
+
 The newest work adds upgrade safety helpers:
 
 - `aurascan upgrade --dry-run` previews repo and AUR updates.
@@ -91,6 +110,9 @@ The newest work adds upgrade safety helpers:
 - It supports pacman-only upgrades plus paru, yay, and Shelly handoff.
 - AI review is optional and raise-only. It can add caution, but it cannot mark
   an upgrade safe or suppress deterministic findings.
+- LM Studio and llama.cpp can provide explicitly enabled loopback-only AI
+  without a placeholder API key; AuraScan does not start or manage the model
+  server and never redirects these providers to cloud AI.
 - `aurascan config-drift --dry-run` explains config drift and prepares safe
   fixes with backups before applying.
 - `aurascan incidents --dry-run` examines bounded journal, coredump, pstore,
@@ -130,7 +152,7 @@ The newest work adds upgrade safety helpers:
 What I would value most:
 
 - Arch, EndeavourOS, Manjaro, and CachyOS users testing dry-run output.
-- Packaging feedback for a future AUR package.
+- Packaging and upgrade feedback for the published AUR package.
 - False positive reports from real PKGBUILDs and upgrades.
 - Suggestions for making the terminal UX friendlier for non-expert Linux users.
 

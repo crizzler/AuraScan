@@ -22,7 +22,7 @@ live terminal consent. Root-shell mode is user-authorized remote code execution,
 not a safety guarantee.
 The optional AuraScan Recovery boot environment extends those guarded workflows
 to an installed OS that cannot boot normally, with deterministic offline
-diagnostics and separately consented network AI.
+diagnostics and separately consented provider AI.
 
 AuraScan does not prove that a package is safe. A clean report, a clean ClamAV
 result, or a valid source signature is not a guarantee. The goal is to find risk
@@ -197,7 +197,8 @@ PKGBUILD text, declared local install hooks when available, local history, and
 available package archives. It can use deterministic rules, ClamAV when
 available, source metadata checks, local history diffing, and structured risk
 summaries. The separate security audit also checks a validated historical AUR
-campaign snapshot, bounded pacman history, and optional `arch-audit` advisories.
+campaign snapshot, the reported August 2026 `hyprland-fixes` incident, bounded
+pacman history, correlated host artifacts, and optional `arch-audit` advisories.
 
 Default scans do not download declared sources, clone upstream repositories,
 fetch PGP keys, run GPG, run makepkg, install packages, or execute package code.
@@ -233,12 +234,42 @@ python -m aurascan init
 python -m aurascan doctor
 ```
 
-`aurascan init` can configure an AI provider and save the API key in
-`~/.config/aurascan/.env`. API keys are prompted with hidden input and the user
-config file is written with restrictive permissions. The wizard recognizes the
-release-safe hook installed by the Arch package and does not ask for a redundant
-local override. Source or development installs can still repair a local hook at
+`aurascan init` can configure a cloud or local AI provider in
+`~/.config/aurascan/.env`. Required cloud API keys are prompted with hidden
+input; optional local-server tokens can be added as
+`AURASCAN_LOCAL_AI_API_KEY`. The user config file is written with restrictive
+permissions. The wizard recognizes the release-safe hook installed by the Arch
+package and does not ask for a redundant local override. Source or development
+installs can still repair a local hook at
 `/etc/pacman.d/hooks/aurascan.hook` when needed.
+
+LM Studio and `llama-server` expose compatible local APIs, so they can be
+selected without installing another Python client:
+
+```bash
+aurascan init --provider lmstudio --model MODEL --enable-ai
+aurascan init --provider llamacpp --model aurascan-local --enable-ai
+aurascan init --provider llamacpp --model MODEL --base-url http://127.0.0.1:9000/v1 --enable-ai
+aurascan doctor
+aurascan doctor --check-ai
+```
+
+The presets use `http://127.0.0.1:1234/v1` for LM Studio and
+`http://127.0.0.1:8080/v1` for llama.cpp. Start and load a model in the selected
+server first; AuraScan does not start, download, or manage local models. The
+wizard prompts for the model ID when `--model` is omitted. For llama.cpp,
+`llama-server --alias aurascan-local ...` provides a stable ID instead of
+exposing the model-file path as the default ID. See the official
+[LM Studio OpenAI-compatible API documentation](https://lmstudio.ai/docs/developer/openai-compat)
+and [llama-server documentation](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
+
+Local providers require explicit `AURASCAN_AI_ENABLED=1`, but do not require a
+placeholder API key when their server has authentication disabled. Set
+`AURASCAN_LOCAL_AI_API_KEY` when the local server requires a Bearer token, and
+use `AURASCAN_AI_BASE_URL` to override a preset with another loopback HTTP(S)
+endpoint. Local-provider URLs are restricted to loopback; AuraScan bypasses
+environment proxies, refuses redirects, and never falls back to a cloud
+provider. `aurascan doctor` remains offline unless `--check-ai` is supplied.
 
 `aurascan init` can also configure upgrade preflight defaults. Upgrade
 preflight is enabled by default even without an explicit setting, but the
@@ -255,11 +286,13 @@ aurascan init --install-recovery --enable-recovery-ai --enable-recovery-auto-ref
 aurascan init --disable-upgrade-preflight
 ```
 
-Network AI analysis is explicit in wizard-created configs. If you choose
-local-only mode, AuraScan writes `AURASCAN_AI_ENABLED=0` and keeps normal scans
-local. `aurascan doctor` checks the selected provider, key presence, optional
-tools, hook status, and config permissions. It does not contact the provider
-unless `--check-ai` is supplied.
+AI analysis is explicit in wizard-created configs. If you leave AI disabled,
+AuraScan writes `AURASCAN_AI_ENABLED=0` and keeps normal scans deterministic and
+local. `aurascan doctor` checks the selected provider, required credential
+state, optional tools, hook status, and config permissions. It does not contact
+the provider unless `--check-ai` is supplied. Selecting LM Studio or llama.cpp
+keeps the request on the configured loopback server; it does not implicitly
+authorize cloud AI.
 
 When AuraScan is launched by a root pacman hook through `sudo`, it also checks
 the invoking user's `~/.config/aurascan/.env` when `SUDO_USER` is available.
@@ -297,7 +330,8 @@ aurascan --deep-static --offline --no-auto-key-fetch --pkgbuild ./PKGBUILD
 history with packaged AUR campaign intelligence. AuraScan ships a validated
 snapshot of the community-maintained June 2026 incident list and labels its
 provenance clearly. It parses package names as data and never executes the
-upstream shell script.
+upstream shell script. It also includes bounded intelligence for the 28 August
+2026 [`hyprland-fixes` report](https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/TAASU6LTO76UCKYLMG25OJPUY7ZONASN/).
 
 ```bash
 aurascan security-audit
@@ -320,10 +354,29 @@ default and official HIGH/CRITICAL advisories are raised only when the pending
 repository transaction does not already include the affected package.
 
 A package-name-only match is MEDIUM because cleaned packages can later be
-legitimate. A matching pacman install/upgrade event inside the campaign window
-is CRITICAL exposure evidence, but still not proof that the exact malicious
-commit executed. AuraScan does not automatically remove packages or claim to
-clean a potentially compromised host.
+legitimate. A matching pacman transaction inside the campaign window,
+including a later removal, is CRITICAL exposure evidence, but still not proof
+that the exact malicious commit executed. AuraScan does not automatically
+remove packages or claim to clean a potentially compromised host.
+
+For `hyprland-fixes`, an installed or pending name is HIGH, a helper-cache-only
+match is LOW, and any matching install/update event in bounded pacman history
+is CRITICAL; a removal event is also exposure evidence because uninstalling
+does not undo host changes. The malicious repository history predates the
+public report. The host audit also checks bounded, non-executing evidence at the
+reported paths: disguised root-`sshd` configuration under
+`/etc/pacman.d`, related systemd units and hourly persistence, the narrow
+sudoers grant, duplicate SSH-key placement, payload copies, and the reported
+firewall peer. One exact path is HIGH; multiple artifacts or validated behavior
+markers are CRITICAL. Evidence labels omit auth-key and SSH-key material.
+
+AuraScan intentionally does not alert on `tailscaled`, a Tailscale interface,
+or a `100.64.0.0/10` address alone. Those are common legitimate conditions and
+do not identify an attacker-controlled tailnet. Static source detection instead
+correlates authenticated Tailscale SSH enrollment or hidden root-SSH behavior
+with independent persistence, privilege, or anti-forensics signals. A match
+proves suspicious code or artifacts were found, not that enrollment or remote
+access succeeded.
 
 ## Upgrade Preflight
 
@@ -420,7 +473,7 @@ and does not run the upgrade command.
 
 ## Contextual Follow-Up Assistant
 
-When network AI is configured, interactive foreground upgrade, incident,
+When an AI provider is configured, interactive foreground upgrade, incident,
 maintenance, and config-drift workflows offer:
 
 ```text
@@ -797,11 +850,13 @@ use another network, phone tethering, or offline recovery.
 Offline deterministic diagnostics start first. AuraScan checks package locks,
 repository health, interrupted transactions, kernel/module trees, initramfs,
 boot-critical config drift, free space, snapshots, the ESP, and the detected
-bootloader. Network AI runs automatically only when recovery AI was separately
-enabled and a usable non-captive connection exists. AuraScan validates the
-opted-in user's `0600` provider config from the mounted target; otherwise it can
-accept a session-only key that is never persisted. Provider failure does not
-block the deterministic plan.
+bootloader. Cloud provider AI runs automatically only when recovery AI was
+separately enabled and a usable non-captive connection exists. A loopback local
+provider can run without external connectivity when its compatible server is
+available inside the recovery environment. AuraScan validates the opted-in
+user's `0600` provider config from the mounted target; otherwise it can accept a
+session-only key that is never persisted. Provider failure does not block the
+deterministic plan.
 
 Recovery reuses the two-pass guarded planner. AI can select only opaque local
 probe IDs and then prioritize only independently verified action IDs. It cannot
@@ -858,7 +913,7 @@ Before applying any fix, AuraScan backs up the active config and drift file
 under `/var/lib/aurascan/config-drift/<run-id>/` with a JSON manifest. `.pacsave`
 files are explained but not restored or deleted automatically in v1.
 
-AI diff review is optional and opt-in. Network AI sees config diffs only when
+AI diff review is optional and opt-in. The configured AI provider sees config diffs only when
 `--ai-diffs` is passed or `AURASCAN_CONFIG_DRIFT_AI_DIFFS=always` is configured.
 Diffs are bounded and redacted first, but AuraScan still treats AI as advisory:
 AI cannot bypass backups, deterministic file classification, or sensitive-file
@@ -986,12 +1041,15 @@ participate in smart or new-only decisions only with
 
 ## Privacy And External Tools
 
-Default scans are local unless network AI analysis has been explicitly enabled
-or a legacy `AURASCAN_AI_KEY` environment variable is present. The first-run
-wizard writes an explicit `AURASCAN_AI_ENABLED` value so the user's choice is
-clear. When enabled, package AI analysis may send package metadata, PKGBUILD
-text, and install-script text to the configured provider. Config drift diff
-review has an additional opt-in gate and sends only redacted bounded diffs.
+Default scans are deterministic and local unless AI analysis has been
+explicitly enabled or a legacy-compatible cloud configuration has an API key
+but no explicit enable flag. Local providers never enable implicitly. The
+first-run wizard writes an explicit `AURASCAN_AI_ENABLED` value so the user's
+choice is clear. When enabled, package AI analysis may send package
+metadata, PKGBUILD text, and install-script text to the configured provider.
+For `lmstudio` and `llamacpp`, that provider is a loopback HTTP server; AuraScan
+does not redirect or proxy the request to another host. Config drift diff review
+has an additional opt-in gate and sends only redacted bounded diffs.
 Incident AI normally runs when the user opens an incident. A separate explicit
 opt-in permits background AI only in the logged-in user service. The root boot,
 weekly, and Safe Autopilot services have no network access and never load API
@@ -1019,15 +1077,22 @@ begins.
 Recovery AI has a separate consent bit. Neither the locally built UKI nor the
 release ISO contains an API key, user config, saved WLAN profile, hostname,
 home path, or incident evidence. A validated target-user provider config is
-read only after target mount and network setup; an optional session key remains
+read only after target mount and runtime setup; an optional session key remains
 in memory. Recovery AI receives the same bounded redacted/facts-only evidence
-and opaque probe/action IDs as foreground incident AI.
+and opaque probe/action IDs as foreground incident AI. A local provider's
+`127.0.0.1` address refers to the recovery environment itself, not the installed
+system. Recovery neither starts nor forwards LM Studio or `llama-server`; if no
+compatible server is already running inside recovery, the AI step remains
+unavailable and deterministic recovery continues without a cloud fallback.
 
 Supported AI provider IDs are `openai`, `anthropic`, `deepseek`, `gemini`, and
-`openrouter`. Provider-specific keys use `AURASCAN_OPENAI_API_KEY`,
+`openrouter`, plus the local `lmstudio` and `llamacpp` providers.
+Provider-specific keys for cloud providers use `AURASCAN_OPENAI_API_KEY`,
 `AURASCAN_ANTHROPIC_API_KEY`, `AURASCAN_DEEPSEEK_API_KEY`,
 `AURASCAN_GEMINI_API_KEY`, or `AURASCAN_OPENROUTER_API_KEY`. Legacy
-`AURASCAN_AI_KEY` remains supported for existing setups.
+`AURASCAN_AI_KEY` remains supported for existing setups. Local providers use
+the optional `AURASCAN_LOCAL_AI_API_KEY`; their endpoint may be overridden with
+`AURASCAN_AI_BASE_URL` subject to the loopback-only policy.
 
 Deep static source acquisition can contact source hosts and, unless disabled,
 a configured keyserver for PGP key lookup. The metadata-only tuning helper

@@ -245,6 +245,7 @@ def test_curated_fixture_manifests_are_valid_and_cover_core_categories():
         "EXEC-EVAL-NET-001",
         "SYS-SYSTEMD-AUTO-001",
         "SYS-CRON-REBOOT-001",
+        "EXEC-INSTALL-HOOK-SUDO-001",
     } <= covered_rules
 
 

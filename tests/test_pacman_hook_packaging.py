@@ -3,7 +3,11 @@ import os
 from pathlib import Path
 import re
 import subprocess
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised by the Python 3.8 CI job
+    import tomli as tomllib
 
 from aurascan.cli import (
     build_parser,
@@ -172,6 +176,7 @@ def test_arch_pkgbuild_installs_disabled_hardened_incident_monitor():
     assert "ExecStart=/usr/bin/aurascan incidents --last-boot --capture-monitor" in service
     assert "PrivateNetwork=yes" in service
     assert "UnsetEnvironment=AURASCAN_AI_KEY" in service
+    assert "AURASCAN_LOCAL_AI_API_KEY" in service
     assert "NoNewPrivileges=yes" in service
     assert "ProtectSystem=strict" in service
     assert "StateDirectory=aurascan/incidents" in service
@@ -179,6 +184,7 @@ def test_arch_pkgbuild_installs_disabled_hardened_incident_monitor():
     assert "ExecStart=/usr/bin/aurascan incidents --current-boot --capture-maintenance" in maintenance_service
     assert "PrivateNetwork=yes" in maintenance_service
     assert "UnsetEnvironment=AURASCAN_AI_KEY" in maintenance_service
+    assert "AURASCAN_LOCAL_AI_API_KEY" in maintenance_service
     assert "CPUWeight=10" in maintenance_service
     assert "IOWeight=10" in maintenance_service
     assert "OnCalendar=weekly" in maintenance_timer
@@ -196,6 +202,7 @@ def test_arch_pkgbuild_installs_disabled_hardened_incident_monitor():
     assert "ExecStart=/usr/bin/aurascan incidents --capture-safe-autopilot" in safe_service
     assert "PrivateNetwork=yes" in safe_service
     assert "UnsetEnvironment=AURASCAN_AI_KEY" in safe_service
+    assert "AURASCAN_LOCAL_AI_API_KEY" in safe_service
     assert "IPAddressDeny=any" in safe_service
     assert "ProtectProc=ptraceable" in safe_service
     assert "ReadWritePaths=/var/lib/aurascan/incidents /var/lib/pacman /etc/pacman.d" in safe_service

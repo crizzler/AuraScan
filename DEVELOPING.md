@@ -15,8 +15,13 @@ python -m pip install -e ".[test]"
 Syntax-only validation is also useful for quick security-focused edits:
 
 ```bash
-python -m compileall aurascan tests
+python -m compileall aurascan tests tools
 ```
+
+GitHub Actions runs the editable test install, compile check, complete pytest
+suite, and both strict presenter audits on Python 3.8 and 3.14. Provider calls
+are mocked; CI explicitly disables AI and never starts a live local model
+server.
 
 ## Real-world warning tuning
 
@@ -91,11 +96,27 @@ writes only `~/.config/aurascan/.env`, creates the config directory with `0700`,
 and writes the env file with `0600`. Do not add command-line API key flags;
 secrets must be entered through hidden input or preexisting environment/config.
 
-Wizard-created configs must set `AURASCAN_AI_ENABLED` explicitly. Local-only
-setup writes `AURASCAN_AI_ENABLED=0`. Network AI setup may write
+Wizard-created configs must set `AURASCAN_AI_ENABLED` explicitly. AI-disabled
+setup writes `AURASCAN_AI_ENABLED=0`. Enabled AI setup may write
 `AURASCAN_AI_PROVIDER`, `AURASCAN_AI_MODEL`, and one provider-specific key such
 as `AURASCAN_OPENAI_API_KEY`. Legacy `AURASCAN_AI_KEY` remains supported so
 existing users do not lose behavior.
+
+`lmstudio` and `llamacpp` are explicit local AI provider IDs using the shared
+OpenAI-compatible chat-completions transport. Their defaults are respectively
+`http://127.0.0.1:1234/v1` and `http://127.0.0.1:8080/v1`. The wizard may save a
+loopback override as `AURASCAN_AI_BASE_URL` and an optional Bearer token as
+`AURASCAN_LOCAL_AI_API_KEY`. Do not require a fake key for a local server with
+authentication disabled, but do require `AURASCAN_AI_ENABLED=1`; keyless local
+configuration must not revive the old implicit-enable behavior.
+
+Local-provider URL handling is part of the security boundary. Accept only
+loopback HTTP(S) endpoints without userinfo, query, or fragment components;
+bypass environment proxies; refuse HTTP redirects; use bounded response reads
+and timeouts; and never fall back to a cloud endpoint. Do not start a server,
+download a model, enable tools or MCP, or send a live request from tests. Use
+injected openers and assert that credentials do not appear in diagnostics,
+exceptions, or serialized details.
 
 When AuraScan runs as root from a sudo-launched pacman hook, config loading may
 also read the invoking user's `~/.config/aurascan/.env` from `SUDO_USER`.
@@ -106,6 +127,14 @@ Unattended or direct-root hook contexts should use `/etc/aurascan/.env`.
 optional tools should be warnings unless the checked workflow cannot proceed.
 Doctor should report upgrade preflight and config drift assistant config state,
 including invalid env values, without reading or printing config file contents.
+For local AI, ordinary doctor output may validate the stored loopback URL and
+optional-token state locally; chat connectivity is allowed only under the
+explicit `--check-ai` request.
+
+Recovery reuses validated provider configuration but does not start or forward
+a local inference server. Loopback there names the recovery environment, not a
+server running on the installed target. A missing local endpoint must preserve
+offline deterministic recovery and must not trigger cloud fallback.
 
 Manual hook setup from `aurascan init` is allowed only for the local admin hook
 path `/etc/pacman.d/hooks/aurascan.hook`. The installer must refuse hook writes
@@ -181,8 +210,10 @@ isolated PGP verification outcomes, suspicious `setup.py`, `package.json`
 install scripts, token-reference source text, vendored dependency directories,
 minified generated-looking files, eval-chain package logic, systemd unit-file
 packaging, systemd auto-enable/start behavior, user-level systemd persistence,
-cron file installation, crontab command use, cron `@reboot` entries, and
-deep-static systemd unit/auto-enable/user-persistence split behavior.
+cron file installation, crontab command use, cron `@reboot` entries, privileged
+sudo execution from install hooks, non-executable extensionless shebang
+scripts, and deep-static systemd
+unit/auto-enable/user-persistence split behavior.
 
 The deep-static fixture set lives under
 `tests/fixtures/curated_packages/deep_static/`. Its archives, detached
@@ -207,6 +238,19 @@ separate from auto-enable/start behavior, and prefer narrow rules for behavior
 that changes background execution. Fixture tests must remain static-only: no
 real makepkg, no package-code execution, no live AUR access, no root, and no
 network requirement.
+
+Remote-access detections should correlate independent behavior. A common daemon
+or command such as `tailscaled`, `sshd`, or `systemctl` is not a backdoor signal
+on its own. Require a remote-access anchor plus another privilege, persistence,
+or anti-forensics behavior, retain exact incident indicators as separate rules,
+and emit secret-free evidence labels. Test the malicious chain, ordinary tool
+usage, comments/messages, missing-anchor combinations, and auth-key redaction.
+
+Host-indicator tests must use an injected temporary root. Keep reads bounded,
+refuse symlinked indicator files, never execute an artifact, and distinguish an
+exact path match from content-validated or multi-artifact correlation. A host
+finding should recommend trusted-media investigation without claiming that a
+static artifact proves successful attacker access.
 
 ## Smart update context contract
 
@@ -329,7 +373,7 @@ usable as a standalone command and as part of `aurascan upgrade`.
 The assistant is enabled by default when upgrade preflight is enabled. The
 wizard may write `AURASCAN_CONFIG_DRIFT_ENABLED` and
 `AURASCAN_CONFIG_DRIFT_AI_DIFFS`. AI diff policy values are `ask`, `never`, and
-`always`; the default is `ask`, which means no network AI receives config diffs
+`always`; the default is `ask`, which means no configured AI provider receives config diffs
 unless the user opts in for that run.
 
 Config drift applies must be backup-first. Before any write or `.pacnew`
@@ -346,7 +390,7 @@ bootloader/initramfs config, sudo/PAM, networking, users/groups, SSH, systemd,
 and security policy. Nontrivial sensitive merges should remain manual unless a
 future deterministic merge validator can prove the exact candidate.
 
-Network AI config-diff prompts must use bounded redacted diffs only. Redact
+AI-provider config-diff prompts must use bounded redacted diffs only. Redact
 secrets, tokens, keys, passwords, private-key blocks, credential URLs, and
 similar auth material before request construction. Invalid AI JSON is
 non-blocking and must not change planned actions.

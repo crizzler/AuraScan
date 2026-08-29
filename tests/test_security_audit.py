@@ -19,8 +19,10 @@ from aurascan.core.security_audit import (
     SecurityAuditReport,
     SecurityFinding,
     audit_campaign_exposure,
+    audit_hyprland_fixes_exposure,
     build_security_audit,
     bundled_campaign_doctor_status,
+    detect_host_campaign_indicators,
     load_campaign_intel,
     parse_arch_audit_json,
     parse_campaign_package_names,
@@ -271,6 +273,196 @@ def test_build_security_audit_correlates_fixture_root(tmp_path: Path):
     assert report.has_alert
     assert report.highest_severity == Severity.CRITICAL
     assert report.history_record_count == 1
+
+
+def test_hyprland_fixes_incident_window_history_is_critical():
+    findings = audit_hyprland_fixes_exposure(
+        {},
+        [PacmanHistoryRecord(
+            timestamp="2026-08-28T20:30:00+0000",
+            action="installed",
+            package="hyprland-fixes",
+            version="1.0-1",
+        )],
+    )
+
+    assert len(findings) == 1
+    assert findings[0].rule_id == "SEC-AUR-HYPRLAND-FIXES-HISTORY"
+    assert findings[0].severity == Severity.CRITICAL
+
+
+def test_hyprland_fixes_history_before_public_report_is_critical():
+    findings = audit_hyprland_fixes_exposure(
+        {},
+        [PacmanHistoryRecord(
+            timestamp="2026-06-01T10:00:00+0000",
+            action="installed",
+            package="hyprland-fixes",
+            version="1.0-1",
+        )],
+    )
+
+    assert findings[0].rule_id == "SEC-AUR-HYPRLAND-FIXES-HISTORY"
+    assert findings[0].severity == Severity.CRITICAL
+
+
+def test_removed_hyprland_fixes_history_still_records_exposure(tmp_path: Path):
+    log = tmp_path / "pacman.log"
+    log.write_text(
+        "[2026-08-29T09:00:00+0000] [ALPM] removed hyprland-fixes (1.0-1)\n"
+    )
+
+    report = build_security_audit(
+        installed_packages={},
+        root=tmp_path / "root",
+        log_paths=[log],
+        include_arch_audit=False,
+        include_host_indicators=False,
+    )
+
+    match = next(item for item in report.findings if item.rule_id == "SEC-AUR-HYPRLAND-FIXES-HISTORY")
+    assert match.severity == Severity.CRITICAL
+    assert "removed=hyprland-fixes" in match.evidence[0]
+
+
+def test_installed_hyprland_fixes_name_alerts_without_claiming_execution():
+    findings = audit_hyprland_fixes_exposure({"hyprland-fixes": "1.0-1"}, [])
+
+    assert len(findings) == 1
+    assert findings[0].rule_id == "SEC-AUR-HYPRLAND-FIXES-INSTALLED"
+    assert findings[0].severity == Severity.HIGH
+    assert "cannot prove" in findings[0].why_it_matters
+
+
+def test_pending_hyprland_fixes_package_is_blocking_audit_evidence():
+    findings = audit_hyprland_fixes_exposure(
+        {},
+        [],
+        pending_package_names=["hyprland-fixes"],
+    )
+
+    assert findings[0].rule_id == "SEC-AUR-HYPRLAND-FIXES-PENDING"
+    assert findings[0].severity == Severity.HIGH
+
+
+def test_hyprland_fixes_helper_cache_is_low_provenance_evidence():
+    findings = audit_hyprland_fixes_exposure(
+        {},
+        [],
+        helper_cache_names=["hyprland-fixes"],
+    )
+
+    assert findings[0].rule_id == "SEC-AUR-HYPRLAND-FIXES-HELPER-CACHE"
+    assert findings[0].severity == Severity.LOW
+
+
+def test_build_security_audit_keeps_hyprland_fixes_findings_with_bundled_campaign(tmp_path: Path):
+    report = build_security_audit(
+        installed_packages={"hyprland-fixes": "1.0-1"},
+        root=tmp_path / "root",
+        home=None,
+        include_arch_audit=False,
+        include_host_indicators=False,
+    )
+
+    assert any(item.rule_id == "SEC-AUR-HYPRLAND-FIXES-INSTALLED" for item in report.findings)
+
+
+def test_host_artifact_correlation_finds_disguised_root_sshd(tmp_path: Path):
+    root = tmp_path / "root"
+    ssh_config = root / "etc/pacman.d/mirrorlist-criteria"
+    ssh_config.parent.mkdir(parents=True)
+    ssh_config.write_text("Port 3333\nPermitRootLogin yes\nAuthorizedKeysFile /etc/fixture-keys\n")
+    service = root / "usr/lib/systemd/system/arch-mirrorlist-criteria.service"
+    service.parent.mkdir(parents=True)
+    service.write_text(
+        "[Service]\nExecStart=/usr/sbin/sshd -D -f /etc/pacman.d/mirrorlist-criteria\n"
+    )
+
+    findings = detect_host_campaign_indicators(root)
+
+    match = next(item for item in findings if item.rule_id == "SEC-AUR-HYPRLAND-FIXES-HOST-ARTIFACTS")
+    assert match.severity == Severity.CRITICAL
+    assert "artifact=/etc/pacman.d/mirrorlist-criteria" in match.evidence
+    assert "root-sshd-config=/etc/pacman.d/mirrorlist-criteria" in match.evidence
+
+
+def test_duplicate_reported_key_locations_are_correlated_without_key_disclosure(tmp_path: Path):
+    root = tmp_path / "root"
+    fake_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyKey fixture\n"
+    for relative in ("etc/userkeys", "etc/system-functions"):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(fake_key)
+
+    findings = detect_host_campaign_indicators(root)
+
+    match = next(item for item in findings if item.rule_id == "SEC-AUR-HYPRLAND-FIXES-HOST-ARTIFACTS")
+    assert any(item.startswith("duplicated-root-ssh-key=") for item in match.evidence)
+    assert all("AAAAC3" not in item for item in match.evidence)
+
+
+def test_tailscaled_service_alone_is_not_a_host_campaign_indicator(tmp_path: Path):
+    root = tmp_path / "root"
+    service = root / "usr/lib/systemd/system/tailscaled.service"
+    service.parent.mkdir(parents=True)
+    service.write_text("[Service]\nExecStart=/usr/bin/tailscaled\n")
+
+    findings = detect_host_campaign_indicators(root)
+
+    assert not any(item.rule_id.startswith("SEC-AUR-HYPRLAND-FIXES") for item in findings)
+
+
+def test_reported_tailscale_peer_firewall_rule_alone_is_not_a_host_indicator(tmp_path: Path):
+    root = tmp_path / "root"
+    rules = root / "etc/ufw/user.rules"
+    rules.parent.mkdir(parents=True)
+    rules.write_text("allow from 100.70.123.108 to any port 3333\n")
+
+    findings = detect_host_campaign_indicators(root)
+
+    assert not any(item.rule_id.startswith("SEC-AUR-HYPRLAND-FIXES") for item in findings)
+
+
+def test_host_artifact_scan_does_not_follow_symlinks(tmp_path: Path):
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    outside.write_text("Port 3333\nPermitRootLogin yes\n")
+    linked = root / "etc/pacman.d/mirrorlist-criteria"
+    linked.parent.mkdir(parents=True)
+    linked.symlink_to(outside)
+
+    findings = detect_host_campaign_indicators(root)
+
+    assert not any(item.rule_id.startswith("SEC-AUR-HYPRLAND-FIXES") for item in findings)
+
+
+def test_host_artifact_scan_does_not_follow_symlinked_parent(tmp_path: Path):
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    config = outside / "pacman.d/mirrorlist-criteria"
+    config.parent.mkdir(parents=True)
+    config.write_text("Port 3333\nPermitRootLogin yes\n")
+    root.mkdir()
+    (root / "etc").symlink_to(outside)
+
+    findings = detect_host_campaign_indicators(root)
+
+    assert not any(item.rule_id.startswith("SEC-AUR-HYPRLAND-FIXES") for item in findings)
+
+
+def test_host_campaign_scan_does_not_follow_symlinked_bpf_root(tmp_path: Path):
+    root = tmp_path / "root"
+    outside = tmp_path / "outside-bpf"
+    outside.mkdir()
+    (outside / "hidden_fixture").write_text("outside")
+    bpf_parent = root / "sys/fs"
+    bpf_parent.mkdir(parents=True)
+    (bpf_parent / "bpf").symlink_to(outside)
+
+    findings = detect_host_campaign_indicators(root)
+
+    assert not any(item.rule_id == "SEC-AUR-CAMPAIGN-BPF-PERSISTENCE" for item in findings)
 
 
 def test_security_audit_cli_json_and_alert_exit(tmp_path: Path):

@@ -7,6 +7,7 @@ from typing import Iterable, List, Optional
 
 from aurascan.analyzers.base import BaseAnalyzer
 from aurascan.analyzers.clamav import ClamAVAnalyzer
+from aurascan.analyzers.remote_access import find_remote_access_backdoor_signals
 from aurascan.core.archive import SafeArchiveExtractor
 from aurascan.core.models import (
     AnalysisResult,
@@ -24,7 +25,9 @@ INTERESTING_NAMES = {
     "Makefile", "CMakeLists.txt", "meson.build", "configure", "autogen.sh",
     "setup.py", "pyproject.toml", "package.json", "package-lock.json",
     "yarn.lock", "pnpm-lock.yaml", "Cargo.toml", "Cargo.lock", "go.mod",
-    "go.sum", "composer.json", "Gemfile",
+    "go.sum", "composer.json", "Gemfile", "hyprland-fixes",
+    "hyprland-fixes-permissions", "hyprland-fixes-post-install",
+    "hyprland-windowrule-and-keybind-fixes",
 }
 TEXT_SUFFIXES = {".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs", ".ts", ".service", ".timer", ".cron"}
 VENDORED_DIRS = {"node_modules", "vendor", "third_party", "deps"}
@@ -162,6 +165,20 @@ class DeepStaticAnalyzer(BaseAnalyzer):
                     line,
                 ))
 
+        signals = find_remote_access_backdoor_signals(active_text)
+        if len(signals) >= 2 and any(signal.remote_anchor for signal in signals):
+            findings.append(self._finding(
+                "DEEPSTATIC-REMOTE-ADMIN-BACKDOOR-001",
+                str(path),
+                Severity.CRITICAL,
+                "Source combines multiple behaviors associated with a root remote-access backdoor.",
+                "Do not build this source revision; preserve its provenance and investigate any prior installation from trusted media.",
+                True,
+                "Correlated signals: " + "; ".join(signal.label for signal in signals),
+                EvidenceQuality.confirmed_static_pattern,
+                min(signal.line_number for signal in signals),
+            ))
+
         if path.name == "package.json":
             findings.extend(self._inspect_package_json(path, text))
         if path.name == "setup.py" and re.search(r"\b(urlopen|requests\.|curl|wget|subprocess)\b", text):
@@ -278,9 +295,11 @@ class DeepStaticAnalyzer(BaseAnalyzer):
 
     def _iter_interesting_files(self, root: Path) -> Iterable[Path]:
         for path in root.rglob("*"):
-            if not path.is_file():
+            if path.is_symlink() or not path.is_file():
                 continue
             rel_parts = path.relative_to(root).parts
+            if ".git" in rel_parts:
+                continue
             if any(part in VENDORED_DIRS for part in rel_parts):
                 yield path
                 continue
@@ -292,12 +311,24 @@ class DeepStaticAnalyzer(BaseAnalyzer):
                 or os.access(path, os.X_OK)
                 or "systemd" in rel_parts
                 or "cron" in rel_parts
+                or (not path.suffix and self._has_text_shebang(path))
             ):
                 yield path
 
+    def _has_text_shebang(self, path: Path) -> bool:
+        try:
+            with path.open("rb") as handle:
+                chunk = handle.read(4096)
+        except OSError:
+            return False
+        return chunk.startswith(b"#!") and b"\x00" not in chunk
+
     def _is_binary(self, path: Path) -> bool:
         try:
-            chunk = path.read_bytes()[:4096]
+            if path.is_symlink():
+                return False
+            with path.open("rb") as handle:
+                chunk = handle.read(4096)
         except OSError:
             return False
         if not chunk:
@@ -308,9 +339,13 @@ class DeepStaticAnalyzer(BaseAnalyzer):
 
     def _read_text(self, path: Path) -> Optional[str]:
         try:
-            if path.stat().st_size > self.max_file_size:
+            if path.is_symlink():
                 return None
-            return path.read_text(encoding="utf-8", errors="replace")
+            with path.open("rb") as handle:
+                payload = handle.read(self.max_file_size + 1)
+            if len(payload) > self.max_file_size:
+                return None
+            return payload.decode("utf-8", errors="replace")
         except OSError:
             return None
 

@@ -4,6 +4,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 import aurascan.core.recovery_cli as recovery_cli
 import aurascan.setup_wizard as setup_wizard
 from aurascan.core.agent import (
@@ -76,6 +78,81 @@ def test_init_writes_hidden_key_without_printing_secret(tmp_path):
     assert "AURASCAN_AI_ENABLED=1" in text
     assert "AURASCAN_OPENAI_API_KEY=fixture-only-value" in text
     assert oct(env_path.stat().st_mode & 0o777) == "0o600"
+
+
+@pytest.mark.parametrize(
+    ("provider", "base_url"),
+    [
+        ("lmstudio", "http://127.0.0.1:1234/v1"),
+        ("llamacpp", "http://127.0.0.1:8080/v1"),
+    ],
+)
+def test_init_configures_keyless_local_ai_without_secret_prompt(tmp_path, provider, base_url):
+    env_path = tmp_path / ".config" / "aurascan" / ".env"
+    stdout = io.StringIO()
+
+    status = run_init(
+        [
+            "--provider", provider,
+            "--model", "fixture-local-model",
+            "--enable-ai",
+            "--no-install-hook",
+        ],
+        input_func=lambda prompt: (_ for _ in ()).throw(AssertionError(f"unexpected prompt: {prompt}")),
+        getpass_func=lambda prompt: (_ for _ in ()).throw(AssertionError(f"unexpected secret prompt: {prompt}")),
+        stdout=stdout,
+        env_path=env_path,
+    )
+
+    text = env_path.read_text(encoding="utf-8")
+    assert status == 0
+    assert f"AURASCAN_AI_PROVIDER={provider}" in text
+    assert "AURASCAN_AI_MODEL=fixture-local-model" in text
+    assert f"AURASCAN_AI_BASE_URL={base_url}" in text
+    assert "AURASCAN_AI_ENABLED=1" in text
+    assert "AURASCAN_LOCAL_AI_API_KEY" not in text
+    assert base_url in stdout.getvalue()
+
+
+def test_init_normalizes_custom_local_base_url(tmp_path):
+    env_path = tmp_path / ".env"
+
+    status = run_init(
+        [
+            "--provider", "lmstudio",
+            "--model", "fixture-local-model",
+            "--base-url", "http://localhost:4321/",
+            "--enable-ai",
+            "--no-install-hook",
+        ],
+        stdout=io.StringIO(),
+        env_path=env_path,
+    )
+
+    assert status == 0
+    assert "AURASCAN_AI_BASE_URL=http://localhost:4321/v1" in env_path.read_text(encoding="utf-8")
+
+
+def test_init_rejects_non_loopback_local_base_url(tmp_path):
+    env_path = tmp_path / ".env"
+    stderr = io.StringIO()
+
+    status = run_init(
+        [
+            "--provider", "llamacpp",
+            "--model", "fixture-local-model",
+            "--base-url", "http://192.168.1.8:8080/v1",
+            "--enable-ai",
+            "--no-install-hook",
+        ],
+        stdout=io.StringIO(),
+        stderr=stderr,
+        env_path=env_path,
+    )
+
+    assert status == 1
+    assert not env_path.exists()
+    assert "loopback" in stderr.getvalue().lower()
 
 
 def test_init_can_write_disabled_local_only_config(tmp_path):
@@ -526,6 +603,34 @@ def test_doctor_json_reports_missing_key_without_leaking_values(tmp_path):
     assert data["ok"] is False
     assert "fixture-only-value" not in stdout.getvalue()
     assert any(check["name"] == "ai_key" and check["status"] == "error" for check in data["checks"])
+
+
+def test_doctor_reports_keyless_local_provider_without_contacting_it(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "AURASCAN_AI_ENABLED=1\n"
+        "AURASCAN_AI_PROVIDER=lmstudio\n"
+        "AURASCAN_AI_MODEL=fixture-local-model\n",
+        encoding="utf-8",
+    )
+    env_path.chmod(0o600)
+
+    checks = build_doctor_checks(
+        env_path=env_path,
+        env={},
+        urlopen=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("doctor must not contact AI by default")),
+        executable_path=tmp_path / "aurascan",
+        local_hook_path=tmp_path / "local.hook",
+        packaged_hook_path=tmp_path / "packaged.hook",
+        recovery_root=tmp_path / "recovery-root",
+    )
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["ai_provider"].status == "ok"
+    assert by_name["ai_provider"].details["base_url"] == "http://127.0.0.1:1234/v1"
+    assert by_name["ai_authentication"].status == "ok"
+    assert by_name["ai_authentication"].details["token_present"] is False
+    assert by_name["followup_assistant"].details["provider_ready"] is True
 
 
 def test_doctor_reports_missing_config_as_warning(tmp_path):
@@ -990,6 +1095,49 @@ def test_doctor_check_ai_uses_mocked_provider(tmp_path):
     assert seen["url"] == "https://api.openai.com/v1/chat/completions"
     assert any(check["name"] == "ai_connectivity" and check["status"] == "ok" for check in data["checks"])
     assert "fixture-only-value" not in stdout.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("provider", "endpoint"),
+    [
+        ("lmstudio", "http://127.0.0.1:1234/v1/chat/completions"),
+        ("llamacpp", "http://127.0.0.1:8080/v1/chat/completions"),
+    ],
+)
+def test_doctor_check_ai_uses_mocked_keyless_local_provider(tmp_path, provider, endpoint):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "AURASCAN_AI_ENABLED=1\n"
+        f"AURASCAN_AI_PROVIDER={provider}\n"
+        "AURASCAN_AI_MODEL=fixture-local-model\n",
+        encoding="utf-8",
+    )
+    env_path.chmod(0o600)
+    stdout = io.StringIO()
+    seen = {}
+
+    def fake_urlopen(req, timeout):
+        seen["url"] = req.full_url
+        seen["headers"] = dict(req.header_items())
+        return FakeResponse()
+
+    status = run_doctor(
+        ["--json", "--check-ai"],
+        stdout=stdout,
+        env_path=env_path,
+        env={},
+        urlopen=fake_urlopen,
+        executable_path=tmp_path / "aurascan",
+        local_hook_path=tmp_path / "local.hook",
+        packaged_hook_path=tmp_path / "packaged.hook",
+        recovery_root=tmp_path / "recovery-root",
+    )
+    data = json.loads(stdout.getvalue())
+
+    assert status == 0
+    assert seen["url"] == endpoint
+    assert "Authorization" not in seen["headers"]
+    assert any(check["name"] == "ai_connectivity" and check["status"] == "ok" for check in data["checks"])
 
 
 def test_hook_install_refuses_missing_installed_executable(tmp_path):

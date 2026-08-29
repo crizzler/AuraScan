@@ -715,7 +715,7 @@ def ask_agent_ai(
 ) -> AgentAIResponse:
     source = dict(os.environ if env is None else env)
     config = resolve_ai_config(source)
-    if config.error or not config.enabled or not config.api_key_present:
+    if not config.ready:
         return AgentAIResponse("", status="not_configured", error=config.error or "AI is not configured")
     try:
         text = call_ai_provider(
@@ -2262,8 +2262,8 @@ def run_agent(
         print("[AuraScan] Repair Agent requires an interactive foreground terminal.", file=stderr)
         return EXIT_FOLLOWUP_UNAVAILABLE
     ai_config = resolve_ai_config(source)
-    if ai_config.error or not ai_config.enabled or not ai_config.api_key_present:
-        print("[AuraScan] Repair Agent requires configured foreground network AI.", file=stderr)
+    if not ai_config.ready:
+        print("[AuraScan] Repair Agent requires a configured foreground AI provider.", file=stderr)
         return EXIT_FOLLOWUP_UNAVAILABLE
     config = resolve_agent_config(source)
     if config.error:

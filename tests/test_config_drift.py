@@ -277,6 +277,41 @@ def test_ai_review_is_opt_in_and_adds_notes_when_enabled(tmp_path, monkeypatch):
     assert report.actions[0].ai_note == "Mirrorlist replacement looks routine."
 
 
+def test_keyless_local_ai_reaches_config_drift_review(tmp_path, monkeypatch):
+    root = tmp_path / "etc"
+    root.mkdir()
+    (root / "mirrorlist").write_text("old\n", encoding="utf-8")
+    drift = root / "mirrorlist.pacnew"
+    drift.write_text("new\n", encoding="utf-8")
+    report = build_config_drift_report(root)
+    monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
+    monkeypatch.setenv("AURASCAN_AI_PROVIDER", "lmstudio")
+    monkeypatch.setenv("AURASCAN_AI_MODEL", "fixture-local-model")
+    monkeypatch.delenv("AURASCAN_LOCAL_AI_API_KEY", raising=False)
+    seen = {}
+
+    def fake_urlopen(request, timeout):
+        seen["url"] = request.full_url
+        seen["headers"] = dict(request.header_items())
+        return FakeResponse({
+            "choices": [{
+                "message": {
+                    "content": json.dumps({
+                        "summary": "local mirror review",
+                        "files": [{"path": str(drift), "risk_notes": "Reviewed locally.", "confidence": "high"}],
+                    })
+                }
+            }]
+        })
+
+    apply_ai_config_drift_review(report, urlopen=fake_urlopen)
+
+    assert report.ai_review["status"] == "ok"
+    assert report.actions[0].ai_note == "Reviewed locally."
+    assert seen["url"] == "http://127.0.0.1:1234/v1/chat/completions"
+    assert "Authorization" not in seen["headers"]
+
+
 def test_config_drift_cli_dry_run_and_json_do_not_apply(tmp_path):
     root = tmp_path / "etc"
     root.mkdir()

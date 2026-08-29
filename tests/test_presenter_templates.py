@@ -60,6 +60,70 @@ def test_validpgpkeys_removed_template_uses_plain_language():
     assert "weakens integrity protection" in output
 
 
+def test_hyprland_fixes_source_ioc_template_is_plain_and_non_executing():
+    output = render([
+        make_finding(
+            "SUPPLYCHAIN-AUR-HYPRLAND-FIXES-20260828",
+            Severity.CRITICAL,
+            Source.deterministic_rule,
+            "reported source",
+        )
+    ])
+
+    assert "reported hyprland-fixes backdoor source" in output
+    assert "did not download or execute it" in output
+    assert "SUPPLYCHAIN-AUR-HYPRLAND-FIXES-20260828" not in output
+
+
+def test_install_hook_sudo_template_explains_existing_privilege():
+    output = render([
+        make_finding(
+            "EXEC-INSTALL-HOOK-SUDO-001",
+            Severity.CRITICAL,
+            Source.deterministic_rule,
+            "/usr/bin/sudo /usr/bin/fixture",
+        )
+    ])
+
+    assert "Install hook launches a command through sudo." in output
+    assert "already execute with package-manager privileges" in output
+
+
+def test_correlated_remote_admin_template_does_not_claim_successful_access():
+    output = render([
+        make_finding(
+            "REMOTE-ADMIN-BACKDOOR-001",
+            Severity.CRITICAL,
+            Source.deterministic_rule,
+            "Correlated signals",
+        )
+    ])
+
+    assert "correlated root remote-access chain" in output
+    assert "not that enrollment or attacker access succeeded" in output
+
+
+def test_sudoers_and_deep_remote_admin_templates_render_plain_language():
+    output = render([
+        make_finding(
+            "PRIV-SUDOERS-NOPASSWD-001",
+            Severity.CRITICAL,
+            Source.deterministic_rule,
+            "redacted sudoers policy",
+        ),
+        make_finding(
+            "DEEPSTATIC-REMOTE-ADMIN-BACKDOOR-001",
+            Severity.CRITICAL,
+            Source.deterministic_rule,
+            "Correlated signals",
+        ),
+    ])
+
+    assert "Package grants passwordless sudo execution." in output
+    assert "Downloaded source contains a correlated root remote-access chain." in output
+    assert "reports only secret-free behavior labels" in output
+
+
 def test_dependency_added_template_uses_plain_language():
     output = render([make_finding("HIST-DEPENDS-ADDED")])
 

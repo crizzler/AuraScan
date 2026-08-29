@@ -25,6 +25,7 @@ RECOVERY_IMAGE_SECRET_MARKERS = (
     b"AURASCAN_DEEPSEEK_API_KEY=",
     b"AURASCAN_GEMINI_API_KEY=",
     b"AURASCAN_OPENROUTER_API_KEY=",
+    b"AURASCAN_LOCAL_AI_API_KEY=",
     b"/home/",
     b"system-connections/",
 )

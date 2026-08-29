@@ -656,7 +656,7 @@ def followup_doctor_status(
             error = str(exc)
     latest = latest_followup_context(context_root) if not exists or safe else None
     return {
-        "provider_ready": not config.error and config.enabled and config.api_key_present,
+        "provider_ready": config.ready,
         "root": str(context_root),
         "storage_exists": exists,
         "storage_safe": safe if exists else True,
@@ -1030,7 +1030,7 @@ def followup_available(
     ):
         return False
     config = resolve_ai_config(source)
-    if config.error or not config.enabled or not config.api_key_present:
+    if not config.ready:
         return False
     if force_interactive is not None:
         return bool(force_interactive)
@@ -1165,8 +1165,8 @@ def ask_followup_ai(
     config = resolve_ai_config(source)
     if config.error:
         return FollowUpResponse("", status="config_error", error=config.error)
-    if not config.enabled or not config.api_key_present:
-        return FollowUpResponse("", status="not_configured", error="network AI is disabled or not configured")
+    if not config.ready:
+        return FollowUpResponse("", status="not_configured", error="AI provider is disabled or not configured")
     prompt = build_followup_ai_prompt(
         context,
         question,
@@ -1591,8 +1591,8 @@ def run_ask(
         )
         return EXIT_FOLLOWUP_UNAVAILABLE
     config = resolve_ai_config(source)
-    if config.error or not config.enabled or not config.api_key_present:
-        detail = config.error or "network AI is disabled or not configured"
+    if not config.ready:
+        detail = config.error or "AI provider is disabled or not configured"
         print(f"[AuraScan] Follow-up assistant unavailable: {detail}.", file=stderr)
         return EXIT_FOLLOWUP_UNAVAILABLE
     root = context_root or user_followup_root(source)

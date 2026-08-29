@@ -725,6 +725,29 @@ def test_ai_invalid_json_is_non_blocking_note(monkeypatch):
     assert report.action == "continue"
 
 
+def test_keyless_local_ai_reaches_upgrade_review(monkeypatch):
+    monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
+    monkeypatch.setenv("AURASCAN_AI_PROVIDER", "llamacpp")
+    monkeypatch.setenv("AURASCAN_AI_MODEL", "aurascan-local")
+    monkeypatch.delenv("AURASCAN_LOCAL_AI_API_KEY", raising=False)
+    report = UpgradePreflightReport(plan=UpgradePlan(), snapshot=base_snapshot(), findings=[])
+    seen = {}
+
+    def fake_urlopen(request, timeout):
+        seen["url"] = request.full_url
+        seen["headers"] = dict(request.header_items())
+        return FakeResponse({
+            "choices": [{"message": {"content": json.dumps({"summary": "Reviewed locally.", "risk_raises": []})}}]
+        })
+
+    apply_ai_upgrade_review(report, urlopen=fake_urlopen)
+
+    assert report.ai_review["status"] == "ok"
+    assert report.ai_review["summary"] == "Reviewed locally."
+    assert seen["url"] == "http://127.0.0.1:8080/v1/chat/completions"
+    assert "Authorization" not in seen["headers"]
+
+
 def test_upgrade_dry_run_never_runs_final_command():
     runner = FakeRunner({tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n")})
     stdout = io.StringIO()

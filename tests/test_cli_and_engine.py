@@ -50,14 +50,7 @@ class SpyAIAnalyzer(AIStaticAnalyzer):
 
 
 def cache_flags(engine):
-    return {
-        "deep_static": engine.deep_static,
-        "update_scan_policy": engine.update_scan_policy.value,
-        "scan_context": engine.scan_context.value,
-        "scan_context_source": engine.scan_context_source.value,
-        "allow_user_asserted_update_context": engine.allow_user_asserted_update_context,
-        "local_package_db_root": str(engine.local_package_db_root) if engine.local_package_db_root is not None else "",
-    }
+    return dict(engine._cache_flags())
 
 
 def test_deep_static_flag_is_parsed_correctly():
@@ -293,6 +286,38 @@ def test_engine_records_update_scan_policy_without_skipping_runtime_scans():
 
     assert engine.update_scan_policy == UpdateScanPolicy.smart
     assert engine._cache_flags()["update_scan_policy"] == "smart"
+
+
+def test_engine_cache_flags_separate_local_ai_configs_without_secrets(monkeypatch):
+    for key in [
+        "AURASCAN_AI_ENABLED",
+        "AURASCAN_AI_PROVIDER",
+        "AURASCAN_AI_MODEL",
+        "AURASCAN_AI_BASE_URL",
+        "AURASCAN_LOCAL_AI_API_KEY",
+    ]:
+        monkeypatch.delenv(key, raising=False)
+    engine = AuraScanEngine()
+    disabled = engine._cache_flags()
+
+    monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
+    monkeypatch.setenv("AURASCAN_AI_PROVIDER", "lmstudio")
+    monkeypatch.setenv("AURASCAN_AI_MODEL", "fixture-model-a")
+    monkeypatch.setenv("AURASCAN_AI_BASE_URL", "http://127.0.0.1:1234/v1")
+    monkeypatch.setenv("AURASCAN_LOCAL_AI_API_KEY", "must-not-enter-cache")
+    first_local = engine._cache_flags()
+
+    monkeypatch.setenv("AURASCAN_AI_MODEL", "fixture-model-b")
+    second_model = engine._cache_flags()
+    monkeypatch.setenv("AURASCAN_AI_BASE_URL", "http://127.0.0.1:4321/v1")
+    second_endpoint = engine._cache_flags()
+
+    assert disabled != first_local
+    assert first_local != second_model
+    assert second_model != second_endpoint
+    assert first_local["ai_ready"] is True
+    assert first_local["ai_provider"] == "lmstudio"
+    assert "must-not-enter-cache" not in repr(first_local)
 
 
 def test_deep_static_flag_adds_deep_static_analyzer():

@@ -52,10 +52,32 @@ preconditions are refreshed before execution. Its reports, retry state, and
 notification text are private to the user under
 `~/.local/state/aurascan/` with `0700` directories and `0600` files.
 
+## Local AI Providers
+
+The `lmstudio` and `llamacpp` providers send the same bounded AI request to an
+OpenAI-compatible server on loopback instead of a cloud API. Their defaults are
+`http://127.0.0.1:1234/v1` and `http://127.0.0.1:8080/v1`. They remain disabled
+until `AURASCAN_AI_ENABLED=1`; choosing a local provider does not silently opt
+the user into AI analysis.
+
+AuraScan accepts only loopback HTTP(S) overrides in `AURASCAN_AI_BASE_URL`,
+bypasses environment proxies, refuses redirects, and never falls back to a
+cloud provider. A server without authentication needs no dummy credential. If
+the server requires authentication, its optional Bearer token is read from
+`AURASCAN_LOCAL_AI_API_KEY`, kept in the permission-checked provider config, and
+excluded from reports and diagnostics.
+
+This boundary keeps AuraScan's request on the same host; it cannot guarantee
+what a separately managed inference server, model, extension, or server log
+does with that request. AuraScan does not start or configure the server, load or
+download models, enable tools or MCP, or grant the model additional filesystem
+or command access. `aurascan doctor` makes no request unless the user supplies
+`--check-ai`.
+
 ## Foreground Contextual Follow-Up
 
 Interactive upgrade, incident, maintenance, and config-drift workflows may open
-the contextual assistant when ordinary network AI is enabled. A session allows
+the contextual assistant when the configured AI provider is enabled. A session allows
 at most eight questions and twelve provider requests. Each request contains no
 more than 12,000 characters assembled from a bounded redacted source result,
 the current redacted question, and a trimmed in-memory conversation.
@@ -183,7 +205,11 @@ connectivity. The opted-in user's provider file is accepted only after regular
 file, owner, and `0600` checks. A session-only key may be entered when no valid
 file exists; it is never written to disk. The two provider requests receive at
 most 80 redacted evidence excerpts and 12,000 characters, plus opaque known
-probe/action IDs. AI cannot supply executable targets or commands.
+probe/action IDs. AI cannot supply executable targets or commands. For a local
+provider, `127.0.0.1` refers to the recovery environment rather than the
+installed system. Recovery does not start or forward LM Studio or
+`llama-server`; if the endpoint is absent, deterministic recovery remains
+available and AuraScan does not substitute a cloud provider.
 
 Private recovery reports, action manifests, backups, validation output, and
 rollback metadata are written under `/var/lib/aurascan/recovery/` with `0700`

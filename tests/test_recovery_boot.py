@@ -107,6 +107,16 @@ def test_image_validation_scans_entire_file_for_credentials(tmp_path):
     assert any("credential" in item for item in errors)
 
 
+def test_image_validation_rejects_local_ai_token(tmp_path):
+    image = tmp_path / "recovery.efi"
+    image.write_bytes(b"MZfixture-AURASCAN_LOCAL_AI_API_KEY=secret")
+
+    valid, errors = validate_recovery_image(image, minimum_size=2, which=lambda _name: None)
+
+    assert valid is False
+    assert any("credential" in item for item in errors)
+
+
 def test_image_validation_requires_selected_kernel_in_ukify_metadata(tmp_path):
     image = tmp_path / "recovery.efi"
     image.write_bytes(b"MZfixture")

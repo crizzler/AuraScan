@@ -778,10 +778,10 @@ def _in_memory_ai_environment(
     result = dict(current)
     result[AI_ENABLED_ENV] = "1"
     configured = resolve_ai_config(result)
-    if configured.api_key_present and not configured.error:
+    if configured.ready:
         return result
     choices = list(provider_choices())
-    print("No validated recovery AI key was found. A session-only key can be used and will not be saved.", file=stdout)
+    print("No ready recovery AI provider was found. Session-only provider credentials can be used when required and will not be saved.", file=stdout)
     for index, provider in enumerate(choices, start=1):
         spec = get_provider_spec(provider)
         print(f"{index}. {spec.label if spec else provider}", file=stdout)
@@ -798,15 +798,18 @@ def _in_memory_ai_environment(
     if spec is None:
         return result
     model = input_func(f"Model [{spec.default_model}]: ").strip() or spec.default_model
-    key = getpass_func(f"{spec.label} API key for this recovery session (input hidden): ").strip()
-    if not key:
-        return result
     result.update({
         AI_PROVIDER_ENV: provider,
         AI_MODEL_ENV: model,
         AI_ENABLED_ENV: "1",
-        spec.key_env: key,
     })
+    configured = resolve_ai_config(result)
+    if configured.authentication_ready and not configured.error:
+        return result
+    key = getpass_func(f"{spec.label} API key for this recovery session (input hidden): ").strip()
+    if not key:
+        return result
+    result[spec.key_env] = key
     return result
 
 
@@ -988,7 +991,7 @@ def run_recovery_session(
         report.notes.append(config_note)
     if not no_ai and not ai_enabled and not user_config_loaded and not json_output:
         ai_enabled = _prompt_yes_no(
-            "Use network AI for this recovery session?",
+            "Use the configured AI provider for this recovery session?",
             input_func,
             default=False,
         )
@@ -1151,7 +1154,7 @@ def run_recovery_tui(**kwargs) -> int:
 
     def session(screen) -> None:
         interface = _CursesRecoveryIO(screen)
-        interface.write("Offline diagnostics start first. Network AI is used only after recovery consent.\n\n")
+        interface.write("Offline diagnostics start first. A configured AI provider is used only after recovery consent.\n\n")
         session_kwargs = dict(kwargs)
         session_kwargs.update({
             "stdout": interface,

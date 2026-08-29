@@ -1,0 +1,46 @@
+[Unit]
+Description=AuraScan offline Agent Instruction Guard monitor
+Documentation=https://github.com/crizzler/AuraScan
+ConditionPathExists=/usr/bin/aurascan
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/aurascan instruction-audit --background-capture
+UMask=0077
+UnsetEnvironment=AURASCAN_AI_KEY AURASCAN_OPENAI_API_KEY AURASCAN_ANTHROPIC_API_KEY AURASCAN_DEEPSEEK_API_KEY AURASCAN_GEMINI_API_KEY AURASCAN_OPENROUTER_API_KEY AURASCAN_LOCAL_AI_API_KEY
+Environment=AURASCAN_AI_ENABLED=0
+Environment=AURASCAN_INSTRUCTION_AI_ENABLED=0
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateNetwork=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectClock=yes
+ProtectHostname=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=ptraceable
+ProcSubset=pid
+StateDirectory=aurascan/instruction-guard
+StateDirectoryMode=0700
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @privileged @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+IPAddressDeny=any
+TimeoutStartSec=120
+Nice=15
+CPUWeight=10
+IOWeight=10
+IOSchedulingClass=idle

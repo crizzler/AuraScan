@@ -92,6 +92,23 @@ from aurascan.core.incident_automation import (
     safe_automation_paths,
     set_background_ai_enabled,
 )
+from aurascan.core.instruction_cli import (
+    INSTRUCTION_AI_ENABLED_ENV,
+    INSTRUCTION_ASSISTANT_SERVICE,
+    INSTRUCTION_ASSISTANT_TIMER,
+    INSTRUCTION_MONITOR_ENABLED_ENV,
+    INSTRUCTION_MONITOR_SERVICE,
+    INSTRUCTION_MONITOR_TIMER,
+    INSTRUCTION_SCAN_MODE_ENV,
+    INSTRUCTION_SCAN_MODES,
+    INSTRUCTION_USER_UNIT_ROOT,
+    _capture_user_timer_state,
+    _restore_user_timer_state,
+    instruction_guard_unit_status,
+    resolve_instruction_guard_preferences,
+    set_instruction_ai_enabled,
+    set_instruction_monitor_enabled,
+)
 from aurascan.core.recovery import (
     RECOVERY_AI_ENABLED_ENV,
     RECOVERY_AUTO_REFRESH_ENV,
@@ -194,6 +211,13 @@ def build_init_parser() -> argparse.ArgumentParser:
     incident_background_ai.add_argument("--enable-incident-background-ai", action="store_true", help="enable logged-in background incident AI analysis")
     incident_background_ai.add_argument("--disable-incident-background-ai", action="store_true", help="disable logged-in background incident AI analysis")
     parser.add_argument("--incident-auto-repair", choices=sorted(INCIDENT_AUTO_REPAIR_VALUES), help="system-wide deterministic incident repair policy")
+    instruction_monitor = parser.add_mutually_exclusive_group()
+    instruction_monitor.add_argument("--enable-instruction-monitor", action="store_true", help="enable the unprivileged Agent Instruction Guard monitor")
+    instruction_monitor.add_argument("--disable-instruction-monitor", action="store_true", help="disable the Agent Instruction Guard monitor")
+    instruction_ai = parser.add_mutually_exclusive_group()
+    instruction_ai.add_argument("--enable-instruction-ai", action="store_true", help="enable separately scheduled raise-only AI analysis for agent files")
+    instruction_ai.add_argument("--disable-instruction-ai", action="store_true", help="disable Agent Instruction Guard AI analysis")
+    parser.add_argument("--instruction-scan-mode", choices=sorted(INSTRUCTION_SCAN_MODES), help="agent control files only, or optional content-only analysis of all Markdown")
     parser.add_argument("--agent-access", choices=AGENT_ACCESS_VALUES, help="maximum/default foreground AI agent access")
     parser.add_argument("--agent-approval", choices=AGENT_APPROVAL_VALUES, help="foreground agent command approval mode")
     parser.add_argument("--agent-output-sharing", choices=AGENT_OUTPUT_VALUES, help="foreground agent terminal-output sharing policy")
@@ -358,6 +382,11 @@ def run_init(
         or args.enable_incident_background_ai
         or args.disable_incident_background_ai
         or args.incident_auto_repair is not None
+        or args.enable_instruction_monitor
+        or args.disable_instruction_monitor
+        or args.enable_instruction_ai
+        or args.disable_instruction_ai
+        or args.instruction_scan_mode is not None
         or args.agent_access is not None
         or args.agent_approval is not None
         or args.agent_output_sharing is not None
@@ -455,6 +484,72 @@ def run_init(
             print("Configured config drift assistant defaults.", file=stdout)
         else:
             print("Config drift assistant will be disabled unless you enable it later.", file=stdout)
+
+    configure_instruction_guard = (
+        args.enable_instruction_monitor
+        or args.disable_instruction_monitor
+        or args.enable_instruction_ai
+        or args.disable_instruction_ai
+        or args.instruction_scan_mode is not None
+    )
+    should_prompt_instruction_guard = should_prompt_upgrade
+    instruction_monitor_action = ""
+    instruction_ai_action = ""
+    if configure_instruction_guard or should_prompt_instruction_guard:
+        existing_instruction = resolve_instruction_guard_preferences(existing)
+        if existing_instruction.error:
+            print(
+                f"Existing Agent Instruction Guard configuration is invalid: {existing_instruction.error}",
+                file=stderr,
+            )
+            return 1
+        instruction_monitor_enabled = existing_instruction.monitor_enabled
+        if args.enable_instruction_monitor:
+            instruction_monitor_enabled = True
+            instruction_monitor_action = "enable"
+        elif args.disable_instruction_monitor:
+            instruction_monitor_enabled = False
+            instruction_monitor_action = "disable"
+        elif should_prompt_instruction_guard:
+            instruction_monitor_enabled = _prompt_yes_no(
+                "Enable the unprivileged Agent Instruction Guard after login and every five minutes?",
+                input_func,
+                default=instruction_monitor_enabled,
+            )
+            if instruction_monitor_enabled != existing_instruction.monitor_enabled:
+                instruction_monitor_action = "enable" if instruction_monitor_enabled else "disable"
+
+        instruction_ai_enabled = existing_instruction.ai_enabled
+        if args.enable_instruction_ai:
+            instruction_ai_enabled = True
+            instruction_ai_action = "enable"
+        elif args.disable_instruction_ai:
+            instruction_ai_enabled = False
+            instruction_ai_action = "disable"
+        elif should_prompt_instruction_guard and instruction_monitor_enabled:
+            provider_env = dict(existing)
+            provider_env.update(updates)
+            if resolve_ai_config(provider_env).ready:
+                instruction_ai_enabled = _prompt_yes_no(
+                    "Allow the separate Agent Instruction Guard AI assistant to review bounded redacted evidence?",
+                    input_func,
+                    default=instruction_ai_enabled,
+                )
+                if instruction_ai_enabled != existing_instruction.ai_enabled:
+                    instruction_ai_action = "enable" if instruction_ai_enabled else "disable"
+
+        scan_mode = args.instruction_scan_mode or existing_instruction.scan_mode
+        if should_prompt_instruction_guard and instruction_monitor_enabled and args.instruction_scan_mode is None:
+            all_markdown = _prompt_yes_no(
+                "Also analyze other Markdown content without adding it to the integrity baseline?",
+                input_func,
+                default=scan_mode == "all-markdown",
+            )
+            scan_mode = "all-markdown" if all_markdown else "agent-surfaces"
+        updates[INSTRUCTION_MONITOR_ENABLED_ENV] = "1" if instruction_monitor_enabled else "0"
+        updates[INSTRUCTION_AI_ENABLED_ENV] = "1" if instruction_ai_enabled else "0"
+        updates[INSTRUCTION_SCAN_MODE_ENV] = scan_mode
+        print("Configured Agent Instruction Guard defaults.", file=stdout)
 
     configure_incidents = (
         args.enable_incident_monitor
@@ -826,6 +921,93 @@ def run_init(
             write_user_env({INCIDENT_BACKGROUND_AI_ENV: previous}, path=target_env)
             return 1
 
+    instruction_rollback_config = {
+        INSTRUCTION_MONITOR_ENABLED_ENV: existing.get(INSTRUCTION_MONITOR_ENABLED_ENV, "0"),
+        INSTRUCTION_AI_ENABLED_ENV: existing.get(INSTRUCTION_AI_ENABLED_ENV, "0"),
+        INSTRUCTION_SCAN_MODE_ENV: existing.get(INSTRUCTION_SCAN_MODE_ENV, "agent-surfaces"),
+    }
+    instruction_monitor_snapshot = None
+    instruction_ai_snapshot = None
+    if instruction_monitor_action:
+        instruction_monitor_snapshot = _capture_user_timer_state(
+            timer=INSTRUCTION_MONITOR_TIMER,
+            service=INSTRUCTION_MONITOR_SERVICE,
+            runner=runner,
+        )
+        if instruction_monitor_snapshot is None:
+            write_user_env(instruction_rollback_config, path=target_env)
+            print(
+                "Could not safely capture the monitor's prior user-unit state.",
+                file=stderr,
+            )
+            return 1
+    if instruction_ai_action:
+        instruction_ai_snapshot = _capture_user_timer_state(
+            timer=INSTRUCTION_ASSISTANT_TIMER,
+            service=INSTRUCTION_ASSISTANT_SERVICE,
+            runner=runner,
+        )
+        if instruction_ai_snapshot is None:
+            write_user_env(instruction_rollback_config, path=target_env)
+            print(
+                "Could not safely capture the AI assistant's prior user-unit state.",
+                file=stderr,
+            )
+            return 1
+
+    if instruction_monitor_action:
+        desired = instruction_monitor_action == "enable"
+        monitor_ok, monitor_message = set_instruction_monitor_enabled(
+            desired,
+            runner=runner,
+            env_path=target_env,
+            write_config=False,
+        )
+        print(monitor_message, file=stdout if monitor_ok else stderr)
+        if not monitor_ok:
+            rollback_ok = _restore_user_timer_state(
+                instruction_monitor_snapshot,
+                timer=INSTRUCTION_MONITOR_TIMER,
+                service=INSTRUCTION_MONITOR_SERVICE,
+                runner=runner,
+            )
+            write_user_env(instruction_rollback_config, path=target_env)
+            if not rollback_ok:
+                print("The monitor's prior user-unit state could not be fully restored.", file=stderr)
+            return 1
+
+    if instruction_ai_action:
+        desired = instruction_ai_action == "enable"
+        provider_env = dict(os.environ)
+        provider_env.update(_safe_read_env(target_env))
+        ai_ok, ai_message = set_instruction_ai_enabled(
+            desired,
+            runner=runner,
+            env_path=target_env,
+            env=provider_env,
+            write_config=False,
+        )
+        print(ai_message, file=stdout if ai_ok else stderr)
+        if not ai_ok:
+            ai_rollback_ok = _restore_user_timer_state(
+                instruction_ai_snapshot,
+                timer=INSTRUCTION_ASSISTANT_TIMER,
+                service=INSTRUCTION_ASSISTANT_SERVICE,
+                runner=runner,
+            )
+            monitor_rollback_ok = True
+            if instruction_monitor_snapshot is not None:
+                monitor_rollback_ok = _restore_user_timer_state(
+                    instruction_monitor_snapshot,
+                    timer=INSTRUCTION_MONITOR_TIMER,
+                    service=INSTRUCTION_MONITOR_SERVICE,
+                    runner=runner,
+                )
+            write_user_env(instruction_rollback_config, path=target_env)
+            if not ai_rollback_ok or not monitor_rollback_ok:
+                print("The prior Instruction Guard user-unit state could not be fully restored.", file=stderr)
+            return 1
+
     updater_paths = updater_desktop_paths(config_home=updater_config_home, data_home=updater_data_home)
     if updater_autostart_action == "install":
         updater_result = install_updater_autostart(paths=updater_paths)
@@ -914,6 +1096,8 @@ def run_doctor(
     incident_maintenance_timer_path: Path = Path("/usr/lib/systemd/system") / INCIDENT_MAINTENANCE_TIMER,
     incident_system_root: Path = INCIDENT_SYSTEM_ROOT,
     incident_background_unit_root: Path = INCIDENT_USER_UNIT_ROOT,
+    instruction_unit_root: Path = INSTRUCTION_USER_UNIT_ROOT,
+    instruction_state_root: Optional[Path] = None,
     incident_safe_service_path: Path = Path("/usr/lib/systemd/system") / INCIDENT_SAFE_AUTOPILOT_SERVICE,
     incident_auto_repair_policy_path: Path = INCIDENT_AUTO_REPAIR_POLICY_PATH,
     incident_auto_repair_policy_uid: int = 0,
@@ -948,6 +1132,8 @@ def run_doctor(
         incident_maintenance_timer_path=incident_maintenance_timer_path,
         incident_system_root=incident_system_root,
         incident_background_unit_root=incident_background_unit_root,
+        instruction_unit_root=instruction_unit_root,
+        instruction_state_root=instruction_state_root,
         incident_safe_service_path=incident_safe_service_path,
         incident_auto_repair_policy_path=incident_auto_repair_policy_path,
         incident_auto_repair_policy_uid=incident_auto_repair_policy_uid,
@@ -994,6 +1180,8 @@ def build_doctor_checks(
     incident_maintenance_timer_path: Path = Path("/usr/lib/systemd/system") / INCIDENT_MAINTENANCE_TIMER,
     incident_system_root: Path = INCIDENT_SYSTEM_ROOT,
     incident_background_unit_root: Path = INCIDENT_USER_UNIT_ROOT,
+    instruction_unit_root: Path = INSTRUCTION_USER_UNIT_ROOT,
+    instruction_state_root: Optional[Path] = None,
     incident_safe_service_path: Path = Path("/usr/lib/systemd/system") / INCIDENT_SAFE_AUTOPILOT_SERVICE,
     incident_auto_repair_policy_path: Path = INCIDENT_AUTO_REPAIR_POLICY_PATH,
     incident_auto_repair_policy_uid: int = 0,
@@ -1090,6 +1278,227 @@ def build_doctor_checks(
 
     if check_ai:
         checks.append(_check_ai_connectivity(effective_env, urlopen=urlopen))
+
+    instruction_preferences = resolve_instruction_guard_preferences(effective_env)
+    if instruction_preferences.error:
+        checks.append(DoctorCheck(
+            "instruction_guard_config",
+            "error",
+            f"Agent Instruction Guard configuration is invalid: {instruction_preferences.error}",
+        ))
+    elif instruction_preferences.monitor_enabled:
+        checks.append(DoctorCheck(
+            "instruction_guard_config",
+            "ok",
+            f"Agent Instruction Guard is enabled in {instruction_preferences.scan_mode} mode",
+            {
+                "monitor_enabled": True,
+                "ai_enabled": instruction_preferences.ai_enabled,
+                "scan_mode": instruction_preferences.scan_mode,
+            },
+        ))
+    else:
+        checks.append(DoctorCheck(
+            "instruction_guard_config",
+            "warn",
+            "Agent Instruction Guard monitor is disabled until the user opts in",
+            {
+                "monitor_enabled": False,
+                "ai_enabled": instruction_preferences.ai_enabled,
+                "scan_mode": instruction_preferences.scan_mode,
+            },
+        ))
+
+    monitor_units_installed = all(
+        (instruction_unit_root / name).is_file()
+        for name in ("aurascan-instruction-monitor.service", "aurascan-instruction-monitor.timer")
+    )
+    assistant_units_installed = all(
+        (instruction_unit_root / name).is_file()
+        for name in ("aurascan-instruction-assistant.service", "aurascan-instruction-assistant.timer")
+    )
+    if monitor_units_installed or assistant_units_installed:
+        instruction_units = instruction_guard_unit_status(
+            runner=runner,
+            unit_root=instruction_unit_root,
+        )
+    else:
+        instruction_units = {
+            "monitor_installed": False,
+            "assistant_installed": False,
+            "monitor_timer_enabled": "not-found",
+            "monitor_timer_active": "inactive",
+            "assistant_timer_enabled": "not-found",
+            "assistant_timer_active": "inactive",
+        }
+    monitor_enabled_state = instruction_units.get("monitor_timer_enabled")
+    monitor_active_state = instruction_units.get("monitor_timer_active")
+    monitor_matches_enabled = bool(
+        instruction_units.get("monitor_installed")
+        and monitor_enabled_state == "enabled"
+        and monitor_active_state == "active"
+    )
+    monitor_matches_disabled = bool(
+        instruction_units.get("monitor_installed")
+        and monitor_enabled_state == "disabled"
+        and monitor_active_state == "inactive"
+    )
+    if instruction_preferences.monitor_enabled:
+        checks.append(DoctorCheck(
+            "instruction_guard_monitor",
+            "ok" if monitor_matches_enabled else "error",
+            "Agent Instruction Guard monitor timer is installed, enabled, and active"
+            if monitor_matches_enabled
+            else "Agent Instruction Guard is enabled in config but its user timer is not healthy",
+            instruction_units,
+        ))
+    elif monitor_matches_disabled:
+        checks.append(DoctorCheck(
+            "instruction_guard_monitor",
+            "ok",
+            "Agent Instruction Guard monitor timer is installed, disabled, and inactive",
+            instruction_units,
+        ))
+    elif monitor_units_installed:
+        checks.append(DoctorCheck(
+            "instruction_guard_monitor",
+            "error",
+            "Agent Instruction Guard is disabled in config but its user timer is enabled, active, or unavailable",
+            instruction_units,
+        ))
+    else:
+        checks.append(DoctorCheck(
+            "instruction_guard_monitor",
+            "warn",
+            "Agent Instruction Guard user units are not installed",
+            instruction_units,
+        ))
+
+    assistant_enabled_state = instruction_units.get("assistant_timer_enabled")
+    assistant_active_state = instruction_units.get("assistant_timer_active")
+    assistant_matches_enabled = bool(
+        instruction_units.get("assistant_installed")
+        and assistant_enabled_state == "enabled"
+        and assistant_active_state == "active"
+    )
+    assistant_matches_disabled = bool(
+        instruction_units.get("assistant_installed")
+        and assistant_enabled_state == "disabled"
+        and assistant_active_state == "inactive"
+    )
+    if instruction_preferences.ai_enabled:
+        assistant_healthy = (
+            ai_config.ready
+            and assistant_matches_enabled
+        )
+        checks.append(DoctorCheck(
+            "instruction_guard_ai",
+            "ok" if assistant_healthy else "error",
+            "Agent Instruction Guard raise-only AI assistant is ready"
+            if assistant_healthy
+            else "Instruction Guard AI consent is enabled but the provider or assistant timer is not ready",
+            {
+                "consent_enabled": True,
+                "provider_ready": ai_config.ready,
+                "assistant_installed": instruction_units.get("assistant_installed"),
+                "assistant_timer_enabled": instruction_units.get("assistant_timer_enabled"),
+                "assistant_timer_active": instruction_units.get("assistant_timer_active"),
+            },
+        ))
+    elif assistant_matches_disabled:
+        checks.append(DoctorCheck(
+            "instruction_guard_ai",
+            "ok",
+            "Agent Instruction Guard AI consent is disabled and its assistant timer is inactive",
+            {
+                "consent_enabled": False,
+                "provider_ready": ai_config.ready,
+                "assistant_installed": instruction_units.get("assistant_installed"),
+                "assistant_timer_enabled": assistant_enabled_state,
+                "assistant_timer_active": assistant_active_state,
+            },
+        ))
+    elif assistant_units_installed:
+        checks.append(DoctorCheck(
+            "instruction_guard_ai",
+            "error",
+            "Instruction Guard AI consent is disabled but its assistant timer is enabled, active, or unavailable",
+            {
+                "consent_enabled": False,
+                "provider_ready": ai_config.ready,
+                "assistant_installed": instruction_units.get("assistant_installed"),
+                "assistant_timer_enabled": assistant_enabled_state,
+                "assistant_timer_active": assistant_active_state,
+            },
+        ))
+    else:
+        checks.append(DoctorCheck(
+            "instruction_guard_ai",
+            "warn",
+            "Agent Instruction Guard AI consent is disabled and its user units are not installed",
+            {
+                "consent_enabled": False,
+                "provider_ready": ai_config.ready,
+                "assistant_installed": False,
+                "assistant_timer_enabled": assistant_enabled_state,
+                "assistant_timer_active": assistant_active_state,
+            },
+        ))
+
+    try:
+        from aurascan.core.instruction_guard import (
+            default_instruction_guard_state_root,
+            instruction_guard_status,
+        )
+
+        if instruction_state_root is not None:
+            resolved_instruction_state = instruction_state_root
+        elif env is not None and "HOME" not in env and "XDG_STATE_HOME" not in env:
+            # Injected test/diagnostic environments must never fall through to
+            # the process owner's real home directory.
+            resolved_instruction_state = env_path.parent / "instruction-guard-state"
+        else:
+            resolved_instruction_state = default_instruction_guard_state_root(effective_env)
+        instruction_state = instruction_guard_status(
+            state_root=resolved_instruction_state,
+            env=effective_env,
+        )
+    except (ImportError, OSError, TypeError, ValueError) as exc:
+        resolved_instruction_state = (
+            instruction_state_root
+            or (env_path.parent / "instruction-guard-state" if env is not None else None)
+        )
+        instruction_state = {"state": "unavailable", "error": str(exc)}
+    if resolved_instruction_state is not None and not Path(resolved_instruction_state).exists():
+        checks.append(DoctorCheck(
+            "instruction_guard_state",
+            "ok",
+            "Agent Instruction Guard private state will be created with 0700 permissions on first scan",
+        ))
+    elif instruction_state.get("state") == "unavailable":
+        checks.append(DoctorCheck(
+            "instruction_guard_state",
+            "error",
+            "Agent Instruction Guard private state ownership, permissions, or schema are unsafe",
+            dict(instruction_state),
+        ))
+    else:
+        checks.append(DoctorCheck(
+            "instruction_guard_state",
+            "ok",
+            "Agent Instruction Guard private state permissions and schema are valid",
+            dict(instruction_state),
+        ))
+
+    notifier = which("notify-send")
+    checks.append(DoctorCheck(
+        "instruction_guard_notifications",
+        "ok" if notifier else "warn",
+        "Desktop notifications are available; Agent Instruction Guard messages contain no paths or snippets"
+        if notifier
+        else "notify-send is unavailable; findings remain visible in the tray and CLI review state",
+        {"notify_send": bool(notifier)},
+    ))
 
     resolved_followup_root = (
         followup_root

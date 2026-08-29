@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": ["Bash(pytest:*)", "Read(./tests/**)"]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m pytest -q tests/unit"
+          }
+        ]
+      }
+    ]
+  }
+}

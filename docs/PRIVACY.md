@@ -1,6 +1,6 @@
 # AuraScan Privacy Boundaries
 
-AuraScan separates incident collection, optional AI analysis, and privileged
+AuraScan separates offline collection, optional AI analysis, and privileged
 repair so no background process receives both network and repair authority.
 
 ## Root Collectors
@@ -10,6 +10,68 @@ repair so no background process receives both network and repair authority.
 do not load user AI configuration, contact a provider, or execute a repair.
 They persist bounded redacted reports under `/var/lib/aurascan/incidents/` and
 publish only non-sensitive marker/status fields needed by the tray.
+
+## Agent Instruction Guard
+
+Agent Instruction Guard is an opt-in, unprivileged scanner for recognized
+AI-agent control files under a user's home directory. Its offline monitor runs
+after login and every five minutes with network access disabled, a read-only
+home, private writable state, low CPU/I/O priority, and all supported AI
+credentials removed from its environment. It reads files only as bounded inert
+text and never imports, renders, sources, or executes them.
+
+The default `agent-surfaces` mode discovers `AGENTS.md`,
+`AGENTS.override.md`, `SKILL.md`, `CLAUDE.md`, `CLAUDE.local.md`, and Claude
+rules, commands, agents, skills, memory, settings, hooks, MCP/plugin manifests,
+and text resources associated with discovered skills. Optional `all-markdown`
+mode applies content rules to other Markdown files but does not baseline their
+integrity. Explicit imports and file symlinks are followed only to regular files
+inside an allowed root; symlinked directories are not traversed. Cache, trash,
+VCS, dependency, and virtual-environment trees are pruned, and each scan is
+bounded by traversal, candidate, file-size, and elapsed-time limits.
+
+Private reports, manifests, AI jobs, alert records, and disable receipts are
+stored under `$XDG_STATE_HOME/aurascan/instruction-guard/` (normally
+`~/.local/state/aurascan/instruction-guard/`) with `0700` directories and
+`0600` files. They may contain normalized file identity and metadata, hashes,
+rule IDs, bounded redacted evidence, integrity status, approval bindings, and
+action history. Treat this as private security data. Approvals are bound to the
+content hash and a hash of machine identity plus UID; restoring state onto a
+rebuilt machine does not establish trust. Corrupt, symlinked, wrongly owned, or
+permission-weakened state is rejected rather than overwritten.
+AuraScan retains the current Instruction Guard report and at most the newest 32
+reports within a 256 MiB aggregate history budget. It retains at most 2,048
+generic alert envelopes, including at most 256 acknowledged envelopes when
+capacity permits. This pruning limits storage growth; it does not approve files
+or erase the manifest's persistent integrity state.
+
+Desktop notifications and tray/public status contain only a generic severity,
+count, and request to review. They never contain paths, snippets, usernames,
+credentials, provider output, or other file content. Acknowledging an alert
+deduplicates the same notification; it does not approve a file.
+
+Instruction Guard AI is a second, independent opt-in. Its user timer processes
+at most one queued job per run through the already configured local or cloud
+provider. A request contains at most 12 KiB of redacted suspicious evidence and
+asks for strict JSON without tools. The provider may return a bounded verdict,
+severity, confidence, matched behavior families, and reasons. AI output is
+labeled interpretation, cannot lower deterministic severity, cannot trust an
+integrity change, and cannot provide commands. Disabling Instruction Guard AI
+causes zero provider calls. The offline monitor never loads provider
+credentials.
+
+Confirmed disable is not quarantine. AuraScan may atomically rename only an
+unchanged, user-owned, standalone regular instruction file after confirmation
+and writes a private receipt for exact restoration. Settings, hooks, plugin
+manifests, scripts, shared configuration, and symlinks are manual-only. Restore
+requires unchanged disabled content, a missing original path, and a safe parent
+directory, then returns the file to unreviewed status rather than trusting it.
+
+This monitor does not preflight pasted commands or download links, intercept
+file opens or processes with fanotify, or continuously prevent access between
+scans. Same-UID malware can read or alter user files and attack AuraScan's user
+state; root malware can disable or deceive the monitor. These limits remain
+true even when state permissions and service sandboxing are correct.
 
 ## Package Security Intelligence
 

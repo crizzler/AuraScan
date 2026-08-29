@@ -23,6 +23,9 @@ not a safety guarantee.
 The optional AuraScan Recovery boot environment extends those guarded workflows
 to an installed OS that cannot boot normally, with deterministic offline
 diagnostics and separately consented provider AI.
+The opt-in Agent Instruction Guard adds a bounded, unprivileged review layer
+for AI-agent control files in a user's home directory without executing their
+contents.
 
 AuraScan does not prove that a package is safe. A clean report, a clean ClamAV
 result, or a valid source signature is not a guarantee. The goal is to find risk
@@ -40,7 +43,7 @@ pre-1.0.
 
 ## What You Can Try Now
 
-AuraScan currently provides nine practical entry points:
+AuraScan currently provides ten practical entry points:
 
 - `aurascan --pkgbuild ./PKGBUILD` reviews package build metadata before trust.
 - `aurascan-makepkg` scans before handing control to `makepkg`.
@@ -49,6 +52,8 @@ AuraScan currently provides nine practical entry points:
   risks.
 - `aurascan security-audit` checks installed packages and pacman history against
   validated AUR campaign intelligence, plus optional official Arch advisories.
+- `aurascan instruction-audit` reviews recognized Claude Code, `AGENTS.md`, and
+  Agent Skill control files for suspicious content and unexpected changes.
 - `aurascan config-drift --dry-run` explains `.pacnew` and `.pacsave` files and
   prepares safe fixes with backups.
 - `aurascan incidents --dry-run` diagnoses system and application crashes from
@@ -155,11 +160,12 @@ wizard.
 
 The Arch/AUR packaging recipe installs `/usr/bin/aurascan`,
 `/usr/bin/aurascan-makepkg`, the pacman hook template, the optional updater
-desktop/icon assets, and disabled-by-default incident monitor, user assistant,
-Safe Autopilot services, recovery image profiles, and a disabled recovery
-refresh hook. It does not build a UKI, alter an ESP, or add a boot entry during
-package installation. It also installs a non-interactive post-install message
-that points users to `aurascan init` and `aurascan doctor`.
+desktop/icon assets, disabled-by-default incident and Agent Instruction Guard
+monitors and user assistants, Safe Autopilot services, recovery image profiles,
+and a disabled recovery refresh hook. It does not build a UKI, alter an ESP, or
+add a boot entry during package installation. It also installs a
+non-interactive post-install message that points users to `aurascan init` and
+`aurascan doctor`.
 
 The source-tree reference recipe remains under `packaging/arch/`. The AUR Git
 repository is the canonical public package history used by AUR clients.
@@ -204,6 +210,11 @@ Default scans do not download declared sources, clone upstream repositories,
 fetch PGP keys, run GPG, run makepkg, install packages, or execute package code.
 The default scan context is `unknown`, which keeps update fast paths disabled.
 
+The separate Agent Instruction Guard performs bounded, static content and
+integrity checks on recognized AI-agent control files. It never imports,
+renders, sources, or executes a discovered file. It is disabled until the user
+opts in.
+
 Deep static source inspection is opt-in: --deep-static is explicit. It safely acquires and inspects declared source
 archives without executing package code. In this mode AuraScan may verify
 detached signatures in an isolated temporary GPG home. Automatic key lookup is
@@ -212,10 +223,14 @@ with `--no-auto-key-fetch` or `--offline`.
 
 ## What It Does Not Protect Against
 
-AuraScan is not a sandbox, VM, or runtime behavior monitor. It does not make
-makepkg safe after it starts running package functions. It does not guarantee
-malware detection, and it cannot see behavior hidden in files it did not fetch
-or inspect.
+AuraScan is not a sandbox, VM, or general process-behavior monitor. It does not
+make makepkg safe after it starts running package functions. The Agent
+Instruction Guard is a periodic control-file scanner, not synchronous
+interception: it cannot stop a process that reads or changes a file between
+scans. It does not preflight pasted commands or download links, use privileged
+fanotify interception, or automatically quarantine files. AuraScan does not
+guarantee malware detection, and it cannot see behavior hidden in files it did
+not fetch or inspect.
 
 ClamAV integration is useful when available, but a clean ClamAV scan is not
 proof of safety. PGP signatures help confirm source integrity and signer
@@ -282,6 +297,7 @@ aurascan init --enable-config-drift --config-drift-ai-diffs ask
 aurascan init --enable-updater-tray --install-updater-autostart
 aurascan init --enable-incident-monitor --enable-incident-ai --incident-ai-evidence redacted
 aurascan init --enable-incident-background-ai --incident-auto-repair safe
+aurascan init --enable-instruction-monitor --disable-instruction-ai --instruction-scan-mode agent-surfaces
 aurascan init --install-recovery --enable-recovery-ai --enable-recovery-auto-refresh --recovery-wifi-profiles ask
 aurascan init --disable-upgrade-preflight
 ```
@@ -377,6 +393,112 @@ correlates authenticated Tailscale SSH enrollment or hidden root-SSH behavior
 with independent persistence, privilege, or anti-forensics signals. A match
 proves suspicious code or artifacts were found, not that enrollment or remote
 access succeeded.
+
+## Agent Instruction Guard
+
+AI-agent control files can influence an assistant every time a project or
+skill is loaded. A poisoned file restored onto a rebuilt machine can therefore
+reintroduce dangerous instructions while still looking like ordinary project
+documentation. `aurascan instruction-audit` provides an opt-in, unprivileged
+review workflow for this risk:
+
+```bash
+aurascan instruction-audit
+aurascan instruction-audit --all-markdown --no-ai
+aurascan instruction-audit --ai --json
+aurascan instruction-audit --review
+aurascan instruction-audit --review REPORT_ID
+aurascan instruction-audit --approve FILE_ID
+aurascan instruction-audit --disable FILE_ID
+aurascan instruction-audit --restore ACTION_ID
+aurascan instruction-audit --status
+aurascan instruction-audit --enable-monitor
+aurascan instruction-audit --enable-ai
+aurascan instruction-audit --disable-monitor
+aurascan instruction-audit --disable-ai
+```
+
+By default AuraScan scans recognized control surfaces under `$HOME`, including
+`AGENTS.md`, `AGENTS.override.md`, `SKILL.md`, `CLAUDE.md`,
+`CLAUDE.local.md`, and Claude rules, commands, agents, skills, memory, settings,
+hooks, MCP/plugin manifests, and text scripts or resources belonging to a
+discovered skill. `--root PATH` selects an explicit root for testing or a
+deliberate one-shot scan. `--all-markdown` extends content analysis to other
+Markdown files, but those extra files are not added to the integrity baseline.
+`--no-ai` guarantees deterministic-only analysis; one-shot `--ai` requests the
+separately configured provider without enabling the background AI timer. A
+complete clear scan exits 0, a completed scan requiring review exits 1, and a
+configuration or scan failure exits 2. Background capture records findings and
+exits 0 so systemd does not mislabel detection as a failed service.
+
+Discovery follows explicit Markdown imports and file symlinks only when the
+final regular-file target stays inside an allowed root. It never traverses a
+symlinked directory. Cache, trash, dependency, virtual-environment, and VCS
+trees are pruned; directory, entry, candidate, size, and time limits keep each
+run bounded, with continuation state for a large home. Files are opened without
+following a final symlink unexpectedly, checked before and after the bounded
+read, and treated only as inert text.
+
+Deterministic rules correlate behaviors such as fetch plus execution,
+credential access plus archive or upload, automatic activation plus
+concealment, persistence plus dangerous actions, decode plus evaluation, and
+privilege or sudo-policy abuse. The parser distinguishes active constructs from
+quoted examples, fenced code, comments, negation, frontmatter, and invalid
+configuration where possible. A match reports suspicious static instructions;
+it does not prove that an assistant obeyed them or that credentials left the
+machine.
+
+Content risk and integrity trust remain separate. Suspicious first-seen files
+alert immediately; otherwise clean first-seen files enter one unreviewed
+inventory. Approval records the exact hash and is bound to the local machine
+identity and UID, so restoring an old manifest onto a rebuilt machine does not
+silently establish trust. Reports, manifests, queued AI jobs, alert state, and
+disable receipts use private permissions under
+`$XDG_STATE_HOME/aurascan/instruction-guard/`. Version 0.9.0 introduces the
+`instruction_guard_report/1.0` schema and Instruction Guard rule version 1.0;
+the existing package-scanner rule version is unchanged.
+Report history is retention-limited to the newest 32 reports and a 256 MiB
+aggregate budget (the current report is always retained). Alert envelopes are
+bounded to 2,048, with at most 256 acknowledged envelopes retained when space
+permits. Pruning never approves content or removes the manifest's persistent
+integrity/review state.
+
+The monitor is installed disabled. After explicit opt-in, its hardened user
+service runs after login and every five minutes with network access disabled,
+a read-only home, private writable state, low CPU/I/O priority, and AI
+credentials removed. A second, separately enabled user timer may process at
+most one pending AI job per run using the configured local or cloud provider.
+It sends at most 12 KiB of redacted suspicious evidence to a tool-free strict
+JSON review. AI is interpretation only: it may raise deterministic severity,
+but cannot lower it, trust an integrity change, or propose commands. Disabling
+Instruction Guard AI makes no provider request.
+
+HIGH/CRITICAL and integrity alerts remain visible through CLI review state and
+the tray. When `notify-send` is available, desktop notifications contain only
+a generic review prompt, never a path, snippet, username, credential, or AI
+text. Acknowledging an alert suppresses an identical notification; it does not
+approve the file.
+
+After explicit confirmation, AuraScan can disable only an unchanged,
+user-owned, standalone regular instruction file. Settings, hook
+configurations, plugin manifests, scripts, shared configurations, and symlinks
+remain manual-only. An eligible file is atomically renamed beside itself to a
+hidden non-discoverable name, and a private receipt supports exact restoration.
+Restore refuses changed or unsafe state, rescans immediately, and returns the
+file to unreviewed status rather than trusting it automatically. There is no
+automatic quarantine.
+
+This is defense in depth, not a same-user security boundary. Malware already
+running as the monitored UID can alter user files or attack AuraScan state;
+root malware can disable or deceive the monitor entirely. Corrupt, symlinked,
+wrongly owned, or permission-weakened guard state fails closed for review
+instead of being overwritten.
+
+The user settings are `AURASCAN_INSTRUCTION_MONITOR_ENABLED`,
+`AURASCAN_INSTRUCTION_AI_ENABLED`, and
+`AURASCAN_INSTRUCTION_SCAN_MODE=agent-surfaces|all-markdown`. Enabling the
+general AuraScan AI provider does not enable Instruction Guard AI or either
+Instruction Guard timer.
 
 ## Upgrade Preflight
 
@@ -615,6 +737,7 @@ The tray menu opens terminal-native AuraScan flows:
 
 - Run AuraScan Upgrade: `aurascan upgrade`
 - Resolve System Findings: `aurascan incidents --resolve`
+- Review Agent Files: `aurascan instruction-audit --review`
 - Run System Maintenance Scan: `aurascan incidents --run-maintenance`
 - AuraScan Settings: `aurascan init`
 
@@ -639,14 +762,18 @@ launcher under `~/.local/share/applications/`; it does not modify
 Cachy-Update, Shelly, or system desktop files. PyQt6 or PySide6 is required only
 for the tray applet, not for normal AuraScan scans.
 
-The tray refreshes incident state every five seconds. Its normal icon changes to
-maintenance-due, attention, or critical variants when the weekly scan is
-overdue or unreviewed findings need attention. Clean scans are silent. Desktop
-notifications are reserved for HIGH/CRITICAL findings and repeated crashes
-unless separately opted-in background AI completes an analysis, in which case
-the tray shows one bounded completion summary. The icon remains changed until
-the guided resolution completes or report retention expires; a verified Safe
-Autopilot repair may clear only the category it actually resolved.
+The tray refreshes incident and Instruction Guard state every five seconds. Its
+normal icon changes to maintenance-due, attention, or critical variants when
+the weekly scan is overdue or unreviewed findings need attention. Instruction
+Guard severity takes priority when it is higher, and its menu action routes to
+the agent-file review rather than the incident flow. Clean scans are silent.
+Desktop notifications are reserved for HIGH/CRITICAL findings and repeated
+crashes unless separately opted-in background AI completes an analysis, in
+which case the tray shows one bounded completion summary. Instruction Guard
+notifications are generic and contain no paths or evidence. The icon remains
+changed until the applicable guided review completes or report retention
+expires; a verified Safe Autopilot repair may clear only the incident category
+it actually resolved.
 
 The config keys are `AURASCAN_UPDATER_TRAY_ENABLED`,
 `AURASCAN_UPDATER_AUTOSTART`, and `AURASCAN_UPDATER_TERMINAL`.
@@ -1057,6 +1184,13 @@ credentials. Incident evidence is bounded and redacted before persistence or
 AI use, and `facts-only` mode omits raw evidence excerpts. See
 [`docs/PRIVACY.md`](docs/PRIVACY.md) for process and storage boundaries.
 
+Instruction Guard's deterministic user service is a separate opt-in and runs
+without network access or AI credentials. Its AI assistant has another consent
+bit, processes at most one queued job per timer run, and receives no more than
+12 KiB of redacted suspicious evidence. Agent-file reports and manifests are
+private user security state; public notifications and tray status never include
+file paths, snippets, usernames, credentials, or provider text.
+
 Contextual follow-up uses the same configured foreground provider consent. It
 sends at most 12,000 redacted characters per request and accepts only
 AuraScan-generated opaque fact, probe, and action IDs. Private source contexts
@@ -1144,8 +1278,13 @@ AuraScan is released under the MIT License. See [LICENSE](LICENSE).
 AuraScan focuses on reducing package-install risk from malicious or suspicious
 packaging behavior, unsafe source archives, weakened source integrity,
 dangerous static patterns, suspicious update drift, and known malware
-signatures when local scanners are available.
+signatures when local scanners are available. Its optional Agent Instruction
+Guard also detects suspicious content and integrity changes in recognized
+AI-agent control files through bounded periodic static scans.
 
 It is a review and blocking layer, not a complete endpoint security system.
 Use it alongside normal Arch-family package trust practices, source review,
-maintainer reputation checks, and system backups.
+maintainer reputation checks, careful review of links and pasted commands, and
+system backups. The Instruction Guard does not synchronously intercept file
+access, inspect running processes, or establish a security boundary against
+same-UID or root malware.

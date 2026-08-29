@@ -9,7 +9,12 @@ from aurascan.core.updater_tray import (
     UPDATER_TERMINAL_ENV,
     UPDATER_TRAY_ENABLED_ENV,
     INCIDENT_REVIEW_COMMAND,
+    INSTRUCTION_REVIEW_COMMAND,
+    NotificationActionRouter,
+    TrayIncidentState,
+    acknowledge_instruction_guard_alerts,
     build_background_incident_notification,
+    build_instruction_guard_notification,
     build_terminal_invocation,
     build_incident_notification,
     build_updater_status,
@@ -23,6 +28,9 @@ from aurascan.core.updater_tray import (
     updater_desktop_paths,
     unseen_background_result,
     mark_background_result_seen,
+    merge_tray_states,
+    pending_instruction_guard_alerts,
+    resolve_tray_instruction_state,
 )
 from aurascan.core.incident_automation import background_result_path
 
@@ -204,6 +212,7 @@ def test_updater_menu_exposes_one_guided_incident_resolution_workflow():
     commands = {label: list(command) for group in UPDATER_MENU_GROUPS for label, command in group}
 
     assert commands["Resolve System Findings"] == ["aurascan", "incidents", "--resolve"]
+    assert commands["Review Agent Files"] == ["aurascan", "instruction-audit", "--review"]
     assert commands["Run System Maintenance Scan"] == ["aurascan", "incidents", "--run-maintenance"]
     assert not {
         "AuraScan Doctor",
@@ -215,7 +224,139 @@ def test_updater_menu_exposes_one_guided_incident_resolution_workflow():
         "Recent Incidents",
     } & commands.keys()
     assert list(INCIDENT_REVIEW_COMMAND) == ["aurascan", "incidents", "--resolve"]
+    assert list(INSTRUCTION_REVIEW_COMMAND) == ["aurascan", "instruction-audit", "--review"]
     assert UPDATER_INCIDENT_REFRESH_MS == 5_000
+
+
+def test_instruction_guard_state_uses_only_secret_free_summary(tmp_path):
+    captured = {}
+
+    def load_status(**kwargs):
+        captured.update(kwargs)
+        return {
+            "schema": "instruction_guard_status/1.0",
+            "state": "review_required",
+            "highest_severity": "HIGH",
+            "pending_alert_count": 2,
+            "review_candidate_count": 3,
+            "latest_report_id": "report-one",
+        }
+
+    state = resolve_tray_instruction_state(
+        env={"XDG_STATE_HOME": str(tmp_path)},
+        state_root=tmp_path / "guard",
+        status_loader=load_status,
+    )
+
+    assert state.state == "critical"
+    assert state.pending_alert_count == 2
+    assert state.review_candidate_count == 3
+    assert state.icon_name.endswith("-critical")
+    assert captured["state_root"] == tmp_path / "guard"
+    assert "report-one" not in state.tooltip
+
+
+def test_instruction_guard_unavailable_state_is_persistent_attention():
+    state = resolve_tray_instruction_state(status_loader=lambda **_kwargs: {"state": "unavailable"})
+
+    assert state.state == "attention"
+    assert state.unavailable is True
+    assert "state needs review" in state.tooltip
+
+
+def test_tray_combines_incident_and_instruction_severity(tmp_path):
+    incident = resolve_tray_incident_state(
+        marker_root=tmp_path / "pending",
+        notification_seen_path=tmp_path / "seen.json",
+        reviewed_path=tmp_path / "reviewed.json",
+        maintenance_status_path=tmp_path / "missing.json",
+        uid=1000,
+    )
+    instruction = resolve_tray_instruction_state(
+        status_loader=lambda **_kwargs: {
+            "state": "review_required",
+            "highest_severity": "MEDIUM",
+            "review_candidate_count": 1,
+        }
+    )
+
+    merged = merge_tray_states(incident, instruction)
+
+    assert merged.state == "attention"
+    assert "agent files" in merged.tooltip
+
+    critical_incident = TrayIncidentState(
+        state="critical",
+        icon_name="aurascan-updater-critical",
+        tooltip="incident",
+        unreviewed_markers=[],
+        background_markers=[],
+        unseen_notification_markers=[],
+        notification_markers=[],
+    )
+    critical_instruction = resolve_tray_instruction_state(
+        status_loader=lambda **_kwargs: {
+            "state": "review_required",
+            "highest_severity": "CRITICAL",
+            "review_candidate_count": 1,
+        }
+    )
+    combined = merge_tray_states(critical_incident, critical_instruction)
+
+    assert combined.state == "critical"
+    assert combined.tooltip == "AuraScan Updater - system and agent file findings need review"
+
+
+def test_instruction_guard_notifications_are_generic_and_acknowledged_by_id_only(tmp_path):
+    source = [
+        {
+            "alert_id": "alert-one",
+            "severity": "HIGH",
+            "path": "/home/alice/private/AGENTS.md",
+            "rule_ids": ["credential-exfiltration"],
+        },
+        {"alert_id": "alert-two", "severity": "CRITICAL", "snippet": "secret-token"},
+        {"severity": "HIGH"},
+    ]
+    alerts = pending_instruction_guard_alerts(
+        state_root=tmp_path,
+        alert_loader=lambda **_kwargs: source,
+    )
+    title, message = build_instruction_guard_notification(alerts)
+    acknowledged = []
+
+    acknowledge_instruction_guard_alerts(
+        alerts,
+        state_root=tmp_path,
+        acknowledge=lambda alert_id, **_kwargs: acknowledged.append(alert_id),
+    )
+
+    assert [alert["alert_id"] for alert in alerts] == ["alert-one", "alert-two"]
+    assert all(set(alert) == {"alert_id", "severity"} for alert in alerts)
+    assert title == "AuraScan found agent file risks"
+    assert "2 Agent Instruction Guard alerts" in message
+    assert "/home/alice" not in message
+    assert "credential-exfiltration" not in message
+    assert "secret-token" not in message
+    assert acknowledged == ["alert-one", "alert-two"]
+
+
+def test_notification_action_router_is_not_hardwired_to_incidents():
+    calls = []
+    router = NotificationActionRouter(
+        terminal="konsole",
+        which=fake_which({"konsole"}),
+        popen=lambda command: calls.append(command),
+    )
+
+    assert router.activate() is None
+    router.route(INCIDENT_REVIEW_COMMAND)
+    router.activate()
+    router.route(INSTRUCTION_REVIEW_COMMAND)
+    router.activate()
+
+    assert calls[0][-3:] == ["aurascan", "incidents", "--resolve"]
+    assert calls[1][-3:] == ["aurascan", "instruction-audit", "--review"]
 
 
 def test_incident_notification_groups_markers_by_boot():

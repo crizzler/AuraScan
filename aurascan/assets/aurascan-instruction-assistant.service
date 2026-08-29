@@ -1,0 +1,41 @@
+[Unit]
+Description=AuraScan optional Agent Instruction Guard AI assistant
+Documentation=https://github.com/crizzler/AuraScan
+ConditionPathExists=/usr/bin/aurascan
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/aurascan instruction-audit --background-assist
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectClock=yes
+ProtectHostname=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=ptraceable
+ProcSubset=pid
+StateDirectory=aurascan/instruction-guard
+StateDirectoryMode=0700
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @privileged @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+TimeoutStartSec=300
+Nice=15
+CPUWeight=10
+IOWeight=10
+IOSchedulingClass=idle
+Environment=PYTHONDONTWRITEBYTECODE=1

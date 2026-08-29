@@ -111,13 +111,20 @@ def test_arch_package_metadata_targets_current_public_release():
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     ).returncode == 0
+    head_is_release_tag = release_tag_exists and subprocess.run(
+        ["git", "diff", "--quiet", f"v{version}^{{}}", "HEAD"],
+        cwd=ROOT,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
 
     assert re.search(rf"^pkgver={re.escape(version)}$", pkgbuild, re.MULTILINE)
     assert f"v$pkgver.tar.gz" in pkgbuild
     # A tagged archive cannot contain the checksum of itself. The release
-    # candidate uses SKIP until the tag exists, then the checkout metadata is
-    # finalized immediately from GitHub's exact generated archive.
-    if release_tag_exists:
+    # candidate/tag commit uses SKIP because the archive does not exist yet;
+    # the following main-branch commit is finalized from GitHub's exact archive.
+    if release_tag_exists and not head_is_release_tag:
         assert 'sha256sums=(\'SKIP\')' not in pkgbuild
     elif is_git_checkout:
         assert "sha256sums=('SKIP')" in pkgbuild
@@ -130,7 +137,7 @@ def test_arch_package_metadata_targets_current_public_release():
     assert "pkgdesc = AI-assisted safety and recovery layer for Arch-family systems" in srcinfo
     assert "optdepends = shelly: optional Shelly update handoff for aurascan upgrade" in srcinfo
     assert f"aurascan-{version}.tar.gz::https://github.com/crizzler/AuraScan/archive/refs/tags/v{version}.tar.gz" in srcinfo
-    if release_tag_exists:
+    if release_tag_exists and not head_is_release_tag:
         assert "sha256sums = SKIP" not in srcinfo
     elif is_git_checkout:
         assert "sha256sums = SKIP" in srcinfo
@@ -214,6 +221,70 @@ def test_arch_pkgbuild_installs_disabled_hardened_incident_monitor():
     assert "systemctl start" not in pkgbuild
     assert "systemctl enable" not in maintenance_timer
     assert "WantedBy=" not in safe_service
+
+
+def test_arch_pkgbuild_installs_disabled_hardened_instruction_guard_services():
+    pkgbuild = read_text("packaging/arch/PKGBUILD")
+    srcinfo = read_text("packaging/arch/.SRCINFO")
+    monitor_service = read_text("aurascan/assets/aurascan-instruction-monitor.service")
+    monitor_timer = read_text("aurascan/assets/aurascan-instruction-monitor.timer")
+    assistant_service = read_text("aurascan/assets/aurascan-instruction-assistant.service")
+    assistant_timer = read_text("aurascan/assets/aurascan-instruction-assistant.timer")
+
+    for asset in (
+        "aurascan-instruction-monitor.service",
+        "aurascan-instruction-monitor.timer",
+        "aurascan-instruction-assistant.service",
+        "aurascan-instruction-assistant.timer",
+    ):
+        assert f"aurascan/assets/{asset}" in pkgbuild
+        assert f"/usr/lib/systemd/user/{asset}" in pkgbuild
+
+    notification_dependency = "libnotify: desktop notifications for Agent Instruction Guard"
+    assert notification_dependency in pkgbuild
+    assert f"optdepends = {notification_dependency}" in srcinfo
+
+    assert "ExecStart=/usr/bin/aurascan instruction-audit --background-capture" in monitor_service
+    assert "PrivateNetwork=yes" in monitor_service
+    assert "IPAddressDeny=any" in monitor_service
+    assert "RestrictAddressFamilies=AF_UNIX" in monitor_service
+    assert "UnsetEnvironment=AURASCAN_AI_KEY" in monitor_service
+    assert "AURASCAN_LOCAL_AI_API_KEY" in monitor_service
+    assert "Environment=AURASCAN_AI_ENABLED=0" in monitor_service
+    assert "Environment=AURASCAN_INSTRUCTION_AI_ENABLED=0" in monitor_service
+    assert "NoNewPrivileges=yes" in monitor_service
+    assert "CapabilityBoundingSet=" in monitor_service
+    assert "ProtectSystem=strict" in monitor_service
+    assert "ProtectHome=read-only" in monitor_service
+    assert "StateDirectory=aurascan/instruction-guard" in monitor_service
+    assert "StateDirectoryMode=0700" in monitor_service
+    assert "CPUWeight=10" in monitor_service
+    assert "IOWeight=10" in monitor_service
+    assert "OnStartupSec=1m" in monitor_timer
+    assert "OnUnitActiveSec=5m" in monitor_timer
+    assert "Persistent=true" in monitor_timer
+    assert "Unit=aurascan-instruction-monitor.service" in monitor_timer
+
+    assert "ExecStart=/usr/bin/aurascan instruction-audit --background-assist" in assistant_service
+    assert "PrivateNetwork=yes" not in assistant_service
+    assert "IPAddressDeny=any" not in assistant_service
+    assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" in assistant_service
+    assert "NoNewPrivileges=yes" in assistant_service
+    assert "CapabilityBoundingSet=" in assistant_service
+    assert "ProtectSystem=strict" in assistant_service
+    assert "ProtectHome=read-only" in assistant_service
+    assert "StateDirectory=aurascan/instruction-guard" in assistant_service
+    assert "StateDirectoryMode=0700" in assistant_service
+    assert "TimeoutStartSec=300" in assistant_service
+    assert "CPUWeight=10" in assistant_service
+    assert "IOWeight=10" in assistant_service
+    assert "OnStartupSec=2m" in assistant_timer
+    assert "OnUnitActiveSec=5m" in assistant_timer
+    assert "Persistent=true" in assistant_timer
+    assert "Unit=aurascan-instruction-assistant.service" in assistant_timer
+
+    assert "systemctl enable" not in pkgbuild
+    assert "systemctl start" not in pkgbuild
 
 
 def test_updater_desktop_asset_is_release_safe():

@@ -20,8 +20,8 @@ python -m compileall aurascan tests tools
 
 GitHub Actions runs the editable test install, compile check, complete pytest
 suite, and both strict presenter audits on Python 3.8 and 3.14. Provider calls
-are mocked; CI explicitly disables AI and never starts a live local model
-server.
+are mocked; CI explicitly disables general and Instruction Guard AI and never
+starts a live local model server.
 
 ## Real-world warning tuning
 
@@ -102,6 +102,15 @@ setup writes `AURASCAN_AI_ENABLED=0`. Enabled AI setup may write
 as `AURASCAN_OPENAI_API_KEY`. Legacy `AURASCAN_AI_KEY` remains supported so
 existing users do not lose behavior.
 
+Agent Instruction Guard setup is separately explicit. The wizard may write
+`AURASCAN_INSTRUCTION_MONITOR_ENABLED`,
+`AURASCAN_INSTRUCTION_AI_ENABLED`, and
+`AURASCAN_INSTRUCTION_SCAN_MODE=agent-surfaces|all-markdown`. Installing the
+package or selecting a general AI provider must not enable either Instruction
+Guard timer. Doctor reports monitor state, notification availability, private
+state permissions, AI consent and provider readiness, and service/timer health
+without scanning the real home or contacting a provider.
+
 `lmstudio` and `llamacpp` are explicit local AI provider IDs using the shared
 OpenAI-compatible chat-completions transport. Their defaults are respectively
 `http://127.0.0.1:1234/v1` and `http://127.0.0.1:8080/v1`. The wizard may save a
@@ -145,6 +154,99 @@ Package install scripts must stay non-interactive. They may print advisory
 first-use guidance, but they must not run `aurascan init`, run `aurascan
 doctor`, request secrets, write user config, install local `/etc` hooks, run
 makepkg, inspect packages, or contact the network during install or upgrade.
+
+## Agent Instruction Guard
+
+`aurascan instruction-audit` is a static, unprivileged review surface for
+AI-agent control files. It is not part of package scan rule versioning. Its
+report and rule contract starts at `instruction_guard_report/1.0` and rule
+version 1.0; changes to the existing package scanner must continue to follow
+that scanner's independent versioning rules.
+
+Default discovery recognizes `AGENTS.md`, `AGENTS.override.md`, `SKILL.md`,
+`CLAUDE.md`, `CLAUDE.local.md`, and Claude rules, commands, agents, skills,
+memory, settings, hooks, MCP/plugin manifests, and text scripts/resources owned
+by a discovered skill. `--all-markdown` adds other Markdown files to content
+analysis only; it must not create integrity-baseline entries for them. Follow
+explicit Markdown imports and final file symlinks only when the resolved regular
+file remains inside an allowed root. Do not traverse symlink directories.
+
+Discovery must prune cache, trash, VCS, dependency, and virtual-environment
+trees, and bound directories, entries, candidates, file size, and elapsed time.
+Persist a continuation cursor when the root is too large for one run. Candidate
+reads use no-follow semantics, validate owner and regular-file type with
+`fstat`, and reject replacement detected during the read. Never execute,
+import, source, render, or deserialize a file into executable objects.
+
+Instruction rules should correlate behaviors rather than flag isolated tool
+names. Required behavior families include fetch plus execution, credential
+access plus archive/upload, automatic activation plus concealment, persistence
+or self-repair plus a dangerous action, obfuscation plus decode/eval/exec, and
+privilege/password/SUID/sudo-policy abuse. Dangerous hooks, broad tool grants,
+and Claude dynamic `!command` blocks are active surfaces. Parsing should
+separate those constructs from fenced examples, quoted documentation, HTML
+comments, negation, YAML frontmatter, and invalid JSON configuration. Static
+evidence must not be worded as proof that an assistant executed an instruction
+or that compromise succeeded.
+
+Keep content risk distinct from integrity state. Suspicious first-seen files
+alert immediately; otherwise clean first-seen recognized files form one
+unreviewed inventory. Store SHA-256 plus device/inode, size, timestamps, mode,
+owner, and symlink state. An approval is valid only for the exact content and a
+binding derived from machine identity plus UID. Corrupt, symlinked, wrongly
+owned, or permission-weakened state must fail closed without overwriting it.
+State, reports, manifests, queued AI jobs, alerts, and disable receipts belong
+under an injected `$XDG_STATE_HOME/aurascan/instruction-guard/` root with
+private directory/file modes.
+Keep history bounded: retain the current report plus at most the newest 32
+reports within a 256 MiB aggregate budget, and at most 2,048 secret-free alert
+envelopes. Retention may discard old presentation records, but it must not
+approve a file, weaken manifest review state, or leave a pending AI job pointing
+at a deleted report.
+
+The offline monitor service runs after login and every five minutes with
+`PrivateNetwork=yes`, a read-only home, private writable state, low CPU/I/O
+priority, and all supported AI credentials unset. Detection is a successful
+service run: background capture records findings and exits zero so systemd does
+not call a security alert a crashed unit. A separately enabled assistant timer
+processes at most one pending job per run. Its prompt contains at most 12 KiB
+of redacted suspicious evidence, grants no tools, and requires strict JSON.
+AI output is raise-only interpretation: it cannot lower deterministic severity,
+trust an integrity change, or supply executable commands. Disabled AI must make
+zero provider calls; malformed or timed-out output preserves deterministic
+findings.
+
+Desktop notifications and tray/public alert state are secret-free: retain only
+generic severity/count/review wording, never paths, snippets, usernames,
+credentials, or AI output. Deduplicate by candidate identity, content hash, and
+rule set. Acknowledgment suppresses duplicate notification only and never
+approves content.
+
+Confirmed disable is intentionally narrow. Only an unchanged, user-owned,
+standalone regular instruction Markdown file may be atomically renamed beside
+itself to a hidden non-discoverable name. Settings, hook configuration, plugin
+manifests, scripts, shared configuration, and symlinks are manual-only. The
+private receipt must bind original and disabled paths, report/action IDs,
+inode, hash, metadata, and timestamp. Restore requires unchanged disabled
+content, an absent original path, and a still-safe parent directory, then
+rescans and returns the file to unreviewed state. Do not add automatic
+quarantine.
+
+Tests use injected temporary roots and defanged `example.invalid` fixtures.
+Cover positive behavior correlations and benign style/security documentation,
+negated commands, ordinary hooks, and fenced examples. Also cover imports,
+Unicode and invalid encodings, BOMs, binary/oversized files, inaccessible and
+deep trees, truncation/cursors, symlinks, FIFOs, atomic replacement and
+mid-read races, same-mtime changes, incremental hashing, machine-bound
+approval invalidation, corrupt state, alert deduplication, and exact
+disable/restore refusal and round trips. Mock AI, systemd, tray, and
+notifications; tests must not scan a real home, start a model, contact a
+provider, require root, or invoke live systemd.
+
+Document the residual boundary in user-facing changes: this is periodic
+detection, not pasted-command/link preflight, privileged fanotify or process
+interception, or a same-UID containment mechanism. Same-UID malware can attack
+user state and root malware can defeat the monitor.
 
 ## Curated Fixture Pack
 

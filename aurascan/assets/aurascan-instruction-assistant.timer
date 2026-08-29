@@ -1,0 +1,13 @@
+[Unit]
+Description=Poll for Agent Instruction Guard findings awaiting optional AI analysis
+Documentation=https://github.com/crizzler/AuraScan
+
+[Timer]
+OnStartupSec=2m
+OnUnitActiveSec=5m
+RandomizedDelaySec=1m
+Persistent=true
+Unit=aurascan-instruction-assistant.service
+
+[Install]
+WantedBy=timers.target

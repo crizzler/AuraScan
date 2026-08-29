@@ -17,7 +17,7 @@ def test_pyproject_console_scripts_are_registered():
     data = tomllib.loads(read_text("pyproject.toml"))
 
     scripts = data["project"]["scripts"]
-    assert data["project"]["version"] == "0.8.0"
+    assert data["project"]["version"] == "0.9.0"
     assert scripts["aurascan"] == "aurascan.cli:main"
     assert scripts["aurascan-makepkg"] == "aurascan.makepkg_wrapper:main"
     assert data["project"]["requires-python"] == ">=3.8"
@@ -38,6 +38,7 @@ def test_entry_point_targets_import():
     from aurascan.core.hardware_health import collect_hardware_health
     from aurascan.core.kernel_module_autopilot import build_kernel_module_check
     from aurascan.core.incidents import run_incidents
+    from aurascan.core.instruction_cli import run_instruction_audit
     from aurascan.makepkg_wrapper import main as wrapper_main
     from aurascan.core.updater_tray import run_updater
 
@@ -48,6 +49,7 @@ def test_entry_point_targets_import():
     assert callable(collect_hardware_health)
     assert callable(build_kernel_module_check)
     assert callable(run_incidents)
+    assert callable(run_instruction_audit)
     assert callable(wrapper_main)
     assert callable(run_updater)
 
@@ -143,6 +145,89 @@ def test_privacy_document_covers_full_control_agent_boundaries():
     ]
     for phrase in required:
         assert phrase in privacy
+
+
+def test_instruction_guard_v090_documentation_contract():
+    def normalized(relative: str) -> str:
+        return " ".join(read_text(relative).lower().split())
+
+    readme = normalized("README.md")
+    privacy = normalized("docs/PRIVACY.md")
+    checklist = normalized("docs/RELEASE_CHECKLIST.md")
+    release = normalized("docs/releases/v0.9.0.md")
+    unreleased = normalized("docs/releases/unreleased.md")
+
+    readme_phrases = [
+        "the opt-in agent instruction guard",
+        "the monitor is installed disabled",
+        "service runs after login and every five minutes with network access disabled",
+        "a second, separately enabled user timer",
+        "suspicious first-seen files alert immediately",
+        "clean first-seen files enter one unreviewed inventory",
+        "--all-markdown` extends content analysis",
+        "not added to the integrity baseline",
+        "disable only an unchanged, user-owned, standalone regular instruction file",
+        "restore refuses changed or unsafe state",
+        "a generic review prompt, never a path, snippet, username, credential, or ai text",
+        "$xdg_state_home/aurascan/instruction-guard/",
+        "private permissions",
+        "same-user security boundary",
+        "root malware can disable or deceive the monitor entirely",
+        "does not preflight pasted commands or download links",
+        "fanotify interception",
+        "there is no automatic quarantine",
+    ]
+    for phrase in readme_phrases:
+        assert phrase in readme
+
+    privacy_phrases = [
+        "an opt-in, unprivileged scanner",
+        "all supported ai credentials removed from its environment",
+        "optional `all-markdown` mode applies content rules",
+        "does not baseline their integrity",
+        "$xdg_state_home/aurascan/instruction-guard/",
+        "with `0700` directories and `0600` files",
+        "a generic severity, count, and request to review",
+        "instruction guard ai is a second, independent opt-in",
+        "confirmed disable is not quarantine",
+        "returns the file to unreviewed status rather than trusting it",
+        "does not preflight pasted commands or download links",
+        "same-uid malware can read or alter user files",
+        "root malware can disable or deceive the monitor",
+    ]
+    for phrase in privacy_phrases:
+        assert phrase in privacy
+
+    checklist_phrases = [
+        "all-markdown mode performs content analysis only",
+        "content risk and integrity state remain separate",
+        "instruction guard approvals bind exact content to machine identity and uid",
+        "instruction guard alert output and notifications contain no paths",
+        "complete exact atomic disable/receipt/restore round trips",
+        "instruction guard does not automatically quarantine a file",
+        "offline instruction guard user service has no network or ai credentials",
+        "instruction guard ai has a separate opt-in",
+        "monitor and ai timers default to disabled",
+        "pasted-command/link preflight, privileged fanotify/process interception",
+        "a boundary against same-uid/root malware",
+    ]
+    for phrase in checklist_phrases:
+        assert phrase in checklist
+
+    release_phrases = [
+        "# aurascan v0.9.0",
+        "released on 2026-08-29",
+        "instruction_guard_report/1.0",
+        "rule version 1.0",
+        "existing package-scanner rule version is unchanged",
+        "application and arch/aur package advance to v0.9.0",
+        "periodic detection, not pasted-command or link preflight",
+        "privileged fanotify/process interception, or automatic quarantine",
+    ]
+    for phrase in release_phrases:
+        assert phrase in release
+
+    assert "changes after v0.9.0 will be recorded here" in unreleased
 
 
 def test_release_checklist_references_required_validation_and_safety_items():

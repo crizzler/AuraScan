@@ -12,6 +12,8 @@ candidate.
 - `.venv/bin/python tools/audit_presenter_coverage.py --strict-medium` passes.
 - Curated fixture tests pass.
 - Deep-static fixture tests pass.
+- Instruction Guard fixtures and CLI, state, AI, service, notification, tray,
+  disable/restore, and packaging contract tests pass.
 - Metadata-only warning sample has been reviewed.
 - No live fixture requires network during pytest.
 - Tests do not run real makepkg.
@@ -32,6 +34,8 @@ candidate.
 - No generated local artifacts are staged or committed.
 - No virtualenv, cache directory, local DB, generated report, keyring, or
   temporary signature/private-key material is committed.
+- Instruction Guard tests use injected temporary roots and never scan the real
+  home, contact a provider, start a model, invoke live systemd, or require root.
 
 ## Safety Gates
 
@@ -60,6 +64,39 @@ candidate.
 - Pacman hook failure recovery is documented.
 - `aurascan-makepkg` is documented as build-time protection.
 - Pacman hook is documented as archive/install-stage protection.
+- Instruction Guard recognizes the documented Claude Code, shared `AGENTS.md`,
+  and Agent Skill surfaces without traversing symlink directories or executing,
+  importing, rendering, or sourcing their contents.
+- Instruction Guard discovery, reads, imports, encodings, files, traversal,
+  elapsed time, and continuation state are bounded and race-checked.
+- All-Markdown mode performs content analysis only and does not create
+  integrity-baseline entries for unrelated Markdown files.
+- Instruction Guard behavior findings require documented correlations and
+  distinguish active constructs from comments, quoted/fenced examples,
+  negation, frontmatter, and invalid configuration.
+- Content risk and integrity state remain separate; suspicious first-seen files
+  alert immediately and clean first-seen files remain unreviewed until explicit
+  approval.
+- Instruction Guard approvals bind exact content to machine identity and UID;
+  corrupt, symlinked, wrongly owned, or permission-weakened private state fails
+  closed without being overwritten.
+- Instruction Guard alert output and notifications contain no paths, snippets,
+  usernames, credentials, or AI text, and acknowledgment never establishes
+  trust.
+- Disable refuses stale, changed, non-owned, symlinked, shared, settings, hook,
+  plugin-manifest, or script targets. Eligible standalone instruction files
+  complete exact atomic disable/receipt/restore round trips and restore as
+  unreviewed.
+- Instruction Guard does not automatically quarantine a file.
+- The offline Instruction Guard user service has no network or AI credentials,
+  uses a read-only home and private writable state, and exits successfully after
+  recording a security finding.
+- Instruction Guard AI has a separate opt-in, processes at most one job per
+  timer run, receives no more than 12 KiB of redacted evidence, has no tools,
+  and accepts only strict bounded JSON.
+- Instruction Guard AI cannot lower deterministic severity, trust an integrity
+  change, or propose executable commands; disabled, malformed, or timed-out AI
+  preserves deterministic findings and disabled AI makes zero calls.
 - Incident root collectors are installed disabled, have no network access, and
   perform no AI requests or repairs themselves.
 - Weekly incident timer is installed disabled, persistent, randomized, and
@@ -156,6 +193,8 @@ candidate.
 - Repair Agent access defaults to `guarded`, approval defaults to
   `each-command`, output sharing defaults to `redacted`, and root policy
   defaults to disabled.
+- Instruction Guard monitor and AI timers default to disabled; its default scan
+  mode is `agent-surfaces`, while `all-markdown` remains explicit.
 
 ## Packaging Metadata
 
@@ -173,6 +212,11 @@ candidate.
   are installed without enabling per-user autostart automatically.
 - If the incident monitor is packaged, its systemd service and tmpfiles rules
   are installed without enabling or starting the service automatically.
+- Instruction Guard offline monitor and separately consented AI service/timer
+  are packaged without enabling or starting either. The monitor has
+  `PrivateNetwork=yes`, and the assistant processes one queued job per run.
+- `libnotify` remains optional; missing `notify-send` does not prevent private
+  CLI/tray review state.
 - User AI and Safe Autopilot units are packaged without enabling either, and
   package scripts never write the system repair policy.
 - Recovery mkosi, systemd, bootloader, tmpfiles, refresh hook, ISO manifest, and
@@ -202,6 +246,12 @@ candidate.
 - README explains why dependency stability is not enough to skip scans.
 - README explains local package DB context proof and `--scan-context auto`.
 - README explains privacy expectations.
+- README and privacy documentation explain Instruction Guard discovery,
+  first-seen/integrity behavior, private state, secret-free alerts, AI consent,
+  and confirmed reversible disable/restore limits.
+- README states that Instruction Guard is periodic detection, not
+  pasted-command/link preflight, privileged fanotify/process interception,
+  automatic quarantine, or a boundary against same-UID/root malware.
 - README explains incident evidence bounds, redaction, AI opt-in behavior, and
   the repair allowlist boundary.
 - README and privacy documentation explain contextual follow-up retention,

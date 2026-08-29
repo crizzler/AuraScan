@@ -19,6 +19,7 @@ class RuleCategory:
     sandbox_runtime = "sandbox_runtime"
     archive_safety = "archive_safety"
     incident_recovery = "incident_recovery"
+    agent_instruction = "agent_instruction"
     unknown = "unknown"
 
 
@@ -347,6 +348,59 @@ RULE_METADATA: Dict[str, RuleMetadata] = {
     "REC-BOOTLOADER-UNKNOWN": RuleMetadata("REC-BOOTLOADER-UNKNOWN", RuleCategory.incident_recovery, Severity.HIGH, "recovery-bootloader", 95, True, "finding_fields", "No supported bootloader and ESP pair was positively detected."),
     "REC-ROOT-SPACE": RuleMetadata("REC-ROOT-SPACE", RuleCategory.incident_recovery, Severity.HIGH, "recovery-disk-space", 85, True, "finding_fields", "The recovery target has critically low free space."),
 }
+
+
+_INSTRUCTION_GUARD_RULES = {
+    "IG-ACTIVE-CLAUDE-DYNAMIC-COMMAND": (Severity.HIGH, "instruction-active-command", 95, "Claude dynamic command syntax is active agent control text."),
+    "IG-ACTIVE-DANGEROUS-HOOK": (Severity.HIGH, "instruction-active-hook", 100, "An automatically activated agent hook contains a dangerous behavior family."),
+    "IG-BEHAVIOR-CREDENTIAL-EXFILTRATION": (Severity.CRITICAL, "instruction-credential-transfer", 100, "Credential access is correlated with collection or transfer behavior."),
+    "IG-BEHAVIOR-FETCH-EXECUTE": (Severity.HIGH, "instruction-fetch-execute", 100, "Agent control text correlates network retrieval with execution."),
+    "IG-BEHAVIOR-OBFUSCATED-EXECUTION": (Severity.HIGH, "instruction-obfuscated-execution", 95, "Decoding or obfuscation is correlated with execution."),
+    "IG-BEHAVIOR-PERSISTENT-DANGEROUS-ACTION": (Severity.HIGH, "instruction-persistence", 95, "Persistence or self-repair is correlated with a dangerous action."),
+    "IG-BEHAVIOR-PRIVILEGE-ABUSE": (Severity.HIGH, "instruction-privilege", 100, "Agent control text requests password capture, sudo-policy weakening, or setuid behavior."),
+    "IG-BEHAVIOR-STEALTH-ACTIVATION": (Severity.HIGH, "instruction-stealth", 95, "Automatic activation is correlated with concealment."),
+    "IG-CONFIG-BROAD-TOOL-GRANT": (Severity.HIGH, "instruction-tool-grant", 85, "An agent configuration grants unusually broad shell or filesystem access."),
+    "IG-CONFIG-INVALID-FRONTMATTER": (Severity.MEDIUM, "instruction-invalid-config", 60, "Agent Markdown has unterminated YAML frontmatter."),
+    "IG-CONFIG-INVALID-JSON": (Severity.MEDIUM, "instruction-invalid-config", 70, "An agent configuration is not valid JSON."),
+    "IG-CONFIG-INVALID-SHAPE": (Severity.MEDIUM, "instruction-invalid-config", 60, "An agent configuration has an unexpected JSON shape."),
+    "IG-CONFIG-UNTERMINATED-FENCE": (Severity.MEDIUM, "instruction-invalid-config", 75, "Agent Markdown contains an unterminated fenced block."),
+    "IG-INTEGRITY-BROKEN-SYMLINK": (Severity.MEDIUM, "instruction-link-integrity", 75, "An agent control file symlink is broken."),
+    "IG-INTEGRITY-ANALYSIS-TRUNCATED": (Severity.MEDIUM, "instruction-analysis-bound", 90, "An agent control file exceeded a bounded import or text-analysis limit."),
+    "IG-INTEGRITY-CONTENT-CHANGED": (Severity.MEDIUM, "instruction-content-change", 90, "A tracked agent control file changed since review."),
+    "IG-INTEGRITY-CONTROL-MISSING": (Severity.MEDIUM, "instruction-content-change", 80, "A previously tracked agent control file is missing."),
+    "IG-INTEGRITY-CONTROL-DIRECTORY-SYMLINK": (Severity.HIGH, "instruction-directory-integrity", 100, "A recognized AI-agent control directory is a symlink and was not traversed."),
+    "IG-INTEGRITY-CONTROL-DIRECTORY-UNAVAILABLE": (Severity.HIGH, "instruction-directory-integrity", 95, "A recognized AI-agent control directory could not be enumerated safely."),
+    "IG-INTEGRITY-CANDIDATE-OVERFLOW": (Severity.HIGH, "instruction-analysis-bound", 95, "The bounded continuation could not retain every imported agent resource."),
+    "IG-INTEGRITY-CONTINUATION-RECOVERY": (Severity.MEDIUM, "instruction-analysis-bound", 90, "A stale continuation inventory was discarded after an interrupted scan."),
+    "IG-INTEGRITY-CROSS-FILESYSTEM-OMISSION": (Severity.MEDIUM, "instruction-directory-integrity", 80, "A mounted directory is outside the bounded same-filesystem scan."),
+    "IG-INTEGRITY-DIRECTORY-OMITTED": (Severity.MEDIUM, "instruction-directory-integrity", 90, "A queued directory or unstable entry could not be enumerated safely."),
+    "IG-INTEGRITY-FINDING-OVERFLOW": (Severity.HIGH, "instruction-analysis-bound", 95, "The bounded report omitted additional integrity findings."),
+    "IG-INTEGRITY-INVENTORY-OVERFLOW": (Severity.CRITICAL, "instruction-analysis-bound", 100, "The bounded report inventory omitted additional agent control files."),
+    "IG-INTEGRITY-MANIFEST-OVERFLOW": (Severity.HIGH, "instruction-analysis-bound", 95, "The integrity manifest reached its tracked-file capacity."),
+    "IG-INTEGRITY-IMPORT-MISSING": (Severity.MEDIUM, "instruction-import-integrity", 70, "An explicitly imported agent resource is unavailable."),
+    "IG-INTEGRITY-IMPORT-NONTEXT": (Severity.MEDIUM, "instruction-import-integrity", 65, "An imported agent resource is not supported bounded text."),
+    "IG-INTEGRITY-IMPORT-OUTSIDE-ROOT": (Severity.HIGH, "instruction-import-integrity", 100, "An explicit agent import leaves the selected root."),
+    "IG-INTEGRITY-IMPORT-TYPE": (Severity.HIGH, "instruction-import-integrity", 95, "An imported agent resource is not a regular file."),
+    "IG-INTEGRITY-MACHINE-BINDING": (Severity.MEDIUM, "instruction-baseline-binding", 90, "A restored baseline is not trusted on this machine and UID."),
+    "IG-INTEGRITY-NONREGULAR-CONTROL": (Severity.HIGH, "instruction-file-integrity", 100, "An agent control path is a FIFO, device, socket, or other non-regular object."),
+    "IG-INTEGRITY-SYMLINK-ESCAPE": (Severity.HIGH, "instruction-link-integrity", 100, "An agent control file symlink leaves the selected root."),
+    "IG-INTEGRITY-SYMLINK-TYPE": (Severity.HIGH, "instruction-link-integrity", 95, "An agent control link does not resolve to a regular file."),
+    "IG-INTEGRITY-UNREADABLE-CONTROL": (Severity.HIGH, "instruction-file-integrity", 95, "An agent control file failed bounded type, ownership, size, or replacement validation."),
+}
+
+RULE_METADATA.update({
+    rule_id: RuleMetadata(
+        rule_id,
+        RuleCategory.agent_instruction,
+        severity,
+        group,
+        priority,
+        True,
+        "finding_fields",
+        description,
+    )
+    for rule_id, (severity, group, priority, description) in _INSTRUCTION_GUARD_RULES.items()
+})
 
 
 def get_rule_metadata(rule_id: str) -> Optional[RuleMetadata]:

@@ -8,15 +8,18 @@ Before publishing to the AUR, verify the checksum against the public GitHub
 release/tag source archive, then regenerate `.SRCINFO` from the final PKGBUILD:
 
 ```bash
-env PATH=/usr/bin:/bin AURASCAN_AI_ENABLED=0 /usr/bin/updpkgsums
-env PATH=/usr/bin:/bin AURASCAN_AI_ENABLED=0 /usr/bin/makepkg --printsrcinfo > .SRCINFO
-env PATH=/usr/bin:/bin AURASCAN_AI_ENABLED=0 /usr/bin/makepkg -Ccsr
+env PATH=/usr/bin:/bin AURASCAN_AI_ENABLED=0 AURASCAN_INSTRUCTION_AI_ENABLED=0 /usr/bin/updpkgsums
+env PATH=/usr/bin:/bin AURASCAN_AI_ENABLED=0 AURASCAN_INSTRUCTION_AI_ENABLED=0 /usr/bin/makepkg --printsrcinfo > .SRCINFO
+env PATH=/usr/bin:/bin AURASCAN_AI_ENABLED=0 AURASCAN_INSTRUCTION_AI_ENABLED=0 /usr/bin/makepkg -Ccsr
 ```
 
 Use this sanitized PATH even for `updpkgsums`, because it invokes `makepkg`
 internally. This prevents a local `aurascan-makepkg` wrapper from performing a
 scan or writing diagnostic output into `PKGBUILD` or `.SRCINFO` during release
 metadata generation.
+The established `PATH=/usr/bin:/bin AURASCAN_AI_ENABLED=0 /usr/bin/updpkgsums`
+boundary is retained above with the separate Instruction Guard AI setting also
+forced to zero.
 
 The public AUR package is a separate Git repository and uses SSH-key
 authentication rather than the GitHub remote:
@@ -90,6 +93,7 @@ Optional external tools:
 - `makepkg`: wrapper workflows through `aurascan-makepkg`;
 - `pacman`/`vercmp`: local package DB context proof for explicit `--scan-context auto` flows.
 - `python-pyqt6`: optional AuraScan Updater tray applet.
+- `libnotify`: optional generic Agent Instruction Guard desktop notifications.
 - `pacman-contrib`: bounded `paccache` cleanup for a proven disk-exhaustion
   incident.
 
@@ -115,6 +119,25 @@ stale pacman-lock and verified mirrorlist
 recovery, never loads API credentials, and defaults to `off`. Public status and
 markers contain only non-sensitive timing, category, UID-scope, and coarse
 repair state; evidence and AI output remain private.
+
+The package also installs
+`aurascan-instruction-monitor.service`/`.timer` and
+`aurascan-instruction-assistant.service`/`.timer` as disabled user units. Users
+may opt into the deterministic monitor with `aurascan init
+--enable-instruction-monitor` or `aurascan instruction-audit
+--enable-monitor`. It runs after login and every five minutes with network
+access disabled, a read-only home, private writable state, low resource
+priority, and AI credentials removed. Finding a suspicious file is recorded as
+a successful service run, not a systemd unit crash.
+
+Instruction Guard AI is a separate opt-in through `aurascan init
+--enable-instruction-ai` or `aurascan instruction-audit --enable-ai`. Its
+network-capable unprivileged assistant processes at most one private redacted
+job per run using the configured provider, and it cannot lower deterministic
+severity or trust changed content. Package installation must not enable either
+timer, scan a home directory, contact a provider, or create Instruction Guard
+state. Missing `notify-send` affects only desktop notification delivery; CLI
+review state and the tray remain available.
 
 Current hook failure behavior:
 

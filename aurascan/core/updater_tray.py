@@ -43,6 +43,7 @@ UPDATER_ICON_NAME = UPDATER_APP_ID
 UPDATER_TOOLTIP = "AuraScan Updater - guarded package upgrades"
 UPDATER_INCIDENT_REFRESH_MS = 5_000
 INCIDENT_REVIEW_COMMAND = ("aurascan", "incidents", "--resolve")
+INSTRUCTION_REVIEW_COMMAND = ("aurascan", "instruction-audit", "--review")
 UPDATER_STATE_ICONS = {
     "normal": UPDATER_ICON_NAME,
     "due": f"{UPDATER_ICON_NAME}-maintenance",
@@ -56,6 +57,7 @@ UPDATER_MENU_GROUPS = (
     ),
     (
         ("Resolve System Findings", INCIDENT_REVIEW_COMMAND),
+        ("Review Agent Files", INSTRUCTION_REVIEW_COMMAND),
         ("Run System Maintenance Scan", ("aurascan", "incidents", "--run-maintenance")),
     ),
     (
@@ -93,6 +95,47 @@ class TrayIncidentState:
     background_markers: List[Dict[str, object]]
     unseen_notification_markers: List[Dict[str, object]]
     notification_markers: List[Dict[str, object]]
+
+
+@dataclass
+class TrayInstructionState:
+    state: str
+    icon_name: str
+    tooltip: str
+    highest_severity: str
+    pending_alert_count: int
+    review_candidate_count: int
+    unavailable: bool = False
+
+
+@dataclass
+class TrayCombinedState:
+    state: str
+    icon_name: str
+    tooltip: str
+
+
+class NotificationActionRouter:
+    """Route the tray's single message-click signal to its latest message."""
+
+    def __init__(self, *, terminal: str, which: Callable, popen: Callable) -> None:
+        self.terminal = terminal
+        self.which = which
+        self.popen = popen
+        self.command: List[str] = []
+
+    def route(self, command: Sequence[str]) -> None:
+        self.command = list(command)
+
+    def activate(self):
+        if not self.command:
+            return None
+        return launch_terminal(
+            self.command,
+            terminal=self.terminal,
+            which=self.which,
+            popen=self.popen,
+        )
 
 
 @dataclass
@@ -400,6 +443,148 @@ def launch_terminal(
     return invocation
 
 
+def resolve_tray_instruction_state(
+    *,
+    env: Optional[Mapping[str, str]] = None,
+    state_root: Optional[Path] = None,
+    status_loader: Optional[Callable[..., Mapping[str, object]]] = None,
+) -> TrayInstructionState:
+    """Resolve only the secret-free Instruction Guard summary for the tray."""
+
+    try:
+        if status_loader is None:
+            from aurascan.core.instruction_guard import instruction_guard_status
+
+            status_loader = instruction_guard_status
+        status = status_loader(state_root=state_root, env=env)
+    except (ImportError, OSError, TypeError, ValueError):
+        status = {"state": "unavailable"}
+    if not isinstance(status, Mapping):
+        status = {"state": "unavailable"}
+
+    raw_state = str(status.get("state") or "unavailable").strip().lower()
+    unavailable = raw_state == "unavailable"
+    highest_severity = str(status.get("highest_severity") or "LOW").strip().upper()
+    pending_alert_count = _bounded_nonnegative_int(status.get("pending_alert_count"))
+    review_candidate_count = _bounded_nonnegative_int(status.get("review_candidate_count"))
+
+    if unavailable:
+        state = "attention"
+        tooltip = "AuraScan Updater - Agent Instruction Guard state needs review"
+    elif highest_severity in {"HIGH", "CRITICAL"}:
+        state = "critical"
+        tooltip = "AuraScan Updater - urgent agent file findings need review"
+    elif highest_severity == "MEDIUM" or pending_alert_count or review_candidate_count:
+        state = "attention"
+        tooltip = "AuraScan Updater - agent files are ready to review"
+    else:
+        state = "normal"
+        tooltip = UPDATER_TOOLTIP
+    return TrayInstructionState(
+        state=state,
+        icon_name=UPDATER_STATE_ICONS[state],
+        tooltip=tooltip,
+        highest_severity=highest_severity,
+        pending_alert_count=pending_alert_count,
+        review_candidate_count=review_candidate_count,
+        unavailable=unavailable,
+    )
+
+
+def merge_tray_states(
+    incident: TrayIncidentState,
+    instruction: TrayInstructionState,
+) -> TrayCombinedState:
+    rank = {"normal": 0, "due": 1, "attention": 2, "critical": 3}
+    incident_rank = rank.get(incident.state, 0)
+    instruction_rank = rank.get(instruction.state, 0)
+    if incident_rank == instruction_rank and incident_rank >= rank["attention"]:
+        state = incident.state
+        tooltip = "AuraScan Updater - system and agent file findings need review"
+    elif instruction_rank > incident_rank:
+        state = instruction.state
+        tooltip = instruction.tooltip
+    else:
+        state = incident.state
+        tooltip = incident.tooltip
+    return TrayCombinedState(state=state, icon_name=UPDATER_STATE_ICONS[state], tooltip=tooltip)
+
+
+def pending_instruction_guard_alerts(
+    *,
+    env: Optional[Mapping[str, str]] = None,
+    state_root: Optional[Path] = None,
+    alert_loader: Optional[Callable[..., Sequence[Mapping[str, object]]]] = None,
+) -> List[Dict[str, object]]:
+    """Load pending secret-free alert envelopes, never reports or evidence."""
+
+    try:
+        if alert_loader is None:
+            from aurascan.core.instruction_guard import pending_instruction_guard_alerts as load_alerts
+
+            alert_loader = load_alerts
+        alerts = alert_loader(state_root=state_root, env=env)
+    except (ImportError, OSError, TypeError, ValueError):
+        return []
+    if not isinstance(alerts, Sequence) or isinstance(alerts, (str, bytes)):
+        return []
+    safe_alerts = []
+    for alert in alerts[:1_000]:
+        if not isinstance(alert, Mapping):
+            continue
+        alert_id = str(alert.get("alert_id") or "")
+        if not alert_id:
+            continue
+        safe_alerts.append({
+            "alert_id": alert_id[:200],
+            "severity": str(alert.get("severity") or "LOW").upper()[:16],
+        })
+    return safe_alerts
+
+
+def acknowledge_instruction_guard_alerts(
+    alerts: Sequence[Mapping[str, object]],
+    *,
+    env: Optional[Mapping[str, str]] = None,
+    state_root: Optional[Path] = None,
+    acknowledge: Optional[Callable[..., object]] = None,
+) -> None:
+    """Suppress repeats after display; this does not approve or trust a file."""
+
+    if acknowledge is None:
+        try:
+            from aurascan.core.instruction_guard import acknowledge_alert
+        except ImportError:
+            return
+
+        acknowledge = acknowledge_alert
+    for alert in alerts:
+        alert_id = str(alert.get("alert_id") or "")
+        if not alert_id:
+            continue
+        try:
+            acknowledge(alert_id, state_root=state_root, env=env)
+        except (ImportError, OSError, TypeError, ValueError):
+            continue
+
+
+def build_instruction_guard_notification(alerts: Sequence[Mapping[str, object]]) -> tuple:
+    count = max(1, len(alerts))
+    noun = "alert" if count == 1 else "alerts"
+    return (
+        "AuraScan found agent file risks",
+        f"AuraScan recorded {count} Agent Instruction Guard {noun}. Click to review the affected agent files.",
+    )
+
+
+def _bounded_nonnegative_int(value: object, *, maximum: int = 1_000_000) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return min(maximum, max(0, parsed))
+
+
 def start_tray_app(
     *,
     env: Optional[Mapping[str, str]] = None,
@@ -410,6 +595,7 @@ def start_tray_app(
     incident_seen_path: Optional[Path] = None,
     incident_reviewed_path: Optional[Path] = None,
     maintenance_status_path: Path = INCIDENT_MAINTENANCE_STATUS,
+    instruction_state_root: Optional[Path] = None,
 ) -> int:
     stderr = stderr or sys.stderr
     config = resolve_updater_config(env)
@@ -449,9 +635,8 @@ def start_tray_app(
     quit_action.triggered.connect(app.quit)
     tray.setContextMenu(menu)
     tray.activated.connect(lambda reason: _handle_tray_activation(reason, tray, config.terminal, which, popen))
-    tray.messageClicked.connect(
-        lambda: launch_terminal(INCIDENT_REVIEW_COMMAND, terminal=config.terminal, which=which, popen=popen)
-    )
+    notification_router = NotificationActionRouter(terminal=config.terminal, which=which, popen=popen)
+    tray.messageClicked.connect(notification_router.activate)
     tray.show()
     seen_path = incident_seen_path or incident_seen_state_path(env)
     reviewed_path = incident_reviewed_path or incident_reviewed_state_path(env)
@@ -461,35 +646,50 @@ def start_tray_app(
     background_requested = set()
 
     def refresh_incident_state() -> None:
-        state = resolve_tray_incident_state(
+        incident_state = resolve_tray_incident_state(
             marker_root=incident_marker_root,
             notification_seen_path=seen_path,
             reviewed_path=reviewed_path,
             maintenance_status_path=maintenance_status_path,
         )
+        instruction_state = resolve_tray_instruction_state(env=env, state_root=instruction_state_root)
+        state = merge_tray_states(incident_state, instruction_state)
         tray.setIcon(load_state_icon(QtGui, state.state))
         tray.setToolTip(state.tooltip)
         if background_enabled:
             request_background_incident_analysis(
-                state.background_markers,
+                incident_state.background_markers,
                 requested=background_requested,
                 popen=popen,
             )
+        instruction_alerts = pending_instruction_guard_alerts(env=env, state_root=instruction_state_root)
+        if instruction_alerts:
+            title, message = build_instruction_guard_notification(instruction_alerts)
+            notification_router.route(INSTRUCTION_REVIEW_COMMAND)
+            tray.showMessage(title, message)
+            acknowledge_instruction_guard_alerts(
+                instruction_alerts,
+                env=env,
+                state_root=instruction_state_root,
+            )
+            return
         result = unseen_background_result(report_root) if background_enabled else {}
         if result:
             title, message = build_background_incident_notification(result)
+            notification_router.route(INCIDENT_REVIEW_COMMAND)
             tray.showMessage(title, message)
             mark_background_result_seen(result, report_root)
             result_key = str(result.get("marker_key") or "")
             matched = [
-                marker for marker in state.unseen_notification_markers
+                marker for marker in incident_state.unseen_notification_markers
                 if marker_identity(marker) == result_key
             ]
             mark_pending_markers_seen(matched, seen_path=seen_path)
-        elif state.notification_markers and not background_enabled:
-            title, message = build_incident_notification(state.notification_markers)
+        elif incident_state.notification_markers and not background_enabled:
+            title, message = build_incident_notification(incident_state.notification_markers)
+            notification_router.route(INCIDENT_REVIEW_COMMAND)
             tray.showMessage(title, message)
-            mark_pending_markers_seen(state.unseen_notification_markers, seen_path=seen_path)
+            mark_pending_markers_seen(incident_state.unseen_notification_markers, seen_path=seen_path)
 
     refresh_incident_state()
     refresh_timer = QtCore.QTimer(tray)

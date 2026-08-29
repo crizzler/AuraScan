@@ -10,6 +10,7 @@ from aurascan.core.config_drift import run_config_drift
 from aurascan.core.engine import AuraScanEngine
 from aurascan.core.followup import run_ask
 from aurascan.core.incidents import run_incidents
+from aurascan.core.instruction_cli import run_instruction_audit
 from aurascan.core.recovery_cli import run_recovery
 from aurascan.core.security_audit import run_security_audit
 from aurascan.core.upgrade_preflight import run_upgrade
@@ -49,6 +50,13 @@ def load_command_environment(raw_argv: List[str]) -> None:
     if raw_argv and raw_argv[0] == "agent":
         if set(raw_argv[1:]) & OFFLINE_AGENT_HELPER_FLAGS:
             return
+    if raw_argv and raw_argv[0] == "instruction-audit":
+        instruction_args = set(raw_argv[1:])
+        if "--background-assist" in instruction_args:
+            load_env(paths=[user_env_path()])
+            return
+        if "--background-capture" in instruction_args:
+            return
     load_env()
 
 
@@ -70,6 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  aurascan recovery   Manage or enter the optional boot recovery environment.\n\n"
             "Security command:\n"
             "  aurascan security-audit  Check known AUR campaigns and official package advisories.\n\n"
+            "Agent file security command:\n"
+            "  aurascan instruction-audit  Audit AI-agent control files without executing them.\n\n"
             "Follow-up command:\n"
             "  aurascan ask        Ask AI about the latest retained AuraScan result.\n\n"
             "Repair agent command:\n"
@@ -169,6 +179,8 @@ def main(argv=None):
         sys.exit(run_ask(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "agent":
         sys.exit(run_agent(raw_argv[1:]))
+    if raw_argv and raw_argv[0] == "instruction-audit":
+        sys.exit(run_instruction_audit(raw_argv[1:]))
 
     args = build_parser().parse_args(raw_argv)
     engine = AuraScanEngine(

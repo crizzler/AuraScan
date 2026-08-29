@@ -50,7 +50,9 @@ def test_ci_workflow_never_configures_or_starts_live_ai():
     text = workflow_text()
 
     assert 'AURASCAN_AI_ENABLED: "0"' in text
+    assert 'AURASCAN_INSTRUCTION_AI_ENABLED: "0"' in text
     assert 'AURASCAN_AI_ENABLED: "1"' not in text
+    assert 'AURASCAN_INSTRUCTION_AI_ENABLED: "1"' not in text
     assert "--check-ai" not in text
     forbidden_live_ai_configuration = (
         "AURASCAN_AI_KEY:",

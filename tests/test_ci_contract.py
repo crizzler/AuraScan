@@ -28,6 +28,7 @@ def test_ci_workflow_covers_oldest_and_current_supported_python():
     assert 'python-version: ["3.8", "3.14"]' in text
     assert "runs-on: ubuntu-latest" in text
     assert "fail-fast: false" in text
+    assert "fetch-depth: 0" in text
 
 
 def test_ci_workflow_keeps_all_release_test_gates():

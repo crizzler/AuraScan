@@ -8,13 +8,15 @@ Before publishing to the AUR, verify the checksum against the public GitHub
 release/tag source archive, then regenerate `.SRCINFO` from the final PKGBUILD:
 
 ```bash
-updpkgsums
-/usr/bin/makepkg --printsrcinfo > .SRCINFO
-/usr/bin/makepkg -Ccsr
+env PATH=/usr/bin:/bin AURASCAN_AI_ENABLED=0 /usr/bin/updpkgsums
+env PATH=/usr/bin:/bin AURASCAN_AI_ENABLED=0 /usr/bin/makepkg --printsrcinfo > .SRCINFO
+env PATH=/usr/bin:/bin AURASCAN_AI_ENABLED=0 /usr/bin/makepkg -Ccsr
 ```
 
-Use `/usr/bin/makepkg` here so a local `aurascan-makepkg` wrapper cannot write
-diagnostic output into `.SRCINFO`.
+Use this sanitized PATH even for `updpkgsums`, because it invokes `makepkg`
+internally. This prevents a local `aurascan-makepkg` wrapper from performing a
+scan or writing diagnostic output into `PKGBUILD` or `.SRCINFO` during release
+metadata generation.
 
 The public AUR package is a separate Git repository and uses SSH-key
 authentication rather than the GitHub remote:

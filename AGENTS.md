@@ -101,9 +101,10 @@ describe unrun checks as passing.
   clean release candidate with `sha256sums=('SKIP')`, create and publish its
   annotated GitHub tag, hash that exact public tag archive, then commit the
   fixed checksum and regenerated `.SRCINFO` to the GitHub branch.
-- Run `/usr/bin/makepkg --printsrcinfo` and the documented trusted package build
-  against the AuraScan-authored recipe. Never run a third-party PKGBUILD as
-  part of this workflow.
+- Run the documented `updpkgsums`, `/usr/bin/makepkg --printsrcinfo`, and trusted
+  package build commands with `PATH=/usr/bin:/bin` and AI explicitly disabled.
+  This prevents a user `makepkg` wrapper from contaminating release metadata.
+  Never run a third-party PKGBUILD as part of this workflow.
 - Update AUR `master` from a separate clean clone after GitHub source is public.
   Preserve the AUR-only maintainer/SPDX headers and tracked files, inspect the
   staged diff, and verify the public AUR commit after pushing.

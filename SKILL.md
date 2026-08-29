@@ -86,9 +86,10 @@ Use this path only when the user explicitly authorizes external publication:
    and tag over the verified SSH remote. Publish the matching GitHub release
    before advertising the package source.
 4. Download the exact public tag archive, compute its SHA-256, replace `SKIP`,
-   and regenerate `.SRCINFO` with `/usr/bin/makepkg --printsrcinfo`. Run the
-   documented package build/check only for AuraScan's trusted recipe, then
-   commit and push the finalized metadata.
+   and regenerate `.SRCINFO` using the sanitized PATH commands in
+   `packaging/arch/README.md`. Explicitly disable AI so a user `makepkg` wrapper
+   cannot contaminate metadata. Run the documented package build/check only for
+   AuraScan's trusted recipe, then commit and push the finalized metadata.
 5. Use a separate clean AUR clone on `master`. Preserve its maintainer/SPDX
    headers and AUR-only tracked files, copy only finalized package metadata,
    inspect the staged diff, commit, and push through

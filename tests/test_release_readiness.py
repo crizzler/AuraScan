@@ -1,5 +1,8 @@
 from pathlib import Path
 
+from aurascan.core.models import Severity
+from aurascan.core.rule_metadata import get_rule_metadata
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - exercised by the Python 3.8 CI job
@@ -251,6 +254,76 @@ def test_instruction_guard_tray_v091_release_contract():
     assert "changes after v0.9.1 will be recorded here" in unreleased
 
 
+def test_aur_maintainer_worm_v092_unreleased_contract():
+    def normalized(relative: str) -> str:
+        return " ".join(read_text(relative).lower().split())
+
+    readme = normalized("README.md")
+    developing = normalized("DEVELOPING.md")
+    agents = normalized("AGENTS.md")
+    skill = normalized("SKILL.md")
+    checklist = normalized("docs/RELEASE_CHECKLIST.md")
+    unreleased = normalized("docs/releases/unreleased.md")
+    engine_source = read_text("aurascan/core/engine.py")
+
+    propagation = get_rule_metadata("SUPPLYCHAIN-AUR-REPO-PROPAGATION-001")
+    uninspected = get_rule_metadata("INSTALL-HOOK-UNINSPECTED-001")
+    assert propagation is not None
+    assert propagation.default_severity == Severity.CRITICAL
+    assert uninspected is not None
+    assert uninspected.default_severity == Severity.HIGH
+    assert 'self.rule_version = "1.3.0"' in engine_source
+
+    unreleased_phrases = [
+        "`supplychain-aur-repo-propagation-001` is a critical hard blocker",
+        "non-dry-run push bound to that aur endpoint or configured remote",
+        "a push explicitly bound to another host",
+        "intentionally not a blanket deep-static source rule",
+        "`install-hook-uninspected-001` is a high hard blocker",
+        "declared relative path under the package directory is a symlink",
+        "potential static propagation chain",
+        "do not claim that package code ran",
+        "for aurascan v0.9.2, the package-scanner rule version advances from `1.2.0` to `1.3.0`",
+        "instruction guard report schema and rule version remain `1.0`",
+    ]
+    for phrase in unreleased_phrases:
+        assert phrase in unreleased
+
+    readme_phrases = [
+        "`supplychain-aur-repo-propagation-001` applies only to deterministic pkgbuild or declared install-hook control text",
+        "non-dry-run push bound to the aur endpoint or configured remote",
+        "declared relative path under the package directory is a symlink",
+        "does not prove that the hook ran",
+        "not apply the rule as a blanket check to every file acquired by `--deep-static`",
+    ]
+    for phrase in readme_phrases:
+        assert phrase in readme
+
+    developing_phrases = [
+        "restrict it to pkgbuild text and declared install-hook text",
+        "pushes explicitly bound to other hosts",
+        "declared relative hook path under the package directory",
+        "an unresolved hook must never reuse or store an allow decision",
+    ]
+    for phrase in developing_phrases:
+        assert phrase in developing
+
+    checklist_phrases = [
+        "for v0.9.2, the package-scanner rule version is `1.3.0`",
+        "`supplychain-aur-repo-propagation-001` remains a critical, non-reviewable blocker",
+        "arbitrary release tooling found only in acquired deep-static source remains negative",
+        "`install-hook-uninspected-001` remains a high, non-reviewable blocker",
+        "every component of the declared relative hook path under the package directory",
+        "an unresolved or changed hook cannot reuse or store an allow decision or review acceptance",
+    ]
+    for phrase in checklist_phrases:
+        assert phrase in checklist
+
+    shared_path_contract = "declared relative hook path under the package directory"
+    assert shared_path_contract in agents
+    assert shared_path_contract in skill
+
+
 def test_release_checklist_references_required_validation_and_safety_items():
     checklist = read_text("docs/RELEASE_CHECKLIST.md")
 
@@ -274,6 +347,9 @@ def test_release_checklist_references_required_validation_and_safety_items():
         "Root-shell also requires a safe root-owned policy",
         "user-authorized remote code execution",
         "Hardware-aware follow-up runs only in an opted-in foreground AI workflow",
+        "SUPPLYCHAIN-AUR-REPO-PROPAGATION-001",
+        "INSTALL-HOOK-UNINSPECTED-001",
+        "package-scanner rule version is `1.3.0`",
     ]
     for phrase in required_phrases:
         assert phrase in checklist

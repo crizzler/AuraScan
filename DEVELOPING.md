@@ -341,8 +341,8 @@ minified generated-looking files, eval-chain package logic, systemd unit-file
 packaging, systemd auto-enable/start behavior, user-level systemd persistence,
 cron file installation, crontab command use, cron `@reboot` entries, privileged
 sudo execution from install hooks, non-executable extensionless shebang
-scripts, and deep-static systemd
-unit/auto-enable/user-persistence split behavior.
+scripts, dot-prefixed install-hook AUR repository propagation, and deep-static
+systemd unit/auto-enable/user-persistence split behavior.
 
 The deep-static fixture set lives under
 `tests/fixtures/curated_packages/deep_static/`. Its archives, detached
@@ -380,6 +380,30 @@ refuse symlinked indicator files, never execute an artifact, and distinguish an
 exact path match from content-validated or multi-artifact correlation. A host
 finding should recommend trusted-media investigation without claiming that a
 static artifact proves successful attacker access.
+
+### AUR repository propagation
+
+`SUPPLYCHAIN-AUR-REPO-PROPAGATION-001` is a deterministic package-control-text
+correlation, not a general ban on Git publishing. Restrict it to PKGBUILD text
+and declared install-hook text. Require an AUR Git target, repository mutation
+or staging, and a non-dry-run `git push` bound to that AUR endpoint or configured
+remote; treat repository enumeration, loops, dot-prefixed hooks, and
+SSH-agent/key references as supporting evidence only. Comments, quoted
+documentation, AUR clone/fetch operations, pushes explicitly bound to other
+hosts, and any one signal alone must remain negative cases.
+
+Do not apply this rule indiscriminately to acquired deep-static source. An
+upstream project may legitimately contain maintainer release tooling, and
+source presence alone does not establish that package build or install logic
+invokes it. If future call-path analysis can prove invocation from package
+control text, add that evidence explicitly rather than weakening the phase
+boundary.
+
+The committed curated fixture uses a dot-prefixed hook and
+`AUR_HOST_PLACEHOLDER`. Its wrapper test substitutes `aur.archlinux.org` only
+inside a temporary copy and uses a fake makepkg runner. Never put working
+credentials, attacker infrastructure, or executable test setup around that
+fixture.
 
 ## Smart update context contract
 
@@ -545,6 +569,15 @@ The wrapper protects the pre-build phase: it scans the PKGBUILD before
 scripts can run. It also statically scans a declared local `install=` script
 when one is present. It does not sandbox makepkg, execute package functions,
 install packages, fetch live AUR data, or make a package safe by itself.
+
+A literal local `install=` declaration is a fail-closed evidence dependency.
+Resolve and read it before returning an allow result, even when its basename is
+dot-prefixed. Missing, unreadable, unsafe, ambiguous, or any symlinked component
+of the declared relative hook path under the package directory blocks before
+makepkg. Include the resolved hook or its bounded failure-state identity in
+cache and review fingerprints: blocker reports may be cached for the same
+failure state, but an unresolved hook must never reuse or store an allow
+decision.
 
 If AuraScan blocks, `aurascan-makepkg` does not invoke makepkg. If AuraScan
 requires manual review, the wrapper also stops before makepkg by default. This

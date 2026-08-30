@@ -59,6 +59,11 @@ Use this workflow for changes in the AuraScan repository.
 6. Do not flag a routine service such as `tailscaled` alone. Correlate it with
    privileged enrollment, root SSH configuration, persistence, credential
    changes, or anti-forensics.
+7. Detect AUR repository propagation only in deterministic PKGBUILD and
+   declared install-hook control text. Correlate an AUR Git target, repository
+   mutation/staging, and outbound push. Treat enumeration, loops, hidden hook
+   names, or SSH credential access as supporting evidence, and do not apply a
+   blanket rule to ordinary release tooling found only in deep-static source.
 
 ## Design instruction-file protection
 
@@ -118,6 +123,12 @@ Use this workflow for changes in the AuraScan repository.
   interception, process monitoring, automatic quarantine, or compromise claims.
 - Bump the engine rule version when changed rules could invalidate cached scan
   decisions.
+- Treat each literal local `install=` target, including a dot-prefixed hook, as
+  mandatory scan evidence. Missing, unreadable, unsafe, ambiguous, or any
+  symlinked component of the declared relative hook path under the package
+  directory fails closed. A blocker may be cached only for the same
+  failure-state identity; an unresolved hook cannot reuse or create an allow
+  decision or review acceptance.
 
 ## Publish GitHub and AUR releases
 

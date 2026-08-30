@@ -1,8 +1,6 @@
 import sys
 import os
 import json
-import re
-import shlex
 import subprocess
 from pathlib import Path
 from typing import List
@@ -16,7 +14,24 @@ from aurascan.analyzers.deterministic import DeterministicAnalyzer
 from aurascan.analyzers.deep_static import DeepStaticAnalyzer
 from aurascan.analyzers.history import HistoryAnalyzer
 from aurascan.analyzers.source_metadata import SourceMetadataAnalyzer
-from aurascan.core.models import AnalysisResult, PackageMetadata, RiskSummary, ScanReport
+from aurascan.core.install_hook import (
+    INSTALL_HOOK_RESOLVED,
+    InstallHookResolution,
+    PackageScanInputError,
+    capture_package_scan_input,
+)
+from aurascan.core.models import (
+    AnalysisResult,
+    Confidence,
+    EvidenceQuality,
+    Finding,
+    PackageMetadata,
+    Phase,
+    RiskSummary,
+    ScanReport,
+    Severity,
+    Source,
+)
 from aurascan.core.risk import RiskEngine
 from aurascan.core.cache import ScanCache
 from aurascan.core.context_provider import build_scan_context_proof
@@ -49,8 +64,10 @@ class AuraScanEngine:
         self.local_package_db_root = Path(local_package_db_root) if local_package_db_root is not None else None
         self.version_compare = version_compare
         self.last_report = None
+        self.last_scan_input_digest = ""
+        self.last_scan_input = None
         self.scanner_version = "2.5.0"
-        self.rule_version = "1.2.0"
+        self.rule_version = "1.3.0"
         self.cache = ScanCache()
         self.risk_engine = RiskEngine()
         self.trust_diff_adapter = HistoryTrustDiffAdapter()
@@ -204,10 +221,42 @@ class AuraScanEngine:
         return not value or value == "unknown"
 
     def scan_pkgbuild(self, pkgbuild_path: str, pkg_name: str = "unknown", pkg_ver: str = "unknown") -> bool:
+        self.last_scan_input_digest = ""
+        self.last_scan_input = None
         cache_flags = self._cache_flags()
+        try:
+            scan_input = capture_package_scan_input(
+                Path(pkgbuild_path),
+                allow_legacy_install=True,
+            )
+        except PackageScanInputError as exc:
+            if exc.code == "oversized":
+                msg = "PKGBUILD exceeds maximum allowed size (5MB). Possible DoS padding attack."
+                self._print(f"[AuraScan] \033[91mBLOCKED\033[0m {pkgbuild_path}", True)
+                self._print(f"  -> {msg}", True)
+                log_audit(pkgbuild_path, [msg])
+                return False
+            self._print(f"[AuraScan] Error reading a stable PKGBUILD snapshot ({exc.code}).", True)
+            return False
+
+        pkgbuild_bytes = scan_input.pkgbuild_bytes
+        content = scan_input.pkgbuild_content
+        install_hook = scan_input.install_hook
+        scan_input_digest = scan_input.input_digest
+        self.last_scan_input = scan_input
+        self.last_scan_input_digest = scan_input_digest
+        cache_key_parts = {
+            "config_flags": cache_flags,
+            "input_digest": scan_input_digest,
+        }
         cached_res = None
         if self.scan_context != ScanContext.auto:
-            cached_res = self.cache.get_cached_result(pkgbuild_path, self.scanner_version, self.rule_version, config_flags=cache_flags)
+            cached_res = self.cache.get_cached_result(
+                pkgbuild_path,
+                self.scanner_version,
+                self.rule_version,
+                **cache_key_parts,
+            )
         if cached_res:
             self.last_report = cached_res
             self._print(f"\n[AuraScan] --- Auditing PKGBUILD: {pkgbuild_path} (CACHED) ---", True)
@@ -227,31 +276,30 @@ class AuraScanEngine:
         all_findings = []
         source_acquisition = []
         is_safe = True
+        if install_hook.declared and install_hook.status != INSTALL_HOOK_RESOLVED:
+            all_findings.append(self._uninspected_install_hook_finding(
+                pkgbuild_path,
+                pkg_name,
+                pkg_ver,
+                install_hook.declaration_line,
+            ))
+            is_safe = False
 
-        try:
-            if os.path.getsize(pkgbuild_path) > MAX_SCRIPT_SIZE:
-                msg = "PKGBUILD exceeds maximum allowed size (5MB). Possible DoS padding attack."
-                self._print(f"[AuraScan] \033[91mBLOCKED\033[0m {pkgbuild_path}", True)
-                self._print(f"  -> {msg}", True)
-                log_audit(pkgbuild_path, [msg])
-                return False
-            with open(pkgbuild_path, 'r') as f:
-                content = f.read()
-        except Exception as e:
-            self._print(f"[AuraScan] Error reading {pkgbuild_path}: {e}", True)
-            return False
-
-        update_decision = self._prepare_update_decision(pkgbuild_path, content)
+        update_decision = self._prepare_update_decision(
+            pkgbuild_path,
+            content,
+            install_hook_resolution=install_hook,
+        )
         if update_decision and update_decision.action == UpdateFastPathAction.skip_update_scan:
             report = self._build_report(
                 pkg_name,
                 pkg_ver,
-                [],
+                all_findings,
                 ["Skipped by explicit new-only update policy"],
                 [],
                 fast_path_decision=update_decision.to_dict(),
             )
-            report.risk_summary = self.risk_engine.evaluate([])
+            report.risk_summary = self.risk_engine.evaluate(all_findings)
             report.baseline_update_policy = "not_updated_skipped_update"
             report.trusted_baseline_updated = False
             out_dict = report.to_dict()
@@ -260,15 +308,33 @@ class AuraScanEngine:
                 print(json.dumps(out_dict, indent=2))
             else:
                 print(report.render_terminal(verbose=self.verbose))
-            self.cache.set_cached_result(pkgbuild_path, self.scanner_version, self.rule_version, out_dict, config_flags=cache_flags)
+            self.cache.set_cached_result(
+                pkgbuild_path,
+                self.scanner_version,
+                self.rule_version,
+                out_dict,
+                **cache_key_parts,
+            )
             self._finalize_history(report.risk_summary, update_decision)
+            if report.risk_summary.blocks_installation:
+                log_audit(pkgbuild_path, [f.explanation for f in all_findings if f.blocks_installation])
+                return False
             return True
 
-        install_script = self._read_declared_install_script(pkgbuild_path, content)
+        install_script = None
+        if install_hook.declared and install_hook.inspectable:
+            install_script = (install_hook.path, install_hook.content)
         for analyzer in self.analyzers:
             if self._skip_analyzer_for_decision(analyzer, update_decision):
                 continue
-            result = analyzer.analyze_pkgbuild(pkgbuild_path, content)
+            if isinstance(analyzer, HistoryAnalyzer):
+                result = analyzer.analyze_pkgbuild(
+                    pkgbuild_path,
+                    content,
+                    install_hook_resolution=install_hook,
+                )
+            else:
+                result = analyzer.analyze_pkgbuild(pkgbuild_path, content)
             all_findings.extend(self._filter_findings_for_mode(result.findings))
             if install_script is not None and hasattr(analyzer, "analyze_install_script"):
                 script_path, script_content = install_script
@@ -300,7 +366,13 @@ class AuraScanEngine:
         else:
             print(report.render_terminal(verbose=self.verbose))
 
-        self.cache.set_cached_result(pkgbuild_path, self.scanner_version, self.rule_version, out_dict, config_flags=cache_flags)
+        self.cache.set_cached_result(
+            pkgbuild_path,
+            self.scanner_version,
+            self.rule_version,
+            out_dict,
+            **cache_key_parts,
+        )
 
         if report.risk_summary.blocks_installation:
             log_audit(pkgbuild_path, [f.explanation for f in all_findings if f.blocks_installation])
@@ -380,31 +452,32 @@ class AuraScanEngine:
                 return analyzer
         return None
 
-    def _read_declared_install_script(self, pkgbuild_path: str, content: str):
-        match = re.search(r"^\s*install\s*=\s*(?P<value>[^\n]+)", content, re.M)
-        if not match:
-            return None
-        raw = match.group("value")
-        if "$" in raw or "`" in raw:
-            return None
-        try:
-            tokens = shlex.split(raw, comments=True, posix=True)
-        except ValueError:
-            return None
-        if len(tokens) != 1:
-            return None
-        relative = Path(tokens[0])
-        if relative.is_absolute() or ".." in relative.parts:
-            return None
-        script_path = Path(pkgbuild_path).parent / relative
-        if not script_path.exists() or not script_path.is_file():
-            return None
-        try:
-            return script_path, script_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return None
+    def _uninspected_install_hook_finding(self, pkgbuild_path: str, pkg_name: str, pkg_ver: str, line_number):
+        return Finding(
+            rule_id="INSTALL-HOOK-UNINSPECTED-001",
+            package_name=pkg_name,
+            package_version=pkg_ver,
+            phase=Phase.install_hook_static,
+            source=Source.deterministic_rule,
+            severity=Severity.HIGH,
+            confidence=Confidence.CONFIRMED,
+            evidence_quality=EvidenceQuality.confirmed_static_pattern,
+            file_path=str(pkgbuild_path),
+            line_number=line_number,
+            evidence_snippet="declared install hook was not safely inspected",
+            explanation="PKGBUILD declares an install hook, but AuraScan could not inspect it safely.",
+            recommendation="Do not build or install this package until the declared hook is a local unchanged regular file that AuraScan can read.",
+            false_positive_notes="This fail-closed finding does not prove that the package or hook is malicious.",
+            blocks_installation=True,
+            requires_manual_review=False,
+        )
 
-    def _prepare_update_decision(self, pkgbuild_path: str, content: str):
+    def _prepare_update_decision(
+        self,
+        pkgbuild_path: str,
+        content: str,
+        install_hook_resolution: InstallHookResolution = None,
+    ):
         if self.update_scan_policy == UpdateScanPolicy.full and self.scan_context == ScanContext.unknown:
             return None
         history = self._history_analyzer()
@@ -413,7 +486,11 @@ class AuraScanEngine:
         previous_snapshot = {}
         previous_accepted = {}
         if history:
-            current_snapshot = history.snapshot_from_pkgbuild(pkgbuild_path, content)
+            current_snapshot = history.snapshot_from_pkgbuild(
+                pkgbuild_path,
+                content,
+                install_hook_resolution=install_hook_resolution,
+            )
             package_key = history.package_key_for_snapshot(current_snapshot)
             if package_key:
                 previous_snapshot = history.get_snapshot(package_key)

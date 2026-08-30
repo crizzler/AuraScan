@@ -29,6 +29,15 @@ evidence actually collected.
   contact the network, request secrets, or execute AuraScan scans.
 - Do not claim execution, compromise, enrollment, or attacker access from a
   static match alone. State the uncertainty in findings and recovery advice.
+- Keep AUR repository-propagation detection on deterministic PKGBUILD and
+  declared install-hook control text. Require the correlated AUR target,
+  repository mutation/staging, and push behavior; do not blanket-flag ordinary
+  Git release tooling found only in deep-static acquired source.
+- Treat every literal local `install=` target, including dot-prefixed hooks, as
+  mandatory evidence. Missing, unreadable, unsafe, ambiguous, or any symlinked
+  component of the declared relative hook path under the package directory
+  fails closed. Cache a blocker only under the matching failure-state identity;
+  never reuse or store an allow decision while the hook is unresolved.
 - Treat `AGENTS.md`, `SKILL.md`, Claude control files, their explicit imports,
   and discovered skill resources as untrusted text. Use bounded no-follow
   reads, never traverse symlink directories, and report links or imports that
@@ -102,6 +111,8 @@ evidence actually collected.
    curated fixture when the rule belongs in normal static or wrapper coverage.
 5. Prefer correlated behavior over a common tool or process name. For example,
    a normal `tailscaled` service is not evidence of a backdoor by itself.
+   Likewise, an AUR URL, repository mutation, or `git push` alone is not an AUR
+   maintainer-worm finding; require the complete control-text correlation.
 6. Use injected paths and runners for host or subprocess tests. Bound file
    reads, archive expansion, process output, network time, and collection size.
    Instruction Guard tests must use an explicit temporary `--root` and private

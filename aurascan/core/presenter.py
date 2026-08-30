@@ -94,6 +94,22 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
         "not_prove": "This match does not prove that the payload ran on this host, but the referenced revision must not be trusted.",
         "action": "Do not build or install this package. Preserve its package and commit metadata and investigate any earlier installation from trusted media.",
     },
+    "SUPPLYCHAIN-AUR-REPO-PROPAGATION-001": {
+        "title": "Package code may propagate changes into AUR repositories.",
+        "summary": "The PKGBUILD or install hook combines an AUR Git remote, repository mutation or staging, and a non-dry-run Git push.",
+        "why": "Package build and install code should not modify and publish other AUR repositories. This combination can spread attacker-controlled package changes through a maintainer's repositories.",
+        "checked": "AuraScan correlated direct Git commands in package text without running them, contacting the AUR, or accessing SSH credentials.",
+        "not_prove": "This static match does not prove that a push ran, succeeded, or changed any remote repository, but the propagation chain is unsafe enough to block the package.",
+        "action": "Do not build or install this revision. Preserve the package metadata and review the full repository-modification logic from a trusted environment.",
+    },
+    "INSTALL-HOOK-UNINSPECTED-001": {
+        "title": "Declared install hook could not be inspected safely.",
+        "summary": "The PKGBUILD declares local install code, but AuraScan could not bind it to a bounded, unchanged regular file inside the package directory.",
+        "why": "Package install hooks can run with package-manager privileges. Allowing a build while the declared hook is missing, ambiguous, unreadable, unsafe, or linked through a symlink would leave privileged code outside the static review.",
+        "checked": "AuraScan parsed the literal install declaration and attempted a bounded no-follow read without sourcing the PKGBUILD or executing the hook.",
+        "not_prove": "An inspection failure does not prove the package or hook is malicious; it means the scan is incomplete and cannot safely authorize the build.",
+        "action": "Repair or fully materialize the package checkout, ensure the hook is a local regular file with no symlinked path component, and scan again.",
+    },
     "EXEC-INSTALL-HOOK-SUDO-001": {
         "title": "Install hook launches a command through sudo.",
         "summary": "The package install hook invokes sudo even though pacman install hooks already execute with package-manager privileges.",

@@ -1,0 +1,9 @@
+post_install() {
+  for fixture_repo in "/tmp/aurascan-fixture-repository-one" "/tmp/aurascan-fixture-repository-two"; do
+    printf '%s\n' '# inert fixture repository change' >> "${fixture_repo}/PKGBUILD"
+    git -C "${fixture_repo}" add PKGBUILD
+    git -C "${fixture_repo}" commit -m "inert fixture repository change"
+    git -C "${fixture_repo}" remote set-url origin "ssh://aur@AUR_HOST_PLACEHOLDER/placeholder-package.git"
+    git -C "${fixture_repo}" push origin master
+  done
+}

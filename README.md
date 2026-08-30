@@ -206,6 +206,27 @@ summaries. The separate security audit also checks a validated historical AUR
 campaign snapshot, the reported August 2026 `hyprland-fixes` incident, bounded
 pacman history, correlated host artifacts, and optional `arch-audit` advisories.
 
+Default static analysis also blocks an AUR-maintainer-worm technique reported
+in the August 2026
+[`xsnow`/`xsnow-bin` incident](https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/thread/FPT525XVV2DL2P437KPHTADV3KJINORN/):
+`SUPPLYCHAIN-AUR-REPO-PROPAGATION-001` applies only to deterministic PKGBUILD
+or declared install-hook control text that correlates an `aur.archlinux.org`
+Git target, repository mutation or staging, and a non-dry-run push bound to the
+AUR endpoint or configured remote. An AUR URL, ordinary clone/fetch behavior,
+`git push` to another host, a dot-prefixed filename, or quoted documentation is
+not enough. The CRITICAL finding means the inspected text contains a static
+chain that could attempt to propagate changes using a maintainer's AUR
+credentials; it does not prove that the hook ran, credentials were available,
+a push succeeded, or an account was compromised.
+
+A literal local `install=` target is mandatory scan evidence, including a
+dot-prefixed hook. AuraScan will not call the package clear when that declared
+hook is absent, unreadable, unsafe, ambiguous, or any component of its declared
+relative path under the package directory is a symlink. It fails closed
+instead. The hook identity participates in scan and review fingerprints: an
+unresolved hook cannot reuse or create an allow decision, although AuraScan may
+cache the matching blocker report under its failure-state identity.
+
 Default scans do not download declared sources, clone upstream repositories,
 fetch PGP keys, run GPG, run makepkg, install packages, or execute package code.
 The default scan context is `unknown`, which keeps update fast paths disabled.
@@ -231,6 +252,12 @@ scans. It does not preflight pasted commands or download links, use privileged
 fanotify interception, or automatically quarantine files. AuraScan does not
 guarantee malware detection, and it cannot see behavior hidden in files it did
 not fetch or inspect.
+
+The AUR propagation rule is deliberately scoped to deterministic PKGBUILD and
+declared install-hook control text. It does not claim to parse or prove the
+exact runtime call path. AuraScan does not apply the rule as a blanket check to
+every file acquired by `--deep-static`, because ordinary upstream release
+tooling may legitimately modify and publish its own repositories.
 
 ClamAV integration is useful when available, but a clean ClamAV scan is not
 proof of safety. PGP signatures help confirm source integrity and signer
@@ -1102,6 +1129,13 @@ makepkg is not invoked by default.
 
 The wrapper protects the pre-build phase. It does not sandbox makepkg, install
 packages, or make package code safe after makepkg starts running build steps.
+
+Declared local `install=` hooks are part of that pre-build gate, including
+dot-prefixed names. If a literal hook target cannot be safely resolved and
+read, or if any component of its declared relative path under the package
+directory is a symlink, the wrapper stops before makepkg. No earlier clear
+result or review token can authorize a package while its declared hook remains
+unresolved.
 
 ## Pacman Hook
 

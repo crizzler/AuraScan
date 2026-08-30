@@ -1,12 +1,14 @@
 from aurascan.analyzers.deep_static import DeepStaticAnalyzer
 from aurascan.analyzers.ai_static import AIStaticAnalyzer
 from aurascan.analyzers.history import HistoryAnalyzer
+import aurascan.analyzers.history as history_module
 from aurascan.analyzers.source_metadata import SourceMetadataAnalyzer
 from aurascan.cli import build_parser
 from aurascan.core.cache import ScanCache
 from aurascan.core.engine import AuraScanEngine
 from aurascan.core.models import AnalysisResult, Confidence, EvidenceQuality, Finding, Phase, ScanReport, Severity, Source
 from aurascan.core.update_policy import UpdateScanPolicy
+from pathlib import Path
 import aurascan.__main__ as module_entrypoint
 import aurascan.cli as cli
 
@@ -49,8 +51,34 @@ class SpyAIAnalyzer(AIStaticAnalyzer):
         return AnalysisResult(True, "spy", [])
 
 
+class HookSpyAnalyzer(NoopAnalyzer):
+    def __init__(self):
+        self.pkgbuild_calls = 0
+        self.install_calls = 0
+        self.install_contents = []
+
+    def analyze_pkgbuild(self, pkgbuild_path, content):
+        self.pkgbuild_calls += 1
+        return AnalysisResult(True, "noop", [])
+
+    def analyze_install_script(self, script_path, content):
+        self.install_calls += 1
+        self.install_contents.append(content)
+        return AnalysisResult(True, "noop", [])
+
+
 def cache_flags(engine):
     return dict(engine._cache_flags())
+
+
+def cached_pkgbuild(engine, pkgbuild):
+    return engine.cache.get_cached_result(
+        str(pkgbuild),
+        engine.scanner_version,
+        engine.rule_version,
+        config_flags=cache_flags(engine),
+        input_digest=engine.last_scan_input_digest,
+    )
 
 
 def test_deep_static_flag_is_parsed_correctly():
@@ -365,7 +393,7 @@ def test_default_fast_scan_does_not_emit_source_acquisition_findings(tmp_path):
     ok = engine.scan_pkgbuild(str(pkgbuild))
 
     assert ok is True
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert cached["source_acquisition"] == []
     assert cached["scan_policy"] == "full"
     assert all(finding["rule_id"] != "SOURCE-UNSUPPORTED" for finding in cached["findings"])
@@ -380,7 +408,7 @@ def test_default_fast_scan_emits_metadata_without_acquisition(tmp_path):
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert cached["source_acquisition"] == []
     assert any(finding["rule_id"] == "SOURCE-META-HTTP-NOT-HTTPS" for finding in cached["findings"])
     assert all(finding["rule_id"] != "SOURCE-HTTP-FETCH-FAILED" for finding in cached["findings"])
@@ -395,7 +423,7 @@ def test_engine_ignores_acquisition_records_when_fast_mode_is_not_enabled(tmp_pa
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert cached["source_acquisition"] == []
     assert all(finding["rule_id"] != "SOURCE-UNSUPPORTED" for finding in cached["findings"])
 
@@ -409,9 +437,163 @@ def test_explicit_deep_static_mode_keeps_source_acquisition_findings(tmp_path):
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert cached["source_acquisition"] == [{"original": "git://example.invalid/repo.git", "status": "unsupported"}]
     assert any(finding["rule_id"] == "SOURCE-UNSUPPORTED" for finding in cached["findings"])
+
+
+def test_pkgbuild_cache_is_bound_to_exact_pkgbuild_and_install_hook_bytes(tmp_path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_bytes(b"pkgname=demo\npkgver=1\ninstall=demo.install\n")
+    hook = tmp_path / "demo.install"
+    hook.write_bytes(b"post_install() { :; }\n")
+    analyzer = HookSpyAnalyzer()
+    engine = AuraScanEngine()
+    engine.cache = ScanCache(tmp_path / "cache")
+    engine.analyzers = [analyzer]
+
+    assert engine.rule_version == "1.3.0"
+    assert engine.scan_pkgbuild(str(pkgbuild)) is True
+    first_digest = engine.last_scan_input_digest
+    assert analyzer.pkgbuild_calls == 1
+    assert analyzer.install_calls == 1
+
+    assert engine.scan_pkgbuild(str(pkgbuild)) is True
+    assert engine.last_scan_input_digest == first_digest
+    assert analyzer.pkgbuild_calls == 1
+    assert analyzer.install_calls == 1
+
+    hook.write_bytes(b"post_install() { printf 'changed'; }\n")
+    assert engine.scan_pkgbuild(str(pkgbuild)) is True
+    hook_digest = engine.last_scan_input_digest
+    assert hook_digest != first_digest
+    assert analyzer.pkgbuild_calls == 2
+    assert analyzer.install_calls == 2
+
+    pkgbuild.write_bytes(pkgbuild.read_bytes().replace(b"\n", b"\r\n"))
+    assert engine.scan_pkgbuild(str(pkgbuild)) is True
+    assert engine.last_scan_input_digest != hook_digest
+    assert analyzer.pkgbuild_calls == 3
+    assert analyzer.install_calls == 3
+
+
+def test_cache_write_cannot_bind_old_analysis_to_replaced_pkgbuild(tmp_path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    original = b"pkgname=demo\npkgver=1\n"
+    replacement = b"pkgname=demo\npkgver=2\n"
+    pkgbuild.write_bytes(original)
+
+    class ReplacingAnalyzer(NoopAnalyzer):
+        def __init__(self):
+            self.calls = 0
+
+        def analyze_pkgbuild(self, pkgbuild_path, content):
+            self.calls += 1
+            if self.calls == 1:
+                Path(pkgbuild_path).write_bytes(replacement)
+            return AnalysisResult(True, "noop", [])
+
+    analyzer = ReplacingAnalyzer()
+    engine = AuraScanEngine()
+    engine.cache = ScanCache(tmp_path / "cache")
+    engine.analyzers = [analyzer]
+
+    assert engine.scan_pkgbuild(str(pkgbuild)) is True
+    first_digest = engine.last_scan_input_digest
+    assert pkgbuild.read_bytes() == replacement
+
+    assert engine.scan_pkgbuild(str(pkgbuild)) is True
+    assert engine.last_scan_input_digest != first_digest
+    assert analyzer.calls == 2
+
+
+def test_missing_declared_install_hook_is_a_fixed_blocking_finding(tmp_path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text("pkgname=demo\npkgver=1\ninstall=missing.install\n", encoding="utf-8")
+    analyzer = HookSpyAnalyzer()
+    engine = AuraScanEngine()
+    engine.cache = ScanCache(tmp_path / "cache")
+    engine.analyzers = [analyzer]
+
+    assert engine.scan_pkgbuild(str(pkgbuild), "demo", "1") is False
+
+    finding = next(item for item in engine.last_report["findings"] if item["rule_id"] == "INSTALL-HOOK-UNINSPECTED-001")
+    assert finding["blocks_installation"] is True
+    assert finding["phase"] == "install_hook_static"
+    assert finding["line_number"] == 3
+    assert finding["evidence_snippet"] == "declared install hook was not safely inspected"
+    assert "missing.install" not in finding["evidence_snippet"]
+    assert analyzer.pkgbuild_calls == 1
+    assert analyzer.install_calls == 0
+
+    assert engine.scan_pkgbuild(str(pkgbuild), "demo", "1") is False
+    assert analyzer.pkgbuild_calls == 1
+
+    (tmp_path / "missing.install").write_text("post_install() { :; }\n", encoding="utf-8")
+    assert engine.scan_pkgbuild(str(pkgbuild), "demo", "1") is True
+    assert analyzer.pkgbuild_calls == 2
+    assert analyzer.install_calls == 1
+
+
+def test_deleted_and_symlinked_hook_states_never_reuse_a_cached_allow(tmp_path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text(
+        "pkgname=demo\npkgver=1\ninstall=demo.install\n",
+        encoding="utf-8",
+    )
+    hook = tmp_path / "demo.install"
+    hook.write_text("post_install() { :; }\n", encoding="utf-8")
+    analyzer = HookSpyAnalyzer()
+    engine = AuraScanEngine()
+    engine.cache = ScanCache(tmp_path / "cache")
+    engine.analyzers = [analyzer]
+
+    assert engine.scan_pkgbuild(str(pkgbuild), "demo", "1") is True
+    resolved_digest = engine.last_scan_input_digest
+
+    hook.unlink()
+    assert engine.scan_pkgbuild(str(pkgbuild), "demo", "1") is False
+    missing_digest = engine.last_scan_input_digest
+    assert missing_digest != resolved_digest
+    assert any(
+        item["rule_id"] == "INSTALL-HOOK-UNINSPECTED-001"
+        for item in engine.last_report["findings"]
+    )
+
+    target = tmp_path / "target.install"
+    target.write_text("post_install() { :; }\n", encoding="utf-8")
+    hook.symlink_to(target)
+    assert engine.scan_pkgbuild(str(pkgbuild), "demo", "1") is False
+    assert engine.last_scan_input_digest not in {missing_digest, resolved_digest}
+    assert any(
+        item["rule_id"] == "INSTALL-HOOK-UNINSPECTED-001"
+        for item in engine.last_report["findings"]
+    )
+
+
+def test_new_only_update_cannot_skip_uninspected_install_hook_blocker(tmp_path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text(BASE_UPDATE.replace("pkgver=1.0", "pkgver=1.1") + "install=missing.install\n", encoding="utf-8")
+    history = accepted_history(tmp_path)
+    spy_ai = SpyAIAnalyzer()
+    engine = AuraScanEngine(
+        update_scan_policy="new-only",
+        scan_context="update",
+        scan_context_source="test_fixture",
+    )
+    engine.cache = ScanCache(tmp_path / "cache")
+    engine.analyzers = [history, spy_ai]
+
+    assert engine.scan_pkgbuild(str(pkgbuild)) is False
+
+    assert spy_ai.called is False
+    assert engine.last_report["fast_path_decision"]["action"] == "skip_update_scan"
+    assert engine.last_report["risk_summary"]["blocks_installation"] is True
+    assert any(
+        finding["rule_id"] == "INSTALL-HOOK-UNINSPECTED-001"
+        for finding in engine.last_report["findings"]
+    )
+    assert history.get_snapshot("demo")["version"] == "1.0"
 
 
 BASE_UPDATE = """# Maintainer: Alice <alice@example.invalid>
@@ -434,6 +616,35 @@ def accepted_history(tmp_path):
     return history
 
 
+def test_engine_reuses_one_hook_resolution_for_update_and_history_analysis(tmp_path, monkeypatch):
+    pkgbuild = tmp_path / "PKGBUILD"
+    hook = tmp_path / "demo.install"
+    baseline = BASE_UPDATE + "install=demo.install\n"
+    pkgbuild.write_text(baseline, encoding="utf-8")
+    hook.write_text("post_install() { :; }\n", encoding="utf-8")
+    history = HistoryAnalyzer(tmp_path / "history.db")
+    history.analyze_pkgbuild(str(pkgbuild), baseline)
+    history.commit_pending_snapshots(scan_level="fast_default")
+
+    current = baseline.replace("pkgver=1.0", "pkgver=1.1")
+    pkgbuild.write_text(current, encoding="utf-8")
+
+    def unexpected_second_resolution(*args, **kwargs):
+        raise AssertionError("HistoryAnalyzer re-resolved an engine-captured hook")
+
+    monkeypatch.setattr(history_module, "resolve_install_hook", unexpected_second_resolution)
+    engine = AuraScanEngine(
+        update_scan_policy="smart",
+        scan_context="update",
+        scan_context_source="test_fixture",
+    )
+    engine.cache = ScanCache(tmp_path / "cache")
+    engine.analyzers = [history]
+
+    assert engine.scan_pkgbuild(str(pkgbuild)) is True
+    assert engine.last_report["fast_path_decision"] is not None
+
+
 def write_local_db_entry(root, name="demo", version="1.0"):
     entry = root / f"{name}-{version}"
     entry.mkdir(parents=True)
@@ -452,7 +663,7 @@ def test_smart_update_uses_trust_diff_and_skips_expensive_analyzers(tmp_path):
 
     ok = engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert ok is True
     assert spy_ai.called is False
     assert cached["fast_path_decision"]["action"] == "use_smart_fast_path"
@@ -473,7 +684,7 @@ def test_smart_update_host_change_runs_normal_scan_and_keeps_baseline(tmp_path):
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert spy_ai.called is True
     assert cached["fast_path_decision"]["action"] == "use_full_scan"
     assert "source_host_changed" in cached["fast_path_decision"]["reason_codes"]
@@ -493,7 +704,7 @@ def test_smart_update_unknown_context_runs_normal_scan(tmp_path):
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert spy_ai.called is True
     assert cached["fast_path_decision"]["action"] == "cannot_fast_path"
     assert cached["fast_path_decision"]["expensive_phases_skipped"] is False
@@ -511,7 +722,7 @@ def test_new_only_update_skip_does_not_update_trusted_baseline(tmp_path):
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert spy_ai.called is False
     assert cached["fast_path_decision"]["action"] == "skip_update_scan"
     assert cached["trusted_baseline_updated"] is False
@@ -530,7 +741,7 @@ def test_explicit_cli_update_context_without_opt_in_does_not_fast_path(tmp_path)
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert spy_ai.called is True
     assert cached["fast_path_decision"]["action"] == "use_full_scan"
     assert "context_not_eligible_for_fast_path" in cached["fast_path_decision"]["reason_codes"]
@@ -558,7 +769,7 @@ def test_explicit_cli_update_context_with_opt_in_can_fast_path_but_warns(tmp_pat
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert spy_ai.called is False
     assert cached["fast_path_decision"]["action"] == "use_smart_fast_path"
     assert cached["scan_context_authority"] == "user_asserted"
@@ -578,7 +789,7 @@ def test_verified_provider_context_can_fast_path_and_reports_verification(tmp_pa
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert spy_ai.called is False
     assert cached["fast_path_decision"]["action"] == "use_smart_fast_path"
     assert cached["scan_context_authority"] == "verified_transaction_provider"
@@ -606,7 +817,7 @@ def test_auto_context_verified_local_db_update_can_fast_path(tmp_path):
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert spy_ai.called is False
     assert cached["scan_context"] == "update"
     assert cached["scan_context_source"] == "local_package_db"
@@ -643,7 +854,7 @@ def test_auto_context_install_uses_normal_scan(tmp_path):
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert spy_ai.called is True
     assert cached["scan_context"] == "install"
     assert cached["context_installed_package_present"] is False
@@ -669,7 +880,7 @@ def test_auto_context_unknown_uses_normal_scan_and_plain_terminal(tmp_path):
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert spy_ai.called is True
     assert cached["scan_context"] == "unknown"
     assert cached["context_eligible_for_fast_path"] is False
@@ -699,7 +910,7 @@ def test_auto_context_new_only_skip_requires_verified_update_and_preserves_basel
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert spy_ai.called is False
     assert cached["fast_path_decision"]["action"] == "skip_update_scan"
     assert cached["trusted_baseline_updated"] is False
@@ -726,7 +937,7 @@ def test_auto_context_full_policy_ignores_fast_path(tmp_path):
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert spy_ai.called is True
     assert cached["fast_path_decision"]["action"] == "use_full_scan"
     assert cached["fast_path_decision"]["reason_codes"] == ["policy_full"]
@@ -752,7 +963,7 @@ def test_auto_context_deep_static_overrides_fast_path(tmp_path):
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert spy_ai.called is True
     assert cached["fast_path_decision"]["action"] == "use_full_scan"
     assert cached["fast_path_decision"]["reason_codes"] == ["explicit_deep_static_requested"]
@@ -777,7 +988,7 @@ def test_auto_context_still_requires_accepted_baseline(tmp_path):
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert spy_ai.called is True
     assert cached["fast_path_decision"]["action"] == "use_full_scan"
     assert "missing_accepted_baseline" in cached["fast_path_decision"]["reason_codes"]
@@ -802,7 +1013,7 @@ def test_auto_context_trust_diff_still_blocks_fast_path(tmp_path):
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = engine.cache.get_cached_result(str(pkgbuild), engine.scanner_version, engine.rule_version, config_flags=cache_flags(engine))
+    cached = cached_pkgbuild(engine, pkgbuild)
     assert spy_ai.called is True
     assert cached["fast_path_decision"]["action"] == "use_full_scan"
     assert "source_host_changed" in cached["fast_path_decision"]["reason_codes"]

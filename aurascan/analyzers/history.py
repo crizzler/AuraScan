@@ -4,10 +4,15 @@ import re
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from aurascan.analyzers.base import BaseAnalyzer
+from aurascan.core.install_hook import (
+    INSTALL_HOOK_RESOLVED,
+    InstallHookResolution,
+    resolve_install_hook,
+)
 from aurascan.core.models import (
     AnalysisResult,
     Confidence,
@@ -53,7 +58,12 @@ class HistoryAnalyzer(BaseAnalyzer):
                 )
             """)
 
-    def _extract_metadata(self, content: str, pkgbuild_path: str = "") -> Dict[str, Any]:
+    def _extract_metadata(
+        self,
+        content: str,
+        pkgbuild_path: str = "",
+        install_hook_resolution: Optional[InstallHookResolution] = None,
+    ) -> Dict[str, Any]:
         snapshot: Dict[str, Any] = {
             "package_name": "",
             "pkgbase": "",
@@ -68,6 +78,8 @@ class HistoryAnalyzer(BaseAnalyzer):
             "checkdepends": [],
             "optdepends": [],
             "install_file_hash": "",
+            "install_hook_input_digest": "",
+            "install_hook_status": "none",
             "pkgbuild_hash": hashlib.sha256(content.encode("utf-8", "replace")).hexdigest(),
             "prepare_hash": "",
             "build_hash": "",
@@ -76,9 +88,17 @@ class HistoryAnalyzer(BaseAnalyzer):
             "timestamp": time.time(),
         }
         if pkgbuild_path:
-            install_path = Path(pkgbuild_path).with_name(".INSTALL")
-            if install_path.exists():
-                snapshot["install_file_hash"] = self._file_hash(install_path)
+            install_hook = install_hook_resolution
+            if install_hook is None:
+                install_hook = resolve_install_hook(
+                    Path(pkgbuild_path),
+                    content,
+                    allow_legacy_install=True,
+                )
+            snapshot["install_hook_input_digest"] = install_hook.input_digest
+            snapshot["install_hook_status"] = install_hook.status
+            if install_hook.status == INSTALL_HOOK_RESOLVED:
+                snapshot["install_file_hash"] = install_hook.content_sha256
 
         for line in content.splitlines():
             stripped = line.strip()
@@ -106,15 +126,33 @@ class HistoryAnalyzer(BaseAnalyzer):
 
         return snapshot
 
-    def snapshot_from_pkgbuild(self, pkgbuild_path: str, content: str) -> Dict[str, Any]:
-        return self._extract_metadata(content, pkgbuild_path)
+    def snapshot_from_pkgbuild(
+        self,
+        pkgbuild_path: str,
+        content: str,
+        install_hook_resolution: Optional[InstallHookResolution] = None,
+    ) -> Dict[str, Any]:
+        return self._extract_metadata(
+            content,
+            pkgbuild_path,
+            install_hook_resolution=install_hook_resolution,
+        )
 
     def package_key_for_snapshot(self, snapshot: Dict[str, Any]) -> str:
         return snapshot.get("pkgbase") or snapshot.get("package_name") or ""
 
-    def analyze_pkgbuild(self, pkgbuild_path: str, content: str) -> AnalysisResult:
+    def analyze_pkgbuild(
+        self,
+        pkgbuild_path: str,
+        content: str,
+        install_hook_resolution: Optional[InstallHookResolution] = None,
+    ) -> AnalysisResult:
         findings: List[Finding] = []
-        snapshot = self._extract_metadata(content, pkgbuild_path)
+        snapshot = self._extract_metadata(
+            content,
+            pkgbuild_path,
+            install_hook_resolution=install_hook_resolution,
+        )
         package_key = self.package_key_for_snapshot(snapshot)
         if not package_key:
             return AnalysisResult(True, "No pkgname found", findings)
@@ -162,12 +200,17 @@ class HistoryAnalyzer(BaseAnalyzer):
         pkgbuild_path: str,
         content: str,
         *,
+        install_hook_resolution: Optional[InstallHookResolution] = None,
         review_decision_id: str = "",
         scanner_version: str = "",
         rule_version: str = "",
         trust_diff: Dict[str, Any] = None,
     ) -> None:
-        snapshot = self.snapshot_from_pkgbuild(pkgbuild_path, content)
+        snapshot = self.snapshot_from_pkgbuild(
+            pkgbuild_path,
+            content,
+            install_hook_resolution=install_hook_resolution,
+        )
         package_key = self.package_key_for_snapshot(snapshot)
         if not package_key:
             return
@@ -307,9 +350,10 @@ class HistoryAnalyzer(BaseAnalyzer):
             for dep in sorted(new_deps - old_deps):
                 add(f"HIST-{dep_key.upper()}-ADDED", Severity.MEDIUM, f"{dep_key} added dependency.", dep)
 
-        if not old.get("install_file_hash") and new.get("install_file_hash"):
-            add("HIST-INSTALL-ADDED", Severity.HIGH, ".install hook was added.", new["install_file_hash"])
-        elif old.get("install_file_hash") != new.get("install_file_hash") and new.get("install_file_hash"):
+        old_install_hash, new_install_hash = self._install_hook_hashes_for_diff(old, new)
+        if not old_install_hash and new_install_hash:
+            add("HIST-INSTALL-ADDED", Severity.HIGH, ".install hook was added.", new_install_hash)
+        elif old_install_hash != new_install_hash and new_install_hash:
             add("HIST-INSTALL-CHANGED", Severity.MEDIUM, ".install hook changed.", "install file hash changed")
 
         for func_name in FUNC_KEYS:
@@ -342,12 +386,20 @@ class HistoryAnalyzer(BaseAnalyzer):
         match = re.search(rf"^{name}\s*\(\)\s*\{{(?P<body>.*?)^\}}", content, re.M | re.S)
         return match.group("body") if match else ""
 
-    def _file_hash(self, path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(65536), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
+    def _install_hook_hashes_for_diff(
+        self,
+        old: Dict[str, Any],
+        new: Dict[str, Any],
+    ) -> Tuple[str, str]:
+        if "install_hook_input_digest" in old and "install_hook_input_digest" in new:
+            return (
+                str(old.get("install_hook_input_digest") or ""),
+                str(new.get("install_hook_input_digest") or ""),
+            )
+        return (
+            str(old.get("install_file_hash") or old.get("install_hook_hash") or ""),
+            str(new.get("install_file_hash") or new.get("install_hook_hash") or ""),
+        )
 
     def _looks_like_random_fork(self, hosts: List[str], urls: List[str]) -> bool:
         joined = " ".join(hosts + urls).lower()

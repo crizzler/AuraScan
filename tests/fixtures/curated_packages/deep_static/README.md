@@ -35,6 +35,9 @@ Source-content scenarios:
 - `source_token_reference`: harmless source text references fake token variable names.
 - `source_vendored_deps`: source tree contains a vendored dependency directory.
 - `source_minified_file`: source tree contains a generated-looking minified file.
+- `source_aur_release_tooling`: an arbitrary acquired source script contains
+  ordinary AUR publication commands without becoming a package-control
+  propagation finding.
 - `deep_static_systemd_unit_file`: source tree contains a harmless `.service` file.
 - `deep_static_systemd_auto_enable`: source text contains a defanged `systemctl enable`.
 - `deep_static_systemd_user_persistence`: source text references a fake user service path.

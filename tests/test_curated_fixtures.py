@@ -16,6 +16,11 @@ from aurascan.makepkg_wrapper import run as run_makepkg_wrapper
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "curated_packages"
 SEVERITY_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+TEMP_ONLY_FIXTURE_SUBSTITUTIONS = {
+    "aur_repo_propagation_install_hook": {
+        "AUR_HOST_PLACEHOLDER": "aur.archlinux.org",
+    },
+}
 FORBIDDEN_LIVE_DANGER = [
     "rm -rf /",
     "mkfs.",
@@ -88,6 +93,21 @@ def assert_report_expectations(report, manifest):
         assert risk["requires_manual_review"] is manifest["expected_manual_review"]
 
 
+def apply_temp_only_fixture_substitutions(work, scenario):
+    substitutions = TEMP_ONLY_FIXTURE_SUBSTITUTIONS.get(scenario, {})
+    if not substitutions:
+        return
+    for path in work.rglob("*"):
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="strict")
+        updated = text
+        for placeholder, replacement in substitutions.items():
+            updated = updated.replace(placeholder, replacement)
+        if updated != text:
+            path.write_text(updated, encoding="utf-8")
+
+
 @pytest.mark.parametrize("manifest", manifests_for("fast"), ids=manifest_ids("fast"))
 def test_curated_fast_scan_fixtures(manifest, tmp_path, capsys):
     engine = engine_for(
@@ -117,6 +137,7 @@ def test_curated_fast_scan_fixtures(manifest, tmp_path, capsys):
 def test_curated_makepkg_wrapper_fixtures(manifest, tmp_path):
     work = tmp_path / manifest["scenario"]
     shutil.copytree(manifest["path"], work)
+    apply_temp_only_fixture_substitutions(work, manifest["scenario"])
     makepkg_calls = []
 
     def factory(**kwargs):
@@ -246,6 +267,7 @@ def test_curated_fixture_manifests_are_valid_and_cover_core_categories():
         "SYS-SYSTEMD-AUTO-001",
         "SYS-CRON-REBOOT-001",
         "EXEC-INSTALL-HOOK-SUDO-001",
+        "SUPPLYCHAIN-AUR-REPO-PROPAGATION-001",
     } <= covered_rules
 
 
@@ -256,6 +278,7 @@ def test_curated_fixtures_are_defanged_and_use_safe_domains():
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         lowered = text.lower()
+        assert "aur.archlinux.org" not in lowered, f"{path} contains the live AUR hostname"
         for forbidden in FORBIDDEN_LIVE_DANGER:
             assert forbidden not in lowered, f"{path} contains forbidden live-danger string {forbidden!r}"
         for host in url_re.findall(text):

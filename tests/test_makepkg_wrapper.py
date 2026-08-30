@@ -4,12 +4,20 @@ import os
 import shutil
 from pathlib import Path
 
+import pytest
+
 from aurascan.analyzers.deterministic import DeterministicAnalyzer
 from aurascan.analyzers.history import HistoryAnalyzer, MANUAL_REVIEW_ACCEPTED_STATUS
 from aurascan.analyzers.source_metadata import SourceMetadataAnalyzer
 from aurascan.core.cache import ScanCache
 from aurascan.core.engine import AuraScanEngine
-from aurascan.core.review import ReviewDecisionStore, ScanFingerprint, get_non_acceptance_blockers
+from aurascan.core.install_hook import capture_package_scan_input
+from aurascan.core.review import (
+    ReviewDecisionStore,
+    ScanFingerprint,
+    build_scan_fingerprint,
+    get_non_acceptance_blockers,
+)
 from aurascan.makepkg_wrapper import (
     EXIT_MANUAL_REVIEW,
     EXIT_MAKEPKG_NOT_FOUND,
@@ -36,6 +44,7 @@ class FakeEngine:
         self.scanned_paths = []
         self.scanner_version = scanner_version
         self.rule_version = rule_version
+        self.last_scan_input_digest = ""
         self.last_report = report or {
             "risk_summary": risk or {
                 "blocks_installation": False,
@@ -48,6 +57,10 @@ class FakeEngine:
     def scan_pkgbuild(self, pkgbuild_path):
         self.order.append("scan")
         self.scanned_paths.append(pkgbuild_path)
+        self.last_scan_input_digest = capture_package_scan_input(
+            Path(pkgbuild_path),
+            allow_legacy_install=True,
+        ).input_digest
         return self.scan_ok
 
 
@@ -531,6 +544,40 @@ def test_declared_install_hook_fixture_is_scanned_before_makepkg(tmp_path):
     assert any(finding["phase"] == "install_hook_static" for finding in report["findings"])
 
 
+def test_wrapper_blocks_missing_declared_hook_before_makepkg(tmp_path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text("pkgname=demo\npkgver=1\ninstall=missing.install\n", encoding="utf-8")
+    local_db = tmp_path / "local"
+    local_db.mkdir()
+    factory, created = real_engine_factory(
+        tmp_path,
+        analyzers=[DeterministicAnalyzer()],
+        local_db=local_db,
+    )
+    makepkg_calls = []
+
+    code = run(
+        [],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner([], makepkg_calls),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == EXIT_SCAN_BLOCKED
+    assert makepkg_calls == []
+    assert any(
+        finding["rule_id"] == "INSTALL-HOOK-UNINSPECTED-001"
+        for finding in created[0].last_report["findings"]
+    )
+    assert any(
+        finding["rule_id"] == "INSTALL-HOOK-UNINSPECTED-001"
+        for finding in get_non_acceptance_blockers(created[0].last_report)
+    )
+
+
 def test_wrapper_smart_auto_uses_verified_local_db_context_when_proven(tmp_path):
     work = copy_fixture(tmp_path, "normal-version-bump", "current")
     previous = FIXTURES / "normal-version-bump" / "previous" / "PKGBUILD"
@@ -683,6 +730,107 @@ def test_manual_review_report_produces_review_token_and_json_fields(tmp_path):
     assert "AuraScan needs review before makepkg" in output
     assert "What AuraScan checked" in output
     assert "Review token:" in output
+
+
+def test_review_fingerprint_changes_when_only_declared_hook_changes(tmp_path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text("pkgname=demo\npkgver=1.0\ninstall=demo.install\n", encoding="utf-8")
+    hook = tmp_path / "demo.install"
+    hook.write_text("post_install() { :; }\n", encoding="utf-8")
+    report = manual_review_report()
+
+    first = build_scan_fingerprint(report, pkgbuild, scanner_version="test", rule_version="1.3.0")
+    hook.write_text("post_install() { printf 'changed'; }\n", encoding="utf-8")
+    second = build_scan_fingerprint(report, pkgbuild, scanner_version="test", rule_version="1.3.0")
+
+    assert first.pkgbuild_hash == second.pkgbuild_hash
+    assert first.install_hook_hashes != second.install_hook_hashes
+    assert first.scan_fingerprint != second.scan_fingerprint
+    assert first.review_token != second.review_token
+
+
+def test_review_fingerprint_preserves_legacy_dot_install_binding(tmp_path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text("pkgname=demo\npkgver=1.0\n", encoding="utf-8")
+    legacy = tmp_path / ".INSTALL"
+    legacy.write_text("post_install() { :; }\n", encoding="utf-8")
+    report = manual_review_report()
+
+    first = build_scan_fingerprint(report, pkgbuild, scanner_version="test", rule_version="1.3.0")
+    legacy.write_text("post_install() { printf 'changed'; }\n", encoding="utf-8")
+    second = build_scan_fingerprint(report, pkgbuild, scanner_version="test", rule_version="1.3.0")
+
+    assert len(first.install_hook_hashes) == 1
+    assert first.install_hook_hashes != second.install_hook_hashes
+    assert first.review_token != second.review_token
+
+
+def test_review_fingerprint_refuses_an_unavailable_scan_input(tmp_path):
+    with pytest.raises(ValueError, match="unavailable package scan input"):
+        build_scan_fingerprint(
+            manual_review_report(),
+            tmp_path / "missing-PKGBUILD",
+            scanner_version="test",
+            rule_version="1.3.0",
+        )
+
+
+def test_wrapper_blocks_when_input_changes_between_scan_and_fingerprint(tmp_path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text("pkgname=demo\npkgver=1\ninstall=demo.install\n", encoding="utf-8")
+    hook = tmp_path / "demo.install"
+    hook.write_text("post_install() { :; }\n", encoding="utf-8")
+    order = []
+
+    class MutatingEngine(FakeEngine):
+        def scan_pkgbuild(self, pkgbuild_path):
+            result = super().scan_pkgbuild(pkgbuild_path)
+            hook.write_text("post_install() { printf changed; }\n", encoding="utf-8")
+            return result
+
+    def factory(**_kwargs):
+        return MutatingEngine(order, report=manual_review_report())
+
+    makepkg_calls = []
+    code = run(
+        [],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == EXIT_SCAN_BLOCKED
+    assert makepkg_calls == []
+    assert order == ["scan"]
+
+
+def test_wrapper_revalidates_input_immediately_before_makepkg(tmp_path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text("pkgname=demo\npkgver=1\n", encoding="utf-8")
+    order = []
+    factory, _created = fake_engine_factory(order)
+    makepkg_calls = []
+
+    def mutating_locator():
+        pkgbuild.write_text("pkgname=demo\npkgver=2\n", encoding="utf-8")
+        return "/usr/bin/makepkg"
+
+    code = run(
+        [],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=mutating_locator,
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == EXIT_SCAN_BLOCKED
+    assert makepkg_calls == []
+    assert order == ["scan"]
 
 
 def test_valid_review_token_allows_makepkg_and_records_sqlite_decision(tmp_path):

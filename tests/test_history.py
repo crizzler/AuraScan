@@ -74,6 +74,67 @@ def test_install_file_added_is_detected(tmp_path: Path):
     assert any(f.rule_id == "HIST-INSTALL-ADDED" for f in result.findings)
 
 
+def test_declared_install_hook_content_change_uses_shared_exact_identity(tmp_path: Path):
+    db = tmp_path / "history.db"
+    analyzer = HistoryAnalyzer(db)
+    pkgbuild = tmp_path / "PKGBUILD"
+    content = BASE_PKGBUILD + "install=demo.install\n"
+    pkgbuild.write_text(content, encoding="utf-8")
+    hook = tmp_path / "demo.install"
+    hook.write_text("post_install() { :; }\n", encoding="utf-8")
+    analyzer.analyze_pkgbuild(str(pkgbuild), content)
+    analyzer.commit_pending_snapshots(scan_level="fast_default")
+    previous = analyzer.get_snapshot("demo")
+
+    hook.write_text("post_install() { printf 'changed'; }\n", encoding="utf-8")
+    result = analyzer.analyze_pkgbuild(str(pkgbuild), content)
+    current = analyzer.pending_snapshots["demo"]
+
+    assert previous["install_file_hash"] != current["install_file_hash"]
+    assert previous["install_hook_input_digest"] != current["install_hook_input_digest"]
+    assert any(f.rule_id == "HIST-INSTALL-CHANGED" for f in result.findings)
+
+
+def test_install_hook_target_change_is_detected_even_when_content_is_identical(tmp_path: Path):
+    analyzer = HistoryAnalyzer(tmp_path / "history.db")
+    pkgbuild = tmp_path / "PKGBUILD"
+    first_content = BASE_PKGBUILD + "install=first.install\n"
+    second_content = first_content.replace("first.install", "second.install")
+    hook_content = "post_install() { :; }\n"
+    (tmp_path / "first.install").write_text(hook_content, encoding="utf-8")
+    (tmp_path / "second.install").write_text(hook_content, encoding="utf-8")
+    pkgbuild.write_text(first_content, encoding="utf-8")
+    analyzer.analyze_pkgbuild(str(pkgbuild), first_content)
+    analyzer.commit_pending_snapshots(scan_level="fast_default")
+    previous = analyzer.get_snapshot("demo")
+
+    pkgbuild.write_text(second_content, encoding="utf-8")
+    result = analyzer.analyze_pkgbuild(str(pkgbuild), second_content)
+    current = analyzer.pending_snapshots["demo"]
+
+    assert previous["install_file_hash"] == current["install_file_hash"]
+    assert previous["install_hook_input_digest"] != current["install_hook_input_digest"]
+    assert any(f.rule_id == "HIST-INSTALL-CHANGED" for f in result.findings)
+
+
+def test_persisted_legacy_install_snapshot_does_not_false_positive_after_upgrade(tmp_path: Path):
+    analyzer = HistoryAnalyzer(tmp_path / "history.db")
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text(BASE_PKGBUILD, encoding="utf-8")
+    (tmp_path / ".INSTALL").write_text("post_install() { :; }\n", encoding="utf-8")
+    analyzer.analyze_pkgbuild(str(pkgbuild), BASE_PKGBUILD)
+    analyzer.commit_pending_snapshots(scan_level="fast_default")
+    legacy_snapshot = analyzer.get_snapshot("demo")
+    legacy_snapshot.pop("install_hook_input_digest")
+    legacy_snapshot.pop("install_hook_status")
+    analyzer.save_snapshot("demo", legacy_snapshot)
+
+    result = analyzer.analyze_pkgbuild(str(pkgbuild), BASE_PKGBUILD)
+
+    assert not any(f.rule_id.startswith("HIST-INSTALL-") for f in result.findings)
+    assert analyzer.pending_snapshots["demo"]["install_file_hash"] == legacy_snapshot["install_file_hash"]
+
+
 def test_blocked_scan_does_not_overwrite_history_baseline(tmp_path: Path):
     db = tmp_path / "history.db"
     analyzer = HistoryAnalyzer(db)

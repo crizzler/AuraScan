@@ -2,14 +2,18 @@ import getpass
 import hashlib
 import json
 import os
-import re
-import shlex
 import sqlite3
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from aurascan.core.install_hook import (
+    PackageScanInput,
+    PackageScanInputError,
+    capture_package_scan_input,
+)
 
 
 class ReviewDecisionStatus(Enum):
@@ -403,13 +407,28 @@ def build_scan_fingerprint(
     prompt_version: str = "",
     scan_config_hash: str = "",
     acceptance_scope: ReviewScope = ReviewScope.exact_scan,
+    scan_input: Optional[PackageScanInput] = None,
 ) -> ScanFingerprint:
     metadata = report.get("package_metadata") or {}
     findings = get_manual_review_acceptance_candidates(report)
     finding_ids = [str(item.get("finding_id") or "") for item in findings if item.get("finding_id")]
     finding_fingerprints = sorted(_finding_fingerprint(item) for item in findings)
-    pkgbuild_hash = _file_hash(pkgbuild_path)
-    install_hook_hashes = _install_hook_hashes(pkgbuild_path)
+    if scan_input is None:
+        try:
+            scan_input = capture_package_scan_input(
+                pkgbuild_path,
+                allow_legacy_install=True,
+            )
+        except PackageScanInputError as exc:
+            raise ValueError("cannot fingerprint an unavailable package scan input") from exc
+    pkgbuild_bytes = scan_input.pkgbuild_bytes
+    pkgbuild_hash = hashlib.sha256(pkgbuild_bytes).hexdigest()
+    install_hook_hashes = (
+        [scan_input.install_hook.input_digest]
+        if scan_input.install_hook.input_digest
+        else []
+    )
+    scan_input_digest = scan_input.input_digest
     source_metadata_hash = _source_metadata_hash(report)
     material = {
         "acceptance_scope": acceptance_scope.value,
@@ -423,6 +442,7 @@ def build_scan_fingerprint(
         "rule_version": rule_version,
         "scan_config_hash": scan_config_hash,
         "scanner_version": scanner_version or report.get("scanner_version") or "",
+        "scan_input_digest": scan_input_digest,
         "source_metadata_hash": source_metadata_hash,
     }
     scan_fingerprint = hashlib.sha256(json.dumps(material, sort_keys=True).encode("utf-8")).hexdigest()
@@ -545,43 +565,6 @@ def _source_metadata_hash(report: Dict[str, Any]) -> str:
         or str(item.get("rule_id", "")).startswith("SIGNATURE")
     ]
     return hashlib.sha256(json.dumps(source_findings, sort_keys=True).encode("utf-8")).hexdigest()
-
-
-def _install_hook_hashes(pkgbuild_path: Path) -> List[str]:
-    try:
-        content = pkgbuild_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    match = re.search(r"^\s*install\s*=\s*(?P<value>[^\n]+)", content, re.M)
-    if not match:
-        return []
-    raw = match.group("value")
-    if "$" in raw or "`" in raw:
-        return []
-    try:
-        tokens = shlex.split(raw, comments=True, posix=True)
-    except ValueError:
-        return []
-    hashes = []
-    for token in tokens[:1]:
-        rel = Path(token)
-        if rel.is_absolute() or ".." in rel.parts:
-            continue
-        path = pkgbuild_path.parent / rel
-        if path.is_file():
-            hashes.append(_file_hash(path))
-    return hashes
-
-
-def _file_hash(path: Path) -> str:
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(65536), b""):
-                digest.update(chunk)
-    except OSError:
-        return ""
-    return digest.hexdigest()
 
 
 def _accepted_by() -> str:

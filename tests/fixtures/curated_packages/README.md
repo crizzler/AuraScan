@@ -16,6 +16,13 @@ Fixtures must stay defanged:
 - Do not include real attacker infrastructure.
 - Do not rely on live AUR, root, network, or real package execution.
 
+The AUR repository-propagation fixture commits only
+`AUR_HOST_PLACEHOLDER`. Its test copies the fixture to a temporary directory
+and replaces that marker with the real AUR hostname so the narrow host
+correlation can be exercised. The wrapper uses a fake makepkg runner and only
+scans the resulting files as text; it never executes the hook or contacts the
+AUR.
+
 Eval, systemd, and cron fixtures are text-only static-detection cases. They may
 include defanged build/install-hook snippets that look like commands, but tests
 must only scan those files as text. Do not run makepkg or execute the fixture

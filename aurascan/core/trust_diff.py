@@ -351,6 +351,11 @@ class _ResolvedFields:
         }
         previous_network = {name: bool(previous.get(f"{name}_network_fetch")) for name in FUNC_NAMES}
         current_network = {name: bool(current.get(f"{name}_network_fetch")) for name in FUNC_NAMES}
+        previous_install_hook_hash, current_install_hook_hash = _install_hook_hashes_for_diff(
+            diff_input,
+            previous,
+            current,
+        )
         has_previous = any(
             [
                 previous,
@@ -385,8 +390,8 @@ class _ResolvedFields:
             current_checkdepends=_list_field(diff_input.current_checkdepends, current, "checkdepends"),
             previous_optdepends=_list_field(diff_input.previous_optdepends, previous, "optdepends"),
             current_optdepends=_list_field(diff_input.current_optdepends, current, "optdepends"),
-            previous_install_hook_hash=diff_input.previous_install_hook_hash or str(previous.get("install_file_hash") or previous.get("install_hook_hash") or ""),
-            current_install_hook_hash=diff_input.current_install_hook_hash or str(current.get("install_file_hash") or current.get("install_hook_hash") or ""),
+            previous_install_hook_hash=previous_install_hook_hash,
+            current_install_hook_hash=current_install_hook_hash,
             previous_function_hashes=previous_function_hashes,
             current_function_hashes=current_function_hashes,
             previous_function_network_fetch=previous_network,
@@ -852,6 +857,29 @@ def _signature_sources(sources: Sequence[str]) -> Set[str]:
 def _hosts(sources: Sequence[str]) -> List[str]:
     hosts = sorted({(urlparse(source).hostname or "").lower() for source in sources if "://" in source})
     return [host for host in hosts if host]
+
+
+def _install_hook_hashes_for_diff(
+    diff_input: TrustBoundaryDiffInput,
+    previous: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> Tuple[str, str]:
+    if diff_input.previous_install_hook_hash or diff_input.current_install_hook_hash:
+        return (
+            diff_input.previous_install_hook_hash
+            or str(previous.get("install_file_hash") or previous.get("install_hook_hash") or ""),
+            diff_input.current_install_hook_hash
+            or str(current.get("install_file_hash") or current.get("install_hook_hash") or ""),
+        )
+    if "install_hook_input_digest" in previous and "install_hook_input_digest" in current:
+        return (
+            str(previous.get("install_hook_input_digest") or ""),
+            str(current.get("install_hook_input_digest") or ""),
+        )
+    return (
+        str(previous.get("install_file_hash") or previous.get("install_hook_hash") or ""),
+        str(current.get("install_file_hash") or current.get("install_hook_hash") or ""),
+    )
 
 
 def _list_field(explicit: Optional[Sequence[str]], snapshot: Mapping[str, Any], *keys: str) -> List[str]:

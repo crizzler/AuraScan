@@ -12,6 +12,11 @@ from typing import Callable, List, Optional, Sequence, TextIO
 
 from aurascan.analyzers.history import HistoryAnalyzer
 from aurascan.core.engine import AuraScanEngine
+from aurascan.core.install_hook import (
+    PackageScanInput,
+    PackageScanInputError,
+    capture_package_scan_input,
+)
 from aurascan.core.review import (
     ReviewDecision,
     ReviewDecisionStatus,
@@ -202,6 +207,18 @@ def run(
                 _print_blocked(stdout)
         return EXIT_SCAN_BLOCKED
 
+    scan_input = _matching_scan_input(engine, pkgbuild_path)
+    if scan_input is None:
+        return _emit_scan_input_changed(
+            options,
+            report,
+            pkgbuild_path,
+            stdout,
+            scan_warnings,
+        )
+
+    pending_acceptance = None
+    decision = None
     if _risk_requires_review(risk):
         fingerprint = None
         if candidates:
@@ -211,6 +228,7 @@ def run(
                 scanner_version=getattr(engine, "scanner_version", ""),
                 rule_version=getattr(engine, "rule_version", ""),
                 scan_config_hash=_scan_config_hash(options),
+                scan_input=scan_input,
             )
         annotate_report_for_review(
             report,
@@ -284,28 +302,12 @@ def run(
                 _print_invalid_review(stdout, status)
             return EXIT_MANUAL_REVIEW
 
-        decision = store.record_acceptance(
+        pending_acceptance = (
+            store,
             fingerprint,
-            reason=options.review_reason,
-            remember=options.remember_review and not options.review_once,
-            expires_at=_review_expires_at(options),
+            candidates,
         )
-        annotate_report_for_review(
-            report,
-            fingerprint=fingerprint,
-            blockers=[],
-            candidates=candidates,
-            acceptance_status=decision.decision_status.value,
-            decision_id=decision.decision_id,
-        )
-        _record_manual_review_acceptance(engine, pkgbuild_path, decision.decision_id)
-        if not options.json_output:
-            _print_review_accepted(stdout)
-    else:
-        decision = None
 
-    if not options.json_output:
-        _print_passed(stdout)
     makepkg_path = makepkg_locator()
     if not makepkg_path:
         error = "Could not locate a real makepkg executable in PATH."
@@ -324,6 +326,42 @@ def run(
             print(f"[AuraScan] {error}", file=stderr)
         return EXIT_MAKEPKG_NOT_FOUND
 
+    if _matching_scan_input(engine, pkgbuild_path) is None:
+        return _emit_scan_input_changed(
+            options,
+            report,
+            pkgbuild_path,
+            stdout,
+            scan_warnings,
+        )
+
+    if pending_acceptance is not None:
+        store, fingerprint, candidates = pending_acceptance
+        decision = store.record_acceptance(
+            fingerprint,
+            reason=options.review_reason,
+            remember=options.remember_review and not options.review_once,
+            expires_at=_review_expires_at(options),
+        )
+        annotate_report_for_review(
+            report,
+            fingerprint=fingerprint,
+            blockers=[],
+            candidates=candidates,
+            acceptance_status=decision.decision_status.value,
+            decision_id=decision.decision_id,
+        )
+        _record_manual_review_acceptance(
+            engine,
+            pkgbuild_path,
+            decision.decision_id,
+            scan_input=scan_input,
+        )
+        if not options.json_output:
+            _print_review_accepted(stdout)
+
+    if not options.json_output:
+        _print_passed(stdout)
     result = subprocess_run([makepkg_path] + options.makepkg_args, cwd=str(cwd_path), check=False)
     makepkg_exit_code = int(getattr(result, "returncode", 0))
     if options.json_output:
@@ -345,6 +383,47 @@ def run(
             warnings=scan_warnings,
         ))
     return makepkg_exit_code
+
+
+def _matching_scan_input(engine, pkgbuild_path: Path) -> Optional[PackageScanInput]:
+    expected_digest = str(getattr(engine, "last_scan_input_digest", "") or "")
+    if not expected_digest:
+        return None
+    try:
+        current = capture_package_scan_input(
+            pkgbuild_path,
+            allow_legacy_install=True,
+        )
+    except PackageScanInputError:
+        return None
+    if current.input_digest != expected_digest:
+        return None
+    return current
+
+
+def _emit_scan_input_changed(
+    options: MakepkgWrapperOptions,
+    report,
+    pkgbuild_path: Path,
+    stdout: TextIO,
+    scan_warnings,
+) -> int:
+    error = "PKGBUILD or install-hook input changed after scanning; makepkg was not invoked."
+    if options.json_output:
+        _emit_json(stdout, _wrapper_envelope(
+            options,
+            action="scan_input_changed",
+            wrapper_exit_code=EXIT_SCAN_BLOCKED,
+            pkgbuild_path=str(pkgbuild_path),
+            scan_report=report,
+            makepkg_invoked=False,
+            errors=[error],
+            warnings=scan_warnings,
+        ))
+    else:
+        print("[AuraScan] BLOCKED: package input changed after the scan.", file=stdout)
+        print("AuraScan did not invoke makepkg. Run the scan again on the stable files.", file=stdout)
+    return EXIT_SCAN_BLOCKED
 
 
 def parse_args(argv: List[str]) -> MakepkgWrapperOptions:
@@ -770,11 +849,14 @@ def _review_store(
         return None
 
 
-def _record_manual_review_acceptance(engine, pkgbuild_path: Path, review_decision_id: str) -> None:
-    try:
-        content = pkgbuild_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return
+def _record_manual_review_acceptance(
+    engine,
+    pkgbuild_path: Path,
+    review_decision_id: str,
+    *,
+    scan_input: PackageScanInput,
+) -> None:
+    content = scan_input.pkgbuild_content
     report = _report_from_engine(engine)
     trust_diff = None
     decision = report.get("fast_path_decision") or {}
@@ -786,6 +868,7 @@ def _record_manual_review_acceptance(engine, pkgbuild_path: Path, review_decisio
             analyzer.record_manual_review_accepted(
                 str(pkgbuild_path),
                 content,
+                install_hook_resolution=scan_input.install_hook,
                 review_decision_id=review_decision_id,
                 scanner_version=getattr(engine, "scanner_version", ""),
                 rule_version=getattr(engine, "rule_version", ""),

@@ -224,6 +224,35 @@ def test_install_hook_added_forces_full_scan():
     assert result.require_full_scan is True
 
 
+def test_exact_install_hook_identity_detects_target_change_with_same_content_hash():
+    previous = snapshot(
+        install_file_hash="same-content",
+        install_hook_input_digest="exact-first-target",
+    )
+    current = snapshot(
+        install_file_hash="same-content",
+        install_hook_input_digest="exact-second-target",
+    )
+
+    result = classify(previous, current)
+
+    assert result.classification == TrustBoundaryClassification.install_behavior_changed
+    assert "install_hook_changed" in result.reason_codes
+
+
+def test_legacy_install_hash_snapshot_is_compatible_with_new_exact_snapshot():
+    previous = snapshot(install_file_hash="same-content")
+    current = snapshot(
+        install_file_hash="same-content",
+        install_hook_input_digest="new-exact-identity",
+    )
+
+    result = classify(previous, current)
+
+    assert "install_hook_changed" not in result.reason_codes
+    assert "install_hook" not in result.changed_fields
+
+
 def test_same_source_url_with_unexpected_checksum_change_blocks_fast_path():
     result = classify(snapshot(), snapshot(checksums=["bbb"]))
 

@@ -1,0 +1,15 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-aur-repo-propagation
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged AUR repository propagation install-hook fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-aur-repo-propagation"
+license=("MIT")
+install=.curated-aur-repo-propagation.install
+source=("https://example.invalid/curated-aur-repo-propagation-1.0.tar.gz")
+sha256sums=("8181818181818181818181818181818181818181818181818181818181818181")
+
+package() {
+  echo "defanged package step"
+}

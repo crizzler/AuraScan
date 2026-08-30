@@ -32,14 +32,21 @@ class ScanCache:
         config_flags: Optional[Dict[str, Any]] = None,
         scan_phase: str = "",
         history_snapshot_hash: str = "",
+        input_digest: str = "",
     ) -> str:
         sha256_hash = hashlib.sha256()
-        try:
-            with open(file_path, "rb") as f:
-                for byte_block in iter(lambda: f.read(4096), b""):
-                    sha256_hash.update(byte_block)
-        except Exception:
-            return "" # Cannot hash, skip cache
+        if input_digest:
+            if len(input_digest) != 64 or any(character not in "0123456789abcdef" for character in input_digest.lower()):
+                return ""
+            sha256_hash.update(b"precomputed-scan-input\0")
+            sha256_hash.update(input_digest.lower().encode("ascii"))
+        else:
+            try:
+                with open(file_path, "rb") as f:
+                    for byte_block in iter(lambda: f.read(4096), b""):
+                        sha256_hash.update(byte_block)
+            except Exception:
+                return ""  # Cannot hash, skip cache
 
         key_material = {
             "scanner_version": scanner_version,
@@ -49,6 +56,7 @@ class ScanCache:
             "config_flags": config_flags or {},
             "scan_phase": scan_phase,
             "history_snapshot_hash": history_snapshot_hash,
+            "input_digest": input_digest,
         }
         sha256_hash.update(json.dumps(key_material, sort_keys=True).encode("utf-8"))
         return sha256_hash.hexdigest()

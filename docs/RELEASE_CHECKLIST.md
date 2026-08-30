@@ -12,6 +12,15 @@ candidate.
 - `.venv/bin/python tools/audit_presenter_coverage.py --strict-medium` passes.
 - Curated fixture tests pass.
 - Deep-static fixture tests pass.
+- AUR repository-propagation tests cover canonical endpoint forms, direct and
+  configured-remote AUR push binding, incomplete correlations, comments and
+  quoted documentation, dry-run pushes, explicitly non-AUR pushes, and the
+  arbitrary acquired-source release-tooling negative.
+- Declared install-hook tests cover literal and dot-prefixed targets, bounded
+  no-follow reads, missing and unreadable files, ambiguous or unsafe
+  declarations, every component of the declared relative hook path under the
+  package directory, replacement races, cache transitions, fast paths, review
+  binding, history, trust diff, and wrapper refusal before makepkg.
 - Instruction Guard fixtures and CLI, state, AI, service, notification, tray,
   disable/restore, and packaging contract tests pass.
 - Metadata-only warning sample has been reviewed.
@@ -64,6 +73,32 @@ candidate.
 - Pacman hook failure recovery is documented.
 - `aurascan-makepkg` is documented as build-time protection.
 - Pacman hook is documented as archive/install-stage protection.
+- For v0.9.2, the package-scanner rule version is `1.3.0`; results cached under
+  `1.2.0` cannot authorize a package under the new deterministic semantics.
+- `SUPPLYCHAIN-AUR-REPO-PROPAGATION-001` remains a CRITICAL, non-reviewable
+  blocker limited to deterministic PKGBUILD and declared install-hook control
+  text. It requires a canonical AUR Git target, repository mutation or staging,
+  and a non-dry-run push bound to that AUR endpoint or configured remote.
+- An AUR URL, clone/fetch behavior, explicitly non-AUR push, dot-prefixed
+  filename, comment, quoted documentation, or incomplete behavior family does
+  not independently establish AUR repository propagation. Arbitrary release
+  tooling found only in acquired deep-static source remains negative.
+- AUR repository-propagation evidence remains fixed and secret-free. Its
+  explanation describes a potential static propagation chain without claiming
+  that package code ran, credentials were available, a push succeeded, or an
+  account or machine was compromised.
+- Every literal local `install=` target, including a dot-prefixed hook, is
+  mandatory evidence before any cached or fast-path allow and before makepkg.
+  `INSTALL-HOOK-UNINSPECTED-001` remains a HIGH, non-reviewable blocker when the
+  declared hook cannot be inspected safely.
+- Install-hook resolution rejects missing, unreadable, unsafe, ambiguous, and
+  non-regular targets and any symlinked component of the declared relative hook
+  path under the package directory. It never sources the PKGBUILD or executes
+  the hook.
+- The exact captured hook identity, or its bounded failure-state identity,
+  participates in cache, history, trust-diff, and review binding. A matching
+  failure-state blocker may be cached, but an unresolved or changed hook cannot
+  reuse or store an allow decision or review acceptance.
 - Instruction Guard recognizes the documented Claude Code, shared `AGENTS.md`,
   and Agent Skill surfaces without traversing symlink directories or executing,
   importing, rendering, or sourcing their contents.

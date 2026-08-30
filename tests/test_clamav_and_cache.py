@@ -66,3 +66,45 @@ def test_cache_invalidates_when_file_hash_changes(tmp_path: Path):
     target.write_text("new content")
 
     assert cache.get_cached_result(str(target), "2.5.0", "1.0.0") is None
+
+
+def test_cache_uses_precomputed_exact_input_without_reopening_target(tmp_path: Path):
+    cache = ScanCache(tmp_path)
+    missing_target = tmp_path / "PKGBUILD"
+    exact_input_digest = "a" * 64
+    result = {"findings": [], "identity": "captured-input"}
+
+    cache.set_cached_result(
+        str(missing_target),
+        "2.5.0",
+        "1.3.0",
+        result,
+        input_digest=exact_input_digest,
+    )
+
+    assert cache.get_cached_result(
+        str(missing_target),
+        "2.5.0",
+        "1.3.0",
+        input_digest=exact_input_digest,
+    ) == result
+
+
+def test_cache_invalidates_when_precomputed_exact_input_changes(tmp_path: Path):
+    cache = ScanCache(tmp_path)
+    target = tmp_path / "PKGBUILD"
+    target.write_text("pkgname=demo\n", encoding="utf-8")
+    cache.set_cached_result(
+        str(target),
+        "2.5.0",
+        "1.3.0",
+        {"findings": []},
+        input_digest="a" * 64,
+    )
+
+    assert cache.get_cached_result(
+        str(target),
+        "2.5.0",
+        "1.3.0",
+        input_digest="b" * 64,
+    ) is None

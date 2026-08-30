@@ -1,7 +1,9 @@
+import os
 import re
 import shlex
 from typing import List
 from aurascan.analyzers.base import BaseAnalyzer
+from aurascan.analyzers.aur_propagation import find_aur_repository_propagation_signals
 from aurascan.analyzers.remote_access import (
     find_remote_access_backdoor_signals,
     mask_shell_quoted_text,
@@ -194,6 +196,34 @@ class DeterministicAnalyzer(BaseAnalyzer):
                 evidence_snippet="Correlated signals: " + "; ".join(signal.label for signal in signals),
                 line_number=min(signal.line_number for signal in signals),
             ))
+        if phase in {Phase.pkgbuild_static, Phase.install_hook_static}:
+            propagation_signals = find_aur_repository_propagation_signals(
+                content,
+                dot_prefixed_hook=(
+                    phase == Phase.install_hook_static
+                    and os.path.basename(pkg_path).startswith(".")
+                ),
+            )
+            if propagation_signals:
+                findings.append(Finding(
+                    rule_id="SUPPLYCHAIN-AUR-REPO-PROPAGATION-001",
+                    package_name=pkg_name,
+                    package_version=pkg_ver,
+                    phase=phase,
+                    source=Source.deterministic_rule,
+                    severity=Severity.CRITICAL,
+                    confidence=Confidence.CONFIRMED,
+                    evidence_quality=EvidenceQuality.confirmed_static_pattern,
+                    file_path=pkg_path,
+                    explanation="Package logic correlates an AUR Git remote with repository mutation or staging and a Git push.",
+                    recommendation="Do not build or install this revision; preserve its package metadata and review the complete propagation logic from a trusted environment.",
+                    blocks_installation=True,
+                    requires_manual_review=False,
+                    evidence_snippet="Correlated signals: " + "; ".join(
+                        signal.label for signal in propagation_signals
+                    ),
+                    line_number=min(signal.line_number for signal in propagation_signals),
+                ))
         if phase == Phase.install_hook_static:
             findings.extend(self._inspect_privileged_install_hook(pkg_path, lines, pkg_name, pkg_ver))
         return findings

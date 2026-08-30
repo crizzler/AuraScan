@@ -75,6 +75,40 @@ def test_hyprland_fixes_source_ioc_template_is_plain_and_non_executing():
     assert "SUPPLYCHAIN-AUR-HYPRLAND-FIXES-20260828" not in output
 
 
+def test_aur_repository_propagation_template_explains_static_correlation():
+    output = render([
+        make_finding(
+            "SUPPLYCHAIN-AUR-REPO-PROPAGATION-001",
+            Severity.CRITICAL,
+            Source.deterministic_rule,
+            "Correlated signals: AUR Git remote; repository content mutation; Git push",
+        )
+    ])
+
+    assert "propagate changes into AUR repositories" in output
+    assert "modify and publish other AUR repositories" in output
+    assert "does not prove that a push ran, succeeded" in output
+    assert "without running them, contacting the AUR" in output
+    assert "SUPPLYCHAIN-AUR-REPO-PROPAGATION-001" not in output
+
+
+def test_uninspected_install_hook_template_explains_fail_closed_uncertainty():
+    output = render([
+        make_finding(
+            "INSTALL-HOOK-UNINSPECTED-001",
+            Severity.HIGH,
+            Source.deterministic_rule,
+            "declared install hook was not safely inspected",
+        )
+    ])
+
+    assert "install hook could not be inspected safely" in output
+    assert "bounded no-follow read" in output
+    assert "does not prove the package or hook is malicious" in output
+    assert "scan is incomplete" in output
+    assert "INSTALL-HOOK-UNINSPECTED-001" not in output
+
+
 def test_install_hook_sudo_template_explains_existing_privilege():
     output = render([
         make_finding(

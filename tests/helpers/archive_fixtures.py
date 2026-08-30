@@ -113,6 +113,21 @@ def _scenario_entries(scenario: str) -> Iterable[TarEntry]:
     if scenario == "source_minified_file":
         minified = ("var a=1;" * 180).encode("ascii") + b"\n"
         return [TarEntry("pkg/dist/app.min.js", minified)]
+    if scenario == "source_aur_release_tooling":
+        return [
+            TarEntry(
+                "pkg/tools/publish-aur.sh",
+                (
+                    b"#!/bin/sh\n"
+                    b"git remote set-url origin "
+                    b"ssh://aur@aur.archlinux.org/placeholder-package.git\n"
+                    b"git add PKGBUILD .SRCINFO\n"
+                    b"git commit -m 'fixture release metadata'\n"
+                    b"git push origin master\n"
+                ),
+                0o644,
+            )
+        ]
     if scenario == "deep_static_systemd_unit_file":
         return [
             TarEntry(

@@ -69,16 +69,25 @@ Use this workflow for changes in the AuraScan repository.
    sizes, and elapsed time.
 3. Correlate active behavior families and suppress quoted examples, fenced
    documentation, comments, and negated instructions where evidence permits.
+   Preserve bounded, one-based physical line ranges for contributing active
+   text and report semantic behavior labels and fixed reasons without source
+   snippets.
 4. Keep first-seen/change integrity review separate from content severity.
-   Machine-and-UID-bound approval cannot be restored onto a rebuilt host.
+   Describe a clean first-seen file as integrity-only review with AI
+   `not-needed`; prioritize actual suspicious findings in terminal output and
+   clearly label an incomplete continuation page. Machine-and-UID-bound
+   approval cannot be restored onto a rebuilt host.
 5. Keep the periodic deterministic service offline and credential-free. AI is
    separately enabled, raise-only, tool-free, strict-JSON, and limited to
-   bounded redacted evidence.
+   bounded opaque evidence IDs, fixed reasons, behavior labels, and
+   deterministic locations. Map advisory rationales to supplied evidence; AI
+   cannot invent lines, establish trust, or claim execution or compromise.
 6. Allow confirmed disable only for unchanged, user-owned, standalone regular
    instruction Markdown. Revalidate every condition at action time and restore
    only an unchanged receipt target when the original path is absent.
-7. Use generic count/severity notifications. Paths, usernames, snippets, and
-   secrets stay in private 0700/0600 state and interactive review output.
+7. Use generic count/severity notifications. Interactive review may identify a
+   private path, but usernames, source snippets, secrets, line details, and AI
+   output must not enter notifications or other public state.
 8. Retention may prune bounded report and alert history, but never manifest
    review state; update or remove AI-job references before deleting a report.
 9. Bind every persisted continuation cursor to the matching committed cycle

@@ -448,12 +448,24 @@ configuration where possible. A match reports suspicious static instructions;
 it does not prove that an assistant obeyed them or that credentials left the
 machine.
 
+Terminal review separates suspicious content from integrity-only review and
+lists suspicious files first. Each content finding includes deterministic,
+one-based line ranges from the bounded source file, semantic behavior labels,
+and a fixed explanation of why the correlation needs review. It does not print
+the source lines themselves. File-level integrity or parser findings say when
+no precise line is available rather than inventing a location. When bounded
+discovery is incomplete, the review identifies the displayed files as the
+current page and explains that a saved continuation still needs to complete.
+
 Content risk and integrity trust remain separate. Suspicious first-seen files
 alert immediately; otherwise clean first-seen files enter one unreviewed
-inventory. Approval records the exact hash and is bound to the local machine
-identity and UID, so restoring an old manifest onto a rebuilt machine does not
-silently establish trust. Reports, manifests, queued AI jobs, alert state, and
-disable receipts use private permissions under
+inventory. Their review state means that AuraScan has no machine-bound approval
+for the content; it does not mean that a suspicious pattern was found. AI
+analysis remains `not-needed` for a clean first-seen file with no deterministic
+content finding. Approval records the exact hash and is bound to the local
+machine identity and UID, so restoring an old manifest onto a rebuilt machine
+does not silently establish trust. Reports, manifests, queued AI jobs, alert
+state, and disable receipts use private permissions under
 `$XDG_STATE_HOME/aurascan/instruction-guard/`. Version 0.9.0 introduces the
 `instruction_guard_report/1.0` schema and Instruction Guard rule version 1.0;
 the existing package-scanner rule version is unchanged.
@@ -468,10 +480,13 @@ service runs after login and every five minutes with network access disabled,
 a read-only home, private writable state, low CPU/I/O priority, and AI
 credentials removed. A second, separately enabled user timer may process at
 most one pending AI job per run using the configured local or cloud provider.
-It sends at most 12 KiB of redacted suspicious evidence to a tool-free strict
-JSON review. AI is interpretation only: it may raise deterministic severity,
-but cannot lower it, trust an integrity change, or propose commands. Disabling
-Instruction Guard AI makes no provider request.
+It sends at most 12 KiB of opaque evidence IDs, fixed deterministic reasons,
+semantic behavior labels, and deterministic line locations to a tool-free
+strict JSON review. It sends no file path or source snippet. AI may return only
+advisory rationales mapped to those evidence IDs: it cannot invent or change a
+line location, lower deterministic severity, establish trust, claim execution
+or compromise, or propose commands. Disabling Instruction Guard AI makes no
+provider request.
 
 HIGH/CRITICAL and integrity alerts remain visible through CLI review state and
 the tray. When `notify-send` is available, desktop notifications contain only

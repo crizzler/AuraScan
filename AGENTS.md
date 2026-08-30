@@ -34,9 +34,10 @@ evidence actually collected.
   reads, never traverse symlink directories, and report links or imports that
   escape the selected root instead of following them.
 - Keep Instruction Guard's deterministic monitor network-isolated. Its AI
-  assistant is a separate opt-in, receives only bounded redacted evidence,
-  cannot lower deterministic severity, establish trust, or request tools, and
-  must never expose paths or snippets in desktop notifications.
+  assistant is a separate opt-in, receives only bounded opaque evidence IDs,
+  fixed reasons, semantic labels, and deterministic locations, cannot invent
+  lines, lower deterministic severity, establish trust, claim compromise, or
+  request tools, and must never receive paths or source snippets.
 - Keep tray monitor/AI toggles as asynchronous, no-shell clients of the
   transactional Instruction Guard CLI. Serialize mutations, bound combined
   child output and runtime, retire Qt children, and prevent tray shutdown from
@@ -44,6 +45,11 @@ evidence actually collected.
 - Keep instruction content risk separate from integrity approval. First-seen
   or changed files require review even when content looks benign; approval is
   bound to the current machine and UID. Never auto-quarantine a file.
+- Keep Instruction Guard review explanatory and evidence-bound. Prioritize
+  suspicious files; show deterministic one-based line ranges, semantic
+  behavior labels, and fixed reasons without source snippets. Describe clean
+  first-seen files as integrity-only review with AI `not-needed`, and identify
+  an incomplete continuation page instead of presenting it as a full scan.
 - Keep private Instruction Guard reports, alerts, and AI-job references
   retention-bounded without pruning manifest trust/review state or leaving a
   queued job pointed at a deleted report.

@@ -189,15 +189,28 @@ comments, negation, YAML frontmatter, and invalid JSON configuration. Static
 evidence must not be worded as proof that an assistant executed an instruction
 or that compromise succeeded.
 
+Preserve original, one-based physical line locations while normalizing active
+text. A content finding should carry bounded deterministic line ranges,
+semantic behavior labels, and a fixed reason, but no source snippet. Correlated
+multi-line behavior must identify the contributing ranges; file-level
+integrity, read, or parser findings must explicitly omit a precise location
+when one cannot be established safely. The terminal renderer prioritizes
+suspicious files, prints the deterministic reason and locations, and separates
+them from integrity-only inventory. A truncated page must be labeled as
+incomplete and explain that its committed continuation remains pending.
+
 Keep content risk distinct from integrity state. Suspicious first-seen files
 alert immediately; otherwise clean first-seen recognized files form one
-unreviewed inventory. Store SHA-256 plus device/inode, size, timestamps, mode,
-owner, and symlink state. An approval is valid only for the exact content and a
-binding derived from machine identity plus UID. Corrupt, symlinked, wrongly
-owned, or permission-weakened state must fail closed without overwriting it.
-State, reports, manifests, queued AI jobs, alerts, and disable receipts belong
-under an injected `$XDG_STATE_HOME/aurascan/instruction-guard/` root with
-private directory/file modes.
+unreviewed inventory. Render that state as an integrity-only approval request,
+not as a suspicious-content finding; AI remains `not-needed` when the clean
+first-seen file has no deterministic content finding. Store SHA-256 plus
+device/inode, size, timestamps, mode, owner, and symlink state. An approval is
+valid only for the exact content and a binding derived from machine identity
+plus UID. Corrupt, symlinked, wrongly owned, or permission-weakened state must
+fail closed without overwriting it. State, reports, manifests, queued AI jobs,
+alerts, and disable receipts belong under an injected
+`$XDG_STATE_HOME/aurascan/instruction-guard/` root with private directory/file
+modes.
 Keep history bounded: retain the current report plus at most the newest 32
 reports within a 256 MiB aggregate budget, and at most 2,048 secret-free alert
 envelopes. Retention may discard old presentation records, but it must not
@@ -210,11 +223,13 @@ priority, and all supported AI credentials unset. Detection is a successful
 service run: background capture records findings and exits zero so systemd does
 not call a security alert a crashed unit. A separately enabled assistant timer
 processes at most one pending job per run. Its prompt contains at most 12 KiB
-of redacted suspicious evidence, grants no tools, and requires strict JSON.
-AI output is raise-only interpretation: it cannot lower deterministic severity,
-trust an integrity change, or supply executable commands. Disabled AI must make
-zero provider calls; malformed or timed-out output preserves deterministic
-findings.
+of opaque evidence IDs, fixed deterministic reasons, semantic behavior labels,
+and deterministic locations; it contains no path or source snippet, grants no
+tools, and requires strict JSON. AI rationales must map back to supplied
+evidence IDs. AI cannot create or change line locations, lower deterministic
+severity, trust an integrity change, claim execution or compromise, or supply
+executable commands. Disabled AI must make zero provider calls; malformed or
+timed-out output preserves deterministic findings and their locations.
 
 The updater tray's checkable monitor and AI controls must remain thin clients
 over `aurascan instruction-audit --status/--enable-*/--disable-*`. Run those

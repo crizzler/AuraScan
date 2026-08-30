@@ -7,7 +7,9 @@ from aurascan.analyzers.source_metadata import SourceMetadataAnalyzer
 from aurascan.cli import build_parser
 from aurascan.core.cache import ScanCache
 from aurascan.core.engine import AuraScanEngine
+import aurascan.core.engine as engine_module
 from aurascan.core.models import AnalysisResult, Confidence, EvidenceQuality, Finding, Phase, ScanReport, Severity, Source
+from aurascan.core.package_archive import PackageIdentityCapture, PACKAGE_IDENTITY_RESOLVED
 from aurascan.core.update_policy import UpdateScanPolicy
 from pathlib import Path
 import io
@@ -283,9 +285,18 @@ def test_package_archive_filename_populates_report_metadata(tmp_path, capsys):
     assert "Audit Complete: wl-clipboard 1:2.3.0-1.1" in output
 
 
-def test_package_archive_uses_bounded_pkginfo_identity(tmp_path, capsys):
+def test_package_archive_uses_captured_pkginfo_identity(tmp_path, capsys, monkeypatch):
     package = tmp_path / "misleading-0-0-any.pkg.tar"
     write_package_identity(package)
+    monkeypatch.setattr(
+        engine_module,
+        "capture_package_identity",
+        lambda _path: PackageIdentityCapture(
+            PACKAGE_IDENTITY_RESOLVED,
+            name="fixture-tools",
+            version="1:2.3-4",
+        ),
+    )
     engine = AuraScanEngine()
     engine.cache = ScanCache(tmp_path / "cache")
     engine.analyzers = [NoopAnalyzer()]

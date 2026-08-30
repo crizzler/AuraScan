@@ -114,7 +114,14 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 def safe_provider_error_detail(error: BaseException) -> str:
     """Return a bounded error label that never includes request data or URLs."""
-    category = getattr(error, "category", "")
+    # Some stdlib exceptions (notably HTTPError on Python 3.8) implement a
+    # delegating ``__getattr__`` that can itself fail when their optional file
+    # object is absent.  Read only an explicitly stored category so sanitizing
+    # an error can never invoke exception-controlled attribute behavior.
+    try:
+        category = str(vars(error).get("category", ""))
+    except (TypeError, ValueError):
+        category = ""
     if not category:
         if isinstance(error, urllib.error.HTTPError):
             category = "http"

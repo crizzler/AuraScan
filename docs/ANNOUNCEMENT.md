@@ -9,11 +9,17 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
-The v0.9.2 release adds a CRITICAL offline blocker for package logic that
-modifies an AUR repository and pushes the result back to the bound AUR remote.
-It also makes declared local install hooks mandatory scan evidence: changed,
-missing, ambiguous, symlinked, or otherwise uninspectable hooks stop before
-makepkg instead of reusing an older clear report.
+The v0.10.0 release makes hostile package and model content data-only. AI
+responses have strict raise-only schemas and no download, repository, shell,
+tool, policy, or execution authority. The foreground Repair Agent is now a
+policy-gated allowlist for read-only diagnostics and constrained exact pacman
+operations, with fresh confirmation for every command.
+
+New deterministic blockers correlate remote downloads with later execution
+across bounded variables, pipelines, decoders, install hooks, built-package
+control files, and acquired source. They also catch image, document, font, or
+media-named files when package logic actually decodes or invokes them as code,
+without treating an ordinary bundled asset as malware.
 
 Agent Instruction Guard reviews now show the suspicious behavior, deterministic
 line range, and reason behind a finding. The existing tray toggles still control
@@ -114,11 +120,22 @@ behavior, checksum/signature drift, local history changes, and optional ClamAV
 or AI signals. It can also be used through `aurascan-makepkg` so the review
 happens before makepkg runs package functions.
 
-The v0.9.2 security update blocks a generic AUR-maintainer-worm chain only when
-package control text combines an AUR Git destination, repository mutation or
-staging, and a non-dry-run push bound to that destination. Ordinary upstream
-release scripts found only in acquired source remain outside the rule. Static
-evidence does not prove a push ran, credentials worked, or compromise occurred.
+The v0.10.0 security update separates AI interpretation from authority. Model
+output cannot select network targets, create commands, lower deterministic
+risk, establish trust, or authorize a repair. Accepted prose remains untrusted
+interpretation, and rejected instructions or destinations become fixed
+secret-free explanations.
+
+Remote-stage analysis now follows bounded artifact identity through variables,
+pipeline filters, redirections, decoders, copies, and interpreters. Unknown
+transformations that feed later execution stop as incomplete inspection rather
+than being called clear or malicious. Images and other opaque bytes are never
+rendered or sent to a multimodal model.
+
+The earlier AUR-maintainer-worm blocker remains limited to package control text
+that combines an AUR Git destination, repository mutation or staging, and a
+non-dry-run push bound to that destination. Static evidence does not prove a
+push ran, credentials worked, or compromise occurred.
 
 Declared local install hooks now use bounded no-follow reads and exact cache,
 history, trust-diff, and review binding. The makepkg wrapper revalidates the

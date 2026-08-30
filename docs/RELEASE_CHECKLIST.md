@@ -87,7 +87,7 @@ candidate.
 - Pacman hook is documented as archive/install-stage protection.
 - For v0.9.2, the package-scanner rule version is `1.3.0`; results cached under
   `1.2.0` cannot authorize a package under the new deterministic semantics.
-- The current unreleased package-scanner rule version is `1.4.0`; cached
+- For v0.10.0, the package-scanner rule version is `1.4.0`; cached
   results from earlier rule versions cannot authorize the new remote-stage,
   built-package hook, source-acquisition, or bounded deep-static semantics.
 - `SUPPLYCHAIN-REMOTE-STAGE-EXEC-001` and

@@ -20,7 +20,7 @@ def test_pyproject_console_scripts_are_registered():
     data = tomllib.loads(read_text("pyproject.toml"))
 
     scripts = data["project"]["scripts"]
-    assert data["project"]["version"] == "0.9.2"
+    assert data["project"]["version"] == "0.10.0"
     assert scripts["aurascan"] == "aurascan.cli:main"
     assert scripts["aurascan-makepkg"] == "aurascan.makepkg_wrapper:main"
     assert data["project"]["requires-python"] == ">=3.8"
@@ -294,7 +294,6 @@ def test_aur_maintainer_worm_v092_release_contract():
     skill = normalized("SKILL.md")
     checklist = normalized("docs/RELEASE_CHECKLIST.md")
     release = normalized("docs/releases/v0.9.2.md")
-    unreleased = normalized("docs/releases/unreleased.md")
     engine_source = read_text("aurascan/core/engine.py")
 
     propagation = get_rule_metadata("SUPPLYCHAIN-AUR-REPO-PROPAGATION-001")
@@ -322,8 +321,6 @@ def test_aur_maintainer_worm_v092_release_contract():
     ]
     for phrase in release_phrases:
         assert phrase in release
-    assert "changes after v0.9.2 will be recorded here" in unreleased
-
     readme_phrases = [
         "`supplychain-aur-repo-propagation-001` applies only to deterministic pkgbuild or declared install-hook control text",
         "non-dry-run push bound to the aur endpoint or configured remote",
@@ -359,6 +356,47 @@ def test_aur_maintainer_worm_v092_release_contract():
     assert shared_path_contract in skill
 
 
+def test_hostile_content_v0100_release_contract():
+    def normalized(relative: str) -> str:
+        return " ".join(read_text(relative).lower().split())
+
+    release = normalized("docs/releases/v0.10.0.md")
+    unreleased = normalized("docs/releases/unreleased.md")
+    checklist = normalized("docs/RELEASE_CHECKLIST.md")
+    pkgbuild = read_text("packaging/arch/PKGBUILD")
+    srcinfo = read_text("packaging/arch/.SRCINFO")
+    engine_source = read_text("aurascan/core/engine.py")
+    recovery_source = read_text("aurascan/core/recovery_cli.py")
+
+    required_release_phrases = [
+        "# aurascan v0.10.0",
+        "released on 2026-08-30",
+        "hostile ai and repair boundaries",
+        "ai cannot lower deterministic severity",
+        "policy-gated repair agent replaces general shell behavior",
+        "remote stages and opaque carriers",
+        "unknown transformations that feed a later executed sink become high incomplete-inspection blockers",
+        "images and other opaque bytes are never rendered or sent to a multimodal model",
+        "source, archive, and tool hardening",
+        "application and arch/aur package advance to v0.10.0",
+        "rule version advances from `1.3.0` to `1.4.0`",
+        "scanner version remains `2.5.0`",
+        "instruction guard report schema and rule version remain `1.0`",
+    ]
+    for phrase in required_release_phrases:
+        assert phrase in release
+
+    assert "changes after v0.10.0 will be recorded here" in unreleased
+    assert "for v0.10.0, the package-scanner rule version is `1.4.0`" in checklist
+    assert "pkgver=0.10.0" in pkgbuild
+    assert "pkgrel=1" in pkgbuild
+    assert "\tpkgver = 0.10.0" in srcinfo
+    assert "aurascan-0.10.0.tar.gz" in srcinfo
+    assert 'self.scanner_version = "2.5.0"' in engine_source
+    assert 'self.rule_version = "1.4.0"' in engine_source
+    assert 'return "0.10.0-dev"' in recovery_source
+
+
 def test_release_checklist_references_required_validation_and_safety_items():
     checklist = read_text("docs/RELEASE_CHECKLIST.md")
 
@@ -386,7 +424,7 @@ def test_release_checklist_references_required_validation_and_safety_items():
         "Hardware-aware follow-up runs only in an opted-in foreground AI workflow",
         "SUPPLYCHAIN-AUR-REPO-PROPAGATION-001",
         "INSTALL-HOOK-UNINSPECTED-001",
-        "current unreleased package-scanner rule version is `1.4.0`",
+        "For v0.10.0, the package-scanner rule version is `1.4.0`",
     ]
     for phrase in required_phrases:
         assert phrase in checklist

@@ -205,6 +205,45 @@ def test_monitor_and_assistant_user_units_enable_disable_without_real_systemd(tm
     ]
 
 
+def test_ai_enable_refuses_unready_provider_without_changing_private_state(
+    monkeypatch,
+    tmp_path,
+):
+    config = tmp_path / "aurascan.env"
+    original = (
+        f"{INSTRUCTION_AI_ENABLED_ENV}=0\n"
+        "AURASCAN_LOCAL_AI_API_KEY=fixture-secret\n"
+    ).encode("utf-8")
+    config.write_bytes(original)
+    config.chmod(0o600)
+    calls = []
+
+    monkeypatch.setattr(
+        instruction_cli,
+        "resolve_ai_config",
+        lambda _env=None: types.SimpleNamespace(ready=False),
+    )
+    monkeypatch.setattr(
+        instruction_cli,
+        "write_user_env",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("provider refusal must not write configuration")
+        ),
+    )
+
+    ok, message = set_instruction_ai_enabled(
+        True,
+        runner=lambda command, **_kwargs: calls.append(list(command)),
+        env_path=config,
+    )
+
+    assert ok is False
+    assert "ready configured AI provider" in message
+    assert calls == []
+    assert config.read_bytes() == original
+    assert config.stat().st_mode & 0o777 == 0o600
+
+
 def test_monitor_unit_rolls_back_when_private_config_write_fails(monkeypatch, tmp_path):
     calls = []
 

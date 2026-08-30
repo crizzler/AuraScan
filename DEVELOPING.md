@@ -216,6 +216,18 @@ trust an integrity change, or supply executable commands. Disabled AI must make
 zero provider calls; malformed or timed-out output preserves deterministic
 findings.
 
+The updater tray's checkable monitor and AI controls must remain thin clients
+over `aurascan instruction-audit --status/--enable-*/--disable-*`. Run those
+commands with an asynchronous, no-shell child process; retain its lifetime,
+serialize changes, bound output and runtime, and refresh state after each
+operation and whenever the menu opens. Status exit codes 0 and 1 are both valid
+JSON states because pending review is not a control failure. Never call the
+configuration setters or live systemd synchronously from the GUI thread. Do
+not expose child stdout/stderr in notifications, tooltips, or other public tray
+state. Disable or defer the tray's own Quit action while a mutating control is
+running so parent teardown cannot interrupt a rollback. Provider readiness and
+transaction rollback remain owned by the CLI.
+
 Desktop notifications and tray/public alert state are secret-free: retain only
 generic severity/count/review wording, never paths, snippets, usernames,
 credentials, or AI output. Deduplicate by candidate identity, content hash, and

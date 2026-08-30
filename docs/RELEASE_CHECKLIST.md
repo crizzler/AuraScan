@@ -123,6 +123,10 @@ candidate.
 - Clean weekly scans are silent; only HIGH/CRITICAL or repeated crashes notify.
 - The tray exposes one incident-resolution action and clearly distinguishes
   repaired findings from reviewed historical evidence.
+- Instruction Guard tray toggles use the asynchronous no-shell transactional
+  CLI, serialize mutations, bound combined child output and runtime, retire Qt
+  process/timer children, keep notifications secret-free, and disable the
+  tray's own Quit action until rollback-sensitive operations finish.
 - Incident repair actions are allowlisted and freshly revalidated as root.
 - AI-generated commands and fabricated incident evidence/action IDs are
   rejected outside an explicitly granted foreground Repair Agent shell session.

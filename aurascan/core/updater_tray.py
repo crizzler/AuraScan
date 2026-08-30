@@ -42,8 +42,13 @@ UPDATER_DESKTOP_NAME = f"{UPDATER_APP_ID}.desktop"
 UPDATER_ICON_NAME = UPDATER_APP_ID
 UPDATER_TOOLTIP = "AuraScan Updater - guarded package upgrades"
 UPDATER_INCIDENT_REFRESH_MS = 5_000
+INSTRUCTION_CONTROL_TIMEOUT_MS = 120_000
+INSTRUCTION_CONTROL_OUTPUT_LIMIT = 65_536
 INCIDENT_REVIEW_COMMAND = ("aurascan", "incidents", "--resolve")
 INSTRUCTION_REVIEW_COMMAND = ("aurascan", "instruction-audit", "--review")
+INSTRUCTION_STATUS_COMMAND = ("aurascan", "instruction-audit", "--status")
+INSTRUCTION_MONITOR_ACTION_LABEL = "Instruction Guard Background Scan"
+INSTRUCTION_AI_ACTION_LABEL = "Instruction Guard AI Analysis"
 UPDATER_STATE_ICONS = {
     "normal": UPDATER_ICON_NAME,
     "due": f"{UPDATER_ICON_NAME}-maintenance",
@@ -106,6 +111,16 @@ class TrayInstructionState:
     pending_alert_count: int
     review_candidate_count: int
     unavailable: bool = False
+
+
+@dataclass
+class TrayInstructionControlState:
+    monitor_enabled: bool = False
+    ai_enabled: bool = False
+    monitor_drift: bool = False
+    ai_drift: bool = False
+    monitor_available: bool = False
+    ai_available: bool = False
 
 
 @dataclass
@@ -577,6 +592,478 @@ def build_instruction_guard_notification(alerts: Sequence[Mapping[str, object]])
     )
 
 
+def resolve_tray_instruction_controls(
+    payload: object,
+) -> TrayInstructionControlState:
+    """Validate a secret-free ``instruction-audit --status --json`` result."""
+
+    if not isinstance(payload, Mapping) or payload.get("config_error"):
+        return TrayInstructionControlState()
+
+    def control_state(prefix: str, consent_key: str):
+        consent = payload.get(consent_key)
+        installed = payload.get(f"{prefix}_installed")
+        enabled = payload.get(f"{prefix}_timer_enabled")
+        active = payload.get(f"{prefix}_timer_active")
+        if (
+            not isinstance(consent, bool)
+            or not isinstance(installed, bool)
+            or not isinstance(enabled, str)
+            or not isinstance(active, str)
+        ):
+            return False, False, False
+        enabled = enabled.strip().lower()
+        active = active.strip().lower()
+        enabled_known = enabled in {"enabled", "disabled", "not-found"}
+        active_known = active in {"active", "inactive", "failed", "not-found"}
+        if not installed or not enabled_known or not active_known:
+            return False, False, False
+        healthy_enabled = consent and enabled == "enabled" and active == "active"
+        healthy_disabled = (
+            not consent
+            and enabled == "disabled"
+            and active == "inactive"
+        )
+        return healthy_enabled, not (healthy_enabled or healthy_disabled), True
+
+    monitor_enabled, monitor_drift, monitor_available = control_state(
+        "monitor",
+        "monitor_enabled",
+    )
+    ai_enabled, ai_drift, ai_available = control_state(
+        "assistant",
+        "ai_enabled",
+    )
+    return TrayInstructionControlState(
+        monitor_enabled=monitor_enabled,
+        ai_enabled=ai_enabled,
+        monitor_drift=monitor_drift,
+        ai_drift=ai_drift,
+        monitor_available=monitor_available,
+        ai_available=ai_available,
+    )
+
+
+class InstructionGuardMenuController:
+    """Run serialized, no-shell Instruction Guard controls off the GUI thread."""
+
+    def __init__(
+        self,
+        *,
+        monitor_action,
+        ai_action,
+        notify: Callable[[str, str], object],
+        route_notification: Callable[[Sequence[str]], object],
+        process_factory: Callable[[], object],
+        program: str,
+        timeout_scheduler: Optional[
+            Callable[[object, Callable[[], None]], object]
+        ] = None,
+    ) -> None:
+        self.monitor_action = monitor_action
+        self.ai_action = ai_action
+        self.notify = notify
+        self.route_notification = route_notification
+        self.process_factory = process_factory
+        self.program = program
+        self.timeout_scheduler = timeout_scheduler
+        self.synchronizing = False
+        self.current_process = None
+        self.current_operation = None
+        self.current_timeout = None
+        self.current_stdout = bytearray()
+        self.current_output_bytes = 0
+        self.current_failed = False
+        self.quit_action = None
+        self.mutation_active = False
+
+    def bind_quit_action(self, action) -> None:
+        self.quit_action = action
+        action.setEnabled(not self.mutation_active)
+
+    def _set_mutation_active(self, active: bool) -> None:
+        self.mutation_active = bool(active)
+        if self.quit_action is not None:
+            self.quit_action.setEnabled(not self.mutation_active)
+
+    def _checking(self) -> None:
+        self.monitor_action.setEnabled(False)
+        self.ai_action.setEnabled(False)
+        tooltip = "Checking Instruction Guard background controls..."
+        self.monitor_action.setToolTip(tooltip)
+        self.ai_action.setToolTip(tooltip)
+
+    def _unavailable(self) -> None:
+        self.synchronizing = True
+        try:
+            self.monitor_action.setChecked(False)
+            self.ai_action.setChecked(False)
+            self.monitor_action.setEnabled(False)
+            self.ai_action.setEnabled(False)
+            tooltip = "Instruction Guard controls need review in AuraScan Settings or aurascan doctor."
+            self.monitor_action.setToolTip(tooltip)
+            self.ai_action.setToolTip(tooltip)
+        finally:
+            self.synchronizing = False
+
+    def apply_status(self, payload: object) -> TrayInstructionControlState:
+        state = resolve_tray_instruction_controls(payload)
+        self.synchronizing = True
+        try:
+            self.monitor_action.setChecked(state.monitor_enabled)
+            self.ai_action.setChecked(state.ai_enabled)
+            self.monitor_action.setEnabled(
+                state.monitor_available and not state.monitor_drift
+            )
+            self.ai_action.setEnabled(state.ai_available and not state.ai_drift)
+            if state.monitor_drift:
+                monitor_tooltip = "Monitor consent and timer state disagree; repair them in AuraScan Settings."
+            elif state.monitor_available:
+                monitor_tooltip = (
+                    "Run the network-isolated deterministic agent-file scan after login and every five minutes."
+                )
+            else:
+                monitor_tooltip = "Instruction Guard monitor controls are unavailable; run aurascan doctor."
+            if state.ai_drift:
+                ai_tooltip = "AI consent and timer state disagree; repair them in AuraScan Settings."
+            elif state.ai_available:
+                ai_tooltip = (
+                    "Allow separately scheduled raise-only analysis through the configured AI provider."
+                )
+            else:
+                ai_tooltip = "Instruction Guard AI controls are unavailable; check AuraScan Settings."
+            self.monitor_action.setToolTip(monitor_tooltip)
+            self.ai_action.setToolTip(ai_tooltip)
+        finally:
+            self.synchronizing = False
+        return state
+
+    @staticmethod
+    def _delete_later(value) -> None:
+        if value is None:
+            return
+        try:
+            value.deleteLater()
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
+    @staticmethod
+    def _process_is_running(process) -> bool:
+        try:
+            state = process.state()
+        except (AttributeError, RuntimeError, TypeError):
+            return False
+        name = str(getattr(state, "name", "") or "")
+        if name:
+            return name != "NotRunning"
+        try:
+            return int(state) != 0
+        except (TypeError, ValueError):
+            return bool(state)
+
+    @staticmethod
+    def _normal_exit(exit_status: object) -> bool:
+        if exit_status is None:
+            return True
+        name = str(getattr(exit_status, "name", "") or "")
+        if name:
+            return name == "NormalExit"
+        try:
+            return int(exit_status) == 0
+        except (TypeError, ValueError):
+            return False
+
+    def _retire_process(self, process):
+        if process is not self.current_process:
+            return None, b"", False
+        operation = self.current_operation
+        stdout = bytes(self.current_stdout)
+        failed = self.current_failed
+        timeout = self.current_timeout
+        was_mutation = bool(operation and operation[0] != "status")
+        self.current_process = None
+        self.current_operation = None
+        self.current_timeout = None
+        self.current_stdout = bytearray()
+        self.current_output_bytes = 0
+        self.current_failed = False
+        if timeout is not None:
+            try:
+                timeout.stop()
+            except (AttributeError, RuntimeError, TypeError):
+                pass
+            self._delete_later(timeout)
+        self._delete_later(process)
+        if was_mutation:
+            self._set_mutation_active(False)
+        return operation, stdout, failed
+
+    def _drain_stdout(self, process) -> None:
+        try:
+            chunk = bytes(process.readAllStandardOutput())
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            chunk = b""
+        if process is not self.current_process or not chunk:
+            return
+        self.current_output_bytes = min(
+            INSTRUCTION_CONTROL_OUTPUT_LIMIT + 1,
+            self.current_output_bytes + len(chunk),
+        )
+        remaining = INSTRUCTION_CONTROL_OUTPUT_LIMIT + 1 - len(self.current_stdout)
+        if remaining > 0:
+            self.current_stdout.extend(chunk[:remaining])
+        if (
+            len(chunk) > remaining
+            or len(self.current_stdout) > INSTRUCTION_CONTROL_OUTPUT_LIMIT
+            or self.current_output_bytes > INSTRUCTION_CONTROL_OUTPUT_LIMIT
+        ):
+            self._stop_for_output_limit(process)
+
+    def _drain_stderr(self, process) -> None:
+        try:
+            chunk = bytes(process.readAllStandardError())
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            chunk = b""
+        if process is not self.current_process or not chunk:
+            return
+        self.current_output_bytes = min(
+            INSTRUCTION_CONTROL_OUTPUT_LIMIT + 1,
+            self.current_output_bytes + len(chunk),
+        )
+        if self.current_output_bytes > INSTRUCTION_CONTROL_OUTPUT_LIMIT:
+            self._stop_for_output_limit(process)
+
+    def _stop_for_output_limit(self, process) -> None:
+        if process is not self.current_process:
+            return
+        self.current_failed = True
+        was_running = self._process_is_running(process)
+        try:
+            process.kill()
+        except (AttributeError, RuntimeError, OSError, TypeError):
+            pass
+        if not was_running:
+            self._finalize_failed(process)
+
+    def _finalize_failed(self, process) -> None:
+        operation, _stdout, _failed = self._retire_process(process)
+        if operation is None:
+            return
+        if operation[0] == "status":
+            self._unavailable()
+            return
+        self._notify_toggle(False, operation[0], operation[1])
+        self.refresh()
+
+    def _start(self, arguments: Sequence[str], operation) -> bool:
+        if self.current_process is not None:
+            return False
+        self._checking()
+        process = None
+        try:
+            process = self.process_factory()
+            process.setProgram(self.program)
+            process.setArguments(list(arguments))
+            try:
+                process.setReadBufferSize(INSTRUCTION_CONTROL_OUTPUT_LIMIT + 1)
+            except (AttributeError, RuntimeError, TypeError):
+                pass
+            process.readyReadStandardOutput.connect(
+                lambda selected=process: self._drain_stdout(selected)
+            )
+            process.readyReadStandardError.connect(
+                lambda selected=process: self._drain_stderr(selected)
+            )
+            process.finished.connect(
+                lambda exit_code, exit_status=None, selected=process: self._finished(
+                    selected,
+                    int(exit_code),
+                    exit_status,
+                )
+            )
+            process.errorOccurred.connect(
+                lambda *_args, selected=process: self._process_error(selected)
+            )
+            self.current_process = process
+            self.current_operation = operation
+            if operation[0] != "status":
+                self._set_mutation_active(True)
+            self.current_stdout = bytearray()
+            self.current_output_bytes = 0
+            self.current_failed = False
+            if self.timeout_scheduler is not None:
+                self.current_timeout = self.timeout_scheduler(
+                    process,
+                    lambda selected=process: self._timed_out(selected),
+                )
+            process.start()
+            return self.current_process is process
+        except (AttributeError, RuntimeError, OSError, TypeError, ValueError):
+            if process is self.current_process:
+                try:
+                    process.kill()
+                except (AttributeError, RuntimeError, OSError, TypeError):
+                    pass
+                self._retire_process(process)
+            elif process is not None:
+                self._delete_later(process)
+            if operation[0] == "status":
+                self._unavailable()
+            else:
+                self._notify_toggle(False, operation[0], operation[1])
+                self.refresh()
+            return False
+
+    def refresh(self) -> bool:
+        return self._start(
+            ["instruction-audit", "--status", "--json"],
+            ("status", False),
+        )
+
+    def _notify_toggle(self, ok: bool, control: str, desired: bool) -> None:
+        label = (
+            "Instruction Guard background scanning"
+            if control == "monitor"
+            else "Instruction Guard AI analysis"
+        )
+        if ok:
+            state = "enabled" if desired else "disabled"
+            title = "AuraScan Agent Instruction Guard"
+            message = f"{label} is now {state}."
+            self.route_notification(INSTRUCTION_STATUS_COMMAND)
+        else:
+            title = "AuraScan could not change Agent Instruction Guard"
+            if control == "ai" and desired:
+                message = (
+                    "AuraScan could not enable Instruction Guard AI analysis. "
+                    "Check the AI provider in AuraScan Settings."
+                )
+            else:
+                message = (
+                    f"AuraScan could not change {label}. "
+                    "Open AuraScan Settings or run aurascan doctor."
+                )
+            self.route_notification(("aurascan", "doctor"))
+        self.notify(title, message)
+
+    def _finished(
+        self,
+        process,
+        exit_code: int,
+        exit_status: object = None,
+    ) -> None:
+        if process is not self.current_process:
+            return
+        self._drain_stdout(process)
+        self._drain_stderr(process)
+        if process is not self.current_process:
+            return
+        operation, stdout, failed = self._retire_process(process)
+        failed = failed or not self._normal_exit(exit_status)
+        if operation[0] == "status":
+            if failed or exit_code not in {0, 1}:
+                self._unavailable()
+                return
+            try:
+                payload = json.loads(stdout.decode("utf-8"))
+            except (UnicodeDecodeError, RecursionError, ValueError):
+                self._unavailable()
+                return
+            self.apply_status(payload)
+            return
+        self._notify_toggle(
+            not failed and exit_code == 0,
+            operation[0],
+            operation[1],
+        )
+        self.refresh()
+
+    def _process_error(self, process) -> None:
+        if process is not self.current_process:
+            return
+        self.current_failed = True
+        if self._process_is_running(process):
+            try:
+                process.kill()
+            except (AttributeError, RuntimeError, OSError, TypeError):
+                pass
+            return
+        self._finalize_failed(process)
+
+    def _timed_out(self, process) -> None:
+        if process is not self.current_process:
+            return
+        self.current_failed = True
+        try:
+            process.kill()
+        except (AttributeError, RuntimeError, OSError, TypeError):
+            pass
+        self._finalize_failed(process)
+
+    @staticmethod
+    def _desired(action, signal_args: Sequence[object]) -> bool:
+        if signal_args and isinstance(signal_args[0], bool):
+            return signal_args[0]
+        return bool(action.isChecked())
+
+    def monitor_triggered(self, *signal_args):
+        if self.synchronizing:
+            return None
+        desired = self._desired(self.monitor_action, signal_args)
+        flag = "--enable-monitor" if desired else "--disable-monitor"
+        return self._start(
+            ["instruction-audit", flag],
+            ("monitor", desired),
+        )
+
+    def ai_triggered(self, *signal_args):
+        if self.synchronizing:
+            return None
+        desired = self._desired(self.ai_action, signal_args)
+        flag = "--enable-ai" if desired else "--disable-ai"
+        return self._start(
+            ["instruction-audit", flag],
+            ("ai", desired),
+        )
+
+
+def build_instruction_guard_toggle_actions(
+    menu,
+    tray,
+    *,
+    route_notification: Callable[[Sequence[str]], object],
+    process_factory: Callable[[], object],
+    program: str,
+    timeout_scheduler: Optional[
+        Callable[[object, Callable[[], None]], object]
+    ] = None,
+) -> InstructionGuardMenuController:
+    monitor_action = menu.addAction(INSTRUCTION_MONITOR_ACTION_LABEL)
+    monitor_action.setCheckable(True)
+    ai_action = menu.addAction(INSTRUCTION_AI_ACTION_LABEL)
+    ai_action.setCheckable(True)
+    controller = InstructionGuardMenuController(
+        monitor_action=monitor_action,
+        ai_action=ai_action,
+        notify=tray.showMessage,
+        route_notification=route_notification,
+        process_factory=process_factory,
+        program=program,
+        timeout_scheduler=timeout_scheduler,
+    )
+    monitor_action.triggered.connect(controller.monitor_triggered)
+    ai_action.triggered.connect(controller.ai_triggered)
+    return controller
+
+
+def _schedule_instruction_control_timeout(QtCore, process, callback):
+    timer = QtCore.QTimer(process)
+    timer.setSingleShot(True)
+    timer.timeout.connect(callback)
+    timer.start(INSTRUCTION_CONTROL_TIMEOUT_MS)
+    return timer
+
+
 def _bounded_nonnegative_int(value: object, *, maximum: int = 1_000_000) -> int:
     try:
         parsed = int(value or 0)
@@ -617,6 +1104,11 @@ def start_tray_app(
     tray = QtWidgets.QSystemTrayIcon()
     tray.setIcon(load_state_icon(QtGui, "normal"))
     tray.setToolTip(UPDATER_TOOLTIP)
+    notification_router = NotificationActionRouter(
+        terminal=config.terminal,
+        which=which,
+        popen=popen,
+    )
 
     menu = QtWidgets.QMenu()
 
@@ -625,19 +1117,38 @@ def start_tray_app(
         action.triggered.connect(lambda _checked=False, cmd=list(command): launch_terminal(cmd, terminal=config.terminal, which=which, popen=popen))
         return action
 
+    instruction_controls = None
     for group_index, group in enumerate(UPDATER_MENU_GROUPS):
         if group_index:
+            menu.addSeparator()
+        if group_index == 2:
+            instruction_controls = build_instruction_guard_toggle_actions(
+                menu,
+                tray,
+                route_notification=notification_router.route,
+                process_factory=lambda: QtCore.QProcess(tray),
+                program=which("aurascan") or "aurascan",
+                timeout_scheduler=lambda process, callback: (
+                    _schedule_instruction_control_timeout(
+                        QtCore,
+                        process,
+                        callback,
+                    )
+                ),
+            )
             menu.addSeparator()
         for label, command in group:
             add_action(label, command)
     menu.addSeparator()
     quit_action = menu.addAction("Quit")
+    instruction_controls.bind_quit_action(quit_action)
     quit_action.triggered.connect(app.quit)
     tray.setContextMenu(menu)
+    menu.aboutToShow.connect(instruction_controls.refresh)
     tray.activated.connect(lambda reason: _handle_tray_activation(reason, tray, config.terminal, which, popen))
-    notification_router = NotificationActionRouter(terminal=config.terminal, which=which, popen=popen)
     tray.messageClicked.connect(notification_router.activate)
     tray.show()
+    instruction_controls.refresh()
     seen_path = incident_seen_path or incident_seen_state_path(env)
     reviewed_path = incident_reviewed_path or incident_reviewed_state_path(env)
     report_root = user_incident_root(env)

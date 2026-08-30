@@ -2,6 +2,8 @@ import io
 import json
 from pathlib import Path
 
+import pytest
+
 from aurascan.core.updater_tray import (
     UPDATER_AUTOSTART_ENV,
     UPDATER_INCIDENT_REFRESH_MS,
@@ -9,12 +11,17 @@ from aurascan.core.updater_tray import (
     UPDATER_TERMINAL_ENV,
     UPDATER_TRAY_ENABLED_ENV,
     INCIDENT_REVIEW_COMMAND,
+    INSTRUCTION_AI_ACTION_LABEL,
+    INSTRUCTION_CONTROL_OUTPUT_LIMIT,
+    INSTRUCTION_MONITOR_ACTION_LABEL,
     INSTRUCTION_REVIEW_COMMAND,
+    INSTRUCTION_STATUS_COMMAND,
     NotificationActionRouter,
     TrayIncidentState,
     acknowledge_instruction_guard_alerts,
     build_background_incident_notification,
     build_instruction_guard_notification,
+    build_instruction_guard_toggle_actions,
     build_terminal_invocation,
     build_incident_notification,
     build_updater_status,
@@ -31,6 +38,7 @@ from aurascan.core.updater_tray import (
     merge_tray_states,
     pending_instruction_guard_alerts,
     resolve_tray_instruction_state,
+    resolve_tray_instruction_controls,
 )
 from aurascan.core.incident_automation import background_result_path
 
@@ -40,6 +48,184 @@ def fake_which(found):
         return f"/usr/bin/{name}" if name in found else None
 
     return _which
+
+
+class FakeSignal:
+    def __init__(self):
+        self.callbacks = []
+
+    def connect(self, callback):
+        self.callbacks.append(callback)
+
+    def emit(self, *args):
+        for callback in list(self.callbacks):
+            callback(*args)
+
+
+class FakeAction:
+    def __init__(self, label):
+        self.label = label
+        self.checkable = False
+        self.checked = False
+        self.enabled = True
+        self.tooltip = ""
+        self.triggered = FakeSignal()
+
+    def setCheckable(self, value):
+        self.checkable = bool(value)
+
+    def setChecked(self, value):
+        self.checked = bool(value)
+
+    def isChecked(self):
+        return self.checked
+
+    def setEnabled(self, value):
+        self.enabled = bool(value)
+
+    def setToolTip(self, value):
+        self.tooltip = str(value)
+
+    def trigger(self, desired, *, include_checked=True):
+        self.checked = bool(desired)
+        if include_checked:
+            self.triggered.emit(bool(desired))
+        else:
+            self.triggered.emit()
+
+
+class FakeMenu:
+    def __init__(self):
+        self.actions = []
+
+    def addAction(self, label):
+        action = FakeAction(label)
+        self.actions.append(action)
+        return action
+
+
+class FakeTray:
+    def __init__(self):
+        self.messages = []
+
+    def showMessage(self, title, message):
+        self.messages.append((title, message))
+
+
+class FakeProcess:
+    def __init__(self):
+        self.finished = FakeSignal()
+        self.errorOccurred = FakeSignal()
+        self.readyReadStandardOutput = FakeSignal()
+        self.readyReadStandardError = FakeSignal()
+        self.program = ""
+        self.arguments = []
+        self.stdout = b""
+        self.stderr = b""
+        self.started = False
+        self.killed = False
+        self.deleted = False
+        self.state_value = 0
+        self.read_buffer_size = None
+
+    def setProgram(self, value):
+        self.program = str(value)
+
+    def setArguments(self, value):
+        self.arguments = list(value)
+
+    def setReadBufferSize(self, value):
+        self.read_buffer_size = int(value)
+
+    def start(self):
+        self.started = True
+        self.state_value = 1
+
+    def state(self):
+        return self.state_value
+
+    def readAllStandardOutput(self):
+        value = self.stdout
+        self.stdout = b""
+        return value
+
+    def readAllStandardError(self):
+        value = self.stderr
+        self.stderr = b""
+        return value
+
+    def emit_stdout(self, value):
+        self.stdout += value
+        self.readyReadStandardOutput.emit()
+
+    def emit_stderr(self, value):
+        self.stderr += value
+        self.readyReadStandardError.emit()
+
+    def complete(self, exit_code, payload=b"", exit_status=0):
+        self.stdout = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
+        self.state_value = 0
+        self.readyReadStandardOutput.emit()
+        self.finished.emit(exit_code, exit_status)
+
+    def kill(self):
+        self.killed = True
+
+    def deleteLater(self):
+        self.deleted = True
+
+
+class FakeTimer:
+    def __init__(self, callback):
+        self.callback = callback
+        self.stopped = False
+        self.deleted = False
+
+    def fire(self):
+        self.callback()
+
+    def stop(self):
+        self.stopped = True
+
+    def deleteLater(self):
+        self.deleted = True
+
+
+def instruction_control_payload(*, monitor=False, ai=False, **updates):
+    payload = {
+        "monitor_enabled": monitor,
+        "ai_enabled": ai,
+        "config_error": "",
+        "monitor_installed": True,
+        "assistant_installed": True,
+        "monitor_timer_enabled": "enabled" if monitor else "disabled",
+        "monitor_timer_active": "active" if monitor else "inactive",
+        "assistant_timer_enabled": "enabled" if ai else "disabled",
+        "assistant_timer_active": "active" if ai else "inactive",
+    }
+    payload.update(updates)
+    return payload
+
+
+def fake_instruction_menu():
+    menu = FakeMenu()
+    tray = FakeTray()
+    processes = []
+    routes = []
+
+    def process_factory():
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    controller = build_instruction_guard_toggle_actions(
+        menu,
+        tray,
+        route_notification=lambda command: routes.append(list(command)),
+        process_factory=process_factory,
+        program="/usr/bin/aurascan",
+    )
+    return menu, tray, processes, routes, controller
 
 
 def test_terminal_launcher_prefers_xdg_terminal_exec():
@@ -225,7 +411,338 @@ def test_updater_menu_exposes_one_guided_incident_resolution_workflow():
     } & commands.keys()
     assert list(INCIDENT_REVIEW_COMMAND) == ["aurascan", "incidents", "--resolve"]
     assert list(INSTRUCTION_REVIEW_COMMAND) == ["aurascan", "instruction-audit", "--review"]
+    assert list(INSTRUCTION_STATUS_COMMAND) == ["aurascan", "instruction-audit", "--status"]
     assert UPDATER_INCIDENT_REFRESH_MS == 5_000
+
+
+def test_instruction_guard_control_status_requires_consistent_consent_and_units():
+    state = resolve_tray_instruction_controls(
+        instruction_control_payload(monitor=True, ai=False)
+    )
+
+    assert state.monitor_enabled is True
+    assert state.ai_enabled is False
+    assert state.monitor_available is True
+    assert state.ai_available is True
+    assert state.monitor_drift is False
+    assert state.ai_drift is False
+
+    drift = resolve_tray_instruction_controls(
+        instruction_control_payload(
+            monitor=True,
+            monitor_timer_active="inactive",
+        )
+    )
+
+    assert drift.monitor_enabled is False
+    assert drift.monitor_available is True
+    assert drift.monitor_drift is True
+
+    failed_disabled_timer = resolve_tray_instruction_controls(
+        instruction_control_payload(monitor_timer_active="failed")
+    )
+
+    assert failed_disabled_timer.monitor_available is True
+    assert failed_disabled_timer.monitor_drift is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        [],
+        {"config_error": "invalid private configuration"},
+        instruction_control_payload(monitor_installed=False),
+        instruction_control_payload(monitor_timer_enabled="unexpected"),
+    ],
+)
+def test_instruction_guard_control_status_fails_closed(payload):
+    state = resolve_tray_instruction_controls(payload)
+
+    assert state.monitor_enabled is False
+    assert state.monitor_available is False
+
+
+@pytest.mark.parametrize("status_exit", [0, 1])
+def test_instruction_guard_menu_refreshes_checkmarks_without_blocking(status_exit):
+    menu, tray, processes, routes, controller = fake_instruction_menu()
+
+    assert [action.label for action in menu.actions] == [
+        INSTRUCTION_MONITOR_ACTION_LABEL,
+        INSTRUCTION_AI_ACTION_LABEL,
+    ]
+    assert all(action.checkable for action in menu.actions)
+    assert controller.refresh() is True
+    assert len(processes) == 1
+    assert processes[0].program == "/usr/bin/aurascan"
+    assert processes[0].arguments == ["instruction-audit", "--status", "--json"]
+    assert processes[0].read_buffer_size == INSTRUCTION_CONTROL_OUTPUT_LIMIT + 1
+    assert all(not action.enabled for action in menu.actions)
+
+    processes[0].complete(
+        status_exit,
+        instruction_control_payload(monitor=True, ai=False),
+    )
+
+    assert menu.actions[0].checked is True
+    assert menu.actions[1].checked is False
+    assert all(action.enabled for action in menu.actions)
+    assert processes[0].deleted is True
+    assert tray.messages == []
+    assert routes == []
+
+
+@pytest.mark.parametrize(
+    ("action_index", "desired", "include_checked", "flag", "control"),
+    [
+        (0, True, True, "--enable-monitor", "monitor"),
+        (0, False, False, "--disable-monitor", "monitor"),
+        (1, True, False, "--enable-ai", "ai"),
+        (1, False, True, "--disable-ai", "ai"),
+    ],
+)
+def test_instruction_guard_menu_toggles_are_serialized_and_refresh_status(
+    action_index,
+    desired,
+    include_checked,
+    flag,
+    control,
+):
+    menu, tray, processes, routes, controller = fake_instruction_menu()
+    initial = instruction_control_payload(
+        monitor=not desired if control == "monitor" else False,
+        ai=not desired if control == "ai" else False,
+    )
+    controller.refresh()
+    processes[0].complete(0, initial)
+
+    menu.actions[action_index].trigger(desired, include_checked=include_checked)
+
+    assert len(processes) == 2
+    assert processes[1].arguments == ["instruction-audit", flag]
+    assert all(not action.enabled for action in menu.actions)
+    menu.actions[1 - action_index].trigger(not menu.actions[1 - action_index].checked)
+    assert len(processes) == 2
+
+    processes[1].complete(0)
+
+    assert len(processes) == 3
+    assert processes[1].deleted is True
+    assert processes[2].arguments == ["instruction-audit", "--status", "--json"]
+    assert routes == [list(INSTRUCTION_STATUS_COMMAND)]
+    assert len(tray.messages) == 1
+    assert ("enabled" if desired else "disabled") in tray.messages[0][1]
+
+    refreshed = instruction_control_payload(
+        monitor=desired if control == "monitor" else False,
+        ai=desired if control == "ai" else False,
+    )
+    processes[2].complete(0, refreshed)
+
+    assert menu.actions[action_index].checked is desired
+    assert all(action.enabled for action in menu.actions)
+    assert processes[2].deleted is True
+
+
+def test_instruction_guard_menu_failure_is_generic_and_reverts_from_status():
+    menu, tray, processes, routes, controller = fake_instruction_menu()
+    controller.refresh()
+    original = instruction_control_payload(monitor=True, ai=False)
+    processes[0].complete(0, original)
+
+    menu.actions[1].trigger(True)
+    processes[1].complete(
+        2,
+        b"/home/alice/private/SKILL.md token=fixture-secret",
+    )
+
+    assert routes == [["aurascan", "doctor"]]
+    assert len(tray.messages) == 1
+    title, message = tray.messages[0]
+    assert "could not" in title.lower()
+    assert "AI provider" in message
+    assert "/home/alice" not in title + message
+    assert "fixture-secret" not in title + message
+    assert len(processes) == 3
+    assert processes[1].deleted is True
+
+    processes[2].complete(1, original)
+
+    assert menu.actions[0].checked is True
+    assert menu.actions[1].checked is False
+    assert all(action.enabled for action in menu.actions)
+    assert processes[2].deleted is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"not-json",
+        b"{\"monitor_enabled\": true}",
+        b"x" * 65_537,
+    ],
+)
+def test_instruction_guard_menu_rejects_untrusted_status_output(payload):
+    menu, tray, processes, routes, controller = fake_instruction_menu()
+    controller.refresh()
+
+    processes[0].complete(0, payload)
+
+    assert all(not action.checked for action in menu.actions)
+    assert all(not action.enabled for action in menu.actions)
+    assert all(action.tooltip for action in menu.actions)
+    assert processes[0].deleted is True
+    assert tray.messages == []
+    assert routes == []
+
+
+def test_instruction_guard_menu_times_out_without_leaking_process_output():
+    menu = FakeMenu()
+    tray = FakeTray()
+    processes = []
+    routes = []
+    timers = []
+
+    def schedule_timeout(_process, callback):
+        timer = FakeTimer(callback)
+        timers.append(timer)
+        return timer
+
+    controller = build_instruction_guard_toggle_actions(
+        menu,
+        tray,
+        route_notification=lambda command: routes.append(list(command)),
+        process_factory=lambda: processes.append(FakeProcess()) or processes[-1],
+        program="/usr/bin/aurascan",
+        timeout_scheduler=schedule_timeout,
+    )
+    controller.apply_status(instruction_control_payload(monitor=False, ai=False))
+    menu.actions[0].trigger(True)
+    processes[0].stdout = b"/home/alice/private token=fixture-secret"
+
+    timers[0].fire()
+
+    assert processes[0].killed is True
+    assert processes[0].deleted is True
+    assert timers[0].stopped is True
+    assert timers[0].deleted is True
+    assert routes == [["aurascan", "doctor"]]
+    assert "/home/alice" not in " ".join(tray.messages[0])
+    assert "fixture-secret" not in " ".join(tray.messages[0])
+    assert len(processes) == 2
+    assert processes[1].arguments == ["instruction-audit", "--status", "--json"]
+
+
+def test_instruction_guard_menu_retires_every_completed_process_and_timer():
+    menu = FakeMenu()
+    tray = FakeTray()
+    processes = []
+    timers = []
+
+    def process_factory():
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    def schedule_timeout(_process, callback):
+        timer = FakeTimer(callback)
+        timers.append(timer)
+        return timer
+
+    controller = build_instruction_guard_toggle_actions(
+        menu,
+        tray,
+        route_notification=lambda _command: None,
+        process_factory=process_factory,
+        program="/usr/bin/aurascan",
+        timeout_scheduler=schedule_timeout,
+    )
+
+    for _index in range(10):
+        assert controller.refresh() is True
+        processes[-1].complete(0, instruction_control_payload())
+
+    assert len(processes) == 10
+    assert len(timers) == 10
+    assert all(process.deleted for process in processes)
+    assert all(timer.stopped and timer.deleted for timer in timers)
+    timers[0].fire()
+    assert len(processes) == 10
+
+
+def test_instruction_guard_menu_drains_and_bounds_combined_child_output():
+    menu, tray, processes, routes, controller = fake_instruction_menu()
+    controller.refresh()
+    process = processes[0]
+
+    first_chunk = INSTRUCTION_CONTROL_OUTPUT_LIMIT // 2
+    process.emit_stderr(b"private-error" + b"x" * (first_chunk - 13))
+    process.emit_stderr(b"x" * (INSTRUCTION_CONTROL_OUTPUT_LIMIT - first_chunk))
+
+    assert process.stderr == b""
+    assert process.stdout == b""
+    assert process.killed is False
+    assert controller.current_stdout == bytearray()
+    assert controller.current_output_bytes == INSTRUCTION_CONTROL_OUTPUT_LIMIT
+
+    process.emit_stderr(b"x")
+
+    assert process.killed is True
+    assert controller.current_process is process
+    assert controller.refresh() is False
+    process.complete(-9, exit_status=1)
+    assert process.deleted is True
+    assert controller.current_process is None
+    assert all(not action.enabled for action in menu.actions)
+    assert tray.messages == []
+    assert routes == []
+
+
+def test_instruction_guard_menu_waits_for_errored_mutation_to_exit_before_refresh():
+    menu, tray, processes, routes, controller = fake_instruction_menu()
+    quit_action = FakeAction("Quit")
+    controller.bind_quit_action(quit_action)
+    controller.apply_status(instruction_control_payload())
+    menu.actions[0].trigger(True)
+    process = processes[0]
+
+    assert quit_action.enabled is False
+    process.errorOccurred.emit(1)
+
+    assert process.killed is True
+    assert controller.current_process is process
+    assert quit_action.enabled is False
+    assert len(processes) == 1
+
+    process.complete(1, exit_status=1)
+
+    assert process.deleted is True
+    assert quit_action.enabled is True
+    assert routes == [["aurascan", "doctor"]]
+    assert len(processes) == 2
+    assert processes[1].arguments == ["instruction-audit", "--status", "--json"]
+
+
+def test_instruction_guard_menu_rejects_crash_exit_and_deep_json():
+    menu, tray, processes, routes, controller = fake_instruction_menu()
+    controller.refresh()
+    processes[0].complete(
+        0,
+        instruction_control_payload(monitor=True),
+        exit_status=1,
+    )
+
+    assert processes[0].deleted is True
+    assert all(not action.enabled for action in menu.actions)
+
+    assert controller.refresh() is True
+    deep_json = b"[" * 2_000 + b"0" + b"]" * 2_000
+    processes[1].complete(0, deep_json)
+
+    assert processes[1].deleted is True
+    assert all(not action.enabled for action in menu.actions)
+    assert tray.messages == []
+    assert routes == []
 
 
 def test_instruction_guard_state_uses_only_secret_free_summary(tmp_path):

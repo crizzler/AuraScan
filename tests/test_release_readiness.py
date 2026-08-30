@@ -17,7 +17,7 @@ def test_pyproject_console_scripts_are_registered():
     data = tomllib.loads(read_text("pyproject.toml"))
 
     scripts = data["project"]["scripts"]
-    assert data["project"]["version"] == "0.9.0"
+    assert data["project"]["version"] == "0.9.1"
     assert scripts["aurascan"] == "aurascan.cli:main"
     assert scripts["aurascan-makepkg"] == "aurascan.makepkg_wrapper:main"
     assert data["project"]["requires-python"] == ">=3.8"
@@ -155,7 +155,6 @@ def test_instruction_guard_v090_documentation_contract():
     privacy = normalized("docs/PRIVACY.md")
     checklist = normalized("docs/RELEASE_CHECKLIST.md")
     release = normalized("docs/releases/v0.9.0.md")
-    unreleased = normalized("docs/releases/unreleased.md")
 
     readme_phrases = [
         "the opt-in agent instruction guard",
@@ -227,7 +226,29 @@ def test_instruction_guard_v090_documentation_contract():
     for phrase in release_phrases:
         assert phrase in release
 
-    assert "changes after v0.9.0 will be recorded here" in unreleased
+
+def test_instruction_guard_tray_v091_release_contract():
+    release = " ".join(read_text("docs/releases/v0.9.1.md").lower().split())
+    unreleased = " ".join(
+        read_text("docs/releases/unreleased.md").lower().split()
+    )
+
+    required = [
+        "# aurascan v0.9.1",
+        "released on 2026-08-30",
+        "instruction guard background scan",
+        "instruction guard ai analysis",
+        "run asynchronously without a shell",
+        "bounded combined child stdout and stderr to 64 kib",
+        "tray quit action is disabled",
+        "real pyqt6 and pyside6 event-loop stress tests",
+        "arch/aur package advance to v0.9.1",
+        "report schema and rule version remain 1.0",
+        "package-scanner rule version is unchanged",
+    ]
+    for phrase in required:
+        assert phrase in release
+    assert "changes after v0.9.1 will be recorded here" in unreleased
 
 
 def test_release_checklist_references_required_validation_and_safety_items():

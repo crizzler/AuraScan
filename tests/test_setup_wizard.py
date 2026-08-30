@@ -595,6 +595,7 @@ def test_doctor_json_reports_missing_key_without_leaking_values(tmp_path):
         executable_path=tmp_path / "usr" / "bin" / "aurascan",
         local_hook_path=tmp_path / "etc" / "pacman.d" / "hooks" / "aurascan.hook",
         packaged_hook_path=tmp_path / "usr" / "share" / "libalpm" / "hooks" / "aurascan.hook",
+        instruction_unit_root=tmp_path / "instruction-units",
         recovery_root=tmp_path / "recovery-root",
     )
     data = json.loads(stdout.getvalue())
@@ -622,6 +623,7 @@ def test_doctor_reports_keyless_local_provider_without_contacting_it(tmp_path):
         executable_path=tmp_path / "aurascan",
         local_hook_path=tmp_path / "local.hook",
         packaged_hook_path=tmp_path / "packaged.hook",
+        instruction_unit_root=tmp_path / "instruction-units",
         recovery_root=tmp_path / "recovery-root",
     )
 
@@ -1087,6 +1089,7 @@ def test_doctor_check_ai_uses_mocked_provider(tmp_path):
         executable_path=tmp_path / "usr" / "bin" / "aurascan",
         local_hook_path=tmp_path / "etc" / "pacman.d" / "hooks" / "aurascan.hook",
         packaged_hook_path=tmp_path / "usr" / "share" / "libalpm" / "hooks" / "aurascan.hook",
+        instruction_unit_root=tmp_path / "instruction-units",
         recovery_root=tmp_path / "recovery-root",
     )
     data = json.loads(stdout.getvalue())
@@ -1130,6 +1133,7 @@ def test_doctor_check_ai_uses_mocked_keyless_local_provider(tmp_path, provider, 
         executable_path=tmp_path / "aurascan",
         local_hook_path=tmp_path / "local.hook",
         packaged_hook_path=tmp_path / "packaged.hook",
+        instruction_unit_root=tmp_path / "instruction-units",
         recovery_root=tmp_path / "recovery-root",
     )
     data = json.loads(stdout.getvalue())

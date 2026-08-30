@@ -733,13 +733,30 @@ aurascan updater --remove-autostart
 aurascan updater --no-tray
 ```
 
-The tray menu opens terminal-native AuraScan flows:
+The tray menu provides terminal-native AuraScan flows and two checkable
+Instruction Guard controls:
 
 - Run AuraScan Upgrade: `aurascan upgrade`
 - Resolve System Findings: `aurascan incidents --resolve`
 - Review Agent Files: `aurascan instruction-audit --review`
 - Run System Maintenance Scan: `aurascan incidents --run-maintenance`
+- Instruction Guard Background Scan: enable or disable the login and
+  five-minute deterministic monitor
+- Instruction Guard AI Analysis: separately enable or disable scheduled,
+  raise-only AI review
 - AuraScan Settings: `aurascan init`
+
+The two checkmarks refresh when the tray starts and whenever its right-click
+menu opens. Changes run asynchronously through the same transactional
+`instruction-audit` controls used by the CLI, so the tray remains responsive
+and partial configuration changes are rolled back. AI analysis can be enabled
+only when an existing local or cloud provider is ready. While state is being
+checked, or when private configuration and user-service state disagree, the
+controls are disabled and their tooltips direct the user to Settings or
+`aurascan doctor`. Success and failure notifications remain generic and never
+include paths, command output, credentials, or provider secrets.
+AuraScan temporarily disables its tray Quit action during an enable/disable
+transaction so it cannot interrupt a configuration rollback.
 
 Config drift is handled automatically before and after `aurascan upgrade`, so
 it is intentionally omitted from the beginner-focused tray menu. The

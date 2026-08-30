@@ -87,6 +87,10 @@ Use this workflow for changes in the AuraScan repository.
 10. Do not treat Markdown quoting or fencing as a trust boundary. Suppress a
     clearly labeled example only while no later active directive references it
     for execution.
+11. Keep tray monitor/AI toggles asynchronous and no-shell. Reuse the
+    transactional CLI, accept review-required status as valid, serialize
+    mutations, bound combined output and runtime, retire Qt children, and do
+    not let the tray's own Quit action interrupt rollback.
 
 ## Preserve scanner safety
 

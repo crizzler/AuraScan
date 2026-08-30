@@ -37,6 +37,10 @@ evidence actually collected.
   assistant is a separate opt-in, receives only bounded redacted evidence,
   cannot lower deterministic severity, establish trust, or request tools, and
   must never expose paths or snippets in desktop notifications.
+- Keep tray monitor/AI toggles as asynchronous, no-shell clients of the
+  transactional Instruction Guard CLI. Serialize mutations, bound combined
+  child output and runtime, retire Qt children, and prevent tray shutdown from
+  interrupting a configuration rollback.
 - Keep instruction content risk separate from integrity approval. First-seen
   or changed files require review even when content looks benign; approval is
   bound to the current machine and UID. Never auto-quarantine a file.
@@ -65,6 +69,8 @@ evidence actually collected.
   and reversible standalone-file disable receipts.
 - `aurascan/core/instruction_cli.py`: Instruction Guard CLI, separate monitor
   and AI service entry points, consent configuration, and user-unit controls.
+- `aurascan/core/updater_tray.py`: secret-free tray state, asynchronous
+  Instruction Guard controls, incident routing, and guarded process lifetime.
 - `aurascan/core/rule_metadata.py` and `aurascan/core/presenter.py`: stable rule
   catalog and user-facing explanations.
 - `aurascan/core/upgrade_preflight.py`: transaction risk checks; it is not a

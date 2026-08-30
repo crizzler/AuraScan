@@ -9,6 +9,16 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
+The v0.9.1 release adds right-click tray toggles for the Agent Instruction
+Guard's deterministic background monitor and separately consented raise-only AI
+analysis. The controls reuse AuraScan's transactional CLI, stay responsive,
+fail closed on configuration drift, and keep notifications secret-free.
+
+Agent Instruction Guard periodically reviews recognized Claude Code,
+`AGENTS.md`, and Agent Skill control files without executing them. Suspicious
+behavior and unexpected changes remain separate review signals, and the feature
+is detection rather than pasted-command interception or same-user containment.
+
 The v0.8 release adds blocking behavior-chain detection for root remote-access
 backdoors such as the reported `hyprland-fixes` package. It correlates
 privileged Tailscale enrollment or hidden root SSH with persistence,
@@ -73,6 +83,7 @@ python -m aurascan security-audit
 python -m aurascan upgrade --dry-run
 python -m aurascan config-drift --dry-run
 python -m aurascan incidents --dry-run --no-ai
+python -m aurascan instruction-audit --status
 python -m aurascan recovery --status
 python -m aurascan ask --latest
 python -m aurascan agent --latest
@@ -93,6 +104,13 @@ looks for risky PKGBUILD patterns, install hooks, unsafe source/archive
 behavior, checksum/signature drift, local history changes, and optional ClamAV
 or AI signals. It can also be used through `aurascan-makepkg` so the review
 happens before makepkg runs package functions.
+
+The v0.9.1 update makes Agent Instruction Guard easier to operate from the
+desktop: its periodic deterministic scan and separate raise-only AI assistant
+can now be enabled or disabled independently from the tray's right-click menu.
+State is refreshed from the private consent and user-timer configuration, and
+failed operations never put paths, command output, or credentials in public
+notifications.
 
 The v0.8 security update adds exact `hyprland-fixes` source and exposure
 intelligence plus generic correlated detection for privileged Tailscale SSH,

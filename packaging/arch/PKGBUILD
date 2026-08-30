@@ -44,7 +44,7 @@ optdepends=(
   'xfsprogs: read-only XFS recovery diagnostics'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('1c924a8cf5554882519bd1c29993c30a6667657fe5f70133f89b7d350e3dfd14')
 
 build() {
   cd "AuraScan-$pkgver"

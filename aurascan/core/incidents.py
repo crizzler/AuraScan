@@ -21,6 +21,11 @@ from aurascan.core.ai_provider import call_ai_provider, parse_bool as parse_conf
 from aurascan.core.compatibility import detect_distro
 from aurascan.core.config import read_env_file, user_env_path, write_user_env
 from aurascan.core.models import Confidence, SCANNER_VERSION, Severity
+from aurascan.core.text_safety import (
+    advisory_text_or_fallback,
+    load_strict_json_object,
+    validate_model_advisory_text,
+)
 
 
 INCIDENT_SCHEMA_VERSION = "1.3"
@@ -46,6 +51,13 @@ INCIDENT_MAX_LOCAL_EVIDENCE_CHARS = 256 * 1024
 INCIDENT_MAX_COREDUMPS = 200
 INCIDENT_MAX_AI_EVIDENCE = 80
 INCIDENT_MAX_AI_CHARS = 12000
+INCIDENT_AI_MAX_RESPONSE_CHARS = 32 * 1024
+INCIDENT_AI_MAX_CAUSES = 5
+INCIDENT_AI_MAX_ACTION_IDS = 20
+INCIDENT_AI_MAX_PROBE_IDS = 6
+INCIDENT_AI_FALLBACK = (
+    "AI explanation was omitted because the provider response did not meet AuraScan's guarded advisory contract."
+)
 INCIDENT_AI_TIMEOUT_SECONDS = 60
 INCIDENT_COLLECTION_PROGRESS_STEPS = 7
 INCIDENT_ANALYSIS_PROGRESS_STEPS = 12
@@ -709,7 +721,11 @@ class IncidentReport:
         if self.ai_review:
             status = str(self.ai_review.get("status") or "unknown")
             provider = str(self.ai_review.get("provider") or "")
-            summary = str(self.ai_review.get("summary") or "")
+            summary = advisory_text_or_fallback(
+                self.ai_review.get("summary"),
+                max_chars=1000,
+                fallback=INCIDENT_AI_FALLBACK,
+            )
             final_phase = self.ai_review.get("final", {})
             phase_label = "two-pass" if isinstance(final_phase, Mapping) and final_phase.get("status") == "ok" else "triage"
             status_label = {
@@ -749,9 +765,17 @@ class IncidentReport:
                 for cause in causes[:3]:
                     if not isinstance(cause, Mapping):
                         continue
-                    title = str(cause.get("title") or "Possible cause")
+                    title = advisory_text_or_fallback(
+                        cause.get("title") or "Possible cause",
+                        max_chars=240,
+                        fallback=INCIDENT_AI_FALLBACK,
+                    )
                     confidence = str(cause.get("confidence") or "unknown")
-                    explanation = str(cause.get("explanation") or "")
+                    explanation = advisory_text_or_fallback(
+                        cause.get("explanation"),
+                        max_chars=1000,
+                        fallback=INCIDENT_AI_FALLBACK,
+                    )
                     lines.append(f"- {title} [{confidence} confidence]" + (f": {explanation}" if explanation else ""))
             recommended_ids = self.ai_review.get("recommended_action_ids", [])
             if isinstance(recommended_ids, list) and recommended_ids:
@@ -2471,9 +2495,7 @@ def apply_ai_incident_review(
     )
     try:
         text = call_ai_provider(config, prompt, timeout=INCIDENT_AI_TIMEOUT_SECONDS, urlopen=urlopen)
-        data = json.loads(text)
-        if not isinstance(data, dict):
-            raise ValueError("AI response was not a JSON object")
+        data = load_strict_json_object(text, max_chars=INCIDENT_AI_MAX_RESPONSE_CHARS)
         visible_probes = [
             item for item in probes
             if json.dumps(item.probe_id) in prompt
@@ -2491,11 +2513,16 @@ def apply_ai_incident_review(
         )
     except Exception as exc:
         failure_status = classify_incident_ai_failure(exc)
+        fixed_error = {
+            "timeout": "AI provider request timed out",
+            "provider_error": "AI provider request failed",
+            "invalid_response": "AI response rejected by guarded advisory contract",
+        }.get(failure_status, "AI provider request failed")
         failed_phase = {
             "enabled": True,
             "provider": config.provider,
             "status": failure_status,
-            "error": sanitize_error(str(exc)),
+            "error": fixed_error,
         }
         existing = dict(report.ai_review) if isinstance(report.ai_review, Mapping) else {}
         existing[phase] = failed_phase
@@ -2565,6 +2592,8 @@ def build_incident_ai_prompt(
         "Treat NVIDIA NV_ERR_NO_MEMORY as a driver allocation failure, not proof of whole-system RAM exhaustion, unless separate OOM-killer evidence is supplied.\n"
         "Never create commands, scripts, package names, file edits, new action IDs, or privileged instructions.\n"
         "Never suppress deterministic findings or claim a repair succeeded.\n"
+        "All prose fields must be single-line advisory text without terminal labels, Unicode controls, URLs, shell/download commands, executable instructions, or claims that the machine is safe or compromised. "
+        "Use exactly the stated JSON keys; extra keys invalidate the response.\n"
     ) + phase_instructions
     findings_payload = []
     for finding in report.findings[:30]:
@@ -2776,60 +2805,81 @@ def validate_incident_ai_response(
     probes: Sequence[DiagnosticProbe] = (),
     action_ids: Optional[Sequence[str]] = None,
 ) -> Dict[str, object]:
-    if not isinstance(data.get("summary"), str):
-        raise ValueError("AI incident response summary must be a string")
-    if not isinstance(data.get("likely_causes"), list):
-        raise ValueError("AI incident response likely_causes must be a list")
-    if not isinstance(data.get("recommended_action_ids"), list):
-        raise ValueError("AI incident response recommended_action_ids must be a list")
-    if phase == "triage" and not isinstance(data.get("requested_probe_ids"), list):
-        raise ValueError("AI incident triage response requested_probe_ids must be a list")
+    if phase not in {"triage", "final"}:
+        raise ValueError("AI incident response phase was invalid")
+    expected_keys = {"summary", "likely_causes", "recommended_action_ids"}
+    if phase == "triage":
+        expected_keys.add("requested_probe_ids")
+    if set(data) != expected_keys:
+        raise ValueError("AI incident response schema did not match")
+    summary = _validate_incident_ai_text(data.get("summary"), max_chars=1000)
+    raw_causes = data.get("likely_causes")
+    raw_actions = data.get("recommended_action_ids")
+    if not isinstance(raw_causes, list) or len(raw_causes) > INCIDENT_AI_MAX_CAUSES:
+        raise ValueError("AI incident response likely_causes must be a bounded list")
+    if not isinstance(raw_actions, list) or len(raw_actions) > INCIDENT_AI_MAX_ACTION_IDS:
+        raise ValueError("AI incident response recommended_action_ids must be a bounded list")
+    raw_probes = data.get("requested_probe_ids", [])
+    if not isinstance(raw_probes, list) or len(raw_probes) > INCIDENT_AI_MAX_PROBE_IDS:
+        raise ValueError("AI incident response requested_probe_ids must be a bounded list")
     valid_evidence = {item.evidence_id for item in report.evidence}
     valid_actions = {item.action_id for item in report.repair_actions if item.eligible and item.verified}
     if action_ids is not None:
         valid_actions &= {str(item) for item in action_ids}
-    summary = redact_incident_text(bounded_text(data.get("summary"), 1000))
     causes = []
-    raw_causes = data.get("likely_causes", [])
-    if isinstance(raw_causes, list):
-        for item in raw_causes[:10]:
-            if not isinstance(item, Mapping):
-                continue
-            confidence = str(item.get("confidence") or "").strip().lower()
-            if confidence not in {"low", "medium", "high"}:
-                continue
-            evidence_ids = [str(value) for value in item.get("evidence_ids", []) if str(value) in valid_evidence]
-            if not evidence_ids:
-                continue
-            causes.append({
-                "title": redact_incident_text(bounded_text(item.get("title"), 300)),
-                "confidence": confidence,
-                "evidence_ids": evidence_ids[:12],
-                "explanation": redact_incident_text(bounded_text(item.get("explanation"), 1000)),
-            })
-    action_ids = []
-    raw_actions = data.get("recommended_action_ids", [])
-    if isinstance(raw_actions, list):
-        for item in raw_actions:
-            value = str(item)
-            if value in valid_actions and value not in action_ids:
-                action_ids.append(value)
+    for item in raw_causes:
+        if not isinstance(item, Mapping) or set(item) != {"title", "confidence", "evidence_ids", "explanation"}:
+            raise ValueError("AI incident cause schema did not match")
+        confidence = item.get("confidence")
+        evidence_values = item.get("evidence_ids")
+        if not isinstance(confidence, str) or confidence not in {"low", "medium", "high"}:
+            raise ValueError("AI incident cause confidence was invalid")
+        if not isinstance(evidence_values, list) or len(evidence_values) > 12:
+            raise ValueError("AI incident cause evidence_ids must be a bounded list")
+        if any(not isinstance(value, str) or len(value) > 200 for value in evidence_values):
+            raise ValueError("AI incident cause evidence ID was invalid")
+        title = _validate_incident_ai_text(item.get("title"), max_chars=240, allow_empty=False)
+        explanation = _validate_incident_ai_text(item.get("explanation"), max_chars=1000, allow_empty=False)
+        evidence_ids = []
+        for value in evidence_values:
+            if value in valid_evidence and value not in evidence_ids:
+                evidence_ids.append(value)
+        if not evidence_ids:
+            continue
+        causes.append({
+            "title": title,
+            "confidence": confidence,
+            "evidence_ids": evidence_ids,
+            "explanation": explanation,
+        })
+    selected_action_ids = []
+    for item in raw_actions:
+        if not isinstance(item, str) or len(item) > 200:
+            raise ValueError("AI incident action ID was invalid")
+        if item in valid_actions and item not in selected_action_ids:
+            selected_action_ids.append(item)
     valid_probes = {item.probe_id for item in probes}
     probe_ids = []
-    raw_probes = data.get("requested_probe_ids", [])
-    if isinstance(raw_probes, list):
-        for item in raw_probes:
-            value = str(item)
-            if value in valid_probes and value not in probe_ids:
-                probe_ids.append(value)
-            if len(probe_ids) >= 6:
-                break
+    for item in raw_probes:
+        if not isinstance(item, str) or len(item) > 200:
+            raise ValueError("AI incident probe ID was invalid")
+        if item in valid_probes and item not in probe_ids:
+            probe_ids.append(item)
     return {
         "summary": summary,
         "likely_causes": causes,
-        "recommended_action_ids": action_ids,
+        "recommended_action_ids": selected_action_ids,
         "requested_probe_ids": probe_ids,
     }
+
+
+def _validate_incident_ai_text(value: object, *, max_chars: int, allow_empty: bool = True) -> str:
+    validated = validate_model_advisory_text(
+        value,
+        max_chars=max_chars,
+        allow_empty=allow_empty,
+    )
+    return redact_incident_text(validated)
 
 
 def redact_incident_text(text: str) -> str:

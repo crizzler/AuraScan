@@ -1,5 +1,4 @@
 import urllib.parse
-from pathlib import Path
 from typing import Dict, List, Tuple
 
 from aurascan.analyzers.base import BaseAnalyzer
@@ -18,11 +17,21 @@ class SourceMetadataAnalyzer(BaseAnalyzer):
         self.parser = parser or SourceParser()
 
     def analyze_pkgbuild(self, pkgbuild_path: str, content: str) -> AnalysisResult:
-        refs, _parser_findings = self.parser.parse(pkgbuild_path, content)
+        refs, parser_findings = self.parser.parse(pkgbuild_path, content)
+        parser_blockers = [
+            finding for finding in parser_findings
+            if finding.rule_id == "SOURCE-PARSER-AMBIGUOUS"
+        ]
         if not refs:
-            return AnalysisResult(True, "No source metadata findings", [])
+            return AnalysisResult(
+                not any(finding.blocks_installation for finding in parser_blockers),
+                "Source metadata inspection was incomplete"
+                if parser_blockers
+                else "No source metadata findings",
+                parser_blockers,
+            )
 
-        findings: List[Finding] = []
+        findings: List[Finding] = list(parser_blockers)
         source_count, checksum_count = self._source_checksum_counts(pkgbuild_path, content, len(refs))
         if checksum_count and checksum_count != source_count:
             findings.append(self._finding(
@@ -228,11 +237,6 @@ class SourceMetadataAnalyzer(BaseAnalyzer):
         )
 
     def _source_checksum_counts(self, pkgbuild_path: str, content: str, source_count: int) -> Tuple[int, int]:
-        srcinfo_path = Path(pkgbuild_path).with_name(".SRCINFO")
-        if srcinfo_path.exists():
-            text = srcinfo_path.read_text(encoding="utf-8", errors="replace")
-            count = sum(1 for line in text.splitlines() if self.parser._srcinfo_checksum_key(line.strip()))
-            return source_count, count
         _algorithm, checksums = self.parser._parse_checksum_arrays(content)
         return source_count, len(checksums)
 

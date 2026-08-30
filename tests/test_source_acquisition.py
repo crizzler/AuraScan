@@ -1,5 +1,6 @@
 import hashlib
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -21,10 +22,36 @@ from aurascan.core.source_acquisition import (
     SourceReference,
     TrustedKeyDirectoryProvider,
 )
+from aurascan.core.trusted_tools import run_bounded_trusted_tool
 
 
 def parse_pkgbuild(content: str):
     return SourceParser().parse_pkgbuild(content, "PKGBUILD")
+
+
+def test_native_tool_runner_captures_small_output_with_fixed_shape():
+    result = run_bounded_trusted_tool(
+        ["/usr/bin/printf", "bounded-output"],
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "bounded-output"
+    assert result.stderr == ""
+
+
+def test_native_tool_runner_terminates_oversized_output():
+    with pytest.raises(subprocess.SubprocessError, match="safety bound"):
+        run_bounded_trusted_tool(
+            ["/usr/bin/yes", "bounded-output"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=True,
+        )
 
 
 def test_parse_local_source():
@@ -129,6 +156,22 @@ pkgbase = demo
     assert all(ref.checksum_algorithm == "sha256" for ref in refs)
 
 
+def test_parse_uses_captured_pkgbuild_instead_of_neighbor_srcinfo(tmp_path: Path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    content = 'source=("package-source.tar")\nsha256sums=(package-digest)\n'
+    pkgbuild.write_text(content, encoding="utf-8")
+    (tmp_path / ".SRCINFO").write_text(
+        "pkgbase = demo\n\tsource = cover-source.tar\n\tsha256sums = cover-digest\n",
+        encoding="utf-8",
+    )
+
+    refs, findings = SourceParser().parse(str(pkgbuild), content)
+
+    assert findings == []
+    assert [ref.resolved for ref in refs] == ["package-source.tar"]
+    assert [ref.checksum for ref in refs] == ["package-digest"]
+
+
 def test_parse_pkgbuild_arch_specific_source_metadata():
     refs, findings = parse_pkgbuild(
         'source=("common.tar.gz")\n'
@@ -143,6 +186,162 @@ def test_parse_pkgbuild_arch_specific_source_metadata():
         "https://example.invalid/x86_64.tar.gz",
     ]
     assert [ref.checksum for ref in refs] == ["common", "x86_64"]
+
+
+def test_parse_indented_source_assignment_instead_of_returning_false_clear():
+    refs, findings = parse_pkgbuild(
+        '  source=("https://example.invalid/indented.tar.gz")\n'
+        'sha256sums=(abc)\n'
+    )
+
+    assert findings == []
+    assert [ref.resolved for ref in refs] == ["https://example.invalid/indented.tar.gz"]
+
+
+def test_parse_source_append_assignments_in_order():
+    refs, findings = parse_pkgbuild(
+        'source=("local.tar")\n'
+        'source+=("https://example.invalid/appended.tar")\n'
+        'sha256sums=(one two)\n'
+    )
+
+    assert findings == []
+    assert [ref.resolved for ref in refs] == [
+        "local.tar",
+        "https://example.invalid/appended.tar",
+    ]
+
+
+def test_parse_array_parenthesis_inside_quoted_filename():
+    refs, findings = parse_pkgbuild(
+        'source=("local)name.tar" "https://example.invalid/remote.tar")\n'
+        'sha256sums=(one two)\n'
+    )
+
+    assert findings == []
+    assert [ref.resolved for ref in refs] == [
+        "local)name.tar",
+        "https://example.invalid/remote.tar",
+    ]
+
+
+def test_quoted_source_assignment_documentation_is_not_a_declaration():
+    refs, findings = parse_pkgbuild(
+        "printf '%s\\n' 'source=(https://example.invalid/documentation.tar)'\n"
+    )
+
+    assert refs == []
+    assert findings == []
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "source helper-that-mutates-pkgbuild.sh\n",
+        "eval 'source=(https://example.invalid/dynamic.tar)'\n",
+        "source[0]=https://example.invalid/replaced.tar\n",
+        'source=("benign.tar")\ndeclare -n ref=source\nref+=("https://example.invalid/dynamic.tar")\n',
+        'source=("benign.tar")\ntypeset -n alias=source\nalias[0]="https://example.invalid/dynamic.tar"\n',
+        "source = (https://example.invalid/malformed.tar)\n",
+        'source=("unterminated.tar\n',
+    ],
+)
+def test_unrepresentable_source_mutation_fails_closed(content: str):
+    refs, findings = parse_pkgbuild(content)
+
+    assert refs == []
+    assert any(
+        finding.rule_id == "SOURCE-PARSER-AMBIGUOUS"
+        and finding.blocks_installation
+        for finding in findings
+    )
+
+
+def test_dynamic_commands_inside_package_function_do_not_hide_static_sources():
+    refs, findings = parse_pkgbuild(
+        'source=("https://example.invalid/static.tar")\n'
+        'sha256sums=(abc)\n'
+        'package() {\n'
+        '  eval "$generated_command"\n'
+        '  source helper-used-during-package.sh\n'
+        '}\n'
+    )
+
+    assert findings == []
+    assert [ref.resolved for ref in refs] == ["https://example.invalid/static.tar"]
+
+
+def test_unterminated_package_function_keeps_source_parser_fail_closed():
+    refs, findings = parse_pkgbuild(
+        'source=("https://example.invalid/static.tar")\n'
+        'package() {\n'
+        '  printf "%s" "unterminated"\n'
+    )
+
+    assert refs == []
+    assert any(finding.rule_id == "SOURCE-PARSER-AMBIGUOUS" for finding in findings)
+
+
+def test_top_level_call_to_defined_helper_keeps_source_parser_fail_closed():
+    refs, findings = parse_pkgbuild(
+        '_choose_sources() { source=("https://example.invalid/dynamic.tar"); }\n'
+        '_choose_sources\n'
+    )
+
+    assert refs == []
+    assert any(finding.rule_id == "SOURCE-PARSER-AMBIGUOUS" for finding in findings)
+
+
+@pytest.mark.parametrize(
+    "invocation",
+    [
+        "if _choose_sources; then :; fi",
+        "! _choose_sources",
+        "time _choose_sources",
+        "MODE=test _choose_sources",
+    ],
+)
+def test_control_wrapped_top_level_helper_calls_fail_closed(invocation: str):
+    refs, findings = parse_pkgbuild(
+        '_choose_sources() { source=("https://example.invalid/dynamic.tar"); }\n'
+        + invocation
+        + "\n"
+    )
+
+    assert refs == []
+    assert any(finding.rule_id == "SOURCE-PARSER-AMBIGUOUS" for finding in findings)
+
+
+def test_dynamic_top_level_command_selection_keeps_source_parser_fail_closed():
+    refs, findings = parse_pkgbuild(
+        '_choose_sources() { source=("https://example.invalid/dynamic.tar"); }\n'
+        'selector=_choose_sources\n'
+        '"$selector"\n'
+    )
+
+    assert refs == []
+    assert any(finding.rule_id == "SOURCE-PARSER-AMBIGUOUS" for finding in findings)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        'builtin source helper.sh',
+        'command eval "source=(dynamic.tar)"',
+        'target=source\nprintf -v "$target" "%s" dynamic.tar',
+        'target=source\nread "$target"',
+        'target=source\nunset "$target"',
+    ],
+)
+def test_indirect_top_level_source_mutation_builtins_fail_closed(mutation: str):
+    refs, findings = parse_pkgbuild(
+        'source=("https://example.invalid/static.tar")\n'
+        + mutation
+        + "\n"
+    )
+
+    assert refs == []
+    assert any(finding.rule_id == "SOURCE-PARSER-AMBIGUOUS" for finding in findings)
 
 
 def test_reject_ambiguous_dynamic_source_safely():
@@ -220,11 +419,20 @@ def test_md5_checksum_match(tmp_path: Path):
     source.write_text("hello")
     digest = hashlib.md5(b"hello").hexdigest()
     ref = SourceReference("src.tar.gz", "src.tar.gz", 0, "src.tar.gz", 0, digest, "md5", SourceKind.local)
-    result = SourceAcquisitionResult(ref, source, size=5, status="acquired")
+    captured_sha256 = hashlib.sha256(b"hello").hexdigest()
+    result = SourceAcquisitionResult(
+        ref,
+        source,
+        size=5,
+        sha256=captured_sha256,
+        status="acquired",
+    )
 
     findings = ChecksumVerifier().verify(result)
 
     assert findings[0].rule_id == "SOURCE-CHECKSUM-MATCH"
+    assert result.sha256 == captured_sha256
+    assert result.sha256 != digest
 
 
 def test_checksum_mismatch_blocks(tmp_path: Path):
@@ -283,9 +491,20 @@ class FakeOpener:
     def __init__(self, body: bytes, final_url: str = "https://example.invalid/src.tar.gz"):
         self.body = body
         self.final_url = final_url
+        self.calls = 0
 
     def open(self, request, timeout):
+        self.calls += 1
         return FakeResponse(self.body, self.final_url)
+
+
+class ExplodingOpener:
+    def __init__(self):
+        self.calls = 0
+
+    def open(self, request, timeout):
+        self.calls += 1
+        raise AssertionError("offline mode attempted a network request")
 
 
 def test_http_download_success_using_mocked_transport(tmp_path: Path):
@@ -309,6 +528,74 @@ def test_redirect_to_unsupported_scheme_rejected(tmp_path: Path):
     assert any(f.rule_id == "SOURCE-HTTP-FETCH-FAILED" for f in result.findings)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1/source.tar.gz",
+        "http://[::1]/source.tar.gz",
+        "http://169.254.169.254/latest/meta-data/",
+        "https://localhost/source.tar.gz",
+        "https://user:secret@example.invalid/source.tar.gz",
+    ],
+)
+def test_http_source_refuses_local_or_credential_bearing_url_before_transport(tmp_path: Path, url: str):
+    opener = FakeOpener(b"should not be read")
+    ref = SourceReference(url, url, 0, "source.tar.gz", 0, None, None, SourceKind.http)
+
+    result = HttpSourceFetcher(SourcePolicy(max_download_size=100), opener=opener).fetch(ref, tmp_path)
+
+    assert opener.calls == 0
+    assert result.status == "failed"
+    assert any(f.rule_id == "SOURCE-HTTP-FETCH-FAILED" and f.blocks_installation for f in result.findings)
+
+
+def test_http_source_refuses_redirect_to_non_public_address(tmp_path: Path):
+    opener = FakeOpener(b"should not be stored", "http://169.254.169.254/latest/meta-data/")
+    ref = SourceReference(
+        "https://example.invalid/source.tar.gz",
+        "https://example.invalid/source.tar.gz",
+        0,
+        "source.tar.gz",
+        0,
+        None,
+        None,
+        SourceKind.http,
+    )
+
+    result = HttpSourceFetcher(SourcePolicy(max_download_size=100), opener=opener).fetch(ref, tmp_path)
+
+    assert opener.calls == 1
+    assert result.status == "failed"
+    assert not (tmp_path / "source.tar.gz").exists()
+
+
+def test_source_report_redacts_url_credentials_query_and_fragment():
+    ref = SourceReference(
+        "renamed.tar::https://user:secret@example.invalid/source.tar?token=secret#fragment",
+        "https://user:secret@example.invalid/source.tar?token=secret#fragment",
+        0,
+        "renamed.tar",
+        0,
+        None,
+        None,
+        SourceKind.http,
+    )
+    result = SourceAcquisitionResult(
+        ref,
+        final_url="https://user:secret@example.invalid/final?token=secret#fragment",
+        status="failed",
+    )
+
+    payload = result.to_dict()
+
+    serialized = repr(payload)
+    assert "secret" not in serialized
+    assert "token" not in serialized
+    assert payload["original"] == "renamed.tar::https://example.invalid/source.tar"
+    assert payload["resolved"] == "https://example.invalid/source.tar"
+    assert payload["final_url"] == "https://example.invalid/final"
+
+
 def test_oversized_download_rejected(tmp_path: Path):
     ref = SourceReference("https://example.invalid/src.tar.gz", "https://example.invalid/src.tar.gz", 0, "src.tar.gz", 0, None, None, SourceKind.http)
     fetcher = HttpSourceFetcher(SourcePolicy(max_download_size=3), opener=FakeOpener(b"hello"))
@@ -317,6 +604,280 @@ def test_oversized_download_rejected(tmp_path: Path):
 
     assert result.status == "failed"
     assert result.local_path is None
+    assert any(f.blocks_installation for f in result.findings)
+
+
+def test_offline_http_fetch_makes_zero_transport_calls(tmp_path: Path):
+    opener = ExplodingOpener()
+    ref = SourceReference(
+        "https://example.invalid/src.tar.gz",
+        "https://example.invalid/src.tar.gz",
+        0,
+        "src.tar.gz",
+        0,
+        "SKIP",
+        "sha256",
+        SourceKind.http,
+    )
+
+    result = HttpSourceFetcher(SourcePolicy(offline=True), opener=opener).fetch(ref, tmp_path)
+
+    assert opener.calls == 0
+    assert result.status == "offline"
+    assert any(f.rule_id == "SOURCE-OFFLINE-UNINSPECTED" and f.blocks_installation for f in result.findings)
+
+
+def test_offline_git_fetch_makes_zero_runner_calls(tmp_path: Path):
+    calls = []
+    ref = SourceReference(
+        "git+https://example.invalid/repo.git#commit=0123456789abcdef0123456789abcdef01234567",
+        "git+https://example.invalid/repo.git#commit=0123456789abcdef0123456789abcdef01234567",
+        0,
+        "repo",
+        0,
+        "SKIP",
+        "sha256",
+        SourceKind.git_https,
+        "commit",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+
+    result = GitSourceFetcher(
+        SourcePolicy(offline=True),
+        runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+    ).fetch(ref, tmp_path)
+
+    assert calls == []
+    assert result.status == "offline"
+    assert any(f.rule_id == "SOURCE-OFFLINE-UNINSPECTED" and f.blocks_installation for f in result.findings)
+
+
+def test_offline_key_provider_makes_zero_transport_calls(tmp_path: Path):
+    opener = ExplodingOpener()
+    provider = TrustedKeyDirectoryProvider(
+        SourcePolicy(offline=True, key_cache_dir=tmp_path / "keys"),
+        opener=opener,
+    )
+
+    source = provider.get_key(FULL_FP)
+
+    assert opener.calls == 0
+    assert source.path is None
+    assert source.error == "KEY_UNAVAILABLE"
+
+
+def test_source_fetcher_propagates_offline_policy_to_signature_verifier(tmp_path: Path):
+    fetcher = SourceFetcher(SourcePolicy(
+        offline=True,
+        auto_key_fetch=True,
+        key_cache_dir=tmp_path / "keys",
+    ))
+
+    assert fetcher.signature_verifier.policy.offline is True
+    assert fetcher.signature_verifier.key_provider.policy.offline is True
+
+
+def test_source_fetcher_offline_bypasses_injected_http_and_git_fetchers(tmp_path: Path):
+    class ExplodingFetcher:
+        def __init__(self):
+            self.calls = 0
+
+        def fetch(self, ref, output_dir):
+            self.calls += 1
+            raise AssertionError("offline source acquisition called a transport")
+
+    http_fetcher = ExplodingFetcher()
+    git_fetcher = ExplodingFetcher()
+    policy = SourcePolicy(
+        offline=True,
+        key_cache_dir=tmp_path / "keys",
+    )
+    refs = [
+        SourceReference(
+            "https://example.invalid/source.tar",
+            "https://example.invalid/source.tar",
+            0,
+            "source.tar",
+            0,
+            "SKIP",
+            "sha256",
+            SourceKind.http,
+        ),
+        SourceReference(
+            "git+https://example.invalid/repository.git",
+            "git+https://example.invalid/repository.git",
+            1,
+            "repository",
+            1,
+            "SKIP",
+            "sha256",
+            SourceKind.git_https,
+        ),
+    ]
+    fetcher = SourceFetcher(
+        policy,
+        http_fetcher=http_fetcher,
+        git_fetcher=git_fetcher,
+    )
+
+    results = fetcher.acquire_all(refs, tmp_path)
+
+    assert http_fetcher.calls == 0
+    assert git_fetcher.calls == 0
+    assert all(result.status == "offline" for result in results)
+    assert all(any(f.blocks_installation for f in result.findings) for result in results)
+    shutil.rmtree(fetcher.last_output_dir)
+
+
+@pytest.mark.parametrize("value", ["../outside.tar", "/tmp/outside.tar"])
+def test_local_source_paths_cannot_escape_package_root(tmp_path: Path, value: str):
+    pkg_dir = tmp_path / "pkg"
+    pkg_dir.mkdir()
+    (tmp_path / "outside.tar").write_bytes(b"outside")
+    ref = SourceReference(value, value, 0, "outside.tar", 0, "SKIP", "sha256", SourceKind.local)
+    fetcher = SourceFetcher(SourcePolicy(offline=True, max_download_size=100))
+
+    result = fetcher.acquire_all([ref], pkg_dir)[0]
+
+    assert result.status == "failed"
+    assert result.local_path is None
+    assert any(f.rule_id == "SOURCE-LOCAL-UNSAFE" and f.blocks_installation for f in result.findings)
+    shutil.rmtree(fetcher.last_output_dir)
+
+
+@pytest.mark.parametrize("reference_kind", [SourceKind.local, SourceKind.signature])
+@pytest.mark.parametrize("kind", ["file_symlink", "directory_symlink", "directory", "fifo"])
+def test_local_source_and_signature_reject_links_and_special_files(
+    tmp_path: Path,
+    kind: str,
+    reference_kind: SourceKind,
+):
+    pkg_dir = tmp_path / "pkg"
+    pkg_dir.mkdir()
+    value = "source.tar"
+    if kind == "file_symlink":
+        outside = tmp_path / "outside.tar"
+        outside.write_bytes(b"outside")
+        (pkg_dir / value).symlink_to(outside)
+    elif kind == "directory_symlink":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / value).write_bytes(b"outside")
+        (pkg_dir / "linked").symlink_to(outside, target_is_directory=True)
+        value = f"linked/{value}"
+    elif kind == "directory":
+        (pkg_dir / value).mkdir()
+    else:
+        os.mkfifo(pkg_dir / value)
+    ref = SourceReference(value, value, 0, "source.tar", 0, "SKIP", "sha256", reference_kind)
+    fetcher = SourceFetcher(SourcePolicy(offline=True, max_download_size=100))
+
+    result = fetcher.acquire_all([ref], pkg_dir)[0]
+
+    assert result.status == "failed"
+    assert any(f.rule_id == "SOURCE-LOCAL-UNSAFE" and f.blocks_installation for f in result.findings)
+    shutil.rmtree(fetcher.last_output_dir)
+
+
+def test_local_source_snapshot_is_bounded_and_independent(tmp_path: Path):
+    pkg_dir = tmp_path / "pkg"
+    pkg_dir.mkdir()
+    source = pkg_dir / "source.tar"
+    source.write_bytes(b"stable")
+    ref = SourceReference("source.tar", "source.tar", 0, "source.tar", 0, "SKIP", "sha256", SourceKind.local)
+    fetcher = SourceFetcher(SourcePolicy(offline=True, max_download_size=6))
+
+    result = fetcher.acquire_all([ref], pkg_dir)[0]
+    source.write_bytes(b"changed")
+
+    assert result.status == "acquired"
+    assert result.local_path != source
+    assert result.local_path.read_bytes() == b"stable"
+    shutil.rmtree(fetcher.last_output_dir)
+
+
+def test_local_source_changed_during_read_is_not_accepted(tmp_path: Path, monkeypatch):
+    pkg_dir = tmp_path / "pkg"
+    pkg_dir.mkdir()
+    source = pkg_dir / "source.tar"
+    source.write_bytes(b"a" * 70000)
+    ref = SourceReference(
+        "source.tar",
+        "source.tar",
+        0,
+        "source.tar",
+        0,
+        "SKIP",
+        "sha256",
+        SourceKind.local,
+    )
+    fetcher = SourceFetcher(SourcePolicy(offline=True, max_download_size=100000))
+    real_read = os.read
+    reads = 0
+
+    def replacing_read(fd, count):
+        nonlocal reads
+        payload = real_read(fd, count)
+        reads += 1
+        if reads == 1:
+            source.write_bytes(b"b" * 70000)
+        return payload
+
+    monkeypatch.setattr("aurascan.core.source_acquisition.os.read", replacing_read)
+
+    result = fetcher.acquire_all([ref], pkg_dir)[0]
+
+    assert result.status == "failed"
+    assert result.local_path is None
+    assert any(f.rule_id == "SOURCE-LOCAL-UNSAFE" and f.blocks_installation for f in result.findings)
+    shutil.rmtree(fetcher.last_output_dir)
+
+
+def test_oversized_local_source_is_a_blocker(tmp_path: Path):
+    pkg_dir = tmp_path / "pkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "source.tar").write_bytes(b"too large")
+    ref = SourceReference("source.tar", "source.tar", 0, "source.tar", 0, "SKIP", "sha256", SourceKind.local)
+    fetcher = SourceFetcher(SourcePolicy(offline=True, max_download_size=3))
+
+    result = fetcher.acquire_all([ref], pkg_dir)[0]
+
+    assert result.status == "failed"
+    assert any(f.rule_id == "SOURCE-LOCAL-UNSAFE" and f.blocks_installation for f in result.findings)
+    shutil.rmtree(fetcher.last_output_dir)
+
+
+class RoutedOpener:
+    def open(self, request, timeout):
+        body = b"first" if request.full_url.endswith("/first") else b"second"
+        return FakeResponse(body, request.full_url)
+
+
+def test_sources_with_the_same_filename_use_independent_destinations(tmp_path: Path):
+    refs = [
+        SourceReference("same.tar::https://example.invalid/first", "https://example.invalid/first", 0, "same.tar", 0, "SKIP", "sha256", SourceKind.http),
+        SourceReference("same.tar::https://example.invalid/second", "https://example.invalid/second", 1, "same.tar", 1, "SKIP", "sha256", SourceKind.http),
+    ]
+    policy = SourcePolicy(max_download_size=100)
+    fetcher = SourceFetcher(policy, http_fetcher=HttpSourceFetcher(policy, opener=RoutedOpener()))
+
+    results = fetcher.acquire_all(refs, tmp_path)
+
+    assert results[0].local_path != results[1].local_path
+    assert results[0].local_path.read_bytes() == b"first"
+    assert results[1].local_path.read_bytes() == b"second"
+    shutil.rmtree(fetcher.last_output_dir)
+
+
+def test_unsupported_source_is_a_fail_closed_blocker(tmp_path: Path):
+    ref = SourceReference("git://example.invalid/repo", "git://example.invalid/repo", 0, "repo", 0, "SKIP", "sha256", SourceKind.unsupported)
+    fetcher = SourceFetcher(SourcePolicy(offline=True))
+
+    result = fetcher.acquire_all([ref], tmp_path)[0]
+
+    assert result.status == "unsupported"
+    assert any(f.rule_id == "SOURCE-UNSUPPORTED" and f.blocks_installation for f in result.findings)
+    shutil.rmtree(fetcher.last_output_dir)
 
 
 def test_signature_only_flow_reports_key_unavailable_when_pgp_key_missing():
@@ -360,6 +921,100 @@ def test_git_fetch_uses_isolated_home_and_disables_credentials(tmp_path: Path, m
     assert all(call[1]["env"]["GIT_CONFIG_NOSYSTEM"] == "1" for call in calls)
     assert all(call[1]["env"]["SSH_AUTH_SOCK"] == "" for call in calls)
     assert all("-c" in call[0] and "credential.helper=" in call[0] for call in calls)
+    assert all(call[0][0] == "/usr/bin/git" for call in calls)
+
+
+def test_git_fetch_refuses_path_shadowed_executable_before_runner(tmp_path: Path, monkeypatch):
+    ref = SourceReference(
+        "git+https://example.invalid/repo.git#commit=0123456789abcdef0123456789abcdef01234567",
+        "git+https://example.invalid/repo.git#commit=0123456789abcdef0123456789abcdef01234567",
+        0,
+        "repo",
+        0,
+        "SKIP",
+        "sha256",
+        SourceKind.git_https,
+        "commit",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    calls = []
+    monkeypatch.setattr(
+        "aurascan.core.source_acquisition.shutil.which",
+        lambda _name: str(tmp_path / "shadowed-git"),
+    )
+
+    result = GitSourceFetcher(
+        runner=lambda *args, **kwargs: calls.append((args, kwargs))
+    ).fetch(ref, tmp_path)
+
+    assert calls == []
+    assert result.status == "skipped"
+    assert any(f.rule_id == "SOURCE-GIT-UNAVAILABLE" and f.blocks_installation for f in result.findings)
+
+
+def test_git_fetch_revalidates_executable_before_checkout(tmp_path: Path, monkeypatch):
+    ref = SourceReference(
+        "git+https://example.invalid/repo.git#commit=0123456789abcdef0123456789abcdef01234567",
+        "git+https://example.invalid/repo.git#commit=0123456789abcdef0123456789abcdef01234567",
+        0,
+        "repo",
+        0,
+        "SKIP",
+        "sha256",
+        SourceKind.git_https,
+        "commit",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    calls = []
+    revalidations = 0
+
+    def fake_runner(args, **kwargs):
+        calls.append(args)
+        if "clone" in args:
+            Path(args[-1]).mkdir(parents=True)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    def replacement_guard(_tool):
+        nonlocal revalidations
+        revalidations += 1
+        if revalidations > 1:
+            from aurascan.core.trusted_tools import TrustedToolError
+            raise TrustedToolError("fixture replacement")
+
+    monkeypatch.setattr("aurascan.core.source_acquisition.shutil.which", lambda _name: "/usr/bin/git")
+    monkeypatch.setattr(
+        "aurascan.core.source_acquisition.revalidate_trusted_system_tool",
+        replacement_guard,
+    )
+
+    result = GitSourceFetcher(runner=fake_runner).fetch(ref, tmp_path)
+
+    assert len(calls) == 1
+    assert result.status == "failed"
+    assert any(f.rule_id == "SOURCE-GIT-FETCH-FAILED" and f.blocks_installation for f in result.findings)
+
+
+def test_git_fetch_refuses_non_public_url_before_runner(tmp_path: Path, monkeypatch):
+    ref = SourceReference(
+        "git+https://127.0.0.1/repo.git#commit=0123456789abcdef0123456789abcdef01234567",
+        "git+https://127.0.0.1/repo.git#commit=0123456789abcdef0123456789abcdef01234567",
+        0,
+        "repo",
+        0,
+        "SKIP",
+        "sha256",
+        SourceKind.git_https,
+        "commit",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    calls = []
+    monkeypatch.setattr("aurascan.core.source_acquisition.shutil.which", lambda name: "/usr/bin/git")
+
+    result = GitSourceFetcher(runner=lambda *args, **kwargs: calls.append((args, kwargs))).fetch(ref, tmp_path)
+
+    assert calls == []
+    assert result.status == "failed"
+    assert any(f.rule_id == "SOURCE-GIT-FETCH-FAILED" and f.blocks_installation for f in result.findings)
 
 
 FULL_FP = "0123456789ABCDEF0123456789ABCDEF01234567"
@@ -434,6 +1089,22 @@ def test_automatic_key_fetch_attempted_only_for_full_fingerprint(tmp_path: Path,
 
     assert source.path.exists()
     assert source.source_type == "keyserver"
+    assert source.data == b"public key"
+    assert oct(source.path.stat().st_mode & 0o777) == "0o600"
+
+
+def test_automatic_key_fetch_refuses_non_public_redirect(tmp_path: Path):
+    opener = FakeOpener(b"not a key", "http://169.254.169.254/latest/meta-data/")
+    provider = TrustedKeyDirectoryProvider(
+        SourcePolicy(key_cache_dir=tmp_path / "cache"),
+        opener=opener,
+    )
+
+    source = provider.get_key(FULL_FP)
+
+    assert source.path is None
+    assert source.error == "KEY_FETCH_FAILED"
+    assert not (tmp_path / "cache" / f"{FULL_FP}.asc").exists()
 
 
 def test_automatic_key_fetch_not_attempted_for_short_key_ids(tmp_path: Path):
@@ -456,6 +1127,45 @@ def test_cached_key_is_reused_by_fingerprint(tmp_path: Path):
 
     assert source.path == cached
     assert source.source_type == "cache"
+    assert source.data == b"public key"
+
+
+def test_key_cache_symlink_is_refused_without_read_or_overwrite(tmp_path: Path):
+    cache = tmp_path / "cache"
+    cache.mkdir(mode=0o700)
+    victim = tmp_path / "victim"
+    victim.write_text("do not replace", encoding="utf-8")
+    (cache / f"{FULL_FP}.asc").symlink_to(victim)
+    opener = FakeOpener(b"new public key")
+
+    source = TrustedKeyDirectoryProvider(
+        SourcePolicy(key_cache_dir=cache),
+        opener=opener,
+    ).get_key(FULL_FP)
+
+    assert source.path is None
+    assert source.data is None
+    assert source.error == "KEY_CACHE_UNSAFE"
+    assert opener.calls == 0
+    assert victim.read_text(encoding="utf-8") == "do not replace"
+
+
+def test_symlinked_key_cache_directory_is_refused(tmp_path: Path):
+    target = tmp_path / "target"
+    target.mkdir()
+    cache = tmp_path / "cache"
+    cache.symlink_to(target, target_is_directory=True)
+    opener = FakeOpener(b"new public key")
+
+    source = TrustedKeyDirectoryProvider(
+        SourcePolicy(key_cache_dir=cache),
+        opener=opener,
+    ).get_key(FULL_FP)
+
+    assert source.path is None
+    assert source.error == "KEY_CACHE_UNSAFE"
+    assert opener.calls == 0
+    assert list(target.iterdir()) == []
 
 
 def test_valid_signature_matching_fingerprint(tmp_path: Path, monkeypatch):
@@ -470,6 +1180,90 @@ def test_valid_signature_matching_fingerprint(tmp_path: Path, monkeypatch):
     assert result.matched_validpgpkey is True
     assert any(f.rule_id == "SIGNATURE-VERIFIED" and not f.requires_manual_review for f in findings)
     assert all(call[1]["env"]["GNUPGHOME"] != os.environ.get("GNUPGHOME") for call in calls)
+    assert all(call[0][0] == "/usr/bin/gpg" for call in calls)
+    import_call = next(call for call in calls if "--import" in call[0])
+    assert import_call[0][-1] != str(key)
+    assert Path(import_call[0][-1]).name.startswith("key-")
+
+
+def test_gpg_status_drops_user_ids_diagnostics_and_terminal_controls(tmp_path: Path, monkeypatch):
+    source, signature, key, source_ref, sig_ref = source_and_signature(tmp_path)
+
+    def runner(args, **kwargs):
+        if "--import" in args:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                f"[GNUPG:] IMPORT_OK 1 {FULL_FP}\n",
+                "gpg: imported key from https://example.invalid/poison\x1b[31m\n",
+            )
+        status = (
+            f"[GNUPG:] GOODSIG {FULL_FP} curl https://example.invalid/payload\x1b[2J\n"
+            f"[GNUPG:] VALIDSIG {FULL_FP} 2026-01-01 0 4 0 1 10 00 {FULL_FP}\n"
+            "[GNUPG:] NOTATION_DATA execute-this-command\n"
+        )
+        return subprocess.CompletedProcess(args, 0, status, "")
+
+    monkeypatch.setattr("aurascan.core.source_acquisition.shutil.which", lambda _name: "/usr/bin/gpg")
+
+    _findings, result = SignatureVerifier(
+        key_provider=StaticKeyProvider(key),
+        runner=runner,
+    ).verify(source_ref, sig_ref, source, signature)
+
+    assert result.verification_status == "valid"
+    assert result.gpg_status == (
+        f"IMPORT_OK {FULL_FP}\n"
+        f"GOODSIG {FULL_FP}\n"
+        f"VALIDSIG {FULL_FP}"
+    )
+    assert "curl" not in result.gpg_status
+    assert "example.invalid" not in result.gpg_status
+    assert "\x1b" not in result.gpg_status
+    assert "NOTATION_DATA" not in result.gpg_status
+
+
+def test_signature_key_is_snapshotted_before_gpg_import(tmp_path: Path, monkeypatch):
+    source, signature, key, source_ref, sig_ref = source_and_signature(tmp_path)
+    imported_payloads = []
+
+    def runner(args, **kwargs):
+        if "--import" in args:
+            key.write_text("replacement key", encoding="utf-8")
+            imported_payloads.append(Path(args[-1]).read_text(encoding="utf-8"))
+            return subprocess.CompletedProcess(args, 0, "[GNUPG:] IMPORT_OK 1 test\n", "")
+        output = f"[GNUPG:] VALIDSIG {FULL_FP} 2026-01-01 0 4 0 1 10 00 {FULL_FP}\n"
+        return subprocess.CompletedProcess(args, 0, output, "")
+
+    monkeypatch.setattr("aurascan.core.source_acquisition.shutil.which", lambda _name: "/usr/bin/gpg")
+
+    findings, result = SignatureVerifier(
+        key_provider=StaticKeyProvider(key),
+        runner=runner,
+    ).verify(source_ref, sig_ref, source, signature)
+
+    assert result.verification_status == "valid"
+    assert imported_payloads == ["public key"]
+    assert any(item.rule_id == "SIGNATURE-VERIFIED" for item in findings)
+
+
+def test_signature_verification_refuses_path_shadowed_gpg(tmp_path: Path, monkeypatch):
+    source, signature, key, source_ref, sig_ref = source_and_signature(tmp_path)
+    calls = []
+    verifier = SignatureVerifier(
+        key_provider=StaticKeyProvider(key),
+        runner=gpg_runner(calls=calls),
+    )
+    monkeypatch.setattr(
+        "aurascan.core.source_acquisition.shutil.which",
+        lambda _name: str(tmp_path / "shadowed-gpg"),
+    )
+
+    findings, result = verifier.verify(source_ref, sig_ref, source, signature)
+
+    assert calls == []
+    assert result.verification_status == "gpg_unavailable"
+    assert any(f.rule_id == "SIGNATURE-VERIFICATION-UNAVAILABLE" for f in findings)
 
 
 def test_valid_signature_fingerprint_mismatch(tmp_path: Path, monkeypatch):

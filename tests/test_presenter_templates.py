@@ -92,6 +92,87 @@ def test_aur_repository_propagation_template_explains_static_correlation():
     assert "SUPPLYCHAIN-AUR-REPO-PROPAGATION-001" not in output
 
 
+def test_remote_stage_execution_template_explains_second_stage_uncertainty():
+    output = render([
+        make_finding(
+            "SUPPLYCHAIN-REMOTE-STAGE-EXEC-001",
+            Severity.CRITICAL,
+            Source.deterministic_rule,
+            "Correlated signals: remote content; derived artifact; execution",
+        )
+    ])
+
+    assert "downloads content and then executes it" in output
+    assert "mutable content fetched during a build" in output
+    assert "did not fetch, decode, or execute" in output
+    assert "does not prove a connection occurred" in output
+    assert "SUPPLYCHAIN-REMOTE-STAGE-EXEC-001" not in output
+
+
+def test_opaque_carrier_template_explains_static_evidence_and_uncertainty():
+    output = render([
+        make_finding(
+            "SUPPLYCHAIN-OPAQUE-CARRIER-EXEC-001",
+            Severity.CRITICAL,
+            Source.deterministic_rule,
+            "Correlated signals: carrier decode; carrier execution",
+        )
+    ])
+
+    assert "executes code through an opaque carrier" in output
+    assert "ordinary picture, document, font" in output
+    assert "did not decode, render, import, or execute" in output
+    assert "does not establish what bytes" in output
+    assert "SUPPLYCHAIN-OPAQUE-CARRIER-EXEC-001" not in output
+
+
+def test_uninspected_built_package_hook_template_fails_closed_without_malware_claim():
+    output = render([
+        make_finding(
+            "PACKAGE-INSTALL-HOOK-UNINSPECTED-001",
+            Severity.HIGH,
+            Source.deterministic_rule,
+            "package install-hook inspection did not complete",
+        )
+    ])
+
+    assert "Built package install hook could not be inspected safely" in output
+    assert "incomplete archive inspection" in output
+    assert "does not prove the package is malicious" in output
+    assert "PACKAGE-INSTALL-HOOK-UNINSPECTED-001" not in output
+
+
+def test_deep_static_incomplete_template_fails_closed_without_malware_claim():
+    output = render([
+        make_finding(
+            "DEEPSTATIC-INSPECTION-INCOMPLETE-001",
+            Severity.HIGH,
+            Source.deterministic_rule,
+            "bounded source-tree inspection did not complete",
+        )
+    ])
+
+    assert "Acquired-source inspection did not complete safely" in output
+    assert "Allowing a build after only part" in output
+    assert "does not prove that the source is malicious" in output
+    assert "DEEPSTATIC-INSPECTION-INCOMPLETE-001" not in output
+
+
+def test_nested_archive_template_describes_incomplete_inspection():
+    output = render([
+        make_finding(
+            "DEEPSTATIC-NESTED-ARCHIVE-UNINSPECTED-001",
+            Severity.HIGH,
+            Source.deterministic_rule,
+            "nested archive content was not recursively inspected",
+        )
+    ])
+
+    assert "nested source archive remains uninspected" in output
+    assert "not evidence of malware" in output
+    assert "DEEPSTATIC-NESTED-ARCHIVE-UNINSPECTED-001" not in output
+
+
 def test_uninspected_install_hook_template_explains_fail_closed_uncertainty():
     output = render([
         make_finding(

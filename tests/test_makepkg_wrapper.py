@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import aurascan.makepkg_wrapper as makepkg_wrapper
 from aurascan.analyzers.deterministic import DeterministicAnalyzer
 from aurascan.analyzers.history import HistoryAnalyzer, MANUAL_REVIEW_ACCEPTED_STATUS
 from aurascan.analyzers.source_metadata import SourceMetadataAnalyzer
@@ -18,6 +19,7 @@ from aurascan.core.review import (
     build_scan_fingerprint,
     get_non_acceptance_blockers,
 )
+from aurascan.core.trusted_tools import TrustedTool, TrustedToolError
 from aurascan.makepkg_wrapper import (
     EXIT_MANUAL_REVIEW,
     EXIT_MAKEPKG_NOT_FOUND,
@@ -30,6 +32,32 @@ from aurascan.makepkg_wrapper import (
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "makepkg_wrapper"
+
+
+@pytest.fixture(autouse=True)
+def trusted_makepkg_tool(monkeypatch):
+    tool = TrustedTool(
+        "makepkg",
+        "/usr/bin/makepkg",
+        1,
+        2,
+        0,
+        0,
+        0o100755,
+    )
+
+    def capture(name, *, which=None):
+        resolved = which(name) if which is not None else "/usr/bin/makepkg"
+        if resolved != "/usr/bin/makepkg":
+            raise TrustedToolError("fixture untrusted path")
+        return tool
+
+    monkeypatch.setattr(makepkg_wrapper, "capture_trusted_system_tool", capture)
+    monkeypatch.setattr(
+        makepkg_wrapper,
+        "revalidate_trusted_system_tool",
+        lambda _tool: None,
+    )
 
 
 class Completed:
@@ -412,6 +440,69 @@ def test_wrapper_returns_clear_error_when_makepkg_not_found(tmp_path):
     assert code == EXIT_MAKEPKG_NOT_FOUND
     assert order == ["scan"]
     assert "Could not locate" in stderr.getvalue()
+
+
+def test_wrapper_refuses_path_shadowed_makepkg_before_invocation(tmp_path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
+    shadow = tmp_path / "bin" / "makepkg"
+    shadow.parent.mkdir()
+    shadow.write_text("#!/bin/sh\nexit 99\n")
+    shadow.chmod(0o755)
+    order = []
+    factory, _created = fake_engine_factory(order)
+    makepkg_calls = []
+    stderr = io.StringIO()
+
+    code = run(
+        [],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: str(shadow),
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        stdout=io.StringIO(),
+        stderr=stderr,
+    )
+
+    assert code == EXIT_MAKEPKG_NOT_FOUND
+    assert order == ["scan"]
+    assert makepkg_calls == []
+    assert str(shadow) not in stderr.getvalue()
+    assert stderr.getvalue() == (
+        "[AuraScan] Could not locate or safely revalidate the trusted system "
+        "makepkg executable.\n"
+    )
+
+
+def test_wrapper_refuses_replaced_makepkg_before_invocation(monkeypatch, tmp_path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
+    order = []
+    factory, _created = fake_engine_factory(order)
+    makepkg_calls = []
+    stderr = io.StringIO()
+
+    def reject_replacement(_tool):
+        raise TrustedToolError("fixture-sensitive-replacement-detail")
+
+    monkeypatch.setattr(
+        makepkg_wrapper,
+        "revalidate_trusted_system_tool",
+        reject_replacement,
+    )
+    code = run(
+        [],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        stdout=io.StringIO(),
+        stderr=stderr,
+    )
+
+    assert code == EXIT_MAKEPKG_NOT_FOUND
+    assert order == ["scan"]
+    assert makepkg_calls == []
+    assert "fixture-sensitive" not in stderr.getvalue()
+    assert "safely revalidate" in stderr.getvalue()
 
 
 def test_locate_real_makepkg_avoids_recursion(tmp_path):

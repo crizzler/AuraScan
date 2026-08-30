@@ -15,6 +15,11 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from aurascan.core.ai_provider import call_ai_provider, resolve_ai_config
 from aurascan.core.ai_provider import parse_bool as parse_config_bool
 from aurascan.core.models import SCANNER_VERSION
+from aurascan.core.text_safety import (
+    advisory_text_or_fallback,
+    load_strict_json_object,
+    validate_model_advisory_text,
+)
 
 
 CONFIG_DRIFT_SCHEMA_VERSION = "1.0"
@@ -24,6 +29,11 @@ CONFIG_DRIFT_AI_DIFFS_VALUES = {"ask", "always", "never"}
 CONFIG_DRIFT_BACKUP_ROOT = Path("/var/lib/aurascan/config-drift")
 EXIT_CONFIG_DRIFT_APPLY_FAILED = 30
 EXIT_CONFIG_DRIFT_USER_DECLINED = 31
+CONFIG_DRIFT_AI_MAX_RESPONSE_CHARS = 16 * 1024
+CONFIG_DRIFT_AI_MAX_FILES = 20
+CONFIG_DRIFT_AI_FALLBACK = (
+    "AI explanation was omitted because the provider response did not meet AuraScan's guarded advisory contract."
+)
 
 LOW_RISK_NAMES = {
     "mirrorlist",
@@ -230,7 +240,13 @@ class ConfigDriftReport:
             lines.append(f"{index}. {action.drift_file.path} [{action.drift_file.kind}/{action.drift_file.risk}{sensitive}]")
             lines.append(f"Plan: {action.summary} ({label})")
             if action.ai_note:
-                lines.append(f"AI note: {action.ai_note}")
+                note = advisory_text_or_fallback(
+                    action.ai_note,
+                    max_chars=500,
+                    fallback=CONFIG_DRIFT_AI_FALLBACK,
+                )
+                if note:
+                    lines.append(f"AI note: {note}")
             if include_preview and action.candidate_text and action.applies:
                 diff = preview_diff(action.drift_file.target_path, action.candidate_text, max_lines=18)
                 if diff:
@@ -244,6 +260,8 @@ class ConfigDriftReport:
             provider = str(self.ai_review.get("provider") or "")
             label = f"AI diff review: {status}" + (f" ({provider})" if provider else "")
             lines.append(label)
+            if status == "invalid_response":
+                lines.append(CONFIG_DRIFT_AI_FALLBACK)
         if self.applied:
             lines.append(f"Applied fixes: {len(self.applied)}")
             if self.backup_root:
@@ -828,6 +846,8 @@ def apply_ai_config_drift_review(
     disabled: bool = False,
     urlopen: Optional[Callable] = None,
 ) -> None:
+    for action in report.actions:
+        action.ai_note = ""
     if disabled:
         report.ai_review = {"enabled": False, "status": "disabled"}
         return
@@ -841,18 +861,23 @@ def apply_ai_config_drift_review(
     prompt = build_config_drift_ai_prompt(report)
     try:
         text = call_ai_provider(config, prompt, timeout=20, urlopen=urlopen)
-        data = json.loads(text)
-        if not isinstance(data, dict):
-            raise ValueError("AI response was not a JSON object")
-    except Exception as exc:
-        report.ai_review = {"enabled": True, "provider": config.provider, "status": "invalid_response", "error": str(exc)}
+        data = load_strict_json_object(text, max_chars=CONFIG_DRIFT_AI_MAX_RESPONSE_CHARS)
+        validated = validate_config_drift_ai_response(report, data)
+    except Exception:
+        report.ai_review = {
+            "enabled": True,
+            "provider": config.provider,
+            "status": "invalid_response",
+            "summary": CONFIG_DRIFT_AI_FALLBACK,
+            "error": "AI response rejected by guarded advisory contract",
+        }
         return
-    apply_ai_notes(report, data)
+    apply_ai_notes(report, validated)
     report.ai_review = {
         "enabled": True,
         "provider": config.provider,
         "status": "ok",
-        "summary": str(data.get("summary") or ""),
+        "summary": validated["summary"],
     }
 
 
@@ -874,10 +899,51 @@ def build_config_drift_ai_prompt(report: ConfigDriftReport) -> str:
         "You are AuraScan's config drift reviewer for Arch-family .pacnew files.\n"
         "Use only the redacted bounded diffs below. Do not claim a merge is guaranteed safe.\n"
         "You may explain risks and suggest caution, but you cannot override AuraScan's deterministic action, backups, or sensitive-file confirmation rules.\n"
-        "Return strict JSON only with this shape:\n"
+        "Every prose value must be one short line without terminal labels, control characters, URLs, commands, executable instructions, or claims that a package, merge, or machine is safe or compromised.\n"
+        "Return strict JSON only with exactly this shape and no extra keys:\n"
         "{\"summary\":\"short summary\",\"files\":[{\"path\":\"path from input\",\"risk_notes\":\"short note\",\"confidence\":\"low|medium|high\"}]}\n\n"
         + json.dumps(payload, sort_keys=True)
     )
+
+
+def validate_config_drift_ai_response(
+    report: ConfigDriftReport,
+    data: Mapping[str, object],
+) -> Dict[str, object]:
+    if set(data) != {"summary", "files"}:
+        raise ValueError("AI config-drift response schema did not match")
+    summary = validate_model_advisory_text(data.get("summary"), max_chars=500)
+    items = data.get("files")
+    if not isinstance(items, list) or len(items) > CONFIG_DRIFT_AI_MAX_FILES:
+        raise ValueError("AI config-drift files must be a bounded list")
+    known_paths = {str(action.drift_file.path) for action in report.actions[:CONFIG_DRIFT_AI_MAX_FILES]}
+    validated_items: List[Dict[str, str]] = []
+    seen_paths = set()
+    for item in items:
+        if not isinstance(item, Mapping) or set(item) != {"path", "risk_notes", "confidence"}:
+            raise ValueError("AI config-drift file entry schema did not match")
+        path = item.get("path")
+        confidence = item.get("confidence")
+        if not isinstance(path, str) or len(path) > 4096:
+            raise ValueError("AI config-drift path was invalid")
+        if not isinstance(confidence, str) or confidence not in {"low", "medium", "high"}:
+            raise ValueError("AI config-drift confidence was invalid")
+        note = validate_model_advisory_text(
+            item.get("risk_notes"),
+            max_chars=500,
+            allow_empty=False,
+        )
+        if path not in known_paths:
+            continue
+        if path in seen_paths:
+            raise ValueError("AI config-drift path was duplicated")
+        seen_paths.add(path)
+        validated_items.append({
+            "path": path,
+            "risk_notes": note,
+            "confidence": confidence,
+        })
+    return {"summary": summary, "files": validated_items}
 
 
 def apply_ai_notes(report: ConfigDriftReport, data: Mapping[str, object]) -> None:
@@ -889,9 +955,9 @@ def apply_ai_notes(report: ConfigDriftReport, data: Mapping[str, object]) -> Non
         if not isinstance(item, Mapping):
             continue
         path = str(item.get("path") or "")
-        note = str(item.get("risk_notes") or "").strip()
+        note = item.get("risk_notes")
         if path in by_path and note:
-            by_path[path].ai_note = note[:500]
+            by_path[path].ai_note = str(note)
 
 
 def redacted_preview_diff(target_path: Path, drift_path: Path, *, max_chars: int = 6000) -> str:

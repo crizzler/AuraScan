@@ -37,6 +37,11 @@ from aurascan.core.incidents import (
 from aurascan.core.models import Confidence, SCANNER_VERSION, Severity
 from aurascan.core.recovery_boot import BootloaderInfo, detect_bootloader
 from aurascan.core.recovery_network import RecoveryNetworkState
+from aurascan.core.text_safety import (
+    advisory_text_or_fallback,
+    load_strict_json_object,
+    validate_model_advisory_text,
+)
 
 
 RECOVERY_SCHEMA_VERSION = "1.0"
@@ -52,6 +57,12 @@ RECOVERY_RUNTIME_MARKER = Path("/run/aurascan-recovery/environment")
 RECOVERY_TARGET_MOUNT = Path("/run/aurascan-recovery/target")
 RECOVERY_MAX_EVIDENCE = 80
 RECOVERY_MAX_AI_CHARS = 12000
+RECOVERY_AI_MAX_RESPONSE_CHARS = 32 * 1024
+RECOVERY_AI_MAX_CAUSES = 5
+RECOVERY_AI_MAX_ACTION_IDS = 20
+RECOVERY_AI_FALLBACK = (
+    "AI explanation was omitted because the provider response did not meet AuraScan's guarded advisory contract."
+)
 RECOVERY_MAX_PROBES = 24
 RECOVERY_MAX_AI_PROBES = 6
 RECOVERY_MAX_EXECUTED_PROBES = 12
@@ -458,7 +469,11 @@ class RecoveryReport:
         if self.probe_results:
             successful = sum(item.status not in {"failed", "timeout"} for item in self.probe_results)
             lines.append(f"\nLocal verification: {successful}/{len(self.probe_results)} probe(s) completed.")
-        summary = str(self.ai_review.get("summary") or "")
+        summary = advisory_text_or_fallback(
+            self.ai_review.get("summary"),
+            max_chars=2000,
+            fallback=RECOVERY_AI_FALLBACK,
+        )
         if summary:
             lines.append("\nAI explanation: " + summary)
         if self.notes:
@@ -2130,6 +2145,8 @@ def build_recovery_ai_prompt(report: RecoveryReport, *, phase: str, facts_only: 
         "Never provide commands, shell text, paths, package names not already shown, file edits, or new action/probe IDs. "
         "You may select only available opaque probe IDs during triage and recommend only verified action IDs. "
         "You cannot suppress deterministic findings, approve execution, declare the machine safe, or request filesystem, partition, firmware, authentication, user-data, Secure Boot key, or arbitrary repairs. "
+        "Every prose field must be one line without terminal labels, Unicode controls, URLs, shell/download commands, executable instructions, or claims that the machine is safe or compromised. "
+        "Use exactly the stated JSON keys; extra keys invalidate the response. "
         "Schema: {\"summary\":string,\"likely_causes\":[{\"title\":string,\"confidence\":\"low|medium|high\",\"evidence_ids\":[string],\"explanation\":string}],"
         "\"requested_probe_ids\":[string],\"recommended_action_ids\":[string]}. "
         "For final phase requested_probe_ids must be empty."
@@ -2169,36 +2186,77 @@ def validate_recovery_ai_response(
     *,
     phase: str,
 ) -> Dict[str, object]:
-    summary = redact_incident_text(str(data.get("summary") or ""))[:2000]
+    if phase not in {"triage", "final"}:
+        raise ValueError("AI recovery response phase was invalid")
+    if set(data) != {"summary", "likely_causes", "requested_probe_ids", "recommended_action_ids"}:
+        raise ValueError("AI recovery response schema did not match")
+    summary = _validate_recovery_ai_text(data.get("summary"), max_chars=2000)
     known_evidence = {item.evidence_id for item in report.incident_report.evidence} if report.incident_report else set()
     known_probes = {item.probe_id for item in report.diagnostic_probes}
     known_actions = {item.action_id for item in report.eligible_actions}
     requested = data.get("requested_probe_ids", [])
     recommended = data.get("recommended_action_ids", [])
-    requested_ids = [] if phase == "final" else [str(item) for item in requested if str(item) in known_probes][:RECOVERY_MAX_AI_PROBES] if isinstance(requested, list) else []
-    recommended_ids = [str(item) for item in recommended if str(item) in known_actions] if isinstance(recommended, list) else []
+    if not isinstance(requested, list) or len(requested) > RECOVERY_MAX_AI_PROBES:
+        raise ValueError("AI recovery requested_probe_ids must be a bounded list")
+    if not isinstance(recommended, list) or len(recommended) > RECOVERY_AI_MAX_ACTION_IDS:
+        raise ValueError("AI recovery recommended_action_ids must be a bounded list")
+    if any(not isinstance(item, str) or len(item) > 200 for item in requested + recommended):
+        raise ValueError("AI recovery probe or action ID was invalid")
+    if phase == "final" and requested:
+        raise ValueError("AI recovery final response requested additional probes")
+    requested_ids = []
+    if phase == "triage":
+        for item in requested:
+            if item in known_probes and item not in requested_ids:
+                requested_ids.append(item)
+    recommended_ids = []
+    for item in recommended:
+        if item in known_actions and item not in recommended_ids:
+            recommended_ids.append(item)
     causes = []
     raw_causes = data.get("likely_causes", [])
-    if isinstance(raw_causes, list):
-        for cause in raw_causes[:5]:
-            if not isinstance(cause, Mapping):
-                continue
-            confidence = str(cause.get("confidence") or "low").lower()
-            if confidence not in {"low", "medium", "high"}:
-                confidence = "low"
-            evidence_ids = cause.get("evidence_ids", [])
-            causes.append({
-                "title": redact_incident_text(str(cause.get("title") or "Possible cause"))[:300],
-                "confidence": confidence,
-                "evidence_ids": [str(item) for item in evidence_ids if str(item) in known_evidence][:20] if isinstance(evidence_ids, list) else [],
-                "explanation": redact_incident_text(str(cause.get("explanation") or ""))[:1200],
-            })
+    if not isinstance(raw_causes, list) or len(raw_causes) > RECOVERY_AI_MAX_CAUSES:
+        raise ValueError("AI recovery likely_causes must be a bounded list")
+    for cause in raw_causes:
+        if not isinstance(cause, Mapping) or set(cause) != {"title", "confidence", "evidence_ids", "explanation"}:
+            raise ValueError("AI recovery cause schema did not match")
+        confidence = cause.get("confidence")
+        evidence_values = cause.get("evidence_ids")
+        if not isinstance(confidence, str) or confidence not in {"low", "medium", "high"}:
+            raise ValueError("AI recovery cause confidence was invalid")
+        if not isinstance(evidence_values, list) or len(evidence_values) > 12:
+            raise ValueError("AI recovery cause evidence_ids must be a bounded list")
+        if any(not isinstance(item, str) or len(item) > 200 for item in evidence_values):
+            raise ValueError("AI recovery cause evidence ID was invalid")
+        title = _validate_recovery_ai_text(cause.get("title"), max_chars=300, allow_empty=False)
+        explanation = _validate_recovery_ai_text(cause.get("explanation"), max_chars=1200, allow_empty=False)
+        evidence_ids = []
+        for item in evidence_values:
+            if item in known_evidence and item not in evidence_ids:
+                evidence_ids.append(item)
+        if not evidence_ids:
+            continue
+        causes.append({
+            "title": title,
+            "confidence": confidence,
+            "evidence_ids": evidence_ids,
+            "explanation": explanation,
+        })
     return {
         "summary": summary,
         "likely_causes": causes,
         "requested_probe_ids": requested_ids,
         "recommended_action_ids": recommended_ids,
     }
+
+
+def _validate_recovery_ai_text(value: object, *, max_chars: int, allow_empty: bool = True) -> str:
+    validated = validate_model_advisory_text(
+        value,
+        max_chars=max_chars,
+        allow_empty=allow_empty,
+    )
+    return redact_incident_text(validated)
 
 
 def apply_recovery_ai_plan(
@@ -2236,13 +2294,15 @@ def apply_recovery_ai_plan(
         if progress_callback:
             progress_callback("AI is selecting bounded local recovery checks")
         raw = call_ai_provider(config, build_recovery_ai_prompt(report, phase="triage", facts_only=facts_only), timeout=30, urlopen=urlopen)
-        parsed = json.loads(raw)
-        if not isinstance(parsed, Mapping):
-            raise ValueError("AI triage was not a JSON object")
+        parsed = load_strict_json_object(raw, max_chars=RECOVERY_AI_MAX_RESPONSE_CHARS)
         triage = validate_recovery_ai_response(report, parsed, phase="triage")
         triage["status"] = "ok"
-    except Exception as exc:
-        triage = {"status": "invalid_response", "error": redact_incident_text(str(exc))[:500], "requested_probe_ids": []}
+    except Exception:
+        triage = {
+            "status": "invalid_response",
+            "error": "AI response rejected by guarded advisory contract",
+            "requested_probe_ids": [],
+        }
     requested = triage.get("requested_probe_ids", []) if isinstance(triage.get("requested_probe_ids"), list) else []
     if progress_callback:
         progress_callback("AuraScan is independently verifying the recovery plan")
@@ -2260,24 +2320,29 @@ def apply_recovery_ai_plan(
                 progress_callback("AI is explaining and prioritizing verified repairs")
             raw = call_ai_provider(config, build_recovery_ai_prompt(report, phase="final", facts_only=facts_only), timeout=30, urlopen=urlopen)
             requests += 1
-            parsed = json.loads(raw)
-            if not isinstance(parsed, Mapping):
-                raise ValueError("AI final review was not a JSON object")
+            parsed = load_strict_json_object(raw, max_chars=RECOVERY_AI_MAX_RESPONSE_CHARS)
             final = validate_recovery_ai_response(report, parsed, phase="final")
             final["status"] = "ok"
-        except Exception as exc:
-            final = {"status": "invalid_response", "error": redact_incident_text(str(exc))[:500]}
+        except Exception:
+            final = {
+                "status": "invalid_response",
+                "error": "AI response rejected by guarded advisory contract",
+            }
     selected = final if final.get("status") == "ok" else triage
     recommended = selected.get("recommended_action_ids", []) if isinstance(selected.get("recommended_action_ids"), list) else []
     for action in report.repair_actions:
         action.ai_recommended = action.action_id in recommended
+    status = "ok" if final.get("status") == "ok" else "triage_only" if triage.get("status") == "ok" else "invalid_response"
+    summary = str(selected.get("summary") or "")
+    if status == "invalid_response":
+        summary = RECOVERY_AI_FALLBACK
     report.ai_review = {
         "enabled": True,
         "provider": config.provider,
-        "status": "ok" if final.get("status") == "ok" else "triage_only" if triage.get("status") == "ok" else "invalid_response",
+        "status": status,
         "provider_requests": requests,
         "evidence_mode": "facts-only" if facts_only else "redacted",
-        "summary": str(selected.get("summary") or ""),
+        "summary": summary,
         "likely_causes": list(selected.get("likely_causes", [])) if isinstance(selected.get("likely_causes"), list) else [],
         "recommended_action_ids": recommended,
         "triage": triage,

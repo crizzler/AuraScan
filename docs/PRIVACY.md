@@ -48,16 +48,20 @@ or erase the manifest's persistent integrity state.
 Desktop notifications and tray/public status contain only a generic severity,
 count, and request to review. They never contain paths, snippets, usernames,
 credentials, provider output, or other file content. Acknowledging an alert
-deduplicates the same notification; it does not approve a file.
+deduplicates the same notification; it does not approve a file. AuraScan calls
+desktop notification only through a captured and revalidated
+`/usr/bin/notify-send`; if it is unavailable, private CLI/tray state remains
+available without spawning another executable from `PATH`.
 
 Instruction Guard AI is a second, independent opt-in. Its user timer processes
 at most one queued job per run through the already configured local or cloud
-provider. A request contains at most 12 KiB of redacted suspicious evidence and
-asks for strict JSON without tools. The provider may return a bounded verdict,
-severity, confidence, matched behavior families, and reasons. AI output is
-labeled interpretation, cannot lower deterministic severity, cannot trust an
-integrity change, and cannot provide commands. Disabling Instruction Guard AI
-causes zero provider calls. The offline monitor never loads provider
+provider. A request contains at most 12 KiB of opaque evidence IDs, fixed
+deterministic reasons, semantic behavior labels, and deterministic line
+locations; it contains no path or source snippet and asks for strict JSON
+without tools. AI rationale must map to supplied evidence IDs. It cannot invent
+or change a line, lower deterministic severity, trust an integrity change,
+claim execution or compromise, or provide commands. Disabling Instruction
+Guard AI causes zero provider calls. The offline monitor never loads provider
 credentials.
 
 Confirmed disable is not quarantine. AuraScan may atomically rename only an
@@ -92,6 +96,75 @@ When installed, `arch-audit` contacts the Arch Security Tracker according to its
 own network behavior and returns official advisory JSON to AuraScan. `--offline`
 skips that request. Campaign and advisory findings remain separate, and neither
 source authorizes automatic package removal or host cleanup.
+
+## Package and Advisory AI Boundaries
+
+Optional package AI receives only a bounded head/tail selection of numbered
+text lines represented as JSON data. It has no tools, filesystem authority, or
+URL/command channel. AuraScan accepts only a strict raise-only schema with
+allowlisted behavior labels and references to lines actually supplied. A
+no-additional-concern response cannot suppress deterministic findings or mark a
+package clean, safe, trusted, or approved.
+
+Upgrade AI receives a bounded redacted transaction summary. It may only raise,
+up to HIGH, the severity of a rule ID already present in deterministic
+findings. It cannot create a standalone finding or action, change blocking
+policy, lower a finding, or authorize an AUR build or package-manager handoff.
+
+Config-drift, incident, and recovery AI use similarly bounded exact schemas.
+Only known local evidence, probe, and verified action IDs survive validation.
+Model prose remains untrusted interpretation. AuraScan normalizes it and rejects
+recognized scheme, bare, IP, email, and obfuscated network destinations;
+direct or indirect action requests; sentence-leading imperative verbs; named or
+generic package-manager/install-helper advice; nominalized operation or
+invocation advice; credential-copy/share wording; questions; commands; terminal
+controls; forged AuraScan labels; credential-like assignments; and unsupported
+safe/compromised claims. Duplicate keys, extra fields, excessive lists/strings,
+malformed JSON, and provider errors also produce a fixed, secret-free failure
+explanation. A rejected raw response is not persisted or rendered; accepted
+bounded interpretation may appear in the private report or terminal view.
+
+These checks reduce recognized prompt-injection and social-engineering forms;
+they cannot prove arbitrary natural language harmless. Model prose has no
+tools, URL fetching, command execution, or policy authority. Only known IDs
+from AuraScan's local deterministic state can survive schema validation, and
+each separately guarded action keeps its existing confirmation and policy
+boundary.
+
+Default cloud and local provider transports refuse redirects. Gemini
+credentials are sent in a request header rather than a URL. Source-acquisition
+reports separately omit URL userinfo, query strings, and fragments so embedded
+credentials or tokens are not retained in scan state.
+
+## Explicit Source Acquisition and Native Tools
+
+Default scanning performs no source/key network request. Explicit deep-static
+acquisition may contact declared source hosts and a configured keyserver. It
+rejects URL userinfo, localhost, and non-public IP literals before the initial
+request and after redirects, but this lexical policy does not eliminate DNS
+rebinding. Git checkout can also consume disk before the acquired tree is fully
+analyzed. Use a disposable, resource-limited environment for adversarial
+acquisition and builds.
+
+Source Git and signature verification capture and revalidate
+`/usr/bin/git` and `/usr/bin/gpg`. The public-key cache uses a private
+user-owned directory; cached/configured keys are read as bounded stable
+non-link byte snapshots, fetched keys are published privately without replacing
+an existing path, and the exact captured bytes are copied into an isolated
+temporary GPG home before import. Package archive member capture, ClamAV,
+notification, makepkg, upgrade, and privileged-agent paths use their documented
+trusted absolute executables. Package archive and ClamAV collection impose
+their documented output/runtime bounds; source Git/GPG likewise use bounded
+combined child output, timeouts, and isolated configuration. Their native
+parser exposure remains a residual risk. The later makepkg handoff is neither
+a parser sandbox nor a bounded build. Raw ClamAV stdout/stderr, human-readable
+GPG diagnostics, and raw provider errors are not persisted as finding evidence.
+
+These controls reduce path substitution, prompt-injected command authority,
+and accidental secret retention; they do not sandbox a native parser. A defect
+in AuraScan or an invoked parser can still be exploitable by hostile bytes.
+Same-UID malware can attack user-owned configuration, cache, and state, and
+root malware can replace AuraScan or the system tools it trusts.
 
 ## Logged-In AI Assistant
 
@@ -178,10 +251,11 @@ active databases, flash firmware, or install drivers. Offline boot and weekly
 collectors gather only static `/proc` and `/sys` inventory and do not run these
 foreground commands or contact a network.
 
-## Foreground Full-Control Repair Agent
+## Foreground Policy-Gated Repair Agent
 
 The Repair Agent is disabled beyond `guarded` tools unless the user configures
-`user-shell` or `root-shell`. It runs only in an interactive foreground
+the compatibility access profiles `user-shell` or `root-shell`. Neither is a
+general shell grant. The feature runs only in an interactive foreground
 terminal. Root collectors, background services, pacman hooks, JSON workflows,
 and the recovery environment cannot invoke it.
 
@@ -193,16 +267,37 @@ at most 32 KiB per command and 128 KiB per session, within a 12,000-character
 request. API keys and other AuraScan secrets are omitted from the executor's
 minimal environment.
 
-`user-shell` commands run as the logged-in user. `root-shell` requires a
-root-owned policy opt-in plus the exact phrase
-`GRANT AI FULL ROOT CONTROL` for every session. The provider and unprivileged
-assistant keep the API credential; the root broker receives no provider
-configuration. Root capabilities are stored under `/run/aurascan-agent/`,
-expire quickly, and are bound to the UID, originating process/start time,
-terminal, retained-context fingerprint, and approval ceiling.
+`user-shell` permits only allowlisted shell output/test builtins and absolute
+read-only diagnostics under `/usr/bin` or `/usr/sbin`, running as the logged-in
+user. `root-shell` adds policy-validated root access for those diagnostics and
+constrained exact `/usr/bin/pacman` query, sync, or removal workflows. It
+requires a root-owned policy opt-in plus the exact phrase
+`GRANT AI ROOT REPAIR COMMANDS` for every session. The provider and
+unprivileged assistant keep the API credential; the root broker receives no
+provider configuration. Root capabilities are stored under
+`/run/aurascan-agent/`, expire quickly, and are bound to the UID, originating
+process/start time, terminal, retained-context fingerprint, and approval
+ceiling.
 
-Before root execution, AuraScan creates a validated Btrfs/Snapper snapshot when
-supported. Continuing without one requires typing
+Every exact model-authored policy-gated command requires a fresh foreground
+confirmation, including a command proposed after the model reads earlier
+terminal output. Legacy `whole-plan` and `session` settings are accepted when an
+older configuration is loaded but are enforced as `each-command`; neither the
+command-profile consent nor the root-session phrase authorizes later commands.
+
+The provider has no direct shell tool. Its response must match a bounded exact
+JSON schema. Before confirmation, AuraScan rejects every program outside the
+allowlist, bare/custom diagnostic paths, mutating or escape-capable diagnostic
+flags, remote references, network/remote-shell clients, Git, AUR/build front
+ends, interpreters/loaders, decoding/evaluation, shell expansion, redirection,
+and unsafe pacman operations. Repository package operations must name
+`/usr/bin/pacman`, cannot target AuraScan directly, and cannot use `-U` or
+alternate root/config/keyring/hook paths. Privileged broker calls revalidate
+trusted package-managed `/usr/bin/sudo` and `/usr/bin/aurascan` identities each
+time.
+
+Before policy-gated root access, AuraScan creates a validated Btrfs/Snapper
+snapshot when supported. Continuing without one requires typing
 `CONTINUE WITHOUT ROLLBACK`. Snapshots cannot protect other disks, firmware,
 credentials, networking, remote services, or every local configuration.
 
@@ -213,13 +308,15 @@ approval metadata, exit status, snapshot state, and bounded redacted output.
 They do not intentionally retain API keys, questions, or AI answers and are
 limited to 30 days or 50 sessions.
 
-Unrestricted root mode is user-authorized remote code execution. After a root
-command starts, it can alter AuraScan, read credentials, disable auditing,
-escape best-effort process controls, or send data over the network. No
-in-process policy can guarantee privacy or containment against authority that
-broad. The typed grants and audits prevent accidental activation; they do not
-make unrestricted root execution safe.
-Unrestricted root commands can defeat these software boundaries.
+The policy gate does not authorize arbitrary model-authored code. Root package
+repairs are still consequential: an approved pacman sync/removal can change
+installed software and system state, and a policy/parser defect or unsafe
+package transaction can cause damage. Read-only diagnostics may expose private
+paths, configuration, logs, or credential-adjacent data in their output.
+Redaction is best effort; the exact `SHARE FULL TERMINAL OUTPUT` phrase
+deliberately increases what the provider receives. Typed grants, fresh command
+confirmation, snapshots, and audits reduce accidental activation but do not
+make every permitted query or package transaction harmless.
 
 ## Safe Autopilot
 

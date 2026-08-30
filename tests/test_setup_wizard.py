@@ -130,7 +130,7 @@ def test_init_normalizes_custom_local_base_url(tmp_path):
     )
 
     assert status == 0
-    assert "AURASCAN_AI_BASE_URL=http://localhost:4321/v1" in env_path.read_text(encoding="utf-8")
+    assert "AURASCAN_AI_BASE_URL=http://127.0.0.1:4321/v1" in env_path.read_text(encoding="utf-8")
 
 
 def test_init_rejects_non_loopback_local_base_url(tmp_path):
@@ -194,10 +194,11 @@ def test_init_can_configure_foreground_repair_agent_defaults(tmp_path):
     text = env_path.read_text(encoding="utf-8")
     assert status == 0
     assert f"{AGENT_ACCESS_ENV}=user-shell" in text
-    assert f"{AGENT_APPROVAL_ENV}=whole-plan" in text
+    assert f"{AGENT_APPROVAL_ENV}=each-command" in text
     assert f"{AGENT_OUTPUT_SHARING_ENV}=redacted" in text
     assert f"{AGENT_SESSION_TIMEOUT_ENV}=25" in text
-    assert "Configured Repair Agent defaults" in stdout.getvalue()
+    assert "Configured Policy-Gated Repair Agent defaults" in stdout.getvalue()
+    assert "legacy input only" in stdout.getvalue()
 
 
 def test_init_configures_root_agent_policy_only_through_privileged_helper(monkeypatch, tmp_path):
@@ -1058,6 +1059,7 @@ def test_doctor_reports_agent_access_root_policy_and_private_audit(tmp_path):
     assert by_name["repair_agent"].status == "ok"
     assert by_name["repair_agent"].details["config"]["access"] == "root-shell"
     assert by_name["repair_agent_root_policy"].status == "warn"
+    assert "Policy-gated root repair sessions" in by_name["repair_agent_root_policy"].message
     assert by_name["repair_agent_root_policy"].details["allowed"] is True
     assert by_name["repair_agent_audit"].status == "ok"
     assert by_name["repair_agent_sessions"].status == "ok"
@@ -1098,6 +1100,25 @@ def test_doctor_check_ai_uses_mocked_provider(tmp_path):
     assert seen["url"] == "https://api.openai.com/v1/chat/completions"
     assert any(check["name"] == "ai_connectivity" and check["status"] == "ok" for check in data["checks"])
     assert "fixture-only-value" not in stdout.getvalue()
+
+
+def test_doctor_ai_connectivity_never_exposes_raw_provider_exception(monkeypatch):
+    marker = "fixture-secret\x1b[31mhttps://example.invalid"
+    monkeypatch.setattr(
+        setup_wizard,
+        "call_ai_provider",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError(marker)),
+    )
+
+    check = setup_wizard._check_ai_connectivity({
+        "AURASCAN_AI_ENABLED": "1",
+        "AURASCAN_AI_PROVIDER": "openai",
+        "AURASCAN_OPENAI_API_KEY": "fixture-only-key",
+    })
+
+    assert check.status == "error"
+    assert check.message == "AI connectivity failed: AI provider request failed"
+    assert marker not in check.message
 
 
 @pytest.mark.parametrize(

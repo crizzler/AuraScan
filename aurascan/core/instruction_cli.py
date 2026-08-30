@@ -16,6 +16,11 @@ from aurascan.core.ai_provider import (
     resolve_ai_config,
 )
 from aurascan.core.config import user_env_path, write_user_env
+from aurascan.core.trusted_tools import (
+    TrustedToolError,
+    capture_trusted_system_tool,
+    revalidate_trusted_system_tool,
+)
 
 
 INSTRUCTION_MONITOR_ENABLED_ENV = "AURASCAN_INSTRUCTION_MONITOR_ENABLED"
@@ -553,20 +558,24 @@ def _provider_reviewer(
 
 
 def _notify_generic(*, which: Callable, runner: Callable) -> bool:
-    executable = which("notify-send")
-    if not executable:
+    try:
+        executable = capture_trusted_system_tool("notify-send", which=which)
+    except TrustedToolError:
+        executable = None
+    if executable is None:
         return False
     try:
+        revalidate_trusted_system_tool(executable)
         result = runner(
             [
-                executable,
+                executable.path,
                 "AuraScan Agent Instruction Guard",
                 "Agent file findings need review in AuraScan.",
             ],
             check=False,
             timeout=10,
         )
-    except (OSError, TypeError, subprocess.SubprocessError):
+    except (OSError, TypeError, TrustedToolError, subprocess.SubprocessError):
         return False
     return int(getattr(result, "returncode", 1)) == 0
 

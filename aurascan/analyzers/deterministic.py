@@ -1,6 +1,7 @@
 import os
 import re
 import shlex
+from pathlib import Path
 from typing import List
 from aurascan.analyzers.base import BaseAnalyzer
 from aurascan.analyzers.aur_propagation import find_aur_repository_propagation_signals
@@ -9,7 +10,16 @@ from aurascan.analyzers.remote_access import (
     mask_shell_quoted_text,
     shell_command_pattern,
 )
+from aurascan.analyzers.remote_stage import (
+    analyze_carrier_execution,
+    analyze_remote_stage_execution,
+)
 from aurascan.core.models import AnalysisResult, Finding, Phase, Source, Severity, Confidence, EvidenceQuality
+from aurascan.core.package_archive import (
+    PACKAGE_HOOK_ABSENT,
+    PACKAGE_HOOK_RESOLVED,
+    capture_package_install_hook,
+)
 
 class Rule:
     def __init__(self, rule_id: str, pattern: str, severity: Severity, explanation: str, blocks: bool):
@@ -140,6 +150,51 @@ _HYPRLAND_FIXES_SOURCE = re.compile(
 )
 
 class DeterministicAnalyzer(BaseAnalyzer):
+    def analyze_package(self, pkg_path: str) -> AnalysisResult:
+        captured = capture_package_install_hook(Path(pkg_path))
+        if captured.status == PACKAGE_HOOK_ABSENT:
+            return AnalysisResult(True, "No package install hook was declared.", [])
+        if captured.status != PACKAGE_HOOK_RESOLVED:
+            finding = Finding(
+                rule_id="PACKAGE-INSTALL-HOOK-UNINSPECTED-001",
+                package_name="unknown",
+                package_version="unknown",
+                phase=Phase.install_hook_static,
+                source=Source.deterministic_rule,
+                severity=Severity.HIGH,
+                confidence=Confidence.CONFIRMED,
+                evidence_quality=EvidenceQuality.confirmed_static_pattern,
+                file_path=str(pkg_path),
+                explanation=(
+                    "The package archive may contain install-time control data, but AuraScan could "
+                    "not obtain a bounded, stable text view of it."
+                ),
+                recommendation=(
+                    "Do not install this package archive until its structure and install hook can "
+                    "be inspected safely."
+                ),
+                false_positive_notes=(
+                    "Incomplete inspection is not evidence that the package is malicious."
+                ),
+                blocks_installation=True,
+                requires_manual_review=False,
+                evidence_snippet="package install-hook inspection did not complete",
+            )
+            return AnalysisResult(False, "Package install hook could not be inspected.", [finding])
+        findings = self.analyze_content(
+            str(pkg_path) + "::/.INSTALL",
+            captured.content,
+            Phase.install_hook_static,
+        )
+        safe = not any(finding.blocks_installation for finding in findings)
+        return AnalysisResult(
+            safe,
+            "Package install hook deterministic rules passed."
+            if safe
+            else "Package install hook deterministic rules failed.",
+            findings,
+        )
+
     def analyze_content(self, pkg_path: str, content: str, phase: Phase, pkg_name: str = "unknown", pkg_ver: str = "unknown") -> List[Finding]:
         findings = []
         lines = content.splitlines()
@@ -195,6 +250,99 @@ class DeterministicAnalyzer(BaseAnalyzer):
                 requires_manual_review=False,
                 evidence_snippet="Correlated signals: " + "; ".join(signal.label for signal in signals),
                 line_number=min(signal.line_number for signal in signals),
+            ))
+        remote_stage_analysis = analyze_remote_stage_execution(content)
+        remote_stage_signals = remote_stage_analysis.signals
+        if not remote_stage_analysis.complete:
+            findings.append(Finding(
+                rule_id="STATIC-REMOTE-STAGE-INSPECTION-INCOMPLETE-001",
+                package_name=pkg_name,
+                package_version=pkg_ver,
+                phase=phase,
+                source=Source.deterministic_rule,
+                severity=Severity.HIGH,
+                confidence=Confidence.CONFIRMED,
+                evidence_quality=EvidenceQuality.confirmed_static_pattern,
+                file_path=pkg_path,
+                explanation=(
+                    "Bounded parsing of package logic did not complete while checking for "
+                    "downloaded artifacts that are later executed."
+                ),
+                recommendation=(
+                    "Do not build or install until the complete package logic can be inspected "
+                    "within the static-analysis bounds."
+                ),
+                false_positive_notes=(
+                    "Incomplete inspection is not evidence that remote content was downloaded or executed."
+                ),
+                blocks_installation=True,
+                requires_manual_review=False,
+                evidence_snippet="bounded remote-stage correlation did not complete",
+            ))
+        if remote_stage_signals:
+            findings.append(Finding(
+                rule_id="SUPPLYCHAIN-REMOTE-STAGE-EXEC-001",
+                package_name=pkg_name,
+                package_version=pkg_ver,
+                phase=phase,
+                source=Source.deterministic_rule,
+                severity=Severity.CRITICAL,
+                confidence=Confidence.CONFIRMED,
+                evidence_quality=EvidenceQuality.confirmed_static_pattern,
+                file_path=pkg_path,
+                explanation=(
+                    "Package logic acquires remote content into a local artifact and then executes "
+                    "that artifact or content derived from it."
+                ),
+                recommendation=(
+                    "Do not build or install this revision until the complete fetch, integrity "
+                    "verification, transformation, and execution chain has been reviewed."
+                ),
+                false_positive_notes=(
+                    "Static correlation does not prove the remote server was contacted, the content "
+                    "was malicious, or execution succeeded."
+                ),
+                blocks_installation=True,
+                requires_manual_review=False,
+                evidence_snippet="Correlated signals: " + "; ".join(
+                    signal.label for signal in remote_stage_signals
+                ),
+                line_number=min(signal.line_number for signal in remote_stage_signals),
+            ))
+        carrier_analysis = analyze_carrier_execution(content)
+        carrier_signals = carrier_analysis.signals
+        # Both correlations share the exact bounded command parser.  The
+        # existing incomplete-inspection blocker above therefore covers a
+        # carrier analysis which could not complete too.
+        if carrier_signals and not remote_stage_signals:
+            findings.append(Finding(
+                rule_id="SUPPLYCHAIN-OPAQUE-CARRIER-EXEC-001",
+                package_name=pkg_name,
+                package_version=pkg_ver,
+                phase=phase,
+                source=Source.deterministic_rule,
+                severity=Severity.CRITICAL,
+                confidence=Confidence.CONFIRMED,
+                evidence_quality=EvidenceQuality.confirmed_static_pattern,
+                file_path=pkg_path,
+                explanation=(
+                    "Package logic decodes local content into an artifact that it later executes, "
+                    "or invokes a media, document, or font-named artifact as code."
+                ),
+                recommendation=(
+                    "Do not build or install this revision until the complete carrier, "
+                    "transformation, and execution chain has been independently reviewed."
+                ),
+                false_positive_notes=(
+                    "Static correlation does not establish the artifact's bytes, intent, or "
+                    "whether execution would succeed."
+                ),
+                blocks_installation=True,
+                requires_manual_review=False,
+                evidence_snippet="Correlated signals: " + "; ".join(
+                    signal.label for signal in carrier_signals
+                ),
+                line_number=min(signal.line_number for signal in carrier_signals),
             ))
         if phase in {Phase.pkgbuild_static, Phase.install_hook_static}:
             propagation_signals = find_aur_repository_propagation_signals(

@@ -11,15 +11,16 @@ for Arch Linux, EndeavourOS, Manjaro, CachyOS, and AUR workflows. It is
 designed to catch obvious and moderately sophisticated malicious package
 behavior, explain risky package metadata clearly, and reduce breakage risk
 before routine upgrades. It can also inspect bounded crash evidence and prepare
-verified repair recipes without allowing AI to invent shell commands. Optional
-Assisted Background Recovery keeps networked AI analysis unprivileged and
-separate from the offline deterministic repair service.
+verified guarded repair recipes without treating AI prose as shell commands.
+Optional Assisted Background Recovery keeps networked AI analysis unprivileged
+and separate from the offline deterministic repair service.
 Foreground upgrade, incident, maintenance, and config-drift results can also
 open a bounded contextual AI follow-up without granting AI command authority.
-An optional foreground Repair Agent can separately grant arbitrary user-shell
-or unrestricted root-shell command authority after explicit configuration and
-live terminal consent. Root-shell mode is user-authorized remote code execution,
-not a safety guarantee.
+The optional foreground Policy-Gated Repair Agent can separately propose only
+allowlisted local diagnostics and constrained repository package repairs after
+explicit configuration, strict response/command validation, and fresh
+live-terminal consent for each exact command. Remote acquisition, arbitrary
+executables, AUR/build tooling, interpreters, and dynamic code are refused.
 The optional AuraScan Recovery boot environment extends those guarded workflows
 to an installed OS that cannot boot normally, with deterministic offline
 diagnostics and separately consented provider AI.
@@ -62,8 +63,9 @@ AuraScan currently provides ten practical entry points:
   plain `aurascan recovery` inside that image starts the guided recovery UI.
 - `aurascan ask --latest` reopens the newest private AuraScan result for
   bounded explanatory questions and locally verified follow-up actions.
-- `aurascan agent --latest` opens the optional foreground Repair Agent. Its
-  default `guarded` mode has no arbitrary command authority.
+- `aurascan agent --latest` opens the optional foreground Policy-Gated Repair
+  Agent. Its default `guarded` mode uses only AuraScan-owned probes/actions;
+  command-enabled profiles remain a fail-closed local allowlist.
 
 ## Quickstart
 
@@ -219,6 +221,24 @@ chain that could attempt to propagate changes using a maintainer's AUR
 credentials; it does not prove that the hook ran, credentials were available,
 a push succeeded, or an account was compromised.
 
+`SUPPLYCHAIN-REMOTE-STAGE-EXEC-001` separately blocks package control text that
+correlates a command-position network download or Git clone with later
+execution of the same local artifact. The correlation follows simple constant
+paths and bounded decode/copy steps, so a downloaded image- or text-named
+carrier that becomes an executed script is covered without AuraScan rendering
+the carrier. Fetching, installing, or documenting a file without executing the
+matched artifact is not enough. Evidence is fixed and secret-free, and the
+finding does not claim that a connection, download, or execution succeeded.
+
+`SUPPLYCHAIN-OPAQUE-CARRIER-EXEC-001` covers the related local-only pattern:
+active package logic decodes content into a separate artifact and then executes
+that exact artifact, or directly invokes a media-, document-, data-, or
+font-named path as code. A picture, archive, font, text file, asset declaration,
+or decode step alone is not a finding. Both correlations use a bounded command
+parser; if that parser cannot finish, AuraScan blocks with
+`STATIC-REMOTE-STAGE-INSPECTION-INCOMPLETE-001` and describes incomplete
+inspection rather than asserting malware or execution.
+
 A literal local `install=` target is mandatory scan evidence, including a
 dot-prefixed hook. AuraScan will not call the package clear when that declared
 hook is absent, unreadable, unsafe, ambiguous, or any component of its declared
@@ -226,6 +246,18 @@ relative path under the package directory is a symlink. It fails closed
 instead. The hook identity participates in scan and review fingerprints: an
 unresolved hook cannot reuse or create an allow decision, although AuraScan may
 cache the matching blocker report under its failure-state identity.
+
+Built package archives receive the same deterministic treatment for their
+`.INSTALL` member. AuraScan reads `.PKGINFO` identity and `.INSTALL` control
+text through a bounded no-follow archive reader. It executes only an
+already-opened, root-owned, non-writable `/usr/bin/bsdtar` identity and checks
+that identity again after use; linked, replaced, oversized, binary, or invalid
+inputs are not accepted as captured metadata. An uninspectable install hook
+fails closed before installation. Built-package reports are not cached until
+every analyzer can share one immutable archive snapshot, avoiding clear-report
+reuse across a mutable package path. Package images and other binary members
+are never rendered for AI. ClamAV may inspect their bytes when available, while
+deterministic rules focus on code paths that decode or execute a carrier.
 
 Default scans do not download declared sources, clone upstream repositories,
 fetch PGP keys, run GPG, run makepkg, install packages, or execute package code.
@@ -240,7 +272,33 @@ Deep static source inspection is opt-in: --deep-static is explicit. It safely ac
 archives without executing package code. In this mode AuraScan may verify
 detached signatures in an isolated temporary GPG home. Automatic key lookup is
 limited to explicit source acquisition/deep-static flows and can be disabled
-with `--no-auto-key-fetch` or `--offline`.
+with `--no-auto-key-fetch` or `--offline`. Offline mode makes zero source or key
+network requests and blocks when a declared remote source therefore cannot be
+inspected. Deep-static parses the exact captured PKGBUILD rather than a
+neighboring `.SRCINFO`, copies local sources through bounded no-follow reads,
+isolates every acquired source path, and blocks on any declared source it
+cannot inspect. Deep-static reports are deliberately not reused from cache
+until acquired-source identities can be bound to an immutable cache key.
+Source parsing handles bounded literal assignments and appends, but fails
+closed with `SOURCE-PARSER-AMBIGUOUS` when Bash syntax, malformed arrays,
+indirect mutation, `eval`/sourcing, or a nameref could change what `source`
+means without evaluation.
+
+Network Git acquisition and signature verification use captured and
+revalidated `/usr/bin/git` and `/usr/bin/gpg` identities rather than a later
+bare `PATH` lookup. Both run with isolated configuration plus bounded time and
+combined captured output. The PGP cache directory must be private and user-owned;
+cached or configured public-key files are read as bounded, stable, non-link
+snapshots. A fetched key is published as a private no-replace cache file, then
+the exact captured bytes are copied into the private temporary GPG home before
+import. These checks reduce path and replacement attacks; they do not make Git,
+GPG, their parsers, or a fetched key intrinsically trustworthy.
+
+Initial and redirected source URLs reject embedded credentials, localhost, and
+non-public IP literals; persisted acquisition metadata omits URL userinfo,
+queries, and fragments. This lexical defense does not eliminate DNS rebinding,
+so explicit network acquisition should still run in an isolated environment
+when the PKGBUILD is untrusted.
 
 ## What It Does Not Protect Against
 
@@ -252,6 +310,26 @@ scans. It does not preflight pasted commands or download links, use privileged
 fanotify interception, or automatically quarantine files. AuraScan does not
 guarantee malware detection, and it cannot see behavior hidden in files it did
 not fetch or inspect.
+
+AuraScan does not attempt to prove that arbitrary pictures, fonts, media,
+firmware, or opaque binaries are benign, and it does not use a multimodal model
+to interpret them. Static correlation can catch supported code that
+materializes and executes a carrier, but unknown decoders, steganography,
+parser vulnerabilities, dormant payloads, and behavior reached only after
+makepkg starts remain residual risk. Use a disposable build environment for
+untrusted AUR packages even after a clear scan. Deep-static currently blocks
+rather than silently skipping a nested archive; it does not recursively expand
+that archive in the same run.
+
+Bounds, no-follow reads, fixed tool paths, and identity checks limit known
+confused-deputy and replacement paths; they are not a parser sandbox. A defect
+in AuraScan, Python, Git, GPG, libarchive/bsdtar, ClamAV, or another invoked
+native parser may still be exploitable by hostile input. Same-UID malware can
+attack user-owned configuration, caches, and state, while root malware can
+replace AuraScan or its trusted system tools and defeat these checks. Explicit
+deep-static acquisition also creates network and disk exposure before the
+acquired tree can be fully analyzed, so use a disposable, resource-limited
+environment for adversarial packages.
 
 The AUR propagation rule is deliberately scoped to deterministic PKGBUILD and
 declared install-hook control text. It does not claim to parse or prove the
@@ -312,6 +390,35 @@ use `AURASCAN_AI_BASE_URL` to override a preset with another loopback HTTP(S)
 endpoint. Local-provider URLs are restricted to loopback; AuraScan bypasses
 environment proxies, refuses redirects, and never falls back to a cloud
 provider. `aurascan doctor` remains offline unless `--check-ai` is supplied.
+
+Package AI is advisory and raise-only. AuraScan sends a bounded head/tail set
+of numbered text lines as a JSON data object, gives the model no tools, and
+accepts only a strict verdict, allowlisted behavior families, and references to
+lines that were actually supplied. Provider prose, commands, URLs, snippets,
+and extra fields are rejected and never retained. A
+`no_additional_concern` response is not a clean bill of health and cannot
+lower or suppress deterministic findings. All default provider transports
+refuse redirects; Gemini credentials are sent in a header rather than a URL.
+Plain-HTTP `localhost` local endpoints are normalized to `127.0.0.1` so a
+mutable host lookup cannot redirect local model traffic.
+
+The same output boundary applies to config-drift, incident, and recovery AI.
+Responses have exact bounded JSON schemas, duplicate keys are rejected, and
+only known evidence, probe, or verified action IDs survive validation. Advisory
+model prose remains untrusted interpretation. Before display or persistence,
+AuraScan normalizes it and rejects recognized URL/domain destinations, direct
+or indirect action requests, sentence-leading imperative verbs, named or
+generic package-manager/install-helper advice, nominalized operation or
+invocation advice, credential transfer wording, questions, terminal controls,
+AuraScan status impersonation, and unsupported claims that a machine is safe or
+compromised. Invalid output and provider errors become fixed, secret-free
+explanations; the rejected raw response is not persisted or rendered.
+
+This language filter reduces common prompt-injection and social-engineering
+paths; it is not proof that arbitrary natural language is harmless. Accepted
+interpretation has no tool, URL, command, policy, or execution authority. Only
+validated known IDs can affect the separately guarded workflow, and
+deterministic evidence remains authoritative.
 
 `aurascan init` can also configure upgrade preflight defaults. Upgrade
 preflight is enabled by default even without an explicit setting, but the
@@ -516,10 +623,12 @@ or compromise, or propose commands. Disabling Instruction Guard AI makes no
 provider request.
 
 HIGH/CRITICAL and integrity alerts remain visible through CLI review state and
-the tray. When `notify-send` is available, desktop notifications contain only
-a generic review prompt, never a path, snippet, username, credential, or AI
-text. Acknowledging an alert suppresses an identical notification; it does not
-approve the file.
+the tray. Desktop notification is attempted only through a captured and
+revalidated `/usr/bin/notify-send`; if that trusted executable is unavailable,
+private CLI/tray review state remains authoritative. Notifications contain
+only a generic review prompt, never a path, snippet, username, credential, or
+AI text. Acknowledging an alert suppresses an identical notification; it does
+not approve the file.
 
 After explicit confirmation, AuraScan can disable only an unchanged,
 user-owned, standalone regular instruction file. Settings, hook
@@ -546,8 +655,9 @@ Instruction Guard timer.
 
 `aurascan upgrade` is an optional first-class upgrade front door for
 Arch-family systems. It previews the pending upgrade, checks local breakage
-risks, then hands off to pacman or a supported AUR helper when it is reasonable
-to continue.
+risks, then hands repository-only work to pacman when it is reasonable to
+continue. Supported AUR helpers may contribute bounded update context, but are
+not currently trusted as an automatic source-build handoff.
 
 ```bash
 aurascan upgrade
@@ -567,17 +677,21 @@ The repo-package preview uses pacman, and the final repo-only handoff is:
 sudo pacman -Syu
 ```
 
-When `paru`, `yay`, or `shelly` is selected or auto-detected, AuraScan also
-queries AUR updates and hands off to that helper. `paru` and `yay` use `-Syu`;
-Shelly 3 uses `shelly upgrade all --no-flatpak --no-appimage`; AuraScan detects
-and retains the older `shelly upgrade-all` syntax for Shelly 2 installations.
-This keeps the handoff aligned with AuraScan's repo/AUR preflight scope. After a
-passing preflight, AuraScan may add the helper's no-confirm option so the
-already-approved upgrade does not ask a second default-no question; use
-`--no-trusted-handoff` to keep the helper confirmation prompt. If no supported
-helper is available, AuraScan still warns about installed foreign packages that
-may need rebuilds after library, kernel, compiler, Python, Qt, or Electron
-updates.
+When `paru`, `yay`, or `shelly` is selected or auto-detected, AuraScan queries
+AUR update metadata through a trusted absolute helper executable. If the query
+finds no planned AUR builds, AuraScan deliberately uses the repository-only
+`/usr/bin/sudo /usr/bin/pacman -Syu` handoff. If it finds an AUR build, the
+deterministic `UPG-AUR-BUILD-UNSCANNED` finding blocks automatic helper
+execution because AuraScan cannot yet prove that every package will pass
+through `aurascan-makepkg`. Run the repository upgrade with `--aur-helper none`,
+then inspect and build each AUR update through `aurascan-makepkg`. A model or
+`--yes` cannot override this blocker.
+
+Before the preview, every helper query, and the final handoff, AuraScan binds
+`sudo`, `pacman`, and any selected helper to a root-owned, non-writable,
+non-symlink absolute executable beneath root-owned, non-writable path
+components. It revalidates the file identity and mode before use. A changed or
+unsafe executable fails closed and requires a fresh preflight.
 
 Upgrade preflight is not a safety guarantee. It checks for practical pitfalls
 such as low `/boot` or root space, CachyOS kernel movement when CachyOS kernel
@@ -589,7 +703,7 @@ dependency/conflict metadata, and pending `.pacnew`/`.pacsave` config drift. A
 clean preflight means AuraScan did not find these signals; pacman, hooks,
 packages, or local configuration can still fail.
 
-Before handing control to Shelly or pacman, AuraScan labels the output boundary
+Before handing control to pacman, AuraScan labels the output boundary
 so mirror, download, conflict, and replacement messages are not mistaken for
 AuraScan errors. Repository conflicts and replacements are described as package
 transition metadata while remaining advisory. After a successful command,
@@ -616,16 +730,19 @@ confirmation before running the package-manager command:
 AuraScan found upgrade risks. Continue anyway? [y/N]
 ```
 
-This is not a hard-blocker bypass model. AuraScan does not force system
-maintenance to stop; it gives you a clear checkpoint before continuing. Pacman
-or the AUR helper will still show its normal confirmation and may still fail.
+Most breakage-risk findings are advisory checkpoints and `--yes` can skip their
+extra prompt. The AUR source-build wrapper invariant is different: its CRITICAL
+blocker cannot be confirmed away. Pacman still shows its normal confirmation
+and may still fail for ordinary repository-only transactions.
 
 AI review is optional and raise-only. When AI is configured and not disabled
 with `--no-ai`, AuraScan sends a redacted structured summary of package names,
 versions, deterministic findings, and selected local system facts. It does not
 send API keys, environment variables, full command output, or file contents.
-AI may raise a preflight risk or add an advisory `UPG-AI-RISK`, but it cannot
-lower deterministic risk, mark an upgrade safe, or hard-block by itself.
+The response may only raise the severity, up to HIGH, of a rule ID already
+present in the deterministic finding set. It cannot create a standalone
+finding or action, lower deterministic risk, mark an upgrade safe, or change a
+finding's blocking policy.
 
 The config keys are `AURASCAN_UPGRADE_PREFLIGHT_ENABLED`,
 `AURASCAN_UPGRADE_AUR_HELPER`, `AURASCAN_UPGRADE_PREFLIGHT_AI`, and
@@ -697,10 +814,11 @@ The interactive commands `/status`, `/stop`, and `/agent ACCESS` are available.
 session only when that access has already been configured; access changes
 cannot inherit an existing grant.
 
-## Full-Control Repair Agent
+## Policy-Gated Repair Agent
 
-`aurascan agent` reuses a retained AuraScan result but can optionally let the AI
-request exact terminal commands:
+`aurascan agent` reuses a retained AuraScan result. Its explicitly configured
+command-enabled profiles may request only policy-validated local diagnostics or
+constrained repository package repairs:
 
 ```bash
 aurascan agent
@@ -714,11 +832,13 @@ Access is layered:
 
 - `guarded` is the default and uses only existing AuraScan-owned probes and
   verified repairs. AI cannot generate commands in guarded mode.
-- `user-shell` may request arbitrary commands under the current user after a
-  foreground session prompt.
-- `root-shell` may request unrestricted root commands. It requires both a
-  root-owned policy opt-in and the exact per-session phrase
-  `GRANT AI FULL ROOT CONTROL`.
+- `user-shell` is a compatibility name for a policy-gated local diagnostic
+  profile. It permits a small set of shell output/test builtins and absolute
+  read-only diagnostics under `/usr/bin` or `/usr/sbin`.
+- `root-shell` adds policy-validated root execution for the same diagnostics
+  and constrained exact `/usr/bin/pacman` query, sync, or removal workflows. It
+  requires both a root-owned policy opt-in and the exact per-session phrase
+  `GRANT AI ROOT REPAIR COMMANDS`.
 
 The settings are `AURASCAN_AGENT_ACCESS`, `AURASCAN_AGENT_APPROVAL`,
 `AURASCAN_AGENT_OUTPUT_SHARING`, and `AURASCAN_AGENT_SESSION_TIMEOUT`.
@@ -726,12 +846,24 @@ The settings are `AURASCAN_AGENT_ACCESS`, `AURASCAN_AGENT_APPROVAL`,
 whether root mode is allowed, its maximum approval mode, and session duration;
 it contains no API credential.
 
-Approval defaults to `each-command`, which displays the exact command,
-privilege, working directory, reason, and expected result before every run.
-`whole-plan` confirms a finite immutable plan, while `session` permits
-autonomous commands until expiry or `/stop` and therefore requires stronger
-typed consent. Commands are noninteractive, limited to 30 per session, and run
-with a minimal environment. Provider requests are limited to 40.
+Approval is enforced as `each-command`: AuraScan displays the exact command,
+privilege, working directory, reason, and expected result and asks again before
+every run, including commands proposed after earlier terminal output. Existing
+`whole-plan` and `session` configuration values remain parseable for upgrade
+compatibility, but command-enabled profiles normalize them to `each-command`;
+an initial user/root session grant never authorizes a later model-authored
+command. Commands are noninteractive, limited to 30 per session, and run with a
+minimal environment. Provider requests are limited to 40.
+
+Repair Agent responses must match one bounded JSON schema. Model-authored shell
+text is rejected before confirmation when it contains remote references,
+network clients or remote shells, Git, AUR helpers, source/build front ends,
+interpreters or dynamic loaders, decoding/evaluation, shell expansion,
+redirection, non-allowlisted commands, arbitrary executable paths, or unsafe
+pacman options. Diagnostics must name an allowlisted absolute `/usr/bin` or
+`/usr/sbin` executable and pass command-specific read-only checks. Repository
+package operations must name `/usr/bin/pacman`, cannot target AuraScan itself,
+and cannot use `-U` or alternate root/config/keyring/hook paths.
 
 Terminal output is shown locally. AI receives at most 32 KiB per command and
 128 KiB per session. Output is redacted by default; `full` requires typing
@@ -750,11 +882,14 @@ Root grants are short-lived and bound to the invoking UID, process identity,
 terminal, context fingerprint, approval ceiling, and capability. Root
 manifests are private under `/var/lib/aurascan/agent/`.
 
-This mode is deliberately dangerous. Once an unrestricted root command starts,
-it can modify AuraScan, disable auditing, escape best-effort process controls,
-destroy data, or change firmware, networking, authentication, and security
-policy. Software cannot make that authority safe. Use it only with commands you
-have read and accepted, preferably in `each-command` mode with current backups.
+Policy-gated root repair is still consequential: an approved pacman sync or
+removal can change installed packages and system state, and a policy/parser bug
+or unsafe package transaction can cause damage. Read every exact command and
+keep current backups. Read-only diagnostic targets and output may also contain
+private system data; default redaction is best effort, while the separate raw
+output phrase deliberately shares more with the configured provider. This
+allowlist is a narrow repair boundary, not a claim that every permitted query
+or package transaction is harmless.
 
 The agent is foreground-only. JSON output, noninteractive workflows, pacman
 hooks, package-manager `--yes`, incident collectors, background services, and
@@ -1127,6 +1262,12 @@ The wrapper scans the current directory's `PKGBUILD` before invoking the real
 before makepkg receives its arguments. If AuraScan blocks or requires review,
 makepkg is not invoked by default.
 
+After the scan, the wrapper accepts only a captured `/usr/bin/makepkg` whose
+path components and final file are root-owned, non-writable, regular,
+executable, and non-symlinked. It revalidates the exact device/inode,
+ownership, group, and mode immediately before invocation. A hostile `PATH`, an
+unexpected makepkg location, or replacement after capture stops the wrapper.
+
 The wrapper protects the pre-build phase. It does not sandbox makepkg, install
 packages, or make package code safe after makepkg starts running build steps.
 
@@ -1171,10 +1312,19 @@ stdin, scans an existing target path when one is provided, or looks for the
 latest matching `.pkg.tar.zst` file in `/var/cache/pacman/pkg`. Missing archive
 targets are reported as warnings and do not block by themselves. Blocking
 findings make AuraScan exit non-zero, which should stop the pacman transaction.
-If `clamscan` is unavailable, AuraScan reports that AV scanning was skipped and
-continues with the remaining checks. If `/usr/bin/aurascan` is missing, pacman
-cannot run the hook command; recover by reinstalling AuraScan or removing the
-stale hook from the hook directory.
+ClamAV runs only when `PATH` resolves to a captured, root-owned, non-writable
+`/usr/bin/clamscan`, which AuraScan revalidates immediately before the bounded
+scan. Database version reporting uses the same policy for
+`/usr/bin/freshclam`. Symlink following, recursion, scanned bytes, file count,
+runtime, and combined output are bounded; the child receives a fixed minimal
+environment, and an option terminator keeps a package filename from becoming a
+ClamAV flag. Raw ClamAV stdout/stderr is not retained as report evidence. If a
+started ClamAV scan times out, exceeds a bound, or returns an error, AuraScan
+records blocking incomplete inspection rather than a clean result. If trusted
+`clamscan` is unavailable, AuraScan reports that AV scanning was skipped and
+continues with the remaining checks. If
+`/usr/bin/aurascan` is missing, pacman cannot run the hook command; recover by
+reinstalling AuraScan or removing the stale hook from the hook directory.
 
 ## Review Acceptance
 
@@ -1267,12 +1417,16 @@ memory-pressure, and normalized hardware-error facts. AuraScan excludes serial
 numbers, UUIDs, raw DMI/SPD data, and raw journal text from that hardware
 summary. Firmware and driver checks are read-only and never install an update.
 
-Repair Agent shell access is a separate foreground authority. Redacted output
-sharing is the default, raw output requires a typed session grant, and API keys
-are removed from the executor environment. Private audits retain command hashes
-and redacted command/output material. Enabling `root-shell` means accepting
-that a root command can defeat these software boundaries after execution
-begins.
+Policy-Gated Repair Agent access is a separate foreground authority. Redacted
+output sharing is the default, raw output requires a typed session grant, and
+API keys are removed from the executor environment. Private audits retain
+command hashes and redacted command/output material. The command gate accepts
+only allowlisted absolute read-only diagnostics plus constrained exact
+`/usr/bin/pacman` workflows; remote acquisition, arbitrary executables,
+AUR/build tools, interpreters, decoders, expansion, and redirection are refused.
+Approved package repairs can still change installed software, and diagnostic
+output can contain private data, so each exact command remains a meaningful
+consent boundary.
 
 Recovery AI has a separate consent bit. Neither the locally built UKI nor the
 release ISO contains an API key, user config, saved WLAN profile, hostname,
@@ -1299,10 +1453,13 @@ a configured keyserver for PGP key lookup. The metadata-only tuning helper
 fetches only PKGBUILD and `.SRCINFO` text from the AUR and does not download
 declared sources.
 
-External tools are optional where appropriate. Missing ClamAV, GPG, makepkg,
-pacman, or vercmp should fail gracefully in the paths that can proceed without
-them. Some workflows, such as invoking the makepkg wrapper after a successful
-scan, require a real makepkg executable.
+External tools are optional only where the workflow can safely continue.
+ClamAV may be skipped with an explicit warning, while failed explicit source
+acquisition remains incomplete and blocking. The package archive reader,
+ClamAV integration, source Git/GPG paths, makepkg wrapper, notification path,
+and upgrade handoff use their documented absolute system executables and
+revalidate identities where applicable. The makepkg wrapper requires trusted
+`/usr/bin/makepkg`; it never falls back to another executable found on `PATH`.
 
 ## False Positives
 

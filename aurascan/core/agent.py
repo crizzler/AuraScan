@@ -1,9 +1,11 @@
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import stat
@@ -12,12 +14,17 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from aurascan.core.ai_provider import call_ai_provider, resolve_ai_config
+from aurascan.core.ai_provider import (
+    call_ai_provider,
+    resolve_ai_config,
+    safe_provider_error_detail,
+)
 from aurascan.core.hardware_health import (
     HARDWARE_HEALTH_PROBE_ID,
     question_requests_hardware_context,
@@ -45,6 +52,16 @@ from aurascan.core.followup import (
     redact_followup_text,
     user_followup_root,
 )
+from aurascan.core.trusted_tools import (
+    TrustedTool,
+    TrustedToolError,
+    capture_trusted_system_tool,
+    revalidate_trusted_system_tool,
+)
+from aurascan.core.text_safety import (
+    load_strict_json_object,
+    validate_model_advisory_text,
+)
 
 
 AGENT_SCHEMA_VERSION = "1.0"
@@ -60,6 +77,17 @@ AGENT_ROOT_POLICY_PATH = Path("/etc/aurascan/agent.conf")
 AGENT_RUNTIME_ROOT = Path("/run/aurascan-agent")
 AGENT_ROOT_AUDIT_ROOT = Path("/var/lib/aurascan/agent")
 AGENT_RECOVERY_RUNTIME_MARKER = Path("/run/aurascan-recovery/environment")
+AGENT_TRUSTED_SUDO_PATH = Path("/usr/bin/sudo")
+AGENT_TRUSTED_HELPER_PATH = Path("/usr/bin/aurascan")
+AGENT_PRIVILEGED_TOOLS_ERROR = (
+    "privileged agent tools are unavailable, unsafe, or changed"
+)
+AGENT_COMMAND_POLICY_ERROR = (
+    "agent command violates AuraScan's local-only execution policy"
+)
+AGENT_AI_RESPONSE_ERROR = "AI response rejected by guarded agent contract"
+AGENT_OUTPUT_LIMIT_ERROR = "command output exceeded AuraScan's fixed capture limit"
+AGENT_OUTPUT_CAPTURE_ERROR = "command output could not be captured safely"
 
 AGENT_ACCESS_VALUES = ("guarded", "user-shell", "root-shell")
 AGENT_APPROVAL_VALUES = ("each-command", "whole-plan", "session")
@@ -77,14 +105,16 @@ AGENT_MAX_COMMANDS_PER_SESSION = 30
 AGENT_MAX_PROVIDER_REQUESTS = 40
 AGENT_MAX_QUESTIONS = 20
 AGENT_MAX_PROMPT_CHARS = 12000
+AGENT_MAX_AI_RESPONSE_CHARS = 32 * 1024
 AGENT_MAX_AI_OUTPUT_PER_COMMAND = 32 * 1024
 AGENT_MAX_AI_OUTPUT_PER_SESSION = 128 * 1024
 AGENT_MAX_RETAINED_OUTPUT = 128 * 1024
+AGENT_MAX_COMMAND_OUTPUT_BYTES = 128 * 1024
+AGENT_OUTPUT_READ_CHUNK = 4096
 AGENT_MAX_REQUEST_BYTES = 256 * 1024
 AGENT_RETENTION_DAYS = 30
 AGENT_MAX_AUDITS = 50
-AGENT_ROOT_GRANT_PHRASE = "GRANT AI FULL ROOT CONTROL"
-AGENT_USER_SESSION_GRANT_PHRASE = "GRANT AI USER SHELL CONTROL"
+AGENT_ROOT_GRANT_PHRASE = "GRANT AI ROOT REPAIR COMMANDS"
 AGENT_RAW_OUTPUT_PHRASE = "SHARE FULL TERMINAL OUTPUT"
 AGENT_NO_SNAPSHOT_PHRASE = "CONTINUE WITHOUT ROLLBACK"
 
@@ -97,6 +127,337 @@ CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 ANSI_ESCAPE_RE = re.compile(
     r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~])"
 )
+AGENT_REMOTE_REFERENCE_RE = re.compile(
+    r"(?:\b[a-z][a-z0-9+.-]{1,20}://|\bwww\.|"
+    r"(?:[a-z0-9_.-]+@)?(?:[a-z0-9-]+\.)+[a-z]{2,63}:|"
+    r"\[[0-9a-f:]+\]:|/dev/(?:tcp|udp)/)",
+    re.IGNORECASE,
+)
+AGENT_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+AGENT_ENCODED_ESCAPE_RE = re.compile(
+    r"\\(?:x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|[0-7]{2,3})"
+)
+AGENT_SENSITIVE_PATH_RE = re.compile(
+    r"(?:^|/)(?:\.aws|\.azure|\.docker|\.gnupg|\.kube|\.ssh|keyrings?|secrets?)(?:/|$)|"
+    r"^/etc/(?:gshadow|shadow|sudoers)(?:$|[./])|"
+    r"^/etc/(?:ssh|sudoers\.d)/|"
+    r"^/(?:proc/(?:kcore|(?:self|[0-9]+)/(?:environ|mem))|run/(?:credentials|secrets))(?:/|$)|"
+    r"(?:^|/)(?:\.env|auth\.json|credentials(?:\.json)?|id_(?:dsa|ecdsa|ed25519|rsa))(?:$|\.)",
+    re.IGNORECASE,
+)
+AGENT_FORBIDDEN_PROGRAMS = {
+    # Network clients and remote shells/copies.
+    "aria2c",
+    "curl",
+    "fetch",
+    "ftp",
+    "git",
+    "gpg",
+    "gpg2",
+    "hg",
+    "lftp",
+    "nc",
+    "ncat",
+    "netcat",
+    "rclone",
+    "rsync",
+    "scp",
+    "sftp",
+    "socat",
+    "ssh",
+    "svn",
+    "bzr",
+    "cvs",
+    "fossil",
+    "telnet",
+    "wget",
+    "wget2",
+    # AUR helpers and package/source build front ends.
+    "aura",
+    "aurman",
+    "bauerbill",
+    "pakku",
+    "pacaur",
+    "pamac",
+    "paru",
+    "pikaur",
+    "rua",
+    "shelly",
+    "trizen",
+    "yay",
+    "yaourt",
+    "makepkg",
+    "pkgctl",
+    "archbuild",
+    "mkarchroot",
+    "cmake",
+    "gmake",
+    "make",
+    "meson",
+    "ninja",
+    "scons",
+    "bazel",
+    "buck",
+    "cargo",
+    "rustc",
+    "go",
+    "gcc",
+    "g++",
+    "cc",
+    "c++",
+    "clang",
+    "clang++",
+    "ld",
+    "as",
+    "javac",
+    "gradle",
+    "mvn",
+    "ant",
+    "npm",
+    "npx",
+    "pnpm",
+    "yarn",
+    "bun",
+    "pip",
+    "pip3",
+    "pipx",
+    "uv",
+    "gem",
+    "composer",
+    "luarocks",
+    "cpan",
+    "cpanm",
+    "pear",
+    "pecl",
+    # Interpreters, loaders, command multiplexers, and persistence launchers.
+    "bash",
+    "dash",
+    "fish",
+    "ksh",
+    "sh",
+    "zsh",
+    "python",
+    "python2",
+    "python3",
+    "perl",
+    "ruby",
+    "php",
+    "node",
+    "deno",
+    "lua",
+    "luajit",
+    "eval",
+    "exec",
+    "source",
+    "xargs",
+    "busybox",
+    "toybox",
+    "parallel",
+    "run-parts",
+    "chroot",
+    "unshare",
+    "nsenter",
+    "proot",
+    "bwrap",
+    "systemd-run",
+    "systemd-nspawn",
+    "at",
+    "batch",
+    "crontab",
+    # General package/network installers other than guarded /usr/bin/pacman.
+    "apt",
+    "apt-get",
+    "dnf",
+    "flatpak",
+    "snap",
+    "zypper",
+    "systemd-sysupdate",
+    # Dynamic decoders and interactive tools with shell escape surfaces.
+    "base64",
+    "basenc",
+    "openssl",
+    "uudecode",
+    "unzip",
+    "gunzip",
+    "bunzip2",
+    "unxz",
+    "unzstd",
+    "vi",
+    "vim",
+    "nvim",
+    "emacs",
+    "less",
+    "more",
+    "gdb",
+    "lldb",
+}
+AGENT_SHELL_RESERVED_WORDS = {
+    "alias",
+    "builtin",
+    "case",
+    "coproc",
+    "declare",
+    "do",
+    "done",
+    "elif",
+    "else",
+    "enable",
+    "esac",
+    "export",
+    "fi",
+    "for",
+    "function",
+    "if",
+    "in",
+    "local",
+    "readonly",
+    "select",
+    "then",
+    "time",
+    "trap",
+    "typeset",
+    "unalias",
+    "until",
+    "while",
+}
+AGENT_PACMAN_UNSAFE_LONG_OPTIONS = {
+    "--arch",
+    "--cachedir",
+    "--config",
+    "--dbpath",
+    "--gpgdir",
+    "--hookdir",
+    "--logfile",
+    "--root",
+    "--sysroot",
+    "--upgrade",
+    "--assume-installed",
+    "--database",
+    "--ignore",
+    "--ignoregroup",
+    "--nodeps",
+    "--overwrite",
+}
+AGENT_PACMAN_ALLOWED_LONG_OPTIONS = {
+    "--asdeps",
+    "--asexplicit",
+    "--changelog",
+    "--check",
+    "--clean",
+    "--color",
+    "--confirm",
+    "--debug",
+    "--deps",
+    "--deptest",
+    "--disable-download-timeout",
+    "--downloadonly",
+    "--explicit",
+    "--file",
+    "--files",
+    "--foreign",
+    "--groups",
+    "--help",
+    "--info",
+    "--list",
+    "--machinereadable",
+    "--native",
+    "--needed",
+    "--noconfirm",
+    "--nosave",
+    "--owns",
+    "--print",
+    "--query",
+    "--quiet",
+    "--recursive",
+    "--refresh",
+    "--regex",
+    "--remove",
+    "--search",
+    "--sync",
+    "--sysupgrade",
+    "--unneeded",
+    "--unrequired",
+    "--upgrades",
+    "--verbose",
+    "--version",
+}
+AGENT_ALLOWED_SHELL_BUILTINS = {
+    ":",
+    "echo",
+    "false",
+    "printf",
+    "pwd",
+    "test",
+    "true",
+}
+AGENT_ALLOWED_LOCAL_DIAGNOSTICS = {
+    "b2sum",
+    "basename",
+    "blkid",
+    "cat",
+    "cut",
+    "df",
+    "dirname",
+    "dmesg",
+    "du",
+    "file",
+    "find",
+    "findmnt",
+    "free",
+    "grep",
+    "groups",
+    "head",
+    "hostname",
+    "hostnamectl",
+    "id",
+    "ip",
+    "journalctl",
+    "loginctl",
+    "lscpu",
+    "ls",
+    "lsblk",
+    "lsof",
+    "lsmod",
+    "lspci",
+    "lsusb",
+    "md5sum",
+    "modinfo",
+    "mountpoint",
+    "namei",
+    "networkctl",
+    "nproc",
+    "pactree",
+    "pgrep",
+    "pidof",
+    "printenv",
+    "ps",
+    "readlink",
+    "realpath",
+    "rg",
+    "sensors",
+    "sha1sum",
+    "sha224sum",
+    "sha256sum",
+    "sha384sum",
+    "sha512sum",
+    "sort",
+    "ss",
+    "stat",
+    "strings",
+    "sysctl",
+    "systemctl",
+    "tail",
+    "timedatectl",
+    "tr",
+    "uname",
+    "uniq",
+    "uptime",
+    "users",
+    "vercmp",
+    "wc",
+    "who",
+    "whoami",
+}
 
 
 @dataclass
@@ -115,6 +476,12 @@ class AgentConfig:
             "session_timeout_minutes": self.session_timeout_minutes,
             "error": self.error,
         }
+
+
+@dataclass(frozen=True)
+class AgentPrivilegedTools:
+    sudo: TrustedTool
+    helper: TrustedTool
 
 
 @dataclass
@@ -289,6 +656,18 @@ def resolve_agent_config(env: Optional[Mapping[str, str]] = None) -> AgentConfig
     return AgentConfig(access, approval, output, minutes, "; ".join(errors))
 
 
+def effective_agent_approval(access: str, approval: str) -> str:
+    """Return the command approval mode enforced by the current runtime.
+
+    Older configuration files may still contain ``whole-plan`` or ``session``.
+    Keep accepting those values so an upgrade does not make the configuration
+    unreadable, but never let either value authorize model-authored shell text.
+    """
+    if access in {"user-shell", "root-shell"}:
+        return "each-command"
+    return approval
+
+
 def read_agent_root_policy(
     path: Path = AGENT_ROOT_POLICY_PATH,
     *,
@@ -372,7 +751,7 @@ def write_agent_root_policy(
     except OSError as exc:
         return False, f"Could not write AuraScan agent root policy: {exc}"
     state = "allowed" if allowed else "disabled"
-    return True, f"AuraScan unrestricted root agent access is {state}."
+    return True, f"AuraScan policy-gated root repair access is {state}."
 
 
 def configure_agent_root_policy(
@@ -382,16 +761,23 @@ def configure_agent_root_policy(
     *,
     runner: Callable = subprocess.run,
     helper: Path = Path("/usr/bin/aurascan"),
+    which: Callable[[str], Optional[str]] = shutil.which,
 ) -> Tuple[bool, str]:
     if max_approval not in AGENT_APPROVAL_VALUES:
         return False, f"Invalid agent root approval policy: {max_approval}"
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         return write_agent_root_policy(allowed, max_approval, max_minutes)
-    if not helper.is_file():
-        return False, "Agent root policy configuration requires package-managed /usr/bin/aurascan."
+    try:
+        privileged_tools = _capture_agent_privileged_tools(helper, which=which)
+    except TrustedToolError:
+        return False, (
+            "Agent root policy configuration requires trusted package-managed "
+            "/usr/bin/sudo and /usr/bin/aurascan."
+        )
     command = [
-        "sudo",
-        str(helper),
+        privileged_tools.sudo.path,
+        "--",
+        privileged_tools.helper.path,
         "agent",
         "--set-root-policy",
         "1" if allowed else "0",
@@ -401,14 +787,19 @@ def configure_agent_root_policy(
         str(max_minutes),
     ]
     try:
+        _revalidate_agent_privileged_tools(privileged_tools)
         result = runner(command, capture_output=True, text=True, check=False)
+    except TrustedToolError:
+        return False, (
+            "Agent root policy configuration refused because trusted privileged tools changed."
+        )
     except OSError as exc:
         return False, f"Could not configure AuraScan agent root policy: {exc}"
     if int(getattr(result, "returncode", 1)) != 0:
         detail = redact_followup_text((getattr(result, "stderr", "") or "").strip())[:500]
         return False, detail or f"Agent root policy command failed with exit code {result.returncode}."
     state = "allowed" if allowed else "disabled"
-    return True, f"AuraScan unrestricted root agent access is {state}."
+    return True, f"AuraScan policy-gated root repair access is {state}."
 
 
 def build_agent_parser() -> argparse.ArgumentParser:
@@ -531,18 +922,745 @@ def _known_ids(raw: object, known: set, limit: int) -> List[str]:
     return result
 
 
-def validate_agent_command(data: Mapping[str, object], *, access: str) -> AgentCommand:
+def _contains_active_shell_expansion(command: str) -> bool:
+    """Detect expansion syntax outside inert single-quoted shell text."""
+
+    single_quoted = False
+    double_quoted = False
+    escaped = False
+    previous = ""
+    for char in command:
+        if single_quoted:
+            if char == "'":
+                single_quoted = False
+            previous = char
+            continue
+        if escaped:
+            escaped = False
+            previous = char
+            continue
+        if char == "\\":
+            escaped = True
+            previous = char
+            continue
+        if char == "'" and not double_quoted:
+            single_quoted = True
+            previous = char
+            continue
+        if char == '"':
+            double_quoted = not double_quoted
+            previous = char
+            continue
+        if char == "#" and not double_quoted and (
+            not previous or previous.isspace() or previous in ";&|()"
+        ):
+            break
+        if char in {"$", "`"}:
+            return True
+        previous = char
+    return False
+
+
+def _contains_active_path_expansion(command: str) -> bool:
+    """Reject unquoted glob, brace, character-class, and tilde expansion."""
+
+    single_quoted = False
+    double_quoted = False
+    escaped = False
+    previous = ""
+    for char in command:
+        if single_quoted:
+            if char == "'":
+                single_quoted = False
+            previous = char
+            continue
+        if escaped:
+            escaped = False
+            previous = char
+            continue
+        if char == "\\":
+            escaped = True
+            previous = char
+            continue
+        if char == "'" and not double_quoted:
+            single_quoted = True
+            previous = char
+            continue
+        if char == '"':
+            double_quoted = not double_quoted
+            previous = char
+            continue
+        if char == "#" and not double_quoted and (
+            not previous or previous.isspace() or previous in ";&|()"
+        ):
+            break
+        if not double_quoted and char in "*?[]{}~":
+            return True
+        previous = char
+    return False
+
+
+def _agent_sensitive_path(tokens: Sequence[str], cwd: str) -> bool:
+    base = Path(cwd) if cwd else Path.cwd()
+    for raw_token in tokens:
+        if AGENT_SENSITIVE_PATH_RE.search(raw_token):
+            return True
+        if (
+            not raw_token
+            or all(char in ";&|<>()" for char in raw_token)
+        ):
+            continue
+        token = raw_token
+        if token.startswith("-"):
+            if "=" in token:
+                token = token.partition("=")[2]
+            elif "/" in token:
+                token = token[token.find("/") :]
+            else:
+                continue
+        if not token:
+            continue
+        candidate = Path(token)
+        if not candidate.is_absolute():
+            candidate = base / candidate
+        try:
+            resolved = candidate.resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if AGENT_SENSITIVE_PATH_RE.search(str(resolved)):
+            return True
+        try:
+            mode = resolved.stat().st_mode
+        except OSError:
+            continue
+        if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+            return True
+    try:
+        resolved_base = base.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return True
+    return AGENT_SENSITIVE_PATH_RE.search(str(resolved_base)) is not None
+
+
+def _lex_agent_command(command: str) -> List[str]:
+    try:
+        lexer = shlex.shlex(
+            command,
+            posix=True,
+            punctuation_chars=";&|<>()",
+        )
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        return list(lexer)
+    except ValueError:
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+
+
+def _agent_command_segments(tokens: Sequence[str]) -> List[List[str]]:
+    segments: List[List[str]] = []
+    current: List[str] = []
+    for token in tokens:
+        if token and all(char in ";&|<>()" for char in token):
+            if any(char in "<>()" for char in token):
+                raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+            if "&" in token and token != "&&":
+                raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+            if not current:
+                raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+            segments.append(current)
+            current = []
+            continue
+        current.append(token)
+    if current:
+        segments.append(current)
+    elif tokens:
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    return segments
+
+
+def _agent_program_and_args(segment: Sequence[str]) -> Tuple[str, List[str]]:
+    if not segment:
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if any(token in AGENT_SHELL_RESERVED_WORDS for token in segment):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if AGENT_ASSIGNMENT_RE.match(segment[0]):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    index = 0
+    if segment[index] == "command":
+        index += 1
+        if index < len(segment) and segment[index] in {"-v", "-V"}:
+            # A command-name lookup is local and does not invoke its operand.
+            return "command-lookup", list(segment[index + 1 :])
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if index >= len(segment):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    program = segment[index]
+    args = list(segment[index + 1 :])
+    if program == ".":
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if any(char in program for char in "*?[]{}"):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if "/" in program:
+        path = Path(program)
+        if not path.is_absolute() or str(path.parent) not in {
+            "/bin",
+            "/sbin",
+            "/usr/bin",
+            "/usr/sbin",
+        }:
+            raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    return Path(program).name.lower(), args
+
+
+def _validate_agent_pacman_command(program_token: str, args: Sequence[str]) -> None:
+    if program_token != "/usr/bin/pacman":
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if not args:
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    operations: List[str] = []
+    short_allowed = {
+        "F": set("Fylxqvh"),
+        "Q": set("Qcdegiklmnopqstuvh"),
+        "R": set("Rnsuqvh"),
+        "S": set("Sygwupcilsqvh"),
+        "T": set("Tqvh"),
+    }
+    long_operations = {
+        "--deptest": "T",
+        "--files": "F",
+        "--query": "Q",
+        "--remove": "R",
+        "--sync": "S",
+    }
+    for token in args:
+        lowered = token.lower()
+        option = lowered.partition("=")[0]
+        if option in AGENT_PACMAN_UNSAFE_LONG_OPTIONS:
+            raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+        if token.startswith("--"):
+            if option not in AGENT_PACMAN_ALLOWED_LONG_OPTIONS:
+                raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+            operation = long_operations.get(option)
+            if operation:
+                operations.append(operation)
+            continue
+        if token.startswith("-") and token != "-":
+            if token == "-V":
+                continue
+            operation_letters = [char for char in token[1:] if char in short_allowed]
+            selected = [char for char in operation_letters if char in {"F", "Q", "R", "S", "T"}]
+            if len(selected) != 1:
+                raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+            operation = selected[0]
+            if any(char not in short_allowed[operation] for char in token[1:]):
+                raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+            operations.append(operation)
+    distinct_operations = set(operations)
+    version_only = any(token in {"-V", "--version", "--help"} for token in args)
+    if len(distinct_operations) > 1 or (not distinct_operations and not version_only):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    operation = next(iter(distinct_operations), "")
+    if operation in {"S", "R"}:
+        target_re = re.compile(
+            r"^(?!\.)[A-Za-z0-9@._+:-]+(?:/(?!\.)[A-Za-z0-9@._+:-]+)?$"
+        )
+        for token in args:
+            if token == "--" or token.startswith("-"):
+                continue
+            if not target_re.fullmatch(token):
+                raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+            if token.rpartition("/")[2].lower() == "aurascan":
+                raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+
+
+def _first_agent_subcommand(args: Sequence[str]) -> str:
+    for token in args:
+        if token == "--":
+            continue
+        if not token.startswith("-"):
+            return token
+    return ""
+
+
+def _validate_agent_read_only_diagnostic(program: str, args: Sequence[str]) -> None:
+    if program == "cat" and (
+        not args or any(token == "-" for token in args)
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "blkid" and any(
+        token in {"-g", "-w", "--garbage-collect", "--write-cache"}
+        or token.startswith("--write-cache=")
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "dmesg" and any(
+        token in {
+            "-c",
+            "-C",
+            "-D",
+            "-E",
+            "-n",
+            "-w",
+            "-W",
+            "--clear",
+            "--console-off",
+            "--console-on",
+            "--console-level",
+            "--follow",
+            "--follow-new",
+        }
+        or token.startswith("--console-level=")
+        or (
+            token.startswith("-")
+            and not token.startswith("--")
+            and any(flag in token[1:] for flag in "wW")
+        )
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "file" and any(
+        token in {"-C", "--compile"} for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "find" and any(
+        token in {
+            "-delete",
+            "-exec",
+            "-execdir",
+            "-fls",
+            "-fprint",
+            "-fprint0",
+            "-fprintf",
+            "-ok",
+            "-okdir",
+        }
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "hostname":
+        allowed = {
+            "-A",
+            "-d",
+            "-f",
+            "-i",
+            "-I",
+            "-s",
+            "--all-fqdns",
+            "--all-ip-addresses",
+            "--domain",
+            "--fqdn",
+            "--ip-address",
+            "--short",
+        }
+        if any(token not in allowed for token in args):
+            raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program in {"hostnamectl", "loginctl", "systemctl", "timedatectl"} and any(
+        token in {"-H", "-M", "--host", "--machine", "--root", "--image"}
+        or (token.startswith(("-H", "-M")) and len(token) > 2)
+        or token.startswith(("--host=", "--machine=", "--root=", "--image="))
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "hostnamectl" and any(
+        token.startswith("set-") for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "hostnamectl" and any(
+        not token.startswith("-") and token != "status" for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "timedatectl" and any(
+        token in {"set-time", "set-timezone", "set-local-rtc", "set-ntp"}
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "timedatectl" and any(
+        not token.startswith("-")
+        and token not in {"status", "show", "show-timesync", "timesync-status"}
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "loginctl" and any(
+        token in {
+            "activate",
+            "attach",
+            "enable-linger",
+            "flush-devices",
+            "kill-session",
+            "kill-user",
+            "lock-session",
+            "lock-sessions",
+            "terminate-seat",
+            "terminate-session",
+            "terminate-user",
+            "unlock-session",
+            "unlock-sessions",
+            "disable-linger",
+        }
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "loginctl":
+        safe_loginctl = {
+            "list-seats",
+            "list-sessions",
+            "list-users",
+            "seat-status",
+            "session-status",
+            "show-seat",
+            "show-session",
+            "show-user",
+            "user-status",
+        }
+        if _first_agent_subcommand(args) not in safe_loginctl:
+            raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "networkctl" and any(
+        token in {
+            "delete",
+            "down",
+            "edit",
+            "forcerenew",
+            "label",
+            "mask",
+            "persist",
+            "reconfigure",
+            "reload",
+            "renew",
+            "unmask",
+            "up",
+        }
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "networkctl" and _first_agent_subcommand(args) not in {
+        "list",
+        "lldp",
+        "status",
+    }:
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "networkctl" and any(
+        not token.startswith("-")
+        and token not in {"list", "lldp", "status"}
+        and not re.fullmatch(r"[A-Za-z0-9_.:@-]+", token)
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "systemctl":
+        safe_subcommands = {
+            "cat",
+            "get-default",
+            "is-active",
+            "is-enabled",
+            "is-failed",
+            "is-system-running",
+            "list-dependencies",
+            "list-jobs",
+            "list-machines",
+            "list-sockets",
+            "list-timers",
+            "list-unit-files",
+            "list-units",
+            "show",
+            "status",
+        }
+        if _first_agent_subcommand(args) not in safe_subcommands:
+            raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "ip" and any(
+        token in {
+            "add",
+            "append",
+            "batch",
+            "change",
+            "delete",
+            "del",
+            "exec",
+            "flush",
+            "netns",
+            "prepend",
+            "replace",
+            "restore",
+            "set",
+        }
+        or token in {"-b", "-batch", "--batch"}
+        or token.startswith(("-b", "--batch="))
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "ip":
+        non_options = [token for token in args if not token.startswith("-")]
+        if non_options:
+            object_name = non_options[0]
+            if object_name == "monitor":
+                raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+            safe_ip_actions = {
+                "addr": {"", "list", "show"},
+                "address": {"", "list", "show"},
+                "link": {"", "list", "show"},
+                "maddress": {"", "list", "show"},
+                "mroute": {"", "list", "show"},
+                "neigh": {"", "list", "show"},
+                "neighbor": {"", "list", "show"},
+                "netconf": {"", "list", "show"},
+                "ntable": {"", "list", "show"},
+                "route": {"", "get", "list", "show"},
+                "rule": {"", "list", "show"},
+                "tcp_metrics": {"", "list", "show"},
+                "token": {"", "list", "show"},
+                "tunnel": {"", "list", "show"},
+                "tuntap": {"", "list", "show"},
+            }
+            action = non_options[1] if len(non_options) > 1 else ""
+            if object_name not in safe_ip_actions or action not in safe_ip_actions[object_name]:
+                raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+            if object_name == "route" and action == "get":
+                if len(non_options) < 3:
+                    raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+                try:
+                    ipaddress.ip_address(non_options[2].split("%", 1)[0])
+                except ValueError:
+                    raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "journalctl" and any(
+        token in {
+            "-f",
+            "--flush",
+            "--follow",
+            "--relinquish-var",
+            "--rotate",
+            "--setup-keys",
+            "--sync",
+            "--update-catalog",
+        }
+        or token.startswith(
+            (
+                "--directory=",
+                "--file=",
+                "--image=",
+                "--machine=",
+                "--namespace=",
+                "--root=",
+                "--vacuum-files=",
+                "--vacuum-size=",
+                "--vacuum-time=",
+            )
+        )
+        or token in {
+            "-D",
+            "-M",
+            "--directory",
+            "--file",
+            "--image",
+            "--machine",
+            "--namespace",
+            "--root",
+            "--vacuum-files",
+            "--vacuum-size",
+            "--vacuum-time",
+        }
+        or (token.startswith(("-D", "-M")) and len(token) > 2)
+        or token.startswith("--follow=")
+        or (
+            token.startswith("-")
+            and not token.startswith("--")
+            and "f" in token[1:]
+        )
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "findmnt" and any(
+        token in {"-p", "--poll"} or token.startswith("--poll=")
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "free" and any(
+        token in {"-s", "--seconds"}
+        or token.startswith(("-s", "--seconds="))
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "rg" and any(
+        token in {"--pre", "--search-zip", "-z"}
+        or token.startswith("--pre=")
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "lsof":
+        if any(
+            re.fullmatch(r"[+-]r(?:[0-9]+(?:\.[0-9]+)?)?", token)
+            for token in args
+        ):
+            raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+        compact_flags = "".join(
+            token[1:]
+            for token in args
+            if token.startswith("-") and not token.startswith("--")
+        )
+        if "n" not in compact_flags or "P" not in compact_flags:
+            raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "ps" and any(
+        token == "e"
+        or (
+            not token.startswith("-")
+            and "e" in token.lower()
+            and any(char in token.lower() for char in "auxw")
+            and re.fullmatch(r"[A-Za-z]+", token) is not None
+        )
+        or (
+            token.startswith("-")
+            and token not in {"-e", "-eF", "-ef"}
+            and "e" in token[1:].lower()
+            and any(char in token[1:].lower() for char in "auxw")
+        )
+        or "environ" in token.lower()
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "sensors" and any(
+        token in {"-s", "--set"} for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "sort" and any(
+        token in {"-o", "--output", "--compress-program"}
+        or token.startswith(("--output=", "--compress-program="))
+        or (token.startswith("-o") and token != "-o")
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "ss" and any(
+        token in {"-E", "-K", "--events", "--kill", "-r", "--resolve"}
+        or token.startswith(("-E", "-K"))
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "sysctl" and any(
+        token in {"-p", "-w", "--load", "--system", "--write"}
+        or token.startswith(("--load=", "--write="))
+        or token.startswith("-w")
+        or ("=" in token and not token.startswith("--pattern="))
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program == "tail" and any(
+        token in {"-f", "-F", "--follow", "--retry"}
+        or token.startswith("--follow=")
+        or (
+            token.startswith("-")
+            and not token.startswith("--")
+            and any(flag in token[1:] for flag in "fF")
+        )
+        for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+
+
+def _validate_agent_segment(segment: Sequence[str]) -> None:
+    program, args = _agent_program_and_args(segment)
+    if program == "command-lookup":
+        return
+    program_token = segment[0]
+    if program == "pacman":
+        _validate_agent_pacman_command(program_token, args)
+        return
+    if program in AGENT_FORBIDDEN_PROGRAMS or re.fullmatch(
+        r"(?:python\d+(?:\.\d+)?|gcc-\d+|clang-\d+|ld-linux[^/]*|"
+        r"(?:extra|core|multilib|staging)-[^/]*-build)",
+        program,
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program in AGENT_ALLOWED_SHELL_BUILTINS:
+        if "/" in program_token:
+            raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    elif program in AGENT_ALLOWED_LOCAL_DIAGNOSTICS:
+        if program_token not in {f"/usr/bin/{program}", f"/usr/sbin/{program}"}:
+            raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+        _validate_agent_read_only_diagnostic(program, args)
+    else:
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if program in {"printf", "echo"} and any(
+        AGENT_ENCODED_ESCAPE_RE.search(token) for token in args
+    ):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+
+
+def _validate_agent_command_policy(command: str, *, cwd: str = "") -> None:
+    if "\n" in command or "\r" in command:
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if any(unicodedata.category(char) == "Cf" for char in command):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if _contains_active_shell_expansion(command):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if _contains_active_path_expansion(command):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    tokens = _lex_agent_command(command)
+    if not tokens:
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if AGENT_REMOTE_REFERENCE_RE.search(" ".join(tokens)):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    if _agent_sensitive_path(tokens, cwd):
+        raise ValueError(AGENT_COMMAND_POLICY_ERROR)
+    for segment in _agent_command_segments(tokens):
+        _validate_agent_segment(segment)
+
+
+def _validate_agent_id_list(
+    value: object,
+    *,
+    limit: int,
+) -> List[str]:
+    if not isinstance(value, list) or len(value) > limit:
+        raise ValueError("agent response identifier list is invalid")
+    result: List[str] = []
+    for item in value:
+        if (
+            not isinstance(item, str)
+            or not item
+            or len(item) > 256
+            or CONTROL_RE.search(item)
+        ):
+            raise ValueError("agent response identifier list is invalid")
+        if item in result:
+            raise ValueError("agent response identifier list is invalid")
+        result.append(item)
+    return result
+
+
+def validate_agent_command(
+    data: Mapping[str, object],
+    *,
+    access: str,
+    allow_command_id: bool = False,
+) -> AgentCommand:
     if access not in {"user-shell", "root-shell"}:
         raise ValueError("shell command fields require an active shell grant")
+    command_fields = {
+        "command",
+        "cwd",
+        "timeout_seconds",
+        "requires_root",
+        "reason",
+        "expected_result",
+    }
+    supplied_fields = frozenset(data)
+    allowed_fields = {frozenset(command_fields)}
+    if allow_command_id:
+        allowed_fields.add(frozenset(command_fields | {"command_id"}))
+    if supplied_fields not in allowed_fields:
+        raise ValueError("agent command schema did not match")
+    supplied_command_id = data.get("command_id")
+    if supplied_command_id is not None and (
+        not isinstance(supplied_command_id, str)
+        or not re.fullmatch(r"agent-cmd-[a-f0-9]{16}", supplied_command_id)
+    ):
+        raise ValueError("agent command identifier is invalid")
     command = data.get("command")
     reason = data.get("reason")
     if not isinstance(command, str) or not command.strip():
         raise ValueError("agent command must be a non-empty string")
-    if not isinstance(reason, str) or not reason.strip():
-        raise ValueError("agent command reason must be a non-empty string")
     if CONTROL_RE.search(command) or len(command) > AGENT_MAX_COMMAND_CHARS:
         raise ValueError("agent command is unsafe or too large")
-    cwd = str(data.get("cwd") or "")
+    raw_cwd = data.get("cwd")
+    if not isinstance(raw_cwd, str):
+        raise ValueError("agent command working directory is invalid")
+    cwd = raw_cwd
     if cwd:
         candidate = Path(cwd)
         if (
@@ -553,28 +1671,43 @@ def validate_agent_command(data: Mapping[str, object], *, access: str) -> AgentC
             or not candidate.is_dir()
         ):
             raise ValueError("agent command working directory is invalid")
-    try:
-        timeout = int(data.get("timeout_seconds") or AGENT_DEFAULT_COMMAND_TIMEOUT)
-    except (TypeError, ValueError):
+    _validate_agent_command_policy(command, cwd=cwd)
+    clean_reason = validate_model_advisory_text(
+        reason,
+        max_chars=1000,
+        allow_empty=False,
+    )
+    expected_result = validate_model_advisory_text(
+        data.get("expected_result"),
+        max_chars=1000,
+    )
+    raw_timeout = data.get("timeout_seconds")
+    if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, int):
         raise ValueError("agent command timeout is invalid")
+    timeout = raw_timeout
     if timeout < 1 or timeout > AGENT_MAX_COMMAND_TIMEOUT:
         raise ValueError("agent command timeout exceeds the allowed range")
-    requires_root = bool(data.get("requires_root", False))
+    requires_root = data.get("requires_root")
+    if not isinstance(requires_root, bool):
+        raise ValueError("agent command privilege flag is invalid")
     if access == "user-shell" and requires_root:
         raise ValueError("a user-shell session cannot accept a root command")
     if access == "root-shell" and not requires_root:
         requires_root = True
-    clean_reason = CONTROL_RE.sub("", reason)[:1000]
-    if not clean_reason.strip():
-        raise ValueError("agent command reason is unsafe or empty")
-    return AgentCommand(
+    validated = AgentCommand(
         command=command,
         reason=clean_reason,
-        expected_result=CONTROL_RE.sub("", str(data.get("expected_result") or ""))[:1000],
+        expected_result=expected_result,
         cwd=cwd,
         timeout_seconds=timeout,
         requires_root=requires_root,
     )
+    if supplied_command_id is not None and not secrets.compare_digest(
+        supplied_command_id,
+        validated.command_id,
+    ):
+        raise ValueError("agent command identifier does not match its content")
+    return validated
 
 
 def validate_agent_ai_response(
@@ -583,21 +1716,39 @@ def validate_agent_ai_response(
     *,
     access: str,
 ) -> AgentAIResponse:
-    if not isinstance(data.get("answer"), str):
-        raise ValueError("agent response answer must be a string")
-    for key in (
+    if set(data) != {
+        "answer",
+        "requested_access",
         "referenced_fact_ids",
         "requested_probe_ids",
         "requested_action_ids",
         "commands",
-    ):
-        if not isinstance(data.get(key), list):
-            raise ValueError(f"agent response {key} must be a list")
-    requested_access = str(data.get("requested_access") or "").strip().lower()
+    }:
+        raise ValueError("agent response schema did not match")
+    answer = validate_model_advisory_text(
+        data.get("answer"),
+        max_chars=4000,
+    )
+    raw_requested_access = data.get("requested_access")
+    if not isinstance(raw_requested_access, str) or len(raw_requested_access) > 32:
+        raise ValueError("agent response requested_access is invalid")
+    requested_access = raw_requested_access.strip().lower()
     if requested_access and requested_access not in AGENT_ACCESS_VALUES:
         raise ValueError("agent response requested_access is invalid")
+    referenced_ids = _validate_agent_id_list(
+        data.get("referenced_fact_ids"),
+        limit=20,
+    )
+    probe_ids = _validate_agent_id_list(
+        data.get("requested_probe_ids"),
+        limit=6,
+    )
+    action_ids = _validate_agent_id_list(
+        data.get("requested_action_ids"),
+        limit=20,
+    )
     raw_commands = data.get("commands", [])
-    if len(raw_commands) > AGENT_MAX_COMMANDS_PER_PLAN:
+    if not isinstance(raw_commands, list) or len(raw_commands) > AGENT_MAX_COMMANDS_PER_PLAN:
         raise ValueError("agent response contains too many commands")
     commands = []
     for raw in raw_commands:
@@ -608,11 +1759,11 @@ def validate_agent_ai_response(
     known_probes = {item.probe_id for item in context.probes}
     known_actions = {item.action_id for item in context.actions if item.verified}
     return AgentAIResponse(
-        answer=CONTROL_RE.sub("", str(data.get("answer") or ""))[:4000],
+        answer=answer,
         requested_access=requested_access,
-        referenced_fact_ids=_known_ids(data.get("referenced_fact_ids"), known_facts, 20),
-        requested_probe_ids=_known_ids(data.get("requested_probe_ids"), known_probes, 6),
-        requested_action_ids=_known_ids(data.get("requested_action_ids"), known_actions, 20),
+        referenced_fact_ids=_known_ids(referenced_ids, known_facts, 20),
+        requested_probe_ids=_known_ids(probe_ids, known_probes, 6),
+        requested_action_ids=_known_ids(action_ids, known_actions, 20),
         commands=commands,
     )
 
@@ -628,14 +1779,19 @@ def build_agent_ai_prompt(
     command_results: Sequence[AgentCommandResult] = (),
     probe_results: Sequence[FollowUpProbeResult] = (),
 ) -> str:
+    approval = effective_agent_approval(access, approval)
     shell_note = (
         "No shell grant is active. commands MUST be empty. You may request user-shell or root-shell access, "
         "but only the user can grant it."
         if access == "guarded"
         else (
             f"An explicit {access} grant is active. You may request exact commands only when they materially "
-            "help answer or resolve the user's AuraScan context. Never conceal command effects or claim success "
-            "before reading a command result."
+            "help answer or resolve the user's AuraScan context. Every exact command requires a fresh user "
+            "confirmation. Commands remain local-only: do not request URLs, remote access or downloads, Git, "
+            "AUR helpers, source builds, interpreters, decoding/evaluation, shell expansion, redirection, or "
+            "arbitrary executable paths. Trusted repository package operations must name /usr/bin/pacman "
+            "directly and cannot use -U or alternate config/root/key/hook paths. Never conceal command effects "
+            "or claim success before reading a command result."
         )
     )
     instructions = (
@@ -643,13 +1799,16 @@ def build_agent_ai_prompt(
         "Use only the supplied bounded context and terminal results. Be calm and explicit about uncertainty.\n"
         f"{shell_note}\n"
         "Known probe and action IDs may be requested. Do not fabricate IDs.\n"
+        "Every prose value must be one short line without URLs, commands, executable instructions, terminal "
+        "labels or controls, credential-like assignments, or claims that a system is safe or compromised.\n"
         "Return strict JSON only with this shape:\n"
         "{\"answer\":\"plain-language response\",\"requested_access\":\"\","
         "\"referenced_fact_ids\":[],\"requested_probe_ids\":[],\"requested_action_ids\":[],"
         "\"commands\":[{\"command\":\"exact shell text\",\"cwd\":\"/absolute/path or empty\","
         "\"timeout_seconds\":120,\"requires_root\":false,\"reason\":\"why\","
         "\"expected_result\":\"what should happen\"}]}\n"
-        "Return at most ten commands. Commands are noninteractive and cannot receive passwords or model keystrokes.\n\n"
+        "Return at most ten commands with exactly the shown fields. Commands are noninteractive and cannot "
+        "receive passwords or model keystrokes.\n\n"
     )
     facts = [
         {
@@ -716,7 +1875,19 @@ def ask_agent_ai(
     source = dict(os.environ if env is None else env)
     config = resolve_ai_config(source)
     if not config.ready:
-        return AgentAIResponse("", status="not_configured", error=config.error or "AI is not configured")
+        if config.error:
+            error = "AI provider configuration is invalid"
+            status = "config_error"
+        elif not config.enabled:
+            error = "AI provider is disabled"
+            status = "not_configured"
+        elif not config.authentication_ready:
+            error = "AI provider authentication is not configured"
+            status = "not_configured"
+        else:
+            error = "AI provider is not configured"
+            status = "not_configured"
+        return AgentAIResponse("", status=status, error=error)
     try:
         text = call_ai_provider(
             config,
@@ -733,15 +1904,23 @@ def ask_agent_ai(
             timeout=60,
             urlopen=urlopen,
         )
-        data = json.loads(text)
-        if not isinstance(data, Mapping):
-            raise ValueError("agent response was not a JSON object")
-        return validate_agent_ai_response(context, data, access=access)
     except Exception as exc:
         return AgentAIResponse(
             "",
             status=classify_followup_failure(exc),
-            error=_redact_agent_text(str(exc), source)[:500],
+            error=safe_provider_error_detail(exc),
+        )
+    try:
+        data = load_strict_json_object(
+            text,
+            max_chars=AGENT_MAX_AI_RESPONSE_CHARS,
+        )
+        return validate_agent_ai_response(context, data, access=access)
+    except Exception:
+        return AgentAIResponse(
+            "",
+            status="invalid_response",
+            error=AGENT_AI_RESPONSE_ERROR,
         )
 
 
@@ -752,7 +1931,7 @@ def minimal_agent_environment(
 ) -> Dict[str, str]:
     source = os.environ if env is None else env
     result = {
-        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin",
+        "PATH": "/usr/bin:/usr/sbin:/bin:/sbin",
         "LANG": str(source.get("LANG") or "C.UTF-8"),
         "LC_ALL": str(source.get("LC_ALL") or ""),
         "TERM": str(source.get("TERM") or "xterm-256color"),
@@ -781,17 +1960,20 @@ def stream_shell_command(
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
     started = time.monotonic()
-    retained: List[str] = []
-    retained_size = [0]
+    captured = bytearray()
+    capture_lock = threading.Lock()
+    output_limit_reached = threading.Event()
+    output_capture_failed = threading.Event()
     try:
         process = popen_factory(
             ["/bin/bash", "--noprofile", "--norc", "-lc", command.command],
             cwd=command.cwd or None,
             env=minimal_agent_environment(env, root=root),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
+            text=False,
+            bufsize=0,
             start_new_session=True,
         )
     except OSError as exc:
@@ -804,17 +1986,46 @@ def stream_shell_command(
             error=_redact_agent_text(str(exc), env)[:500],
         )
 
+    def stop_for_unsafe_output() -> None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+
     def consume() -> None:
-        if process.stdout is None:
+        stream = process.stdout
+        if stream is None:
+            output_capture_failed.set()
+            stop_for_unsafe_output()
             return
-        for chunk in iter(process.stdout.readline, ""):
-            safe_chunk = sanitize_terminal_output(chunk)
-            print(safe_chunk, end="", file=stdout, flush=True)
-            if retained_size[0] < AGENT_MAX_RETAINED_OUTPUT:
-                remaining = AGENT_MAX_RETAINED_OUTPUT - retained_size[0]
-                kept = safe_chunk[:remaining]
-                retained.append(kept)
-                retained_size[0] += len(kept)
+        try:
+            try:
+                output_fd = stream.fileno()
+            except (AttributeError, OSError, ValueError):
+                output_fd = None
+            while True:
+                if output_fd is None:
+                    chunk = stream.read(AGENT_OUTPUT_READ_CHUNK)
+                else:
+                    chunk = os.read(output_fd, AGENT_OUTPUT_READ_CHUNK)
+                if not chunk:
+                    return
+                if isinstance(chunk, str):
+                    chunk = chunk.encode("utf-8", "replace")
+                else:
+                    chunk = bytes(chunk)
+                with capture_lock:
+                    remaining = AGENT_MAX_COMMAND_OUTPUT_BYTES - len(captured)
+                    if remaining > 0:
+                        captured.extend(chunk[:remaining])
+                    exceeded = len(chunk) > remaining
+                if exceeded:
+                    output_limit_reached.set()
+                    stop_for_unsafe_output()
+                    return
+        except (OSError, ValueError):
+            output_capture_failed.set()
+            stop_for_unsafe_output()
 
     thread = threading.Thread(target=consume, daemon=True)
     thread.start()
@@ -851,12 +2062,41 @@ def stream_shell_command(
         exit_code = int(process.returncode if process.returncode is not None else 130)
         print("\n[AuraScan] Command interrupted; its process group was stopped.", file=stderr)
     thread.join(timeout=2)
-    output = "".join(retained)
+    if thread.is_alive():
+        output_capture_failed.set()
+        stop_for_unsafe_output()
+        thread.join(timeout=1)
+    with capture_lock:
+        captured_bytes = bytes(captured)
+    output = sanitize_terminal_output(
+        captured_bytes.decode("utf-8", "replace")
+    )[:AGENT_MAX_RETAINED_OUTPUT]
+    if output:
+        print(output, end="", file=stdout, flush=True)
     status = (
         "interrupted"
         if interrupted
-        else ("timeout" if timed_out else ("ok" if exit_code == 0 else "failed"))
+        else (
+            "timeout"
+            if timed_out
+            else (
+                "output_limit"
+                if output_limit_reached.is_set()
+                else (
+                    "failed"
+                    if output_capture_failed.is_set()
+                    else ("ok" if exit_code == 0 else "failed")
+                )
+            )
+        )
     )
+    error = ""
+    if status == "output_limit":
+        error = AGENT_OUTPUT_LIMIT_ERROR
+        print(f"\n[AuraScan] {AGENT_OUTPUT_LIMIT_ERROR}.", file=stderr)
+    elif output_capture_failed.is_set() and not timed_out and not interrupted:
+        error = AGENT_OUTPUT_CAPTURE_ERROR
+        print(f"\n[AuraScan] {AGENT_OUTPUT_CAPTURE_ERROR}.", file=stderr)
     return AgentCommandResult(
         command.command_id,
         status,
@@ -864,6 +2104,7 @@ def stream_shell_command(
         output,
         time.monotonic() - started,
         timed_out=timed_out,
+        error=error,
     )
 
 
@@ -1096,7 +2337,7 @@ def issue_root_session(
         return {"ok": False, "error": error}
     policy = read_agent_root_policy(policy_path, required_uid=policy_uid)
     if policy.error or not policy.allowed:
-        return {"ok": False, "error": policy.error or "unrestricted root agent policy is disabled"}
+        return {"ok": False, "error": policy.error or "root repair agent policy is disabled"}
     try:
         uid = int(request.get("uid"))
         pid = int(request.get("origin_pid"))
@@ -1117,10 +2358,12 @@ def issue_root_session(
             "ok": False,
             "error": "root session terminal does not match the originating process",
         }
-    approval = str(request.get("approval") or "")
-    if approval not in AGENT_APPROVAL_VALUES:
+    requested_approval = str(request.get("approval") or "")
+    if requested_approval not in AGENT_APPROVAL_VALUES:
         return {"ok": False, "error": "root session approval mode is invalid"}
-    if AGENT_APPROVAL_ORDER[approval] > AGENT_APPROVAL_ORDER[policy.max_approval]:
+    approval = effective_agent_approval("root-shell", requested_approval)
+    policy_approval = effective_agent_approval("root-shell", policy.max_approval)
+    if AGENT_APPROVAL_ORDER[approval] > AGENT_APPROVAL_ORDER[policy_approval]:
         return {"ok": False, "error": "requested approval mode exceeds the root policy ceiling"}
     if minutes < 1 or minutes > min(policy.max_minutes, AGENT_MAX_SESSION_MINUTES):
         return {"ok": False, "error": "requested root session duration exceeds the policy ceiling"}
@@ -1304,18 +2547,28 @@ def execute_root_command_request(
     if not isinstance(raw_command, Mapping):
         return {"ok": False, "error": "command request does not contain a command object"}
     try:
-        command = validate_agent_command(raw_command, access="root-shell")
+        command = validate_agent_command(
+            raw_command,
+            access="root-shell",
+            allow_command_id=True,
+        )
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
-    plan_hash = str(request.get("plan_hash") or "")
-    if not re.fullmatch(r"[a-f0-9]{64}", plan_hash):
-        return {"ok": False, "error": "approved plan hash is invalid"}
-    if state.get("approval") == "whole-plan":
-        active_hash = str(state.get("active_plan_hash") or "")
-        approve_plan = bool(request.get("approve_plan", False))
-        if active_hash and not secrets.compare_digest(active_hash, plan_hash) and not approve_plan:
-            return {"ok": False, "error": "approved root plan changed"}
-        state["active_plan_hash"] = plan_hash
+    command_hash = str(request.get("plan_hash") or "")
+    expected_hash = _plan_hash([command])
+    if not re.fullmatch(r"[a-f0-9]{64}", command_hash) or not secrets.compare_digest(
+        command_hash,
+        expected_hash,
+    ):
+        return {"ok": False, "error": "approved command hash does not match the exact command"}
+    # Legacy root-session records may name a broader approval mode. The broker
+    # deliberately narrows them so a previous plan/session grant cannot carry
+    # forward after an upgrade.
+    state["approval"] = effective_agent_approval(
+        "root-shell",
+        str(state.get("approval") or "each-command"),
+    )
+    state["active_plan_hash"] = ""
     print(
         f"[AuraScan root agent] Running approved command {command.command_id}.",
         file=stderr,
@@ -1393,16 +2646,51 @@ def _temporary_request(data: Mapping[str, object]) -> str:
     return name
 
 
+def _capture_agent_privileged_tools(
+    helper: Path,
+    *,
+    which: Callable[[str], Optional[str]] = shutil.which,
+    search_path: Optional[str] = None,
+) -> AgentPrivilegedTools:
+    if helper != AGENT_TRUSTED_HELPER_PATH:
+        raise TrustedToolError("privileged agent helper was not package-managed")
+    resolver = which
+    if search_path is not None and which is shutil.which:
+        resolver = lambda name: shutil.which(name, path=search_path)
+    sudo = capture_trusted_system_tool("sudo", which=resolver)
+    package_helper = capture_trusted_system_tool("aurascan", which=resolver)
+    if sudo is None or package_helper is None:
+        raise TrustedToolError("privileged agent tool was unavailable")
+    if sudo.path != str(AGENT_TRUSTED_SUDO_PATH) or package_helper.path != str(
+        AGENT_TRUSTED_HELPER_PATH
+    ):
+        raise TrustedToolError("privileged agent tool path was unexpected")
+    return AgentPrivilegedTools(sudo=sudo, helper=package_helper)
+
+
+def _revalidate_agent_privileged_tools(tools: AgentPrivilegedTools) -> None:
+    revalidate_trusted_system_tool(tools.sudo)
+    revalidate_trusted_system_tool(tools.helper)
+
+
 def _invoke_root_helper(
     args: Sequence[str],
     request: Mapping[str, object],
     *,
-    helper: Path,
+    privileged_tools: AgentPrivilegedTools,
     runner: Callable = subprocess.run,
 ) -> Dict[str, object]:
     name = _temporary_request(request)
     try:
-        command = ["sudo", str(helper), "agent", *args, name]
+        _revalidate_agent_privileged_tools(privileged_tools)
+        command = [
+            privileged_tools.sudo.path,
+            "--",
+            privileged_tools.helper.path,
+            "agent",
+            *args,
+            name,
+        ]
         if runner is subprocess.run:
             process = subprocess.Popen(
                 command,
@@ -1431,6 +2719,8 @@ def _invoke_root_helper(
         if not isinstance(data, dict):
             return {"ok": False, "error": "privileged agent helper returned invalid output"}
         return data
+    except TrustedToolError:
+        return {"ok": False, "error": AGENT_PRIVILEGED_TOOLS_ERROR}
     except OSError as exc:
         return {"ok": False, "error": _redact_agent_text(str(exc))[:500]}
     finally:
@@ -1445,7 +2735,7 @@ def _issue_root_grant(
     *,
     snapshot_requested: bool,
     snapshot_waived: bool,
-    helper: Path,
+    privileged_tools: AgentPrivilegedTools,
     runner: Callable,
     tty: str,
 ) -> Dict[str, object]:
@@ -1467,7 +2757,7 @@ def _issue_root_grant(
     response = _invoke_root_helper(
         ["--issue-root-session"],
         request,
-        helper=helper,
+        privileged_tools=privileged_tools,
         runner=runner,
     )
     if response.get("ok"):
@@ -1482,8 +2772,7 @@ def _execute_via_root_helper(
     command: AgentCommand,
     plan_hash: str,
     *,
-    approve_plan: bool,
-    helper: Path,
+    privileged_tools: AgentPrivilegedTools,
     runner: Callable,
     env: Mapping[str, str],
 ) -> AgentCommandResult:
@@ -1495,14 +2784,13 @@ def _execute_via_root_helper(
         "tty": session.tty,
         "context_fingerprint": session.context_fingerprint,
         "plan_hash": plan_hash,
-        "approve_plan": approve_plan,
         "audit_command": _redact_agent_text(command.command, env),
         "command": command.to_dict(),
     }
     response = _invoke_root_helper(
         ["--execute-request"],
         request,
-        helper=helper,
+        privileged_tools=privileged_tools,
         runner=runner,
     )
     if not response.get("ok") or not isinstance(response.get("result"), Mapping):
@@ -1529,7 +2817,7 @@ def _execute_via_root_helper(
 def _revoke_root_grant(
     session: AgentSession,
     *,
-    helper: Path,
+    privileged_tools: AgentPrivilegedTools,
     runner: Callable,
 ) -> None:
     if not session.root_capability:
@@ -1540,7 +2828,12 @@ def _revoke_root_grant(
         "capability": session.root_capability,
         "uid": current_user_uid(),
     }
-    _invoke_root_helper(["--revoke-root-session"], request, helper=helper, runner=runner)
+    _invoke_root_helper(
+        ["--revoke-root-session"],
+        request,
+        privileged_tools=privileged_tools,
+        runner=runner,
+    )
     session.root_capability = ""
 
 
@@ -1552,12 +2845,12 @@ def _plan_hash(commands: Sequence[AgentCommand]) -> str:
 
 
 def _print_agent_banner(session: AgentSession, stdout) -> None:
-    print("\n[AuraScan] Full-Control Repair Agent", file=stdout)
+    print("\n[AuraScan] Policy-Gated Repair Agent", file=stdout)
     print("=" * 54, file=stdout)
     if session.access == "root-shell":
-        print("ACCESS: UNRESTRICTED ROOT", file=stdout)
+        print("ACCESS: POLICY-GATED ROOT REPAIR", file=stdout)
     elif session.access == "user-shell":
-        print("ACCESS: UNRESTRICTED USER SHELL", file=stdout)
+        print("ACCESS: LOCAL DIAGNOSTIC COMMANDS", file=stdout)
     else:
         print("ACCESS: GUARDED AURASCAN TOOLS", file=stdout)
     print(
@@ -1569,8 +2862,14 @@ def _print_agent_banner(session: AgentSession, stdout) -> None:
         rollback = f"Snapper snapshot {session.snapshot_id}" if session.snapshot_id else "NO SNAPSHOT"
         print(f"Rollback preparation: {rollback}", file=stdout)
         print(
-            "Warning: root commands can alter disks, firmware, networking, security settings, "
-            "AuraScan itself, and the audit controls.",
+            "Warning: approved /usr/bin/pacman root repairs can still alter installed packages "
+            "and system state; local diagnostic commands remain read-only.",
+            file=stdout,
+        )
+    if session.access in {"user-shell", "root-shell"}:
+        print(
+            "Command gate: local-only allowlisted commands require fresh confirmation; remote "
+            "acquisition, arbitrary executables, AUR/build tools, and dynamic code are refused.",
             file=stdout,
         )
     print("Commands: /status, /agent ACCESS, /stop", file=stdout)
@@ -1609,16 +2908,13 @@ def _display_plan(commands: Sequence[AgentCommand], stdout) -> None:
 
 def _confirm_commands(
     commands: Sequence[AgentCommand],
-    approval: str,
+    _approval: str,
     input_func: Callable[[str], str],
     stdout,
 ) -> List[AgentCommand]:
-    if approval == "session":
-        return list(commands)
-    if approval == "whole-plan":
-        _display_plan(commands, stdout)
-        answer = input_func("Run this exact command plan? [y/N] ").strip().lower()
-        return list(commands) if answer in {"y", "yes"} else []
+    # ``whole-plan`` and ``session`` remain accepted configuration spellings for
+    # upgrade compatibility, but all model-authored shell text is confirmed one
+    # exact command at a time.
     approved = []
     for command in commands:
         _display_plan([command], stdout)
@@ -1735,6 +3031,7 @@ def run_agent_session(
     audit_root: Optional[Path] = None,
     helper: Path = Path("/usr/bin/aurascan"),
     runner: Callable = subprocess.run,
+    which: Callable[[str], Optional[str]] = shutil.which,
     popen_factory: Callable = subprocess.Popen,
     tty: Optional[str] = None,
     root_policy_path: Path = AGENT_ROOT_POLICY_PATH,
@@ -1745,35 +3042,37 @@ def run_agent_session(
     source = dict(os.environ if env is None else env)
     runtime = runtime or FollowUpRuntime()
     now = int(time.time())
+    effective_approval = effective_agent_approval(access, approval)
     session = AgentSession(
         session_id="agent-" + uuid.uuid4().hex,
         context_id=context.context_id,
         context_fingerprint=followup_context_fingerprint(context),
         access=access,
-        approval=approval,
+        approval=effective_approval,
         output_sharing=output_sharing,
         created_at=now,
         expires_at=now + session_timeout_minutes * 60,
         tty=tty if tty is not None else _tty_identity(),
     )
     result = AgentSessionResult()
+    privileged_tools: Optional[AgentPrivilegedTools] = None
     persist_followup_context(context, context_root)
 
+    if approval != effective_approval:
+        print(
+            f"[AuraScan] Configured approval mode '{approval}' is a legacy alias for shell sessions. "
+            "Effective approval is each-command: every exact model-authored command requires a fresh confirmation.",
+            file=stdout,
+        )
+
     if access == "user-shell":
-        if approval == "session":
-            phrase = input_func(
-                f"Type {AGENT_USER_SESSION_GRANT_PHRASE} to allow autonomous user commands: "
-            ).strip()
-            if phrase != AGENT_USER_SESSION_GRANT_PHRASE:
-                print("[AuraScan] User-shell session grant was not given.", file=stdout)
-                return result
-        else:
-            answer = input_func(
-                "Allow the AI to propose arbitrary commands as your current user for this session? [y/N] "
-            ).strip().lower()
-            if answer not in {"y", "yes"}:
-                print("[AuraScan] User-shell access was not enabled.", file=stdout)
-                return result
+        answer = input_func(
+            "Allow the AI to propose policy-validated local diagnostic commands for this session? "
+            "Every exact command will still require confirmation. [y/N] "
+        ).strip().lower()
+        if answer not in {"y", "yes"}:
+            print("[AuraScan] User-shell access was not enabled.", file=stdout)
+            return result
 
     if output_sharing == "full":
         phrase = input_func(
@@ -1793,15 +3092,22 @@ def run_agent_session(
             result.setup_failed = True
             return result
         phrase = input_func(
-            "UNRESTRICTED ROOT lets AI-requested commands change any part of this system.\n"
+            "ROOT REPAIR permits policy-validated /usr/bin/pacman workflows plus read-only diagnostics.\n"
             f"Type {AGENT_ROOT_GRANT_PHRASE} to continue: "
         ).strip()
         if phrase != AGENT_ROOT_GRANT_PHRASE:
-            print("[AuraScan] Unrestricted root access was not granted.", file=stdout)
+            print("[AuraScan] Root repair access was not granted.", file=stdout)
             return result
-        if not helper.is_file():
+        try:
+            privileged_tools = _capture_agent_privileged_tools(
+                helper,
+                which=which,
+                search_path=str(source["PATH"]) if "PATH" in source else None,
+            )
+        except TrustedToolError:
             print(
-                "[AuraScan] Root-shell access requires package-managed /usr/bin/aurascan.",
+                "[AuraScan] Root-shell access requires trusted package-managed "
+                "/usr/bin/sudo and /usr/bin/aurascan.",
                 file=stderr,
             )
             result.setup_failed = True
@@ -1810,7 +3116,7 @@ def run_agent_session(
             session,
             snapshot_requested=True,
             snapshot_waived=False,
-            helper=helper,
+            privileged_tools=privileged_tools,
             runner=runner,
             tty=session.tty,
         )
@@ -1831,7 +3137,7 @@ def run_agent_session(
                 session,
                 snapshot_requested=False,
                 snapshot_waived=True,
-                helper=helper,
+                privileged_tools=privileged_tools,
                 runner=runner,
                 tty=session.tty,
             )
@@ -1997,22 +3303,18 @@ def run_agent_session(
                 commands = response.commands[
                     : max(0, AGENT_MAX_COMMANDS_PER_SESSION - session.command_count)
                 ]
-                approved = _confirm_commands(commands, session.approval, input_func, stdout)
-                if not approved:
-                    break
-                plan_hash = _plan_hash(commands)
-                if session.approval == "whole-plan":
-                    if session.active_plan_hash and session.active_plan_hash != plan_hash:
-                        print(
-                            "[AuraScan] The proposed plan changed; the approval above applies only "
-                            "to this new exact plan.",
-                            file=stdout,
-                        )
-                    session.active_plan_hash = plan_hash
                 pending_results = []
-                for command_index, command in enumerate(approved):
+                for command in commands:
                     if int(time.time()) >= session.expires_at:
                         print("[AuraScan] Agent grant expired before the next command.", file=stderr)
+                        break
+                    approved = _confirm_commands(
+                        [command],
+                        session.approval,
+                        input_func,
+                        stdout,
+                    )
+                    if not approved:
                         break
                     print(
                         f"\n[AuraScan] Running approved {'root' if command.requires_root else 'user'} command "
@@ -2024,9 +3326,8 @@ def run_agent_session(
                         command_result = _execute_via_root_helper(
                             session,
                             command,
-                            plan_hash,
-                            approve_plan=command_index == 0,
-                            helper=helper,
+                            _plan_hash([command]),
+                            privileged_tools=privileged_tools,
                             runner=runner,
                             env=source,
                         )
@@ -2110,8 +3411,12 @@ def run_agent_session(
         session.stopped = True
         result.stopped = True
     finally:
-        if session.access == "root-shell":
-            _revoke_root_grant(session, helper=helper, runner=runner)
+        if session.access == "root-shell" and privileged_tools is not None:
+            _revoke_root_grant(
+                session,
+                privileged_tools=privileged_tools,
+                runner=runner,
+            )
         session.stopped = True
         result.questions = session.questions
         result.provider_requests = session.provider_requests
@@ -2200,7 +3505,7 @@ def run_agent(
         if hidden:
             print(json.dumps({"ok": False, "error": "agent helpers are disabled in recovery mode"}), file=stdout)
         else:
-            print("[AuraScan] Full-Control Repair Agent is not available in recovery mode v1.", file=stderr)
+            print("[AuraScan] Policy-Gated Repair Agent is not available in recovery mode v1.", file=stderr)
         return EXIT_FOLLOWUP_UNAVAILABLE
 
     if args.set_root_policy is not None:
@@ -2271,6 +3576,10 @@ def run_agent(
         return EXIT_AGENT_CONFIG_ERROR
     requested_access = args.access or config.access
     requested_approval = args.approval or config.approval
+    effective_requested_approval = effective_agent_approval(
+        requested_access,
+        requested_approval,
+    )
     requested_output = args.output_sharing or config.output_sharing
     requested_minutes = args.session_timeout or config.session_timeout_minutes
     if requested_minutes < 1 or requested_minutes > AGENT_MAX_SESSION_MINUTES:
@@ -2295,7 +3604,11 @@ def run_agent(
                 file=stderr,
             )
             return EXIT_AGENT_ROOT_REFUSED
-        if AGENT_APPROVAL_ORDER[requested_approval] > AGENT_APPROVAL_ORDER[policy.max_approval]:
+        effective_policy_approval = effective_agent_approval(
+            "root-shell",
+            policy.max_approval,
+        )
+        if AGENT_APPROVAL_ORDER[effective_requested_approval] > AGENT_APPROVAL_ORDER[effective_policy_approval]:
             print("[AuraScan] Requested approval mode exceeds the root policy ceiling.", file=stderr)
             return EXIT_AGENT_ROOT_REFUSED
         requested_minutes = min(requested_minutes, policy.max_minutes)
@@ -2354,6 +3667,7 @@ def run_agent(
         audit_root=audit_root,
         helper=helper,
         runner=runner,
+        which=which,
         popen_factory=popen_factory,
         root_policy_path=root_policy_path,
         root_policy_uid=root_policy_uid,

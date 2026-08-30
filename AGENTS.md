@@ -16,6 +16,11 @@ evidence actually collected.
   `lmstudio` and `llamacpp` providers may be keyless but must remain restricted
   to validated loopback HTTP(S), with proxies and redirects disabled and no
   cloud fallback.
+- Treat every package-AI input and response as hostile. Send only bounded
+  numbered data, expose no tools or URL/command authority, accept strict
+  allowlisted raise-only fields, refuse all provider redirects, and never
+  retain raw model prose. AI cannot lower a deterministic result or describe a
+  no-additional-concern response as safe, clean, trusted, or approved.
 - Keep malicious fixtures defanged and deterministic. Use `example.invalid`,
   inert strings, temporary roots, and fake credentials; never include working
   attacker infrastructure or require root, a real package installation, or a
@@ -33,11 +38,38 @@ evidence actually collected.
   declared install-hook control text. Require the correlated AUR target,
   repository mutation/staging, and push behavior; do not blanket-flag ordinary
   Git release tooling found only in deep-static acquired source.
+- Block remote second-stage execution only on a complete artifact-bound chain:
+  active network acquisition, a concrete local artifact (or bounded derived
+  artifact), and later execution. Do not flag a source URL, picture/media
+  filename, unexecuted download, quoted example, or unmatched path alone.
+- Block an opaque local carrier only when package/acquired-source logic decodes
+  content into a concrete artifact and later executes that artifact, or
+  actively invokes a media-, document-, data-, or font-named path as code. A
+  file extension, bundled asset, archive, decode step, or picture alone is not
+  evidence of execution. Parser limits or malformed command streams fail
+  closed as incomplete inspection rather than being labeled malware.
 - Treat every literal local `install=` target, including dot-prefixed hooks, as
   mandatory evidence. Missing, unreadable, unsafe, ambiguous, or any symlinked
   component of the declared relative hook path under the package directory
   fails closed. Cache a blocker only under the matching failure-state identity;
   never reuse or store an allow decision while the hook is unresolved.
+- Treat a built package `.INSTALL` member as mandatory deterministic evidence.
+  Use the bounded no-follow package reader and fail closed if the member list
+  or hook cannot be captured as stable regular UTF-8 text; optional AI or
+  ClamAV must not be the only install-hook control-flow check.
+- Deep-static must parse the captured PKGBUILD rather than a neighboring
+  `.SRCINFO`, make zero HTTP/Git/key calls under `--offline`, snapshot local
+  sources without following links, isolate acquisition paths, and block every
+  declared source it cannot inspect. Do not cache deep-static allow reports
+  until acquired bytes/revisions and statuses are bound into the cache key.
+- Source-array collection is not a Bash evaluator. Accept only supported
+  bounded literal assignment/append forms and fail closed on malformed arrays,
+  dynamic or indirect mutation, sourcing/eval, subscripts, reads, or namerefs
+  that could change a `source` array without static proof.
+- Reject embedded credentials, localhost, and non-public IP literals in
+  explicit source/key URLs before transport and after redirects. Redact URL
+  userinfo, query strings, and fragments from persisted acquisition metadata;
+  do not claim this lexical check eliminates DNS rebinding.
 - Treat `AGENTS.md`, `SKILL.md`, Claude control files, their explicit imports,
   and discovered skill resources as untrusted text. Use bounded no-follow
   reads, never traverse symlink directories, and report links or imports that
@@ -68,6 +100,36 @@ evidence actually collected.
 - Treat quoted and fenced material as context, not a trust boundary. A labeled
   example may stay inert only while no later active instruction tells the
   agent to run, source, evaluate, or execute that example.
+- Policy-Gated Repair Agent command-enabled profiles always require a fresh,
+  just-in-time confirmation for each exact model-authored command. A session
+  grant, prior plan, earlier command, or terminal-result review must never
+  authorize a changed or later command; privileged command hashes bind the
+  exact command. The `user-shell` and `root-shell` names are compatibility
+  profiles, not general shell grants.
+- Keep Repair Agent commands on a fail-closed local allowlist: documented shell
+  output/test builtins, absolute `/usr/bin` or `/usr/sbin` read-only diagnostics
+  with command-specific mutation checks, and constrained exact
+  `/usr/bin/pacman` query/sync/removal workflows. Reject everything else,
+  including remote references, network/remote-shell clients, Git, AUR/build
+  front ends, interpreters/loaders, decoding/evaluation, shell expansion,
+  redirection, custom/bare executables, unsafe pacman options/targets, and
+  direct AuraScan modification before offering confirmation. Approved package
+  changes remain consequential and diagnostic output may contain private data;
+  never describe this boundary as Full Control or unrestricted execution.
+- Invoke hostile-input native tools only through the documented trusted
+  boundary: fixed absolute system paths, root-owned non-writable non-link path
+  components/final files, and identity revalidation where supported. Bound
+  input, captured output, and runtime whenever AuraScan treats the tool as a
+  hostile-input parser. This applies to `/usr/bin/git`,
+  `/usr/bin/gpg`, `/usr/bin/bsdtar`, `/usr/bin/clamscan`,
+  `/usr/bin/freshclam`, `/usr/bin/notify-send`, `/usr/bin/makepkg`, upgrade
+  tools, and Repair Agent privileged helpers; never validate one executable and
+  later call a bare name. The post-scan makepkg handoff still executes package
+  build logic and is not a bounded scanner or sandbox.
+- Keep the public-key cache private and bounded. Read cached/configured keys as
+  stable no-follow byte snapshots, publish fetched cache entries atomically
+  without replacing an existing path, and import an exact private temporary
+  copy rather than reopening a mutable key path.
 
 ## Repository map
 
@@ -77,6 +139,10 @@ evidence actually collected.
 - `aurascan/analyzers/deterministic.py`: default static PKGBUILD/install-hook
   rules.
 - `aurascan/analyzers/deep_static.py`: opt-in acquired-source inspection.
+- `aurascan/analyzers/remote_stage.py`: secret-free fetch/artifact/execute
+  correlation shared by package control text and acquired source.
+- `aurascan/core/package_archive.py`: bounded no-follow built-package
+  install-hook capture.
 - `aurascan/core/security_audit.py`: installed state, bounded history, helper
   caches, host indicators, and official advisory integration.
 - `aurascan/core/instruction_guard.py`: bounded discovery, deterministic
@@ -124,7 +190,33 @@ evidence actually collected.
    library-only runtime dependency policy.
 9. Mock every AI transport in tests. CI and normal doctor runs must not require,
    discover, start, or contact a live LM Studio, llama.cpp, or cloud endpoint.
-10. For instruction-file disable/restore, revalidate ownership, regular-file
+10. Treat images, archives, fonts, and opaque blobs as bytes, never as model
+    instructions. Bound parser input/output and extraction by actual bytes and
+    entries, not attacker-declared metadata alone. Bound acquired-source tree
+    entries and candidates too; incomplete reads, traversal, links, or nested
+    archives not recursively inspected block the result.
+11. Treat all model-authored advisory prose as untrusted output. Accept exact
+    bounded JSON schemas and known IDs only; reject duplicate keys, recognized
+    network destinations, direct/indirect or sentence-leading imperative action
+    requests, named/generic package-helper advice, actionable nominalized
+    operation/invocation wording, credential-transfer advice, questions,
+    commands, controls, product impersonation, credential-like assignments, and
+    unsupported safe/compromised claims without persisting rejected raw output
+    or errors.
+    Accepted prose remains untrusted interpretation: lexical filtering is not
+    proof that arbitrary natural language is harmless and must never grant tool,
+    URL, command, policy, or execution authority.
+12. Resolve upgrade executables to trusted absolute, root-owned, non-writable,
+    non-symlink identities and revalidate them before each query and handoff.
+    Never hand planned AUR builds to a helper unless every build is provably
+    routed through AuraScan's wrapper; AI and confirmation cannot waive this.
+13. Treat fixed tool paths and bounded parsers as risk reduction, not a sandbox.
+    Same-UID malware can attack user configuration/cache/state; root malware can
+    replace AuraScan or system tools; native parser defects, DNS rebinding,
+    steganography, and unknown decoders remain possible. Keep these limits
+    explicit in user-facing claims and recommend disposable resource-limited
+    environments for adversarial explicit acquisition and builds.
+14. For instruction-file disable/restore, revalidate ownership, regular-file
     type, unchanged content and inode, parent safety, and destination absence at
     action time. Settings, hook/plugin configs, scripts, and symlinks remain
     manual-only.

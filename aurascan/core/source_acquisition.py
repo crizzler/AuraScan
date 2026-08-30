@@ -1,18 +1,31 @@
+import errno
 import hashlib
+import ipaddress
 import os
 import re
+import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from aurascan.core.models import Confidence, EvidenceQuality, Finding, Phase, Severity, Source
+from aurascan.core.install_hook import _iter_shell_segments, _mask_heredoc_bodies
+from aurascan.core.text_safety import sanitize_terminal_text
+from aurascan.core.trusted_tools import (
+    TrustedToolError,
+    capture_trusted_system_tool,
+    revalidate_trusted_system_tool,
+    run_bounded_trusted_tool,
+)
 
 
 class SourceKind(Enum):
@@ -33,6 +46,28 @@ CHECKSUM_FAMILIES = (
     ("sha1sums", "sha1"),
     ("md5sums", "md5"),
 )
+_MAX_PGP_KEY_BYTES = 1024 * 1024
+_GPG_STATUS_KEYWORDS = frozenset({
+    "BADSIG",
+    "ERRSIG",
+    "EXPKEYSIG",
+    "EXPSIG",
+    "GOODSIG",
+    "IMPORT_OK",
+    "IMPORT_PROBLEM",
+    "NEWSIG",
+    "NO_PUBKEY",
+    "REVKEYSIG",
+    "TRUST_EXPIRED",
+    "TRUST_FULLY",
+    "TRUST_MARGINAL",
+    "TRUST_NEVER",
+    "TRUST_ULTIMATE",
+    "TRUST_UNDEFINED",
+    "VALIDSIG",
+})
+_GPG_STATUS_FINGERPRINT = re.compile(r"[0-9A-Fa-f]{16,64}\Z")
+_MAX_GPG_STATUS_LINES = 32
 
 
 @dataclass
@@ -67,8 +102,8 @@ class SourceAcquisitionResult:
 
     def to_dict(self) -> Dict[str, object]:
         return {
-            "original": self.reference.original,
-            "resolved": self.reference.resolved,
+            "original": _redact_source_reference(self.reference.original),
+            "resolved": _redact_source_reference(self.reference.resolved),
             "index": self.reference.index,
             "filename": self.reference.filename,
             "kind": self.reference.kind.value,
@@ -76,7 +111,7 @@ class SourceAcquisitionResult:
             "checksum_algorithm": self.reference.checksum_algorithm,
             "checksum": self.reference.checksum,
             "local_path": str(self.local_path) if self.local_path else None,
-            "final_url": self.final_url,
+            "final_url": _redact_source_reference(self.final_url) if self.final_url else None,
             "size": self.size,
             "sha256": self.sha256,
             "status": self.status,
@@ -110,9 +145,12 @@ class SourcePolicy:
 
 class SourceParser:
     def parse(self, pkgbuild_path: str, content: str) -> Tuple[List[SourceReference], List[Finding]]:
-        srcinfo_path = Path(pkgbuild_path).with_name(".SRCINFO")
-        if srcinfo_path.exists():
-            return self.parse_srcinfo(srcinfo_path.read_text(encoding="utf-8", errors="replace"), str(srcinfo_path))
+        # The caller supplies the exact PKGBUILD snapshot bound to the scan
+        # identity.  A sibling .SRCINFO is generated metadata which may be
+        # stale, forged, symlinked, or replaced independently; never let it
+        # substitute different source declarations implicitly.  Integrations
+        # that already possess trusted .SRCINFO bytes may still call the
+        # explicit parse_srcinfo() API.
         return self.parse_pkgbuild(content, pkgbuild_path)
 
     def parse_srcinfo(self, content: str, path: str = ".SRCINFO") -> Tuple[List[SourceReference], List[Finding]]:
@@ -134,7 +172,17 @@ class SourceParser:
 
     def parse_pkgbuild(self, content: str, path: str = "PKGBUILD") -> Tuple[List[SourceReference], List[Finding]]:
         variables = self._parse_basic_variables(content)
-        source_bodies = self._parse_source_bodies(content)
+        source_bodies, source_parse_error = self._parse_source_bodies(content)
+        if source_parse_error:
+            return [], [_finding(
+                "SOURCE-PARSER-AMBIGUOUS",
+                path,
+                Severity.HIGH,
+                "PKGBUILD source declarations could not be represented safely without evaluating Bash.",
+                "Do not build or install until every source declaration and mutation has been resolved and inspected independently.",
+                True,
+                "source declaration syntax was not inspected",
+            )]
         if not source_bodies:
             return [], []
 
@@ -144,11 +192,11 @@ class SourceParser:
             findings.append(_finding(
                 "SOURCE-PARSER-AMBIGUOUS",
                 path,
-                Severity.MEDIUM,
+                Severity.HIGH,
                 "PKGBUILD source array contains dynamic Bash syntax AuraScan will not evaluate.",
-                "Review source acquisition manually. AuraScan does not execute Bash to resolve sources.",
-                False,
-                joined_source_body.strip()[:300],
+                "Do not build or install until every dynamic source declaration has been resolved and inspected independently.",
+                True,
+                "dynamic source declaration was not inspected",
             ))
             return [], findings
 
@@ -219,12 +267,269 @@ class SourceParser:
                 keys.append(key)
         return keys
 
-    def _parse_source_bodies(self, content: str) -> List[str]:
+    def _parse_source_bodies(self, content: str) -> Tuple[List[str], bool]:
         bodies: List[str] = []
-        pattern = r"^source(?:_[A-Za-z0-9_]+)?=(?:\((?P<array>.*?)\)|(?P<scalar>[^\n]+))"
-        for match in re.finditer(pattern, content, re.M | re.S):
-            bodies.append(match.group("array") if match.group("array") is not None else match.group("scalar"))
-        return bodies
+        prepared = _mask_heredoc_bodies(content).content
+        prepared, function_parse_error, defined_functions = self._mask_function_bodies(prepared)
+        if function_parse_error:
+            return [], True
+        assignment_pattern = re.compile(
+            r"^\s*(?:(?:declare|export|local|readonly|typeset)\s+(?:-[A-Za-z]+\s+)*)?"
+            r"(?P<name>source(?:_[A-Za-z0-9_]+)?)(?P<subscript>\[[^\]]*\])?"
+            r"(?P<operator>\+=|=)(?P<value>.*)$",
+            re.S,
+        )
+        for segment, _line_number in _iter_shell_segments(prepared):
+            match = assignment_pattern.match(segment)
+            if match is None:
+                if self._segment_may_mutate_sources(segment, defined_functions):
+                    return [], True
+                continue
+            if match.group("subscript"):
+                return [], True
+            value = match.group("value").strip()
+            if value.startswith("("):
+                body = self._balanced_array_body(value)
+                if body is None:
+                    return [], True
+            else:
+                try:
+                    scalar_tokens = shlex.split(value, comments=True, posix=True)
+                except ValueError:
+                    return [], True
+                if len(scalar_tokens) != 1:
+                    return [], True
+                body = value
+            try:
+                shlex.split(body, comments=True, posix=True)
+            except ValueError:
+                return [], True
+            bodies.append(body)
+        return bodies, False
+
+    def _mask_function_bodies(self, content: str) -> Tuple[str, bool, set]:
+        """Remove inert function definitions from top-level source parsing.
+
+        makepkg evaluates top-level metadata while defining, but not invoking,
+        package functions.  Commands such as ``eval`` inside ``package()`` do
+        not mutate the source array used for acquisition.  Mask complete,
+        syntactically bounded function bodies while preserving newlines; an
+        unterminated body remains ambiguous and fails closed.
+        """
+        function_start = re.compile(
+            r"(?m)^[ \t]*(?:(?:function[ \t]+(?P<function_name>[A-Za-z_]"
+            r"[A-Za-z0-9_]*)(?:[ \t]*\([ \t]*\))?)|(?:(?P<plain_name>"
+            r"[A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\)))[ \t]*"
+            r"(?:\n[ \t]*)?\{"
+        )
+        masked = list(content)
+        defined_functions = set()
+        search_at = 0
+        while True:
+            match = function_start.search(content, search_at)
+            if match is None:
+                break
+            opening = content.rfind("{", match.start(), match.end())
+            closing = self._matching_function_brace(content, opening)
+            if closing is None:
+                return content, True, set()
+            defined_functions.add(match.group("function_name") or match.group("plain_name"))
+            for index in range(match.start(), closing + 1):
+                if masked[index] not in {"\n", "\r"}:
+                    masked[index] = " "
+            search_at = closing + 1
+        return "".join(masked), False, defined_functions
+
+    def _matching_function_brace(self, content: str, opening: int) -> Optional[int]:
+        depth = 0
+        quote = ""
+        escaped = False
+        comment = False
+        for index in range(opening, len(content)):
+            char = content[index]
+            if comment:
+                if char == "\n":
+                    comment = False
+                continue
+            if quote:
+                if quote == "'":
+                    if char == "'":
+                        quote = ""
+                elif escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = ""
+                continue
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\":
+                escaped = True
+                continue
+            if char in {"'", '"', "`"}:
+                quote = char
+                continue
+            if char == "#":
+                comment = True
+                continue
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return index
+                if depth < 0:
+                    return None
+        return None
+
+    def _balanced_array_body(self, value: str) -> Optional[str]:
+        quote = ""
+        escaped = False
+        depth = 0
+        for index, char in enumerate(value):
+            if quote:
+                if quote == "'":
+                    if char == "'":
+                        quote = ""
+                elif escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = ""
+                continue
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\":
+                escaped = True
+                continue
+            if char in {"'", '"'}:
+                quote = char
+                continue
+            if char == "(":
+                depth += 1
+                continue
+            if char == ")":
+                depth -= 1
+                if depth < 0:
+                    return None
+                if depth == 0:
+                    if value[index + 1:].strip():
+                        return None
+                    return value[1:index]
+        return None
+
+    def _segment_may_mutate_sources(self, segment: str, defined_functions: Optional[set] = None) -> bool:
+        raw_assignment = re.search(
+            r"(?:^|[;&|(){}\s])source(?:_[A-Za-z0-9_]+)?(?:\[[^\]]*\])?\s*(?:\+?=)",
+            segment,
+        )
+        if re.search(r"\$\{\s*source(?:\[[^\]]*\])?\s*(?::?=)", segment):
+            return True
+        try:
+            tokens = shlex.split(segment, comments=False, posix=True)
+        except ValueError:
+            return raw_assignment is not None
+        if not tokens:
+            return False
+        command_index = 0
+        while command_index < len(tokens) and tokens[command_index] in {
+            "!", "do", "elif", "else", "if", "then", "time", "until", "while",
+        }:
+            command_index += 1
+        while command_index < len(tokens) and re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*=.*",
+            tokens[command_index],
+            re.S,
+        ):
+            command_index += 1
+        if command_index >= len(tokens):
+            return raw_assignment is not None
+        command_token = tokens[command_index]
+        if "$" in command_token or "`" in command_token:
+            # A dynamically selected top-level command can invoke a locally
+            # defined helper that mutates global source metadata.  Do not
+            # execute Bash to resolve it.
+            return True
+        command = command_token.rsplit("/", 1)[-1]
+        bypass_functions = False
+        if command in {"builtin", "command"}:
+            bypass_functions = True
+            command_index += 1
+            while command_index < len(tokens) and tokens[command_index].startswith("-"):
+                command_index += 1
+            if command_index >= len(tokens):
+                return False
+            command_token = tokens[command_index]
+            if "$" in command_token or "`" in command_token:
+                return True
+            command = command_token.rsplit("/", 1)[-1]
+        if defined_functions and not bypass_functions and command in defined_functions:
+            # Calling a locally defined shell function while makepkg sources
+            # the PKGBUILD can mutate global metadata through behavior hidden
+            # in that function.  AuraScan does not execute it to find out.
+            return True
+        if command in {"source", ".", "eval"}:
+            return True
+        if command in {"declare", "export", "local", "readonly", "typeset", "unset"}:
+            if command in {"declare", "local", "typeset"} and any(
+                token == "--nameref"
+                or bool(re.fullmatch(r"-[A-Za-z]*n[A-Za-z]*", token))
+                for token in tokens[1:]
+                if token.startswith("-")
+            ):
+                # A nameref can mutate any source array through an unrelated
+                # identifier in a later statement.  Static source collection
+                # cannot establish that alias safely without evaluating Bash.
+                return True
+            return any(
+                token == "source"
+                or token.startswith("source[")
+                or token.startswith("source=")
+                or token.startswith("source+=")
+                or token.startswith("source_")
+                or "$" in token
+                or "`" in token
+                for token in tokens[1:]
+                if not token.startswith("-")
+            )
+        if command == "printf":
+            for index in range(1, len(tokens) - 1):
+                if tokens[index] not in {"-v", "--variable"}:
+                    continue
+                target = tokens[index + 1]
+                if (
+                    target == "source"
+                    or target.startswith("source[")
+                    or "$" in target
+                    or "`" in target
+                ):
+                    return True
+            return False
+        if command in {"read", "mapfile", "readarray"}:
+            return any(
+                token == "source"
+                or token.startswith("source[")
+                or "$" in token
+                or "`" in token
+                for token in tokens[1:]
+                if not token.startswith("-")
+            )
+        # A source-looking string passed to echo/printf/documentation is inert;
+        # an assignment token in command-prefix position is not.
+        prefix_tokens = []
+        for token in tokens:
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=", token):
+                prefix_tokens.append(token)
+                continue
+            break
+        return any(
+            re.match(r"^source(?:_[A-Za-z0-9_]+)?(?:\[[^\]]*\])?\+?=", token)
+            for token in prefix_tokens
+        )
 
     def _srcinfo_source_key(self, line: str) -> Optional[str]:
         key = line.split("=", 1)[0].strip() if "=" in line else ""
@@ -298,7 +603,10 @@ class SourceParser:
         return findings
 
     def _tokenize_array(self, body: str) -> List[str]:
-        return [token for token in re.findall(r"""(?:"([^"]+)"|'([^']+)'|([^\s()]+))""", body) for token in token if token]
+        try:
+            return shlex.split(body, comments=True, posix=True)
+        except ValueError:
+            return []
 
     def _interpolate(self, token: str, variables: Dict[str, str]) -> str:
         for key, value in variables.items():
@@ -358,6 +666,7 @@ class PublicKeySource:
     path: Optional[Path] = None
     source_type: str = "unavailable"
     error: Optional[str] = None
+    data: Optional[bytes] = field(default=None, repr=False)
 
 
 @dataclass
@@ -367,6 +676,131 @@ class PublicKeyImportResult:
     key_source: Optional[PublicKeySource] = None
     gpg_status: str = ""
     error: Optional[str] = None
+
+
+def _prepare_private_key_cache(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, mode=0o700, exist_ok=True)
+        metadata = path.lstat()
+        if (
+            path.is_symlink()
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_mode & 0o022
+        ):
+            return False
+        os.chmod(str(path), 0o700)
+        return True
+    except OSError:
+        return False
+
+
+def _read_key_candidate(path: Path) -> Tuple[str, Optional[bytes]]:
+    """Read one stable, bounded, non-link public-key file."""
+
+    descriptor = -1
+    try:
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return "absent", None
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_mode & 0o022
+        ):
+            return "unsafe", None
+        descriptor = os.open(
+            str(path),
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+        )
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size > _MAX_PGP_KEY_BYTES
+            or before.st_mode & 0o022
+        ):
+            return "unsafe", None
+        payload = bytearray()
+        while len(payload) <= _MAX_PGP_KEY_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(65536, _MAX_PGP_KEY_BYTES + 1 - len(payload)),
+            )
+            if not chunk:
+                break
+            payload.extend(chunk)
+        after = os.fstat(descriptor)
+        if (
+            len(payload) > _MAX_PGP_KEY_BYTES
+            or _file_snapshot_identity(before) != _file_snapshot_identity(after)
+        ):
+            return "unsafe", None
+        return "resolved", bytes(payload)
+    except OSError:
+        return "unsafe", None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _write_private_key_cache(path: Path, payload: bytes) -> None:
+    if len(payload) > _MAX_PGP_KEY_BYTES or not _prepare_private_key_cache(path.parent):
+        raise ValueError("public-key cache was unsafe")
+    directory_fd = -1
+    temporary_name = ".key-" + uuid.uuid4().hex
+    descriptor = -1
+    try:
+        directory_fd = os.open(
+            str(path.parent),
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        directory_metadata = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(directory_metadata.st_mode)
+            or directory_metadata.st_uid != os.geteuid()
+            or directory_metadata.st_mode & 0o077
+        ):
+            raise ValueError("public-key cache directory was unsafe")
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        _write_all(descriptor, payload)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        # Hard-link creation is an atomic no-replace publish.  A malicious or
+        # stale cache entry, including a symlink, is never followed or replaced.
+        os.link(
+            temporary_name,
+            path.name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        os.unlink(temporary_name, dir_fd=directory_fd)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if directory_fd >= 0:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except OSError:
+                pass
+            os.close(directory_fd)
 
 
 @dataclass
@@ -386,8 +820,8 @@ class PgpVerificationResult:
 
     def to_dict(self) -> Dict[str, object]:
         return {
-            "signature_path": self.signature_path,
-            "signed_file_path": self.signed_file_path,
+            "signature_path": _redact_source_reference(self.signature_path),
+            "signed_file_path": _redact_source_reference(self.signed_file_path),
             "verification_status": self.verification_status,
             "signer_fingerprint": self.signer_fingerprint,
             "normalized_validpgpkeys": self.normalized_validpgpkeys,
@@ -413,35 +847,54 @@ class TrustedKeyDirectoryProvider(PublicKeyProvider):
         opener: Optional[urllib.request.OpenerDirector] = None,
     ):
         self.policy = policy or SourcePolicy()
-        self.opener = opener or urllib.request.build_opener()
-        self.policy.key_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.opener = opener or urllib.request.build_opener(_SafeRedirectHandler(self.policy))
+        self._cache_safe = _prepare_private_key_cache(self.policy.key_cache_dir)
 
     def get_key(self, fingerprint: str) -> PublicKeySource:
         normalized = PgpKeyNormalizer.normalize(fingerprint)
         cached = self.policy.key_cache_dir / f"{normalized}.asc"
-        if cached.exists():
-            return PublicKeySource(normalized, cached, "cache")
+        if self._cache_safe:
+            cached_state, cached_data = _read_key_candidate(cached)
+            if cached_state == "resolved":
+                return PublicKeySource(normalized, cached, "cache", data=cached_data)
+            if cached_state == "unsafe":
+                return PublicKeySource(normalized, error="KEY_CACHE_UNSAFE")
         for directory in self.policy.trusted_key_dirs:
             for suffix in (".asc", ".gpg", ".pgp"):
                 candidate = directory / f"{normalized}{suffix}"
-                if candidate.exists():
-                    return PublicKeySource(normalized, candidate, "trusted_key_dir")
+                candidate_state, candidate_data = _read_key_candidate(candidate)
+                if candidate_state == "resolved":
+                    return PublicKeySource(
+                        normalized,
+                        candidate,
+                        "trusted_key_dir",
+                        data=candidate_data,
+                    )
+                if candidate_state == "unsafe":
+                    return PublicKeySource(normalized, error="KEY_FILE_UNSAFE")
         if self.policy.offline or not self.policy.auto_key_fetch:
             return PublicKeySource(normalized, error="KEY_UNAVAILABLE")
         if not PgpKeyNormalizer.is_full_fingerprint(normalized):
             return PublicKeySource(normalized, error="WEAK_KEY_ID")
+        if not self._cache_safe:
+            return PublicKeySource(normalized, error="KEY_CACHE_UNSAFE")
         url = f"{self.policy.keyserver}/pks/lookup?op=get&options=mr&search=0x{normalized}"
         try:
+            _validate_public_remote_url(url, self.policy.allowed_redirect_schemes)
             request = urllib.request.Request(url, headers={"User-Agent": "AuraScan/0.1"})
-            with self.opener.open(request, timeout=self.policy.timeout) as response, cached.open("wb") as handle:
-                handle.write(response.read(self.policy.max_download_size + 1))
-            if cached.stat().st_size > self.policy.max_download_size:
-                cached.unlink(missing_ok=True)
+            with self.opener.open(request, timeout=self.policy.timeout) as response:
+                if hasattr(response, "geturl"):
+                    _validate_public_remote_url(
+                        str(response.geturl()),
+                        self.policy.allowed_redirect_schemes,
+                    )
+                payload = response.read(_MAX_PGP_KEY_BYTES + 1)
+            if len(payload) > _MAX_PGP_KEY_BYTES:
                 return PublicKeySource(normalized, error="KEY_FETCH_OVERSIZED")
-        except (OSError, urllib.error.URLError, ValueError) as exc:
-            cached.unlink(missing_ok=True)
-            return PublicKeySource(normalized, error=str(exc))
-        return PublicKeySource(normalized, cached, "keyserver")
+            _write_private_key_cache(cached, payload)
+        except (OSError, urllib.error.URLError, ValueError):
+            return PublicKeySource(normalized, error="KEY_FETCH_FAILED")
+        return PublicKeySource(normalized, cached, "keyserver", data=payload)
 
 
 class ChecksumVerifier:
@@ -464,7 +917,6 @@ class ChecksumVerifier:
         if not result.local_path or not result.local_path.exists():
             return []
         digest = _hash_file(result.local_path, ref.checksum_algorithm or "sha256")
-        result.sha256 = digest
         if digest != ref.checksum.lower():
             return [_finding(
                 "SOURCE-CHECKSUM-MISMATCH",
@@ -522,11 +974,11 @@ class SignatureVerifier:
         self,
         policy: Optional[SourcePolicy] = None,
         key_provider: Optional[PublicKeyProvider] = None,
-        runner: Callable = subprocess.run,
+        runner: Optional[Callable] = None,
     ):
         self.policy = policy or SourcePolicy()
         self.key_provider = key_provider or TrustedKeyDirectoryProvider(self.policy)
-        self.runner = runner
+        self.runner = runner or run_bounded_trusted_tool
         self.last_result: Optional[PgpVerificationResult] = None
 
     def verify(
@@ -580,16 +1032,20 @@ class SignatureVerifier:
             result.related_finding_ids.append(finding.finding_id)
             self.last_result = result
             return [finding], result
-        if shutil.which("gpg") is None:
+        try:
+            gpg_tool = capture_trusted_system_tool("gpg")
+        except TrustedToolError:
+            gpg_tool = None
+        if gpg_tool is None:
             result = self._result(source, signature, "gpg_unavailable", valid_keys)
             finding = _finding(
                 "SIGNATURE-VERIFICATION-UNAVAILABLE",
                 source.original,
                 Severity.MEDIUM,
-                "gpg is unavailable, so AuraScan could not verify the detached signature.",
-                "Install GnuPG or verify the signature manually.",
+                "A trusted system GnuPG executable is unavailable, so AuraScan could not verify the detached signature.",
+                "Install the distribution GnuPG package, repair PATH or executable permissions, or verify the signature independently.",
                 False,
-                str(signature_path),
+                "trusted GnuPG verification was unavailable",
             )
             result.related_finding_ids.append(finding.finding_id)
             self.last_result = result
@@ -599,8 +1055,14 @@ class SignatureVerifier:
         key_findings: List[Finding] = []
         for fingerprint in valid_keys:
             key_source = self.key_provider.get_key(fingerprint)
+            if key_source.data is None and key_source.path is not None:
+                key_state, key_payload = _read_key_candidate(key_source.path)
+                if key_state == "resolved":
+                    key_source.data = key_payload
+                else:
+                    key_source.error = "KEY_FILE_UNSAFE"
             key_sources.append(key_source)
-            if key_source.path is None:
+            if key_source.data is None:
                 finding = _finding(
                     "KEY_UNAVAILABLE",
                     source.original,
@@ -611,7 +1073,7 @@ class SignatureVerifier:
                     key_source.error or fingerprint,
                 )
                 key_findings.append(finding)
-        if not any(item.path for item in key_sources):
+        if not any(item.data is not None for item in key_sources):
             result = self._result(source, signature, "key_unavailable", valid_keys)
             result.key_fetch_attempted = any(item.source_type == "keyserver" or item.error not in (None, "KEY_UNAVAILABLE", "WEAK_KEY_ID") for item in key_sources)
             result.key_fetch_provider = self.policy.keyserver if self.policy.auto_key_fetch and not self.policy.offline else None
@@ -625,12 +1087,33 @@ class SignatureVerifier:
         try:
             import_status = ""
             imported_source = None
-            for key_source in key_sources:
-                if key_source.path is None:
+            for key_index, key_source in enumerate(key_sources):
+                key_payload = key_source.data
+                if key_payload is None and key_source.path is not None:
+                    key_state, key_payload = _read_key_candidate(key_source.path)
+                    if key_state != "resolved":
+                        key_payload = None
+                if key_payload is None:
                     continue
+                import_path = gnupg_home / f"key-{key_index:04d}.asc"
+                import_fd = os.open(
+                    str(import_path),
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+                try:
+                    _write_all(import_fd, key_payload)
+                    os.fsync(import_fd)
+                finally:
+                    os.close(import_fd)
                 imported_source = key_source
+                revalidate_trusted_system_tool(gpg_tool)
                 import_proc = self.runner(
-                    ["gpg", "--homedir", str(gnupg_home), "--batch", "--no-tty", "--import", str(key_source.path)],
+                    [gpg_tool.path, "--homedir", str(gnupg_home), "--batch", "--no-tty", "--import", str(import_path)],
                     capture_output=True,
                     text=True,
                     timeout=self.policy.timeout,
@@ -638,21 +1121,22 @@ class SignatureVerifier:
                     env=self._gpg_env(gnupg_home),
                 )
                 import_status += (import_proc.stdout or "") + (import_proc.stderr or "")
+            revalidate_trusted_system_tool(gpg_tool)
             verify_proc = self.runner(
-                ["gpg", "--homedir", str(gnupg_home), "--batch", "--no-tty", "--status-fd", "1", "--no-auto-key-retrieve", "--verify", str(signature_path), str(source_path)],
+                [gpg_tool.path, "--homedir", str(gnupg_home), "--batch", "--no-tty", "--status-fd", "1", "--no-auto-key-retrieve", "--verify", str(signature_path), str(source_path)],
                 capture_output=True,
                 text=True,
                 timeout=self.policy.timeout,
                 check=False,
                 env=self._gpg_env(gnupg_home),
             )
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, subprocess.SubprocessError, TrustedToolError):
             result = self._result(source, signature, "verification_error", valid_keys)
             finding = _finding(
                 "SIGNATURE-VERIFICATION-ERROR",
                 source.original,
                 Severity.MEDIUM,
-                f"Detached signature verification failed to run: {exc}",
+                "Detached signature verification could not run through the captured trusted executable.",
                 "Review the source signature manually.",
                 False,
                 str(signature_path),
@@ -741,7 +1225,28 @@ class SignatureVerifier:
         return None
 
     def _sanitize_status(self, status: str) -> str:
-        return "\n".join(line[:500] for line in status.splitlines() if "[GNUPG:]" in line or "gpg:" in line)[:4000]
+        # GnuPG status output may contain an attacker-controlled user ID after
+        # GOODSIG/BADSIG and its ordinary diagnostics can echo filenames or
+        # other package-controlled text.  Persist only allowlisted machine
+        # status names and an optional hexadecimal key identifier.  Never
+        # retain human-readable `gpg:` diagnostics or the remainder of a
+        # status line.
+        sanitized: List[str] = []
+        for line in status.splitlines():
+            if len(sanitized) >= _MAX_GPG_STATUS_LINES:
+                break
+            if not line.startswith("[GNUPG:] "):
+                continue
+            fields = line[len("[GNUPG:] "):].split()
+            if not fields or fields[0] not in _GPG_STATUS_KEYWORDS:
+                continue
+            rendered = fields[0]
+            for token in fields[1:]:
+                if _GPG_STATUS_FINGERPRINT.fullmatch(token):
+                    rendered += " " + token.upper()
+                    break
+            sanitized.append(rendered)
+        return "\n".join(sanitized)[:2000]
 
 
 class HttpSourceFetcher:
@@ -750,15 +1255,17 @@ class HttpSourceFetcher:
         self.opener = opener or urllib.request.build_opener(_SafeRedirectHandler(self.policy))
 
     def fetch(self, ref: SourceReference, output_dir: Path) -> SourceAcquisitionResult:
-        output_path = output_dir / ref.filename
+        if self.policy.offline:
+            return _offline_acquisition_result(ref)
+        output_path = output_dir / _safe_filename(ref.filename)
         digest = hashlib.sha256()
         size = 0
         try:
+            _validate_public_remote_url(ref.resolved, self.policy.allowed_redirect_schemes)
             request = urllib.request.Request(ref.resolved, headers={"User-Agent": "AuraScan/0.1"})
-            with self.opener.open(request, timeout=self.policy.timeout) as response, output_path.open("wb") as handle:
+            with self.opener.open(request, timeout=self.policy.timeout) as response, output_path.open("xb") as handle:
                 final_url = response.geturl()
-                if urllib.parse.urlparse(final_url).scheme not in self.policy.allowed_redirect_schemes:
-                    raise ValueError(f"redirected to unsupported scheme: {final_url}")
+                _validate_public_remote_url(final_url, self.policy.allowed_redirect_schemes)
                 while True:
                     chunk = response.read(65536)
                     if not chunk:
@@ -768,7 +1275,7 @@ class HttpSourceFetcher:
                         raise ValueError("download exceeded maximum size")
                     digest.update(chunk)
                     handle.write(chunk)
-        except (OSError, urllib.error.URLError, ValueError) as exc:
+        except (OSError, urllib.error.URLError, ValueError):
             if output_path.exists():
                 output_path.unlink()
             return SourceAcquisitionResult(
@@ -776,49 +1283,56 @@ class HttpSourceFetcher:
                 status="failed",
                 findings=[_finding(
                     "SOURCE-HTTP-FETCH-FAILED",
-                    ref.original,
+                    "declared remote source",
                     Severity.HIGH,
-                    f"HTTP/HTTPS source acquisition failed: {exc}",
-                    "Do not treat this package as fully inspected. Retry or review the source manually.",
-                    False,
-                    ref.original,
+                    "HTTP/HTTPS source acquisition failed, so deep-static inspection is incomplete.",
+                    "Do not build or install until every declared source can be acquired and inspected safely.",
+                    True,
+                    "declared remote source was not acquired",
                 )],
             )
         return SourceAcquisitionResult(ref, output_path, final_url, size, digest.hexdigest(), "acquired", [])
 
 
 class GitSourceFetcher:
-    def __init__(self, policy: Optional[SourcePolicy] = None, runner: Callable = subprocess.run):
+    def __init__(self, policy: Optional[SourcePolicy] = None, runner: Optional[Callable] = None):
         self.policy = policy or SourcePolicy()
-        self.runner = runner
+        self.runner = runner or run_bounded_trusted_tool
 
     def fetch(self, ref: SourceReference, output_dir: Path) -> SourceAcquisitionResult:
         findings = self.classification_findings(ref)
+        if self.policy.offline:
+            findings.append(_offline_finding(ref))
+            return SourceAcquisitionResult(ref, status="offline", findings=findings)
         if ref.fragment_type == "commit" and not _is_full_commit(ref.fragment_value or ""):
             findings.append(_finding(
                 "SOURCE-GIT-COMMIT-NOT-FULL",
-                ref.original,
+                "declared Git source",
                 Severity.HIGH,
                 "git+https source commit fragment is not a full 40-character commit hash.",
-                "Pin to a full commit hash before relying on automated source acquisition.",
-                False,
-                ref.fragment_value or "",
+                "Pin to a full commit hash and inspect that exact revision before building or installing.",
+                True,
+                "Git source revision could not be acquired safely",
             ))
             return SourceAcquisitionResult(ref, status="skipped", findings=findings)
-        if shutil.which("git") is None:
+        try:
+            git_tool = capture_trusted_system_tool("git")
+        except TrustedToolError:
+            git_tool = None
+        if git_tool is None:
             findings.append(_finding(
                 "SOURCE-GIT-UNAVAILABLE",
-                ref.original,
-                Severity.MEDIUM,
-                "git is not available, so AuraScan could not acquire this source.",
-                "Install git or review the source manually.",
-                False,
-                ref.original,
+                "declared Git source",
+                Severity.HIGH,
+                "A trusted system Git executable is unavailable, so AuraScan could not acquire this source.",
+                "Install the distribution Git package, repair PATH or executable permissions, or inspect the exact revision independently.",
+                True,
+                "declared Git source was not acquired",
             ))
             return SourceAcquisitionResult(ref, status="skipped", findings=findings)
 
         repo_url = self._repo_url(ref)
-        checkout_dir = output_dir / ref.filename
+        checkout_dir = output_dir / _safe_filename(ref.filename)
         env = {
             "HOME": str(output_dir / "empty-home"),
             "GIT_CONFIG_NOSYSTEM": "1",
@@ -829,8 +1343,10 @@ class GitSourceFetcher:
         }
         Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
         try:
+            _validate_public_remote_url(repo_url, {"https"})
+            revalidate_trusted_system_tool(git_tool)
             self.runner(
-                ["git", "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "clone", "--no-recurse-submodules", "--filter=blob:none", repo_url, str(checkout_dir)],
+                [git_tool.path, "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "clone", "--no-recurse-submodules", "--filter=blob:none", repo_url, str(checkout_dir)],
                 capture_output=True,
                 text=True,
                 timeout=self.policy.timeout,
@@ -838,24 +1354,25 @@ class GitSourceFetcher:
                 check=True,
             )
             if ref.fragment_type in {"commit", "tag", "branch"} and ref.fragment_value:
+                revalidate_trusted_system_tool(git_tool)
                 self.runner(
-                    ["git", "-C", str(checkout_dir), "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "checkout", "--detach" if ref.fragment_type != "branch" else ref.fragment_value, ref.fragment_value] if ref.fragment_type != "branch" else ["git", "-C", str(checkout_dir), "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "checkout", ref.fragment_value],
+                    [git_tool.path, "-C", str(checkout_dir), "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "checkout", "--detach" if ref.fragment_type != "branch" else ref.fragment_value, ref.fragment_value] if ref.fragment_type != "branch" else [git_tool.path, "-C", str(checkout_dir), "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "checkout", ref.fragment_value],
                     capture_output=True,
                     text=True,
                     timeout=self.policy.timeout,
                     env=env,
                     check=True,
                 )
-        except (subprocess.SubprocessError, OSError) as exc:
+        except (subprocess.SubprocessError, OSError, ValueError, TrustedToolError):
             shutil.rmtree(checkout_dir, ignore_errors=True)
             findings.append(_finding(
                 "SOURCE-GIT-FETCH-FAILED",
-                ref.original,
+                "declared Git source",
                 Severity.HIGH,
-                f"git+https source acquisition failed: {exc}",
-                "Do not treat this package as fully inspected. Review the git source manually.",
-                False,
-                ref.original,
+                "Git source acquisition failed, so deep-static inspection is incomplete.",
+                "Do not build or install until the exact declared revision can be acquired and inspected safely.",
+                True,
+                "declared Git source was not acquired",
             ))
             return SourceAcquisitionResult(ref, status="failed", findings=findings)
         return SourceAcquisitionResult(ref, checkout_dir, ref.resolved, 0, None, "acquired", findings)
@@ -920,15 +1437,25 @@ class SourceFetcher:
         self.http_fetcher = http_fetcher or HttpSourceFetcher(self.policy)
         self.git_fetcher = git_fetcher or GitSourceFetcher(self.policy)
         self.checksum_verifier = checksum_verifier or ChecksumVerifier()
-        self.signature_verifier = signature_verifier or SignatureVerifier()
+        self.signature_verifier = signature_verifier or SignatureVerifier(self.policy)
         self.last_output_dir: Optional[Path] = None
 
     def acquire_all(self, refs: List[SourceReference], pkg_dir: Path) -> List[SourceAcquisitionResult]:
         output_dir = Path(tempfile.mkdtemp(prefix="aurascan-sources-"))
         self.last_output_dir = output_dir
         results: List[SourceAcquisitionResult] = []
-        for ref in refs:
-            result = self.acquire(ref, pkg_dir, output_dir)
+        for ordinal, ref in enumerate(refs):
+            # Each declaration receives its own private destination.  Distinct
+            # URLs and renamed sources can normalize to the same basename; a
+            # shared path would let a later source overwrite bytes recorded for
+            # an earlier acquisition before content analysis begins.
+            ref_output_dir = output_dir / f"source-{ordinal:04d}-{ref.index:04d}"
+            ref_output_dir.mkdir(mode=0o700)
+            result = self.acquire(ref, pkg_dir, ref_output_dir)
+            if result.status != "acquired" and not any(
+                finding.blocks_installation for finding in result.findings
+            ):
+                result.findings.append(_uninspected_source_finding(ref))
             result.findings.extend(self.checksum_verifier.verify(result))
             results.append(result)
         by_ref_index = {result.reference.index: result for result in results}
@@ -955,22 +1482,14 @@ class SourceFetcher:
 
     def acquire(self, ref: SourceReference, pkg_dir: Path, output_dir: Path) -> SourceAcquisitionResult:
         if ref.kind == SourceKind.local:
-            path = Path(ref.resolved)
-            path = path if path.is_absolute() else pkg_dir / path
-            if not path.exists():
-                return SourceAcquisitionResult(ref, status="failed", findings=[_finding(
-                    "SOURCE-LOCAL-MISSING",
-                    str(path),
-                    Severity.MEDIUM,
-                    "Declared local source does not exist.",
-                    "Verify the source path or fetch it manually before deep static scanning.",
-                    False,
-                    ref.original,
-                )])
-            return SourceAcquisitionResult(ref, path, None, path.stat().st_size, _sha256_file(path), "acquired", [])
+            return self._acquire_local_file(ref, pkg_dir, output_dir)
         if ref.kind == SourceKind.http:
+            if self.policy.offline:
+                return _offline_acquisition_result(ref)
             return self.http_fetcher.fetch(ref, output_dir)
         if ref.kind == SourceKind.git_https:
+            if self.policy.offline:
+                return _offline_acquisition_result(ref)
             return self.git_fetcher.fetch(ref, output_dir)
         if ref.kind == SourceKind.signature:
             acquired = self._acquire_signature(ref, pkg_dir, output_dir)
@@ -988,17 +1507,19 @@ class SourceFetcher:
             return acquired
         return SourceAcquisitionResult(ref, status="unsupported", findings=[_finding(
             "SOURCE-UNSUPPORTED",
-            ref.original,
-            Severity.MEDIUM,
-            f"Unsupported source scheme or VCS type for automated acquisition: {ref.original}",
-            "This can be normal for AUR packages, but AuraScan could only continue partially. Review this source manually.",
-            False,
-            ref.original,
+            "declared source",
+            Severity.HIGH,
+            "A declared source uses a scheme or VCS type AuraScan cannot inspect safely.",
+            "Do not build or install until every declared source has been inspected independently.",
+            True,
+            "declared source was not inspected",
         )])
 
     def _acquire_signature(self, ref: SourceReference, pkg_dir: Path, output_dir: Path) -> SourceAcquisitionResult:
         parsed = urllib.parse.urlparse(ref.resolved)
         if parsed.scheme in {"http", "https"}:
+            if self.policy.offline:
+                return _offline_acquisition_result(ref)
             temp_ref = SourceReference(
                 ref.original,
                 ref.resolved,
@@ -1013,19 +1534,89 @@ class SourceFetcher:
             result = self.http_fetcher.fetch(temp_ref, output_dir)
             result.reference = ref
             return result
-        path = Path(ref.resolved)
-        path = path if path.is_absolute() else pkg_dir / path
-        if path.exists():
-            return SourceAcquisitionResult(ref, path, None, path.stat().st_size, _sha256_file(path), "acquired", [])
-        return SourceAcquisitionResult(ref, status="failed", findings=[_finding(
-            "SIGNATURE-FILE-MISSING",
-            str(path),
-            Severity.MEDIUM,
-            "Declared detached signature file was not acquired.",
-            "Review signature availability manually.",
-            False,
-            ref.original,
-        )])
+        return self._acquire_local_file(ref, pkg_dir, output_dir)
+
+    def _acquire_local_file(
+        self,
+        ref: SourceReference,
+        pkg_dir: Path,
+        output_dir: Path,
+    ) -> SourceAcquisitionResult:
+        try:
+            source_fd = _open_bounded_local_source(
+                pkg_dir,
+                ref.resolved,
+                max_bytes=self.policy.max_download_size,
+            )
+        except _LocalSourceError as exc:
+            rule_id = "SOURCE-LOCAL-MISSING" if exc.code == "missing" else "SOURCE-LOCAL-UNSAFE"
+            explanation = (
+                "A declared local source file is missing, so deep-static inspection is incomplete."
+                if exc.code == "missing"
+                else "A declared local source could not be opened as a bounded, unchanged regular file inside the package directory."
+            )
+            return SourceAcquisitionResult(ref, status="failed", findings=[_finding(
+                rule_id,
+                "declared local source",
+                Severity.HIGH,
+                explanation,
+                "Do not build or install until the complete local source set can be inspected safely.",
+                True,
+                "declared local source was not inspected",
+            )])
+
+        destination = output_dir / _safe_filename(ref.filename)
+        digest = hashlib.sha256()
+        copied = 0
+        before = os.fstat(source_fd)
+        destination_fd = -1
+        try:
+            destination_fd = os.open(
+                str(destination),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+            )
+            while True:
+                chunk = os.read(source_fd, min(65536, self.policy.max_download_size + 1 - copied))
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if copied > self.policy.max_download_size:
+                    raise _LocalSourceError("oversized")
+                digest.update(chunk)
+                _write_all(destination_fd, chunk)
+            after = os.fstat(source_fd)
+            if _file_snapshot_identity(before) != _file_snapshot_identity(after) or copied != after.st_size:
+                raise _LocalSourceError("changed")
+        except (OSError, _LocalSourceError) as exc:
+            if destination_fd >= 0:
+                os.close(destination_fd)
+                destination_fd = -1
+            destination.unlink(missing_ok=True)
+            code = exc.code if isinstance(exc, _LocalSourceError) else "read_error"
+            return SourceAcquisitionResult(ref, status="failed", findings=[_finding(
+                "SOURCE-LOCAL-UNSAFE",
+                "declared local source",
+                Severity.HIGH,
+                "A declared local source changed, exceeded the size bound, or could not be copied safely for inspection.",
+                "Do not build or install until the complete local source set can be inspected safely.",
+                True,
+                f"local source snapshot failed: {code}",
+            )])
+        finally:
+            if destination_fd >= 0:
+                os.close(destination_fd)
+            os.close(source_fd)
+
+        return SourceAcquisitionResult(
+            ref,
+            destination,
+            None,
+            copied,
+            digest.hexdigest(),
+            "acquired",
+            [],
+        )
 
     def _matched_signatures(self, refs: List[SourceReference]) -> List[Tuple[SourceReference, SourceReference]]:
         signatures = [ref for ref in refs if ref.kind == SourceKind.signature]
@@ -1053,19 +1644,198 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         self.redirect_count = 0
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        self.redirect_count += 1
-        parsed = urllib.parse.urlparse(newurl)
-        if self.redirect_count > self.policy.max_redirects:
+        redirect_count = int(getattr(req, "_aurascan_redirect_count", 0)) + 1
+        if redirect_count > self.policy.max_redirects:
             raise urllib.error.HTTPError(req.full_url, code, "too many redirects", headers, fp)
-        if parsed.scheme not in self.policy.allowed_redirect_schemes:
-            raise urllib.error.HTTPError(req.full_url, code, f"unsupported redirect scheme: {parsed.scheme}", headers, fp)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        try:
+            _validate_public_remote_url(newurl, self.policy.allowed_redirect_schemes)
+        except ValueError as exc:
+            raise urllib.error.HTTPError(req.full_url, code, str(exc), headers, fp)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        setattr(redirected, "_aurascan_redirect_count", redirect_count)
+        return redirected
+
+
+class _LocalSourceError(Exception):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def _open_bounded_local_source(pkg_dir: Path, value: str, *, max_bytes: int) -> int:
+    """Open one relative regular file beneath pkg_dir without following links."""
+
+    candidate = Path(value)
+    parts = candidate.parts
+    if (
+        not value
+        or candidate.is_absolute()
+        or not parts
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise _LocalSourceError("unsafe_path")
+
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    directory_fd = -1
+    try:
+        directory_fd = os.open(str(pkg_dir), directory_flags)
+        if not stat.S_ISDIR(os.fstat(directory_fd).st_mode):
+            raise _LocalSourceError("unsafe_root")
+        for part in parts[:-1]:
+            try:
+                child_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            except OSError as exc:
+                raise _LocalSourceError(
+                    "missing" if exc.errno == errno.ENOENT else "unsafe_component"
+                ) from exc
+            os.close(directory_fd)
+            directory_fd = child_fd
+            if not stat.S_ISDIR(os.fstat(directory_fd).st_mode):
+                raise _LocalSourceError("unsafe_component")
+        try:
+            source_fd = os.open(parts[-1], file_flags, dir_fd=directory_fd)
+        except OSError as exc:
+            raise _LocalSourceError(
+                "missing" if exc.errno == errno.ENOENT else "unsafe_file"
+            ) from exc
+        metadata = os.fstat(source_fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            os.close(source_fd)
+            raise _LocalSourceError("not_regular")
+        if metadata.st_size > max_bytes:
+            os.close(source_fd)
+            raise _LocalSourceError("oversized")
+        return source_fd
+    except OSError as exc:
+        raise _LocalSourceError(
+            "missing" if exc.errno == errno.ENOENT else "unsafe_root"
+        ) from exc
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+
+
+def _file_snapshot_identity(metadata: os.stat_result) -> Tuple[int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _write_all(fd: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        written = os.write(fd, payload[offset:])
+        if written <= 0:
+            raise OSError("short write while snapshotting local source")
+        offset += written
+
+
+def _offline_finding(ref: SourceReference) -> Finding:
+    return _finding(
+        "SOURCE-OFFLINE-UNINSPECTED",
+        "declared remote source",
+        Severity.HIGH,
+        "Offline mode refused network acquisition of a declared remote source, so deep-static inspection is incomplete.",
+        "Inspect a trusted local copy or rerun explicit deep-static acquisition with network access before building or installing.",
+        True,
+        "offline mode made no source network request",
+    )
+
+
+def _offline_acquisition_result(ref: SourceReference) -> SourceAcquisitionResult:
+    return SourceAcquisitionResult(
+        ref,
+        status="offline",
+        findings=[_offline_finding(ref)],
+    )
+
+
+def _uninspected_source_finding(ref: SourceReference) -> Finding:
+    return _finding(
+        "SOURCE-UNINSPECTED",
+        "declared source",
+        Severity.HIGH,
+        "A declared source was not acquired as inspectable content, so deep-static inspection is incomplete.",
+        "Do not build or install until every declared source can be inspected safely.",
+        True,
+        "declared source was not inspected",
+    )
 
 
 def _safe_filename(name: str) -> str:
     name = Path(name).name
     name = re.sub(r"[^A-Za-z0-9._+-]", "_", name)
-    return name or "source"
+    return "source" if name in {"", ".", ".."} else name
+
+
+def _validate_public_remote_url(value: str, allowed_schemes: Iterable[str]) -> None:
+    """Reject source URLs that can directly address local/private services.
+
+    This is a lexical boundary around attacker-supplied package metadata.  It
+    rejects embedded credentials, localhost names, and non-global IP literals
+    for both the first request and every observed redirect.  It deliberately
+    does not claim to solve DNS rebinding; the explicit deep-static network
+    workflow remains a higher-risk opt-in operation.
+    """
+
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme not in set(allowed_schemes):
+        raise ValueError("unsupported remote source scheme")
+    if not parsed.hostname:
+        raise ValueError("remote source URL has no host")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("remote source URL contains embedded credentials")
+    hostname = parsed.hostname.rstrip(".").lower()
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        raise ValueError("remote source URL targets localhost")
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return
+    if not address.is_global:
+        raise ValueError("remote source URL targets a non-public address")
+
+
+def _redact_source_reference(value: str) -> str:
+    """Return bounded source metadata without URL credentials or query data."""
+
+    safe_value = sanitize_terminal_text(str(value), max_chars=1024, single_line=True)
+    rename = ""
+    candidate = safe_value
+    if "::" in candidate:
+        rename, candidate = candidate.split("::", 1)
+        rename = _safe_filename(rename) + "::"
+    git_prefix = "git+" if candidate.startswith("git+") else ""
+    parsed_value = candidate[4:] if git_prefix else candidate
+    parsed = urllib.parse.urlparse(parsed_value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return safe_value
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    try:
+        port = f":{parsed.port}" if parsed.port is not None else ""
+    except ValueError:
+        port = ""
+    redacted = urllib.parse.urlunparse(
+        parsed._replace(netloc=host + port, query="", fragment="")
+    )
+    return rename + git_prefix + redacted
 
 
 def _sha256_file(path: Path) -> str:
@@ -1118,10 +1888,10 @@ def _finding(
         severity=severity,
         confidence=Confidence.CONFIRMED if evidence_quality == EvidenceQuality.confirmed_static_pattern else Confidence.HIGH,
         evidence_quality=evidence_quality,
-        file_path=file_path,
+        file_path=_redact_source_reference(file_path),
         explanation=explanation,
         recommendation=recommendation,
         blocks_installation=blocks,
         requires_manual_review=not blocks,
-        evidence_snippet=evidence,
+        evidence_snippet=_redact_source_reference(evidence),
     )

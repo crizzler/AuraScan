@@ -6,7 +6,6 @@ import re
 import shutil
 import subprocess
 import sys
-import urllib.error
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional
@@ -24,6 +23,7 @@ from aurascan.core.ai_provider import (
     normalize_local_base_url,
     provider_choices,
     resolve_ai_config,
+    safe_provider_error_detail,
 )
 from aurascan.core.agent import (
     AGENT_ACCESS_ENV,
@@ -38,6 +38,7 @@ from aurascan.core.agent import (
     AGENT_SESSION_TIMEOUT_ENV,
     agent_doctor_status,
     configure_agent_root_policy,
+    effective_agent_approval,
     read_agent_root_policy,
     resolve_agent_config,
 )
@@ -218,13 +219,17 @@ def build_init_parser() -> argparse.ArgumentParser:
     instruction_ai.add_argument("--enable-instruction-ai", action="store_true", help="enable separately scheduled raise-only AI analysis for agent files")
     instruction_ai.add_argument("--disable-instruction-ai", action="store_true", help="disable Agent Instruction Guard AI analysis")
     parser.add_argument("--instruction-scan-mode", choices=sorted(INSTRUCTION_SCAN_MODES), help="agent control files only, or optional content-only analysis of all Markdown")
-    parser.add_argument("--agent-access", choices=AGENT_ACCESS_VALUES, help="maximum/default foreground AI agent access")
-    parser.add_argument("--agent-approval", choices=AGENT_APPROVAL_VALUES, help="foreground agent command approval mode")
+    parser.add_argument("--agent-access", choices=AGENT_ACCESS_VALUES, help="foreground Policy-Gated Repair Agent access profile")
+    parser.add_argument(
+        "--agent-approval",
+        choices=AGENT_APPROVAL_VALUES,
+        help="policy-gated command approval mode (legacy broader values are enforced as each-command)",
+    )
     parser.add_argument("--agent-output-sharing", choices=AGENT_OUTPUT_VALUES, help="foreground agent terminal-output sharing policy")
     parser.add_argument("--agent-session-timeout", type=int, metavar="MINUTES", help="foreground agent session duration")
     agent_root = parser.add_mutually_exclusive_group()
-    agent_root.add_argument("--allow-agent-root", action="store_true", help="allow separately consented unrestricted root agent sessions")
-    agent_root.add_argument("--deny-agent-root", action="store_true", help="disable unrestricted root agent sessions system-wide")
+    agent_root.add_argument("--allow-agent-root", action="store_true", help="allow separately consented policy-gated root repair sessions")
+    agent_root.add_argument("--deny-agent-root", action="store_true", help="disable policy-gated root repair sessions system-wide")
     parser.add_argument("--agent-root-max-approval", choices=AGENT_APPROVAL_VALUES, help="system-wide root agent approval ceiling")
     parser.add_argument("--agent-root-max-minutes", type=int, metavar="MINUTES", help="system-wide root agent duration ceiling")
     updater = parser.add_mutually_exclusive_group()
@@ -683,6 +688,14 @@ def run_init(
             approval = args.agent_approval
         elif should_prompt_agent and access != "guarded":
             approval = _prompt_agent_approval(input_func, approval, stdout)
+        requested_approval = approval
+        approval = effective_agent_approval(access, approval)
+        if requested_approval != approval:
+            print(
+                f"Repair Agent approval '{requested_approval}' is retained as a legacy input only; "
+                "command-enabled profiles enforce fresh each-command confirmation.",
+                file=stdout,
+            )
         if args.agent_output_sharing is not None:
             output_sharing = args.agent_output_sharing
         elif should_prompt_agent and access != "guarded":
@@ -716,12 +729,14 @@ def run_init(
             agent_root_action = False
         elif should_prompt_agent and access == "root-shell":
             print(
-                "Unrestricted root mode is equivalent to user-authorized remote code execution. "
-                "It can change disks, firmware, networking, authentication, and AuraScan itself.",
+                "Policy-gated root repair permits only allowlisted absolute read-only diagnostics "
+                "and constrained /usr/bin/pacman workflows. Remote acquisition, arbitrary "
+                "executables, AUR/build tools, interpreters, and dynamic code are refused. "
+                "Approved package changes can still alter installed software and system state.",
                 file=stdout,
             )
             root_allowed = _prompt_yes_no(
-                "Allow separately consented unrestricted root agent sessions?",
+                "Allow separately consented policy-gated root repair sessions?",
                 input_func,
                 default=False,
             )
@@ -732,6 +747,10 @@ def run_init(
             agent_root_action = root_allowed
         elif agent_root_action is True:
             agent_root_max_approval = approval
+        agent_root_max_approval = effective_agent_approval(
+            "root-shell",
+            agent_root_max_approval,
+        )
         if args.agent_root_max_minutes is not None:
             agent_root_max_minutes = args.agent_root_max_minutes
             agent_root_action = root_allowed
@@ -752,7 +771,7 @@ def run_init(
         updates[AGENT_OUTPUT_SHARING_ENV] = output_sharing
         updates[AGENT_SESSION_TIMEOUT_ENV] = str(session_minutes)
         print(
-            f"Configured Repair Agent defaults: {access}, {approval}, {output_sharing}.",
+            f"Configured Policy-Gated Repair Agent defaults: {access}, {approval}, {output_sharing}.",
             file=stdout,
         )
 
@@ -1548,49 +1567,49 @@ def build_doctor_checks(
         checks.append(DoctorCheck(
             "repair_agent",
             "error",
-            f"Repair Agent configuration is invalid: {agent_config['error']}",
+            f"Policy-Gated Repair Agent configuration is invalid: {agent_config['error']}",
             agent,
         ))
     elif agent_config.get("access") == "guarded":
         checks.append(DoctorCheck(
             "repair_agent",
             "ok",
-            "Repair Agent is limited to guarded AuraScan-owned tools",
+            "Policy-Gated Repair Agent is limited to guarded AuraScan-owned tools",
             agent,
         ))
     elif not ai_config.ready:
         checks.append(DoctorCheck(
             "repair_agent",
             "warn",
-            "Repair Agent shell access is configured but foreground AI is unavailable",
+            "Policy-Gated Repair Agent command access is configured but foreground AI is unavailable",
             agent,
         ))
     else:
         checks.append(DoctorCheck(
             "repair_agent",
             "ok",
-            f"Repair Agent foreground access is configured for {agent_config.get('access')}",
+            f"Policy-Gated Repair Agent access is configured for {agent_config.get('access')}",
             agent,
         ))
     if root_policy.get("error"):
         checks.append(DoctorCheck(
             "repair_agent_root_policy",
             "error",
-            f"Repair Agent root policy is unsafe or invalid: {root_policy['error']}",
+            f"Policy-Gated Repair Agent root policy is unsafe or invalid: {root_policy['error']}",
             root_policy,
         ))
     elif root_policy.get("allowed"):
         checks.append(DoctorCheck(
             "repair_agent_root_policy",
             "warn",
-            "Unrestricted root agent sessions are allowed but still require a typed per-session grant",
+            "Policy-gated root repair sessions are allowed but still require a typed per-session grant",
             root_policy,
         ))
     else:
         checks.append(DoctorCheck(
             "repair_agent_root_policy",
             "ok",
-            "Unrestricted root agent sessions are disabled",
+            "Policy-gated root repair sessions are disabled",
             root_policy,
         ))
     if agent.get("audit_storage_exists") and not agent.get("audit_storage_safe"):
@@ -2307,10 +2326,18 @@ def _prompt_config_drift_ai_diffs(input_func: Callable[[str], str], default: str
 def _prompt_agent_access(input_func: Callable[[str], str], default: str, stdout) -> str:
     choices = list(AGENT_ACCESS_VALUES)
     default = default if default in choices else "guarded"
-    print("Repair Agent access defaults:", file=stdout)
+    descriptions = {
+        "guarded": "AuraScan-owned probes and verified repairs; no model command field",
+        "user-shell": "compatibility profile for allowlisted local read-only diagnostics",
+        "root-shell": "policy-gated diagnostics plus constrained /usr/bin/pacman repairs",
+    }
+    print(
+        "Policy-Gated Repair Agent access defaults (user-shell/root-shell are compatibility profile names):",
+        file=stdout,
+    )
     for index, value in enumerate(choices, start=1):
         marker = " default" if value == default else ""
-        print(f"  {index}. {value}{marker}", file=stdout)
+        print(f"  {index}. {value}{marker}: {descriptions[value]}", file=stdout)
     while True:
         answer = input_func(f"Repair Agent access [{default}]: ").strip().lower()
         if not answer:
@@ -2325,7 +2352,10 @@ def _prompt_agent_access(input_func: Callable[[str], str], default: str, stdout)
 def _prompt_agent_approval(input_func: Callable[[str], str], default: str, stdout) -> str:
     choices = list(AGENT_APPROVAL_VALUES)
     default = default if default in choices else "each-command"
-    print("Repair Agent command approval defaults:", file=stdout)
+    print(
+        "Policy-Gated Repair Agent command approval defaults (command-enabled profiles enforce each-command):",
+        file=stdout,
+    )
     for index, value in enumerate(choices, start=1):
         marker = " default" if value == default else ""
         print(f"  {index}. {value}{marker}", file=stdout)
@@ -2413,10 +2443,12 @@ def _check_ai_connectivity(env: Mapping[str, str], *, urlopen: Optional[Callable
         return DoctorCheck("ai_connectivity", "error", f"AI connectivity check skipped: {config.key_env} is missing")
     try:
         text = call_ai_provider(config, connectivity_prompt(), timeout=15, urlopen=urlopen)
-    except urllib.error.URLError as exc:
-        return DoctorCheck("ai_connectivity", "error", f"AI connectivity failed: {exc}")
     except Exception as exc:
-        return DoctorCheck("ai_connectivity", "error", f"AI connectivity failed: {exc}")
+        return DoctorCheck(
+            "ai_connectivity",
+            "error",
+            "AI connectivity failed: " + safe_provider_error_detail(exc),
+        )
     if text.startswith("BENIGN:"):
         return DoctorCheck("ai_connectivity", "ok", "AI provider connectivity check passed")
     return DoctorCheck("ai_connectivity", "warn", "AI provider responded, but not with AuraScan's expected test format")

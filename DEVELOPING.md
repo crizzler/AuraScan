@@ -121,11 +121,24 @@ configuration must not revive the old implicit-enable behavior.
 
 Local-provider URL handling is part of the security boundary. Accept only
 loopback HTTP(S) endpoints without userinfo, query, or fragment components;
-bypass environment proxies; refuse HTTP redirects; use bounded response reads
+bypass environment proxies; pin plain-HTTP `localhost` to `127.0.0.1`; refuse
+HTTP redirects; use bounded response reads
 and timeouts; and never fall back to a cloud endpoint. Do not start a server,
 download a model, enable tools or MCP, or send a live request from tests. Use
 injected openers and assert that credentials do not appear in diagnostics,
 exceptions, or serialized details.
+
+All package-AI input is attacker-controlled data. Send only a bounded,
+line-numbered JSON evidence object and give that model no tools, URL authority,
+or command channel. Accept an exact schema containing only the raise-only
+verdict, allowlisted behavior families, and references to supplied lines.
+Reject extra fields, free prose, snippets, URLs, commands, unknown labels,
+duplicate keys, and out-of-range lines without retaining raw output. A
+no-additional-concern response must never be presented as clean, safe, trusted,
+or approved and cannot suppress deterministic findings. Cloud and local
+provider transports both refuse redirects; provider errors must be normalized
+before they reach reports, caches, audit logs, or terminals, and credentials
+must never appear in a request URL.
 
 When AuraScan runs as root from a sudo-launched pacman hook, config loading may
 also read the invoking user's `~/.config/aurascan/.env` from `SUDO_USER`.
@@ -247,7 +260,10 @@ Desktop notifications and tray/public alert state are secret-free: retain only
 generic severity/count/review wording, never paths, snippets, usernames,
 credentials, or AI output. Deduplicate by candidate identity, content hash, and
 rule set. Acknowledgment suppresses duplicate notification only and never
-approves content.
+approves content. Resolve notifications through the shared trusted-tool
+boundary: only captured and revalidated `/usr/bin/notify-send` may run. Its
+absence is a notification-delivery limitation, not a reason to discard private
+CLI/tray review state.
 
 Confirmed disable is intentionally narrow. Only an unchanged, user-owned,
 standalone regular instruction Markdown file may be atomically renamed beside
@@ -405,6 +421,111 @@ inside a temporary copy and uses a fake makepkg runner. Never put working
 credentials, attacker infrastructure, or executable test setup around that
 fixture.
 
+### Remote second-stage execution
+
+`SUPPLYCHAIN-REMOTE-STAGE-EXEC-001` is a deterministic correlation for
+PKGBUILD and declared install-hook text. Require a command-position network
+download or Git clone, a concrete local artifact identity, and later execution
+of that artifact or a bounded decoded/copied derivative. Keep source arrays,
+comments, quoted documentation, downloads that are only packaged, path
+mismatches, and every incomplete correlation negative. Emit only fixed behavior
+labels; URLs, paths, tokens, and model prose do not belong in evidence.
+
+The shared command parser is bounded. A parser limit, malformed command stream,
+or other incomplete correlation pass must produce blocking
+`STATIC-REMOTE-STAGE-INSPECTION-INCOMPLETE-001`; incomplete inspection is not a
+malware claim. `SUPPLYCHAIN-OPAQUE-CARRIER-EXEC-001` reuses the same parser and
+requires either a local decode-to-artifact followed by execution of that exact
+artifact, or active invocation of a media-, document-, data-, or font-suffixed
+path as code. Never flag an asset name, source/archive declaration, local file,
+decode step, comment, message, or quoted example by itself.
+
+The acquired-source variant, `DEEPSTATIC-REMOTE-STAGE-EXEC-001`, applies the
+same narrow data-flow correlation to bounded interesting source text. It does
+not render images or treat a picture/media filename as malicious by itself.
+Tests may represent a carrier with inert bytes and `example.invalid`, but must
+never decode or execute fixture content. The acquired-source local-carrier
+variant is `DEEPSTATIC-OPAQUE-CARRIER-EXEC-001`; an incomplete parser or source
+tree must keep `DEEPSTATIC-INSPECTION-INCOMPLETE-001` blocking.
+
+Built package `.INSTALL` members are mandatory deterministic evidence. Capture
+them through the bounded no-follow archive reader, reject invalid/binary or
+unstable content, and fail closed with
+`PACKAGE-INSTALL-HOOK-UNINSPECTED-001`. Resolve `.PKGINFO` identity through the
+same reader: execute only an already-opened trusted `/usr/bin/bsdtar`, bind its
+identity before and after use, bound stdout, and reject links, replacement,
+duplicate identity fields, and invalid text without printing or persisting
+archive bytes or tool diagnostics.
+Do not rely on optional AI or ClamAV to cover privileged install-hook control
+flow. Keep built-package cache reads and writes disabled until identity,
+analyzers, and the cache key all consume one immutable no-follow archive
+snapshot.
+
+Deep-static source discovery must parse the exact captured PKGBUILD bytes, not
+an independently mutable sibling `.SRCINFO`. Local sources are copied through
+bounded no-follow component walks into per-reference private paths. Offline
+mode performs no HTTP, Git, or key fetch, and any declared source that cannot be
+inspected blocks the deep-static result. Do not read or write a deep-static
+cache entry until the cache identity includes immutable acquired-source bytes
+or revisions and every acquisition status. Reject source/key URLs with
+userinfo, localhost, or non-public IP literals before the initial request and
+after redirects; strip userinfo, query strings, and fragments from persisted
+URL metadata. Document that this lexical boundary does not eliminate DNS
+rebinding rather than claiming a complete network sandbox.
+
+Treat source-array parsing as a refusal boundary, not a Bash evaluator. Support
+only bounded literal assignments/appends and simple constant interpolation.
+Malformed arrays, dynamic expansion, subscripts, indirect assignment,
+`eval`/sourcing, reads into source variables, and `declare`/`typeset` namerefs
+that could alias a source array must return blocking
+`SOURCE-PARSER-AMBIGUOUS`. Tests should include indentation, trailing comments,
+quoted closing parentheses, appends, malformed input, and unrelated inert
+source-looking strings.
+
+Explicit Git and signature workflows may invoke native tools on hostile data,
+so capture and revalidate only `/usr/bin/git` and `/usr/bin/gpg`; never validate
+one path and later execute a bare name. Git runs with isolated HOME/config,
+credentials and hooks disabled, bounded time and combined child output, and no
+recursive submodules. GPG uses the same bounded child-output runner and retains
+only allowlisted machine status names plus hexadecimal key identifiers.
+Public-key cache state must use a private user-owned final directory, bounded
+stable no-follow key reads, and atomic private no-replace publication. Copy the
+exact captured key bytes into the private temporary GPG home before import so a
+configured or cached key path cannot be swapped between review and use. These
+controls reduce replacement risk but do not sandbox Git/GPG parsers or remove
+the need to isolate explicit acquisition.
+
+Stream archive and source-tree enumeration under explicit entry, candidate,
+file-size, and actual extracted-byte limits. Bind archive inputs and candidate
+files to no-follow regular-file snapshots, fail closed on replacement or
+incomplete reads, and remove partial extraction output transactionally. Do not
+silently skip archive links or treat attacker-declared member sizes as the
+extraction budget. Until recursive nested-archive inspection carries the same
+budgets and depth accounting, detect nested archives in the acquired tree and
+block them as incomplete inspection.
+
+Config-drift, incident, and recovery AI prose is data too. Parse bounded JSON
+with duplicate-key rejection, require exact schemas and known local IDs, and
+accept only short single-line advisory prose after compatibility normalization.
+Reject recognized scheme, bare, IP, email, and obfuscated destinations; direct,
+actor/modal, recommendation, and sentence-leading imperative instructions;
+named or generic package-manager/install-helper advice; actionable nominalized
+operation/invocation forms; credential-transfer instructions; questions;
+commands; terminal controls; product impersonation; credential-like
+assignments; and unsupported safe/compromised claims. Keep benign declarative
+uncertainty and evidence statements such as “may indicate” or “an invocation
+was observed” usable when they do not direct an action. Persist a fixed
+secret-free rejection reason, never the rejected raw provider response or
+exception.
+
+Validated model prose is still untrusted interpretation, not allowlisted
+program semantics. The lexical guard cannot prove every natural-language
+construction inert, so prose must never acquire tools, URL fetching, command
+execution, policy authority, or the ability to invent an ID. Prefer fixed
+templates and allowlisted semantic labels over adding another free-form model
+field. Add central `text_safety` positives and adversarial negatives whenever
+the shared prose contract changes.
+
 ## Smart update context contract
 
 The smart update fast path is conservative. The default scan context is
@@ -475,16 +596,24 @@ it separate from `AuraScanEngine` and the pacman archive hook: the hook remains
 a last-minute package archive scanner, while upgrade preflight reasons about
 transaction and local system breakage risk.
 
-The default handoff is `sudo pacman -Syu`. Supported helper execution is limited
-to `paru -Syu`, `yay -Syu`, and Shelly's scoped upgrade command. Shelly 3 uses
-`shelly upgrade all --no-flatpak --no-appimage` and
-`shelly list-updates aur --json`; AuraScan keeps the corresponding
-`upgrade-all` and `check-updates --aur --json` forms for Shelly 2. Generic
-helper commands are out of scope until they can be validated safely. Repo
-package previews should come from pacman's `--print --print-format` path. AUR
-update context may come from helper `-Qua` or the version-matched Shelly query,
-but v1 must not run makepkg, build AUR packages, inspect AUR sources, or execute
-package code during preflight.
+The default handoff is `/usr/bin/sudo /usr/bin/pacman -Syu`. Helper use is
+limited to update queries: `paru -Qua`, `yay -Qua`, and the version-matched
+Shelly AUR JSON query. Repo package previews should come from pacman's `--print
+--print-format` path. If a helper query finds no AUR build, the final command
+must be repository-only pacman rather than a fresh helper transaction that
+could expand after preflight. If it finds any planned AUR build, emit blocking
+`UPG-AUR-BUILD-UNSCANNED`; do not invoke the helper unless a future design can
+prove a real per-package `aurascan-makepkg` integration. Do not simulate that
+proof with a flag or environment marker. Preflight must not run makepkg, build
+AUR packages, inspect AUR sources, or execute package code.
+
+Capture `/usr/bin/sudo`, `/usr/bin/pacman`, and the absolute path returned for a
+selected helper as executable identities. Reject final files or path components
+that are symlinks, not root-owned, or group/world writable; reject non-regular
+or non-executable final files. Revalidate device, inode, owner, group, and mode
+immediately before every preview/query and final handoff. Tests must cover a
+hostile `PATH`, symlinks, and replacement after preview. Never fall back to a
+bare command name after a trust check fails.
 
 Upgrade preflight is enabled by default. The wizard may write
 `AURASCAN_UPGRADE_PREFLIGHT_ENABLED`, `AURASCAN_UPGRADE_AUR_HELPER`,
@@ -503,19 +632,25 @@ command; `--yes` must not silently apply those fixes. After a successful
 package-manager handoff, autopilot should run post-upgrade aftercare and report
 module/reboot status without rebooting automatically.
 
-Preflight findings are advisory. HIGH or CRITICAL risk requires AuraScan's
-extra confirmation prompt unless `--yes` is used, but this is not a hard-blocker
-system. If the user continues, pacman or the helper still owns the actual
-transaction and its normal confirmation/failure behavior.
+Most preflight findings are advisory. HIGH or CRITICAL breakage risk requires
+AuraScan's extra confirmation prompt unless `--yes` is used. Deterministic
+security invariants may be hard blockers: in particular,
+`UPG-AUR-BUILD-UNSCANNED` cannot be cleared by confirmation, `--yes`, or AI.
+For an allowed repository-only transaction, pacman still owns its normal
+confirmation and failure behavior.
 
-AI upgrade review is raise-only. It may add `UPG-AI-RISK` or raise an existing
-preflight finding up to HIGH, but it must not lower deterministic findings,
-mark an upgrade safe, suppress findings, or hard-block by itself. The prompt
-must use a redacted structured summary only: package names, versions,
-deterministic finding summaries, and selected local system facts. Do not send
+AI upgrade review is raise-only. It may raise an existing deterministic rule ID
+up to HIGH, but it cannot create a standalone finding or action, lower or
+suppress a deterministic finding, change blocking policy, or mark an upgrade
+safe. Require an exact bounded JSON schema, at most twelve unique raises,
+allowlisted severities, and short safe prose; reject duplicate keys, extra
+fields, unknown IDs, URLs, commands, controls, credential-like assignments,
+and unsupported safety/compromise claims without retaining raw output. The
+prompt uses only a redacted structured summary of package names, versions,
+deterministic findings, and selected local system facts. Do not send
 environment variables, API keys, arbitrary command output, or file contents.
-AI may explain or raise kernel/module risk, but deterministic autopilot owns
-package-fix decisions and local verification status.
+Deterministic autopilot owns package-fix decisions and local verification
+status.
 
 ## config drift assistant
 
@@ -548,6 +683,39 @@ secrets, tokens, keys, passwords, private-key blocks, credential URLs, and
 similar auth material before request construction. Invalid AI JSON is
 non-blocking and must not change planned actions.
 
+## Policy-Gated Repair Agent command boundary
+
+The foreground Policy-Gated Repair Agent is the one AI workflow whose explicit
+command-enabled access profiles can accept a command field. Keep `guarded`
+command-free. The `user-shell` and `root-shell` names remain configuration/API
+compatibility values; neither grants a general shell. Validate one exact bounded
+response schema and reject unknown fields, unsafe advisory prose, fabricated
+IDs, and commands whose hash-derived identifier does not match their content.
+Every exact model-authored command is then displayed and confirmed
+independently; legacy `whole-plan` and `session` settings normalize to effective
+`each-command` authorization.
+
+Commands are a fail-closed local allowlist. Permit only the small documented set
+of shell output/test builtins, absolute `/usr/bin` or `/usr/sbin` read-only
+diagnostics with command-specific mutation/escape checks, and constrained exact
+`/usr/bin/pacman` query, sync, or removal workflows. Reject every non-allowlisted
+program plus remote references, network/remote-shell clients, Git, AUR helpers,
+source/build front ends, interpreters, decoding/evaluation, shell expansion,
+redirection, and unsafe package-manager options. Pacman must reject `-U`,
+alternate root/config/keyring/hook paths, unsafe operation combinations, path
+targets, and direct modification of AuraScan. Capture and revalidate the
+package-managed `/usr/bin/sudo` and `/usr/bin/aurascan` identities before every
+privileged broker call.
+
+Add positives for hostile prompt-injected commands, PATH-shadowed/bare/custom
+executables, mutating diagnostic flags, and pacman bypass attempts. Add
+negatives only for inert prose, allowed builtins, exact absolute diagnostics,
+and constrained pacman operations. Root package repair remains consequential,
+and diagnostic output may contain private data; the allowlist is not proof that
+every permitted argument or package transaction is harmless. Do not describe
+this feature as Full Control, unrestricted shell, arbitrary commands, or remote
+code execution.
+
 ## makepkg wrapper
 
 `aurascan-makepkg` is a makepkg-side front door for AUR workflows:
@@ -563,6 +731,13 @@ The wrapper looks for `PKGBUILD` in the current directory, runs AuraScan first,
 and invokes the real `makepkg` with the original makepkg arguments only when
 AuraScan allows the build. AuraScan-only flags use the `--aurascan-*` prefix and
 are not passed to makepkg.
+
+After scanning, capture only `/usr/bin/makepkg` through the shared trusted-tool
+boundary and revalidate its exact device/inode, ownership, group, and mode
+immediately before invocation. The final file and path components must be
+root-owned, non-writable, regular/executable where applicable, and non-link.
+Hostile PATH resolution, a different installation, or replacement after the
+scan fails closed; never fall back to a bare `makepkg` name.
 
 The wrapper protects the pre-build phase: it scans the PKGBUILD before
 `prepare()`, `build()`, `check()`, `package()`, or package/source-tree helper
@@ -701,9 +876,18 @@ executable can break pacman transactions.
 
 Current hook failure behavior is intentionally simple: missing archive targets
 are warnings and do not block by themselves; blocking findings return non-zero
-and should stop the pacman transaction; missing `clamscan` skips AV with a
-warning; a missing `/usr/bin/aurascan` executable is a hook installation problem
-that users recover from by reinstalling AuraScan or removing the stale hook.
+and should stop the pacman transaction. ClamAV runs only through captured and
+revalidated `/usr/bin/clamscan`, with symlink following, scan bytes, file count,
+recursion, and runtime bounded; database version checks likewise require
+trusted `/usr/bin/freshclam`. Use a fixed minimal environment, terminate option
+parsing before the caller-controlled target path, suppress clean-file output,
+and bound combined child output. Do not persist raw ClamAV stdout/stderr, and
+keep signature/path evidence terminal-safe and secret-free. A started scan that
+times out, exceeds a bound, or exits with an error is blocking incomplete
+inspection. A missing or unsafe `clamscan` skips AV with a warning. A missing
+`/usr/bin/aurascan` executable is
+a hook installation problem that users recover from by reinstalling AuraScan or
+removing the stale hook.
 
 Future AUR-helper integration should prefer configuring the helper's makepkg
 command, when supported, to call `aurascan-makepkg`. Future pacman hook context

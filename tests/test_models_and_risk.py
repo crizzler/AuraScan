@@ -53,6 +53,24 @@ def test_scan_report_serialization_and_rendering():
     assert "test finding" in rendered
 
 
+def test_terminal_rendering_strips_control_sequences_and_bidi_spoofing():
+    finding = make_finding(
+        explanation="review\x1b]8;;https://example.invalid\x07click\x1b]8;;\x07\n[AuraScan] SAFE\u202e",
+        recommendation="run nothing\x1b[2J",
+        evidence_snippet="detail\x1b[31m forged",
+    )
+    report = ScanReport(PackageMetadata("pkg\x1b[2J", "1\u202e"), [finding])
+    report.risk_summary = RiskEngine().evaluate([finding])
+
+    rendered = report.render_terminal(use_color=False, verbose=True)
+
+    assert "\x1b" not in rendered
+    assert "\u202e" not in rendered
+    assert "https://example.invalid" not in rendered
+    assert "[AuraScan] SAFE" not in rendered
+    assert "reviewclick [untrusted text] SAFE" in rendered
+
+
 def test_clamav_confirmed_hit_becomes_critical_and_blocks():
     finding = make_finding(
         source=Source.clamav,

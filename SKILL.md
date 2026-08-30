@@ -64,6 +64,17 @@ Use this workflow for changes in the AuraScan repository.
    mutation/staging, and outbound push. Treat enumeration, loops, hidden hook
    names, or SSH credential access as supporting evidence, and do not apply a
    blanket rule to ordinary release tooling found only in deep-static source.
+8. Detect remote second-stage execution only when static data flow binds an
+   active fetch/clone to a local artifact and later execution of that artifact
+   or a bounded decoded/copied derivative. Keep unexecuted downloads, source
+   arrays, documentation, ordinary picture/media assets, and path mismatches
+   negative. Treat a supported local decode-to-file chain followed by exact
+   execution, or direct interpreter/executable invocation of a media-,
+   document-, or font-named path, as a separate opaque-carrier correlation;
+   never infer hidden content from the filename alone.
+9. Scan built package `.INSTALL` control text through the bounded no-follow
+   archive reader. An unreadable, changing, oversized, binary, or invalid hook
+   is an incomplete-inspection blocker, not evidence of compromise.
 
 ## Design instruction-file protection
 
@@ -113,6 +124,10 @@ Use this workflow for changes in the AuraScan repository.
 - Keep the default path offline and no-fetch; source acquisition stays explicit.
 - Local AI stays explicit and loopback-only, bypasses proxies, refuses
   redirects, bounds responses/timeouts, and never falls back to cloud AI.
+- Package AI is tool-free and raise-only. Send bounded numbered JSON data;
+  accept only strict allowlisted fields referencing supplied lines; discard raw
+  model prose, commands, URLs, and extra fields. No model response may lower a
+  deterministic result or establish trust.
 - Mock provider calls and local endpoints; do not require a live model server in
   tests or CI.
 - Use defanged local fixtures, `example.invalid`, fake keys, and temporary roots.
@@ -123,6 +138,40 @@ Use this workflow for changes in the AuraScan repository.
   interception, process monitoring, automatic quarantine, or compromise claims.
 - Bump the engine rule version when changed rules could invalidate cached scan
   decisions.
+- In deep-static mode, parse only the captured PKGBUILD, refuse all network
+  acquisition under `--offline`, snapshot local files with no-follow reads,
+  isolate per-source paths, fail closed on uninspected declarations, and avoid
+  cache reuse until acquired-source identities are part of the key.
+- Reject source/key URL credentials, localhost, and non-public IP literals on
+  initial and redirected requests; omit URL userinfo, query, and fragment data
+  from reports and state. State the residual DNS-rebinding limit explicitly.
+- Bound archive entry enumeration and actual extracted bytes; never render or
+  send images, fonts, media, or opaque binaries to an AI merely to inspect
+  them. Bound acquired-source tree entries/candidates and fail closed when a
+  candidate cannot be captured as unchanged regular-file text or a nested
+  archive was not recursively inspected.
+- Validate every model-authored advisory response with duplicate-key-rejecting
+  bounded JSON, exact schemas, known IDs, and non-executable one-line prose.
+  Do not retain URLs, commands, terminal controls, forged AuraScan labels,
+  unsupported safe/compromised claims, raw model output, or raw exceptions.
+- Repair Agent `user-shell` and `root-shell` are compatibility names for a
+  fail-closed local command policy, not arbitrary shell grants. Accept only
+  allowlisted read-only diagnostics and exact policy-checked
+  `/usr/bin/pacman` forms; reject remote references, VCS/AUR/build tools,
+  interpreters/loaders, decoding/evaluation, expansion, redirection,
+  sensitive paths, mutation-capable diagnostic modes, and arbitrary
+  executables before showing a confirmation. Require fresh, just-in-time
+  approval for every exact model-authored command regardless of legacy
+  session/plan configuration.
+- For native tools that parse hostile data, capture a package-managed absolute
+  executable, revalidate its identity immediately before use, provide a
+  minimal environment, terminate option parsing before untrusted paths, and
+  bound time plus combined output. Treat an invoked ClamAV scan that times out,
+  exceeds a bound, or returns an error as incomplete inspection rather than a
+  clean result.
+- Upgrade handoffs use revalidated trusted absolute executables. Planned AUR
+  builds block unless a future implementation can prove every package is
+  routed through `aurascan-makepkg`; AI and confirmation do not waive this.
 - Treat each literal local `install=` target, including a dot-prefixed hook, as
   mandatory scan evidence. Missing, unreadable, unsafe, ambiguous, or any
   symlinked component of the declared relative hook path under the package

@@ -1,5 +1,6 @@
 from aurascan.analyzers.deep_static import DeepStaticAnalyzer
 from aurascan.analyzers.ai_static import AIStaticAnalyzer
+from aurascan.analyzers.deterministic import DeterministicAnalyzer
 from aurascan.analyzers.history import HistoryAnalyzer
 import aurascan.analyzers.history as history_module
 from aurascan.analyzers.source_metadata import SourceMetadataAnalyzer
@@ -9,6 +10,8 @@ from aurascan.core.engine import AuraScanEngine
 from aurascan.core.models import AnalysisResult, Confidence, EvidenceQuality, Finding, Phase, ScanReport, Severity, Source
 from aurascan.core.update_policy import UpdateScanPolicy
 from pathlib import Path
+import io
+import tarfile
 import aurascan.__main__ as module_entrypoint
 import aurascan.cli as cli
 
@@ -79,6 +82,15 @@ def cached_pkgbuild(engine, pkgbuild):
         config_flags=cache_flags(engine),
         input_digest=engine.last_scan_input_digest,
     )
+
+
+def write_package_identity(path, name="fixture-tools", version="1:2.3-4"):
+    payload = f"pkgname = {name}\npkgver = {version}\n".encode("utf-8")
+    with tarfile.open(path, "w") as archive:
+        info = tarfile.TarInfo(".PKGINFO")
+        info.size = len(payload)
+        info.mode = 0o644
+        archive.addfile(info, io.BytesIO(payload))
 
 
 def test_deep_static_flag_is_parsed_correctly():
@@ -271,23 +283,100 @@ def test_package_archive_filename_populates_report_metadata(tmp_path, capsys):
     assert "Audit Complete: wl-clipboard 1:2.3.0-1.1" in output
 
 
-def test_cached_package_report_with_unknown_metadata_is_repaired_from_filename(tmp_path, capsys):
-    package = tmp_path / "demo-tools-2.0-3-x86_64.pkg.tar.zst"
-    package.write_bytes(b"same content")
+def test_package_archive_uses_bounded_pkginfo_identity(tmp_path, capsys):
+    package = tmp_path / "misleading-0-0-any.pkg.tar"
+    write_package_identity(package)
     engine = AuraScanEngine()
     engine.cache = ScanCache(tmp_path / "cache")
     engine.analyzers = [NoopAnalyzer()]
+
+    assert engine.scan_package(str(package)) is True
+
+    capsys.readouterr()
+    assert engine.last_report["package_metadata"]["name"] == "fixture-tools"
+    assert engine.last_report["package_metadata"]["version"] == "1:2.3-4"
+
+
+def test_package_archive_symlink_fails_closed_in_deterministic_scan(tmp_path, capsys):
+    package = tmp_path / "fixture-1-1-any.pkg.tar"
+    write_package_identity(package, name="fixture", version="1-1")
+    link = tmp_path / "linked-1-1-any.pkg.tar"
+    link.symlink_to(package)
+    engine = AuraScanEngine()
+    engine.cache = ScanCache(tmp_path / "cache")
+    engine.analyzers = [DeterministicAnalyzer()]
+
+    assert engine.scan_package(str(link)) is False
+
+    capsys.readouterr()
+    blocker = next(
+        finding
+        for finding in engine.last_report["findings"]
+        if finding["rule_id"] == "PACKAGE-INSTALL-HOOK-UNINSPECTED-001"
+    )
+    assert blocker["blocks_installation"] is True
+
+
+def test_built_package_scan_does_not_cache_across_path_replacement(tmp_path, capsys):
+    package = tmp_path / "demo-1.0-1-any.pkg.tar.zst"
+    replacement = tmp_path / "replacement.pkg.tar.zst"
+    package.write_bytes(b"first package bytes")
+    replacement.write_bytes(b"other package bytes")
+
+    class CountingAnalyzer(NoopAnalyzer):
+        def __init__(self):
+            self.calls = 0
+
+        def analyze_package(self, pkg_path):
+            self.calls += 1
+            return AnalysisResult(True, "noop", [])
+
+    analyzer = CountingAnalyzer()
+    engine = AuraScanEngine()
+    engine.cache = ScanCache(tmp_path / "cache")
+    engine.analyzers = [analyzer]
+
+    assert engine.scan_package(str(package)) is True
+    replacement.replace(package)
+    assert engine.scan_package(str(package)) is True
+
+    capsys.readouterr()
+    assert analyzer.calls == 2
+    assert engine.cache.get_cached_result(
+        str(package),
+        engine.scanner_version,
+        engine.rule_version,
+        config_flags=cache_flags(engine),
+    ) is None
+
+
+def test_built_package_scan_ignores_legacy_path_cache_entry(tmp_path, capsys):
+    package = tmp_path / "demo-tools-2.0-3-x86_64.pkg.tar.zst"
+    package.write_bytes(b"same content")
+
+    class CountingAnalyzer(NoopAnalyzer):
+        def __init__(self):
+            self.calls = 0
+
+        def analyze_package(self, pkg_path):
+            self.calls += 1
+            return AnalysisResult(True, "fresh scan", [])
+
+    analyzer = CountingAnalyzer()
+    engine = AuraScanEngine()
+    engine.cache = ScanCache(tmp_path / "cache")
+    engine.analyzers = [analyzer]
     cached_report = {
         "schema_version": "1.0",
         "scanner_version": "2.5.0",
-        "package_metadata": {"name": "unknown", "version": "unknown"},
+        "package_metadata": {"name": "stale-package", "version": "0-1"},
         "risk_summary": {
-            "severity": "LOW",
-            "action": "ALLOW",
-            "recommended_action": "allow",
+            "severity": "CRITICAL",
+            "action": "BLOCKED",
+            "recommended_action": "block",
             "requires_manual_review": False,
-            "blocks_installation": False,
-            "reason": "cached fixture",
+            "blocks_installation": True,
+            "reason": "stale cached fixture",
         },
         "findings": [],
         "messages": ["cached"],
@@ -304,9 +393,11 @@ def test_cached_package_report_with_unknown_metadata_is_repaired_from_filename(t
     assert engine.scan_package(str(package)) is True
 
     output = capsys.readouterr().out
+    assert analyzer.calls == 1
     assert engine.last_report["package_metadata"]["name"] == "demo-tools"
     assert engine.last_report["package_metadata"]["version"] == "2.0-3"
     assert "Audit Complete: demo-tools 2.0-3" in output
+    assert "(CACHED)" not in output
 
 
 def test_engine_records_update_scan_policy_without_skipping_runtime_scans():
@@ -437,9 +528,38 @@ def test_explicit_deep_static_mode_keeps_source_acquisition_findings(tmp_path):
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = cached_pkgbuild(engine, pkgbuild)
-    assert cached["source_acquisition"] == [{"original": "git://example.invalid/repo.git", "status": "unsupported"}]
-    assert any(finding["rule_id"] == "SOURCE-UNSUPPORTED" for finding in cached["findings"])
+    assert engine.last_report["source_acquisition"] == [
+        {"original": "git://example.invalid/repo.git", "status": "unsupported"}
+    ]
+    assert any(
+        finding["rule_id"] == "SOURCE-UNSUPPORTED"
+        for finding in engine.last_report["findings"]
+    )
+    assert cached_pkgbuild(engine, pkgbuild) is None
+
+
+def test_deep_static_scans_never_reuse_or_write_pkgbuild_cache(tmp_path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text("pkgname=demo\npkgver=1\n", encoding="utf-8")
+
+    class CountingAnalyzer(NoopAnalyzer):
+        def __init__(self):
+            self.calls = 0
+
+        def analyze_pkgbuild(self, pkgbuild_path, content):
+            self.calls += 1
+            return AnalysisResult(True, "deep scan", [])
+
+    analyzer = CountingAnalyzer()
+    engine = AuraScanEngine(deep_static=True)
+    engine.cache = ScanCache(tmp_path / "cache")
+    engine.analyzers = [analyzer]
+
+    assert engine.scan_pkgbuild(str(pkgbuild)) is True
+    assert engine.scan_pkgbuild(str(pkgbuild)) is True
+
+    assert analyzer.calls == 2
+    assert cached_pkgbuild(engine, pkgbuild) is None
 
 
 def test_pkgbuild_cache_is_bound_to_exact_pkgbuild_and_install_hook_bytes(tmp_path):
@@ -452,7 +572,7 @@ def test_pkgbuild_cache_is_bound_to_exact_pkgbuild_and_install_hook_bytes(tmp_pa
     engine.cache = ScanCache(tmp_path / "cache")
     engine.analyzers = [analyzer]
 
-    assert engine.rule_version == "1.3.0"
+    assert engine.rule_version == "1.4.0"
     assert engine.scan_pkgbuild(str(pkgbuild)) is True
     first_digest = engine.last_scan_input_digest
     assert analyzer.pkgbuild_calls == 1
@@ -963,10 +1083,10 @@ def test_auto_context_deep_static_overrides_fast_path(tmp_path):
 
     engine.scan_pkgbuild(str(pkgbuild))
 
-    cached = cached_pkgbuild(engine, pkgbuild)
     assert spy_ai.called is True
-    assert cached["fast_path_decision"]["action"] == "use_full_scan"
-    assert cached["fast_path_decision"]["reason_codes"] == ["explicit_deep_static_requested"]
+    assert engine.last_report["fast_path_decision"]["action"] == "use_full_scan"
+    assert engine.last_report["fast_path_decision"]["reason_codes"] == ["explicit_deep_static_requested"]
+    assert cached_pkgbuild(engine, pkgbuild) is None
 
 
 def test_auto_context_still_requires_accepted_baseline(tmp_path):

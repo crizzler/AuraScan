@@ -25,6 +25,21 @@ from aurascan.core.instruction_cli import (
     set_instruction_ai_enabled,
     set_instruction_monitor_enabled,
 )
+from aurascan.core.trusted_tools import TrustedTool
+
+
+def trust_notify_send(monkeypatch):
+    tool = TrustedTool("notify-send", "/usr/bin/notify-send", 1, 2, 0, 0, 0o100755)
+    monkeypatch.setattr(
+        instruction_cli,
+        "capture_trusted_system_tool",
+        lambda *_args, **_kwargs: tool,
+    )
+    monkeypatch.setattr(
+        instruction_cli,
+        "revalidate_trusted_system_tool",
+        lambda _tool: None,
+    )
 
 
 class FakeReport:
@@ -414,6 +429,7 @@ def test_instruction_audit_status_exit_code_reflects_persistent_review_state(
 
 
 def test_background_capture_returns_clear_and_notification_is_generic(monkeypatch, tmp_path):
+    trust_notify_send(monkeypatch)
     scan_calls = []
 
     def scan(root, **kwargs):
@@ -468,6 +484,7 @@ def test_background_capture_returns_clear_and_notification_is_generic(monkeypatc
 
 
 def test_background_capture_leaves_alert_pending_when_notification_fails(monkeypatch, tmp_path):
+    trust_notify_send(monkeypatch)
     acknowledged = []
     install_fake_guard(
         monkeypatch,
@@ -490,6 +507,18 @@ def test_background_capture_leaves_alert_pending_when_notification_fails(monkeyp
 
     assert status == EXIT_CLEAR
     assert acknowledged == []
+
+
+def test_notification_refuses_path_shadowed_notify_send_without_execution(tmp_path):
+    calls = []
+
+    delivered = instruction_cli._notify_generic(
+        which=lambda _name: str(tmp_path / "notify-send"),
+        runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    assert delivered is False
+    assert calls == []
 
 
 def test_explicit_one_shot_ai_can_use_a_configured_disabled_local_provider(monkeypatch):

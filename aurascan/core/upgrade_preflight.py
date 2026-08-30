@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -13,7 +14,11 @@ from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, 
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen as urllib_urlopen
 
-from aurascan.core.ai_provider import call_ai_provider, resolve_ai_config
+from aurascan.core.ai_provider import (
+    call_ai_provider,
+    resolve_ai_config,
+    safe_provider_error_detail,
+)
 from aurascan.core.ai_provider import parse_bool as parse_config_bool
 from aurascan.core.config_drift import (
     CONFIG_DRIFT_AI_DIFFS_ENV,
@@ -32,6 +37,10 @@ from aurascan.core.kernel_module_autopilot import (
 from aurascan.core.local_package_db import compare_versions_with_vercmp
 from aurascan.core.models import SCANNER_VERSION, Severity
 from aurascan.core.security_audit import SecurityAuditReport, build_security_audit
+from aurascan.core.text_safety import (
+    load_strict_json_object,
+    validate_model_advisory_text,
+)
 
 
 UPGRADE_PREFLIGHT_SCHEMA_VERSION = "1.3"
@@ -39,6 +48,7 @@ EXIT_PREFLIGHT_UNAVAILABLE = 20
 EXIT_USER_DECLINED = 21
 EXIT_PREFLIGHT_DISABLED = 22
 EXIT_UPGRADE_VERIFICATION_FAILED = 23
+EXIT_UPGRADE_BLOCKED = 24
 EXIT_UPGRADE_COMMAND_FAILED_TO_START = 127
 PACMAN_PRINT_FORMAT = "%n\t%v\t%r\t%s\t%D\t%H\t%R"
 HIGH_RISK = {Severity.HIGH, Severity.CRITICAL}
@@ -47,7 +57,13 @@ UPGRADE_PREFLIGHT_ENABLED_ENV = "AURASCAN_UPGRADE_PREFLIGHT_ENABLED"
 UPGRADE_PREFLIGHT_AUR_HELPER_ENV = "AURASCAN_UPGRADE_AUR_HELPER"
 UPGRADE_PREFLIGHT_AI_ENV = "AURASCAN_UPGRADE_PREFLIGHT_AI"
 UPGRADE_TRUSTED_HANDOFF_ENV = "AURASCAN_UPGRADE_TRUSTED_HANDOFF"
+UPGRADE_AI_MAX_RESPONSE_CHARS = 16 * 1024
+UPGRADE_AI_MAX_RISK_RAISES = 12
+UPGRADE_AI_MAX_SUMMARY_CHARS = 500
+UPGRADE_AI_MAX_REASON_CHARS = 500
 UPGRADE_AUR_HELPERS = {"auto", "paru", "yay", "shelly", "none"}
+TRUSTED_SUDO_PATH = "/usr/bin/sudo"
+TRUSTED_PACMAN_PATH = "/usr/bin/pacman"
 REPOSITORY_HEALTH_BACKUP_ROOT = Path("/var/lib/aurascan/repo-health")
 SHELLY_MODERN_MAJOR = 3
 SHELLY_MODERN_UPGRADE_COMMAND = [
@@ -94,7 +110,144 @@ ABI_SENSITIVE_PACKAGES = {
 REPO_HEADER_RE = re.compile(r"^\s*\[([^]]+)\]\s*$")
 REPO_INCLUDE_RE = re.compile(r"^\s*Include\s*=\s*(.+?)\s*$")
 REPO_SERVER_RE = re.compile(r"^\s*Server\s*=")
+UPGRADE_AI_UNSUPPORTED_CONCLUSION_RE = re.compile(
+    r"\b(?:upgrade|transaction|handoff)\b.{0,24}\b"
+    r"(?:safe|secure|clean|trusted|approved|compromised|hacked|infected)\b|"
+    r"\b(?:safe|secure|clean|trusted|approved|compromised|hacked|infected)\b.{0,24}\b"
+    r"(?:upgrade|transaction|handoff)\b",
+    re.IGNORECASE,
+)
 ProgressReporter = Callable[[str], None]
+
+
+class UnsafeUpgradeExecutable(RuntimeError):
+    """Raised when an upgrade executable cannot be bound to a trusted file."""
+
+
+@dataclass(frozen=True)
+class TrustedExecutable:
+    name: str
+    path: str
+    device: int
+    inode: int
+    owner: int
+    group: int
+    mode: int
+
+    def to_dict(self) -> Dict[str, object]:
+        return {"name": self.name, "path": self.path}
+
+
+def _trusted_executable_stat(name: str, path: str, *, required_owner: int = 0) -> os.stat_result:
+    candidate = Path(path)
+    if not candidate.is_absolute() or ".." in candidate.parts:
+        raise UnsafeUpgradeExecutable(f"{name} executable path must be absolute and normalized")
+
+    try:
+        final_stat = os.lstat(str(candidate))
+    except OSError as exc:
+        raise UnsafeUpgradeExecutable(f"trusted {name} executable is unavailable: {exc}")
+    if stat.S_ISLNK(final_stat.st_mode):
+        raise UnsafeUpgradeExecutable(f"trusted {name} executable must not be a symlink")
+    if not stat.S_ISREG(final_stat.st_mode):
+        raise UnsafeUpgradeExecutable(f"trusted {name} executable is not a regular file")
+    if final_stat.st_uid != required_owner:
+        raise UnsafeUpgradeExecutable(f"trusted {name} executable is not root-owned")
+    if final_stat.st_mode & 0o022:
+        raise UnsafeUpgradeExecutable(f"trusted {name} executable is group/world writable")
+    if os.geteuid() != 0 and os.access(str(candidate), os.W_OK):
+        raise UnsafeUpgradeExecutable(f"trusted {name} executable is writable by the current user")
+    if not final_stat.st_mode & 0o111:
+        raise UnsafeUpgradeExecutable(f"trusted {name} executable is not executable")
+
+    current = Path(candidate.anchor)
+    components = [current]
+    for component in candidate.parts[1:-1]:
+        current = current / component
+        components.append(current)
+    for component in components:
+        try:
+            component_stat = os.lstat(str(component))
+        except OSError as exc:
+            raise UnsafeUpgradeExecutable(f"trusted {name} path component is unavailable: {exc}")
+        if stat.S_ISLNK(component_stat.st_mode):
+            raise UnsafeUpgradeExecutable(f"trusted {name} path contains a symlink component")
+        if not stat.S_ISDIR(component_stat.st_mode):
+            raise UnsafeUpgradeExecutable(f"trusted {name} path component is not a directory")
+        if component_stat.st_uid != 0:
+            raise UnsafeUpgradeExecutable(f"trusted {name} path contains a non-root-owned component")
+        if component_stat.st_mode & 0o022:
+            raise UnsafeUpgradeExecutable(f"trusted {name} path contains a group/world-writable component")
+        if os.geteuid() != 0 and os.access(str(component), os.W_OK):
+            raise UnsafeUpgradeExecutable(f"trusted {name} path contains a current-user-writable component")
+    return final_stat
+
+
+def capture_trusted_executable(name: str, path: str) -> TrustedExecutable:
+    metadata = _trusted_executable_stat(name, path)
+    return TrustedExecutable(
+        name=name,
+        path=str(Path(path)),
+        device=int(metadata.st_dev),
+        inode=int(metadata.st_ino),
+        owner=int(metadata.st_uid),
+        group=int(metadata.st_gid),
+        mode=int(metadata.st_mode),
+    )
+
+
+def revalidate_trusted_executable(executable: TrustedExecutable) -> None:
+    metadata = _trusted_executable_stat(executable.name, executable.path, required_owner=executable.owner)
+    observed = (
+        int(metadata.st_dev),
+        int(metadata.st_ino),
+        int(metadata.st_uid),
+        int(metadata.st_gid),
+        int(metadata.st_mode),
+    )
+    expected = (
+        executable.device,
+        executable.inode,
+        executable.owner,
+        executable.group,
+        executable.mode,
+    )
+    if observed != expected:
+        raise UnsafeUpgradeExecutable(
+            f"trusted {executable.name} executable changed after preflight; run a fresh preflight"
+        )
+
+
+def _run_trusted_command(
+    command: Sequence[str],
+    executables: Sequence[TrustedExecutable],
+    *,
+    runner: Callable,
+    **kwargs,
+):
+    for executable in executables:
+        revalidate_trusted_executable(executable)
+    return runner(list(command), **kwargs)
+
+
+def _trusted_upgrade_query_runner(plan: "UpgradePlan", runner: Callable) -> Callable:
+    """Wrap downstream collectors so their pacman queries use the bound file."""
+
+    def trusted_runner(command, **kwargs):
+        argv = list(command)
+        if argv and argv[0] in {"pacman", TRUSTED_PACMAN_PATH}:
+            pacman = plan.trusted_executables.get("pacman")
+            if pacman is None:
+                raise UnsafeUpgradeExecutable("trusted pacman identity is unavailable")
+            return _run_trusted_command(
+                [pacman.path] + argv[1:],
+                [pacman],
+                runner=runner,
+                **kwargs,
+            )
+        return runner(argv, **kwargs)
+
+    return trusted_runner
 
 
 @dataclass
@@ -158,6 +311,7 @@ class UpgradePlan:
     preview_command: List[str] = field(default_factory=list)
     final_command: List[str] = field(default_factory=list)
     command_source: str = "pacman"
+    trusted_executables: Dict[str, TrustedExecutable] = field(default_factory=dict, repr=False)
 
     @property
     def available(self) -> bool:
@@ -179,6 +333,10 @@ class UpgradePlan:
             "preview_command": list(self.preview_command),
             "final_command": list(self.final_command),
             "command_source": self.command_source,
+            "trusted_executables": {
+                name: executable.to_dict()
+                for name, executable in sorted(self.trusted_executables.items())
+            },
         }
 
 
@@ -303,9 +461,20 @@ class SystemSnapshot:
     pacnew_scan_truncated: bool = False
 
     @classmethod
-    def collect(cls, runner: Callable = subprocess.run, etc_root: Path = Path("/etc")) -> "SystemSnapshot":
-        installed_packages = _command_lines(runner, ["pacman", "-Qq"])
-        foreign_packages = _command_lines(runner, ["pacman", "-Qqem"])
+    def collect(
+        cls,
+        runner: Callable = subprocess.run,
+        etc_root: Path = Path("/etc"),
+        trusted_executables: Optional[Mapping[str, TrustedExecutable]] = None,
+    ) -> "SystemSnapshot":
+        pacman = (trusted_executables or {}).get("pacman")
+        if pacman is None:
+            try:
+                pacman = capture_trusted_executable("pacman", TRUSTED_PACMAN_PATH)
+            except UnsafeUpgradeExecutable:
+                pacman = None
+        installed_packages = _trusted_command_lines(runner, pacman, ["-Qq"]) if pacman else []
+        foreign_packages = _trusted_command_lines(runner, pacman, ["-Qqem"]) if pacman else []
         ignored_packages = _command_lines(runner, ["pacman-conf", "IgnorePkg"])
         ignored_groups = _command_lines(runner, ["pacman-conf", "IgnoreGroup"])
         boot_paths = [str(path) for path in (Path("/boot"), Path("/boot/efi")) if path.exists()]
@@ -316,7 +485,11 @@ class SystemSnapshot:
             distro_info=detect_distro().to_dict(),
             installed_packages=installed_packages,
             foreign_packages=foreign_packages,
-            foreign_package_info=collect_foreign_package_info(foreign_packages, runner=runner),
+            foreign_package_info=collect_foreign_package_info(
+                foreign_packages,
+                runner=runner,
+                pacman_executable=pacman,
+            ),
             ignored_packages=ignored_packages,
             ignored_groups=ignored_groups,
             root_free_mib=_free_mib(Path("/")),
@@ -364,6 +537,7 @@ class UpgradeFinding:
     recommended_action: str
     evidence: str = ""
     source: str = "deterministic"
+    blocking: bool = False
 
     def __post_init__(self) -> None:
         self.severity = Severity(self.severity.value if isinstance(self.severity, Severity) else str(self.severity))
@@ -378,6 +552,7 @@ class UpgradeFinding:
             "recommended_action": self.recommended_action,
             "evidence": self.evidence,
             "source": self.source,
+            "blocking": self.blocking,
         }
 
 
@@ -404,9 +579,15 @@ class UpgradePreflightReport:
         return self.highest_severity in HIGH_RISK
 
     @property
+    def blocks_upgrade(self) -> bool:
+        return any(finding.blocking for finding in self.findings)
+
+    @property
     def action(self) -> str:
         if not self.plan.available:
             return "unavailable"
+        if self.blocks_upgrade:
+            return "block"
         if self.requires_confirmation:
             return "confirm"
         return "continue"
@@ -416,7 +597,7 @@ class UpgradePreflightReport:
             "severity": self.highest_severity.value,
             "action": self.action,
             "requires_confirmation": self.requires_confirmation,
-            "blocks_upgrade": False,
+            "blocks_upgrade": self.blocks_upgrade,
             "reason": self._risk_reason(),
         }
 
@@ -505,7 +686,9 @@ class UpgradePreflightReport:
             if summary:
                 lines.append(summary)
 
-        if self.action == "confirm":
+        if self.action == "block":
+            lines.append("\nRecommended Action: Do not continue through AuraScan's automatic handoff; follow the blocking finding above.")
+        elif self.action == "confirm":
             lines.append("\nRecommended Action: Review the risks above before continuing.")
         elif self.action == "unavailable":
             lines.append("\nRecommended Action: Do not run the upgrade from AuraScan until the preview problem is resolved.")
@@ -814,6 +997,13 @@ def run_upgrade(
         return 0
     if options.json_output and not options.yes:
         return 0
+    if report.blocks_upgrade:
+        print(
+            "[AuraScan] Upgrade blocked: planned AUR source builds are not handed to an unverified helper. "
+            "Scan and build them through aurascan-makepkg, or rerun a repository-only upgrade with --aur-helper none.",
+            file=stderr,
+        )
+        return EXIT_UPGRADE_BLOCKED
     if not options.dry_run and not options.json_output:
         fix_status = run_kernel_module_autopilot_fixes(
             report,
@@ -860,8 +1050,8 @@ def run_upgrade(
     print_trusted_handoff_note(report, options, stdout=stdout, stderr=stderr)
     print_package_manager_handoff_context(report, options, stdout=stdout, stderr=stderr)
     try:
-        result = runner(report.plan.final_command, check=False)
-    except OSError as exc:
+        result = run_trusted_upgrade_handoff(report.plan, runner=runner)
+    except (OSError, UnsafeUpgradeExecutable) as exc:
         print(f"[AuraScan] Upgrade command failed to start: {exc}", file=stderr)
         if followup_context is not None:
             _offer_upgrade_followup_outcome(
@@ -1021,7 +1211,11 @@ def verify_upgrade_handoff(plan: UpgradePlan, *, runner: Callable = subprocess.r
     expected = {pkg.name: pkg.new_version for pkg in plan.repo_packages if pkg.name and pkg.new_version}
     if not expected:
         return []
-    installed = installed_package_versions(expected.keys(), runner=runner)
+    installed = installed_package_versions(
+        expected.keys(),
+        runner=runner,
+        pacman_executable=plan.trusted_executables.get("pacman"),
+    )
     missing: List[str] = []
     for name, version in expected.items():
         installed_version = installed.get(name, "")
@@ -1031,13 +1225,30 @@ def verify_upgrade_handoff(plan: UpgradePlan, *, runner: Callable = subprocess.r
     return missing
 
 
-def installed_package_versions(packages: Iterable[str], *, runner: Callable = subprocess.run) -> Dict[str, str]:
+def installed_package_versions(
+    packages: Iterable[str],
+    *,
+    runner: Callable = subprocess.run,
+    pacman_executable: Optional[TrustedExecutable] = None,
+) -> Dict[str, str]:
     names = sorted({name for name in packages if name})
     if not names:
         return {}
+    if pacman_executable is None:
+        try:
+            pacman_executable = capture_trusted_executable("pacman", TRUSTED_PACMAN_PATH)
+        except UnsafeUpgradeExecutable:
+            return {}
     try:
-        result = runner(["pacman", "-Q"] + names, capture_output=True, text=True, check=False)
-    except OSError:
+        result = _run_trusted_command(
+            [pacman_executable.path, "-Q"] + names,
+            [pacman_executable],
+            runner=runner,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, UnsafeUpgradeExecutable):
         return {}
     versions: Dict[str, str] = {}
     output = str(getattr(result, "stdout", "") or "")
@@ -1111,11 +1322,24 @@ def planned_package_download_urls(
     names = [pkg.name for pkg in plan.repo_packages if pkg.name]
     if not names:
         return []
-    with tempfile.TemporaryDirectory(prefix="aurascan-url-check.") as cache_dir:
-        cmd = ["pacman", "-Sp", "--cachedir", cache_dir] + names[:max_urls]
+    pacman = plan.trusted_executables.get("pacman")
+    if pacman is None:
         try:
-            result = runner(cmd, capture_output=True, text=True, check=False)
-        except OSError:
+            pacman = capture_trusted_executable("pacman", TRUSTED_PACMAN_PATH)
+        except UnsafeUpgradeExecutable:
+            return []
+    with tempfile.TemporaryDirectory(prefix="aurascan-url-check.") as cache_dir:
+        cmd = [pacman.path, "-Sp", "--cachedir", cache_dir] + names[:max_urls]
+        try:
+            result = _run_trusted_command(
+                cmd,
+                [pacman],
+                runner=runner,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except (OSError, UnsafeUpgradeExecutable):
             return []
     output = "\n".join([
         str(getattr(result, "stdout", "") or ""),
@@ -1161,11 +1385,30 @@ def trusted_handoff_command(report: UpgradePreflightReport, options: UpgradeOpti
 
 
 def should_use_trusted_handoff(report: UpgradePreflightReport, options: UpgradeOptions) -> bool:
-    if not options.trusted_handoff_enabled or not report.plan.available:
+    if not options.trusted_handoff_enabled or not report.plan.available or report.blocks_upgrade:
         return False
     if report.requires_confirmation:
         return False
-    return report.plan.selected_helper == "shelly"
+    return report.plan.command_source == "shelly"
+
+
+def run_trusted_upgrade_handoff(plan: UpgradePlan, *, runner: Callable = subprocess.run):
+    command = list(plan.final_command)
+    if plan.command_source == "pacman":
+        sudo = plan.trusted_executables.get("sudo")
+        pacman = plan.trusted_executables.get("pacman")
+        if sudo is None or pacman is None:
+            raise UnsafeUpgradeExecutable("trusted sudo/pacman identity is missing from the upgrade plan")
+        if command[:2] != [sudo.path, pacman.path]:
+            raise UnsafeUpgradeExecutable("repository upgrade command no longer matches the trusted sudo/pacman plan")
+        return _run_trusted_command(command, [sudo, pacman], runner=runner, check=False)
+
+    helper = plan.trusted_executables.get(plan.command_source)
+    if helper is None:
+        raise UnsafeUpgradeExecutable(f"trusted {plan.command_source} identity is missing from the upgrade plan")
+    if not command or command[0] != helper.path:
+        raise UnsafeUpgradeExecutable(f"{plan.command_source} upgrade command no longer matches the trusted executable plan")
+    return _run_trusted_command(command, [helper], runner=runner, check=False)
 
 
 def print_trusted_handoff_note(report: UpgradePreflightReport, options: UpgradeOptions, *, stdout, stderr=None) -> None:
@@ -1182,7 +1425,7 @@ def print_package_manager_handoff_context(
     stderr,
 ) -> None:
     stream = stderr if options.json_output else stdout
-    helper = "Shelly/pacman" if report.plan.selected_helper == "shelly" else "the package manager"
+    helper = "Shelly/pacman" if report.plan.command_source == "shelly" else "the package manager"
     print("\n[AuraScan] Package-manager handoff", file=stream, flush=True)
     print(
         f"Download, mirror, and package-transition lines below come from {helper} and configured repositories, not AuraScan.",
@@ -1270,13 +1513,19 @@ def run_kernel_module_autopilot_fixes(
     command = kernel_module_fix_command(check)
     if not command:
         return None
+    sudo = report.plan.trusted_executables.get("sudo")
+    pacman = report.plan.trusted_executables.get("pacman")
+    if sudo is None or pacman is None or command[:2] != ["sudo", "pacman"]:
+        print("[AuraScan] Kernel/module fix refused: trusted sudo/pacman identity is unavailable.", file=stderr)
+        return EXIT_UPGRADE_COMMAND_FAILED_TO_START
+    command = [sudo.path, pacman.path] + list(command[2:])
     packages = ", ".join(command[4:])
     answer = input_func(f"AuraScan can install missing kernel support packages: {packages}. Apply fix before upgrading? [Y/n] ").strip().lower()
     if answer in {"", "y", "yes"}:
         print(f"[AuraScan] Running kernel/module fix: {' '.join(command)}", file=stdout)
         try:
-            result = runner(command, check=False)
-        except OSError as exc:
+            result = _run_trusted_command(command, [sudo, pacman], runner=runner, check=False)
+        except (OSError, UnsafeUpgradeExecutable) as exc:
             print(f"[AuraScan] Kernel/module fix command failed to start: {exc}", file=stderr)
             return EXIT_UPGRADE_COMMAND_FAILED_TO_START
         code = int(getattr(result, "returncode", 0))
@@ -1320,9 +1569,22 @@ def run_upgrade_kernel_module_aftercare(
 ) -> None:
     if not options.kernel_module_autopilot_enabled or options.dry_run:
         return
-    post_snapshot = snapshot or SystemSnapshot.collect(runner=runner)
-    check = build_kernel_module_check(plan, post_snapshot, runner=runner, modules_root=modules_root, mode="post_upgrade")
     stream = stderr if options.json_output else stdout
+    try:
+        post_snapshot = snapshot or SystemSnapshot.collect(
+            runner=runner,
+            trusted_executables=plan.trusted_executables,
+        )
+        check = build_kernel_module_check(
+            plan,
+            post_snapshot,
+            runner=_trusted_upgrade_query_runner(plan, runner),
+            modules_root=modules_root,
+            mode="post_upgrade",
+        )
+    except UnsafeUpgradeExecutable as exc:
+        print(f"[AuraScan] Kernel/module aftercare skipped: {exc}", file=stream)
+        return
     print("\n[AuraScan] Kernel/module aftercare", file=stream)
     print(f"Kernel/module check: {check.summary}.", file=stream)
     if check.reboot_required:
@@ -1400,7 +1662,12 @@ def run_repository_health_autopilot_repairs(
             print("[AuraScan] Repository repair skipped. Upgrade preflight remains unavailable.", file=stderr)
             return False
 
-    result = apply_repository_health_repairs(check, runner=runner, backup_root=backup_root)
+    result = apply_repository_health_repairs(
+        check,
+        runner=runner,
+        backup_root=backup_root,
+        sudo_executable=report.plan.trusted_executables.get("sudo"),
+    )
     if not result.success:
         print("[AuraScan] Repository repair failed. Upgrade preflight remains unavailable.", file=stderr)
         for error in result.errors[:6]:
@@ -1521,6 +1788,7 @@ def apply_repository_health_repairs(
     *,
     runner: Callable = subprocess.run,
     backup_root: Path = REPOSITORY_HEALTH_BACKUP_ROOT,
+    sudo_executable: Optional[TrustedExecutable] = None,
 ) -> RepositoryRepairResult:
     issues = check.fixable_issues
     if not issues:
@@ -1536,10 +1804,17 @@ def apply_repository_health_repairs(
         "actions": [],
     }
 
+    if use_sudo and sudo_executable is None:
+        try:
+            sudo_executable = capture_trusted_executable("sudo", TRUSTED_SUDO_PATH)
+        except UnsafeUpgradeExecutable as exc:
+            result.errors.append(f"repository repair executable trust check failed: {exc}")
+            return result
+
     try:
         if use_sudo:
-            command = ["sudo", "mkdir", "-p", str(backup_dir)]
-            status = runner(command, check=False)
+            command = [sudo_executable.path, "mkdir", "-p", str(backup_dir)]
+            status = _run_trusted_command(command, [sudo_executable], runner=runner, check=False)
             if int(getattr(status, "returncode", 0)) != 0:
                 result.errors.append(f"failed to create backup directory: {' '.join(command)}")
                 return result
@@ -1565,12 +1840,17 @@ def apply_repository_health_repairs(
                 group = 0
             backup_path = backup_dir / target.name
             if use_sudo:
-                copy_status = runner(["sudo", "cp", "-a", str(target), str(backup_path)], check=False)
+                copy_status = _run_trusted_command(
+                    [sudo_executable.path, "cp", "-a", str(target), str(backup_path)],
+                    [sudo_executable],
+                    runner=runner,
+                    check=False,
+                )
                 if int(getattr(copy_status, "returncode", 0)) != 0:
                     result.errors.append(f"failed to back up {target} to {backup_path}")
                     return result
-                install_status = runner([
-                    "sudo",
+                install_command = [
+                    sudo_executable.path,
                     "install",
                     "-o",
                     str(owner),
@@ -1580,7 +1860,13 @@ def apply_repository_health_repairs(
                     f"{mode & 0o777:o}",
                     str(source),
                     str(target),
-                ], check=False)
+                ]
+                install_status = _run_trusted_command(
+                    install_command,
+                    [sudo_executable],
+                    runner=runner,
+                    check=False,
+                )
                 if int(getattr(install_status, "returncode", 0)) != 0:
                     result.errors.append(f"failed to restore {target} from {source}")
                     return result
@@ -1611,8 +1897,14 @@ def apply_repository_health_repairs(
             })
 
         manifest_path = backup_dir / "manifest.json"
-        write_repository_repair_manifest(manifest_path, manifest, runner=runner, use_sudo=use_sudo)
-    except OSError as exc:
+        write_repository_repair_manifest(
+            manifest_path,
+            manifest,
+            runner=runner,
+            use_sudo=use_sudo,
+            sudo_executable=sudo_executable,
+        )
+    except (OSError, UnsafeUpgradeExecutable) as exc:
         result.errors.append(str(exc))
         return result
 
@@ -1633,16 +1925,24 @@ def write_repository_repair_manifest(
     *,
     runner: Callable,
     use_sudo: bool,
+    sudo_executable: Optional[TrustedExecutable] = None,
 ) -> None:
     text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     if not use_sudo:
         manifest_path.write_text(text, encoding="utf-8")
         return
+    if sudo_executable is None:
+        raise UnsafeUpgradeExecutable("trusted sudo identity is unavailable for repository repair")
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
         handle.write(text)
         tmp_path = Path(handle.name)
     try:
-        status = runner(["sudo", "install", "-m", "0644", str(tmp_path), str(manifest_path)], check=False)
+        status = _run_trusted_command(
+            [sudo_executable.path, "install", "-m", "0644", str(tmp_path), str(manifest_path)],
+            [sudo_executable],
+            runner=runner,
+            check=False,
+        )
         if int(getattr(status, "returncode", 0)) != 0:
             raise OSError(f"failed to write repair manifest to {manifest_path}")
     finally:
@@ -1722,13 +2022,29 @@ def run_upgrade_preflight(
 ) -> UpgradePreflightReport:
     progress = progress or (lambda _message: None)
     plan = build_upgrade_plan(options, runner=runner, which=which, progress=progress)
+    trusted_query_runner = _trusted_upgrade_query_runner(plan, runner)
     progress("Collecting local system facts.")
-    system_snapshot = snapshot or SystemSnapshot.collect(runner=runner)
+    try:
+        system_snapshot = snapshot or SystemSnapshot.collect(
+            runner=runner,
+            trusted_executables=plan.trusted_executables,
+        )
+    except UnsafeUpgradeExecutable as exc:
+        plan.preview_error = f"upgrade executable trust check failed during local queries: {exc}"
+        system_snapshot = SystemSnapshot()
     repository_health = build_repository_health_check(pacman_conf_path) if preview_error_indicates_no_servers(plan.preview_error) else None
     kernel_module_check = None
     if options.kernel_module_autopilot_enabled and not plan.preview_error:
         progress("Checking kernel and external module compatibility.")
-        kernel_module_check = build_kernel_module_check(plan, system_snapshot, runner=runner, modules_root=modules_root)
+        try:
+            kernel_module_check = build_kernel_module_check(
+                plan,
+                system_snapshot,
+                runner=trusted_query_runner,
+                modules_root=modules_root,
+            )
+        except UnsafeUpgradeExecutable as exc:
+            plan.preview_error = f"upgrade executable trust check failed during kernel queries: {exc}"
     progress("Evaluating deterministic upgrade risks.")
     findings = analyze_upgrade_risks(
         plan,
@@ -1740,16 +2056,27 @@ def run_upgrade_preflight(
     security_report = None
     if options.security_audit_enabled:
         progress("Checking known AUR campaigns and official package advisories.")
-        security_report = build_security_audit(
-            runner=runner,
-            which=which,
-            installed_packages={name: "installed version not collected by upgrade snapshot" for name in system_snapshot.installed_packages},
-            pending_package_names=[pkg.name for pkg in plan.aur_packages],
-            home=None,
-            include_host_indicators=False,
-            include_arch_audit=True,
-        )
-        findings.extend(security_audit_upgrade_findings(security_report, plan))
+        try:
+            security_report = build_security_audit(
+                runner=trusted_query_runner,
+                which=which,
+                installed_packages={name: "installed version not collected by upgrade snapshot" for name in system_snapshot.installed_packages},
+                pending_package_names=[pkg.name for pkg in plan.aur_packages],
+                home=None,
+                include_host_indicators=False,
+                include_arch_audit=True,
+            )
+        except UnsafeUpgradeExecutable as exc:
+            plan.preview_error = f"upgrade executable trust check failed during security queries: {exc}"
+            findings = analyze_upgrade_risks(
+                plan,
+                system_snapshot,
+                kernel_module_check=kernel_module_check,
+                kernel_module_autopilot_enabled=options.kernel_module_autopilot_enabled,
+                repository_health=repository_health,
+            )
+        else:
+            findings.extend(security_audit_upgrade_findings(security_report, plan))
     report = UpgradePreflightReport(
         plan=plan,
         snapshot=system_snapshot,
@@ -1772,16 +2099,46 @@ def build_upgrade_plan(
     progress: Optional[ProgressReporter] = None,
 ) -> UpgradePlan:
     progress = progress or (lambda _message: None)
-    helper, helper_error = resolve_aur_helper(options.aur_helper, which=which)
-    shelly_modern = shelly_uses_modern_cli(runner=runner) if helper == "shelly" else True
-    final_command = helper_upgrade_command(helper, shelly_modern=shelly_modern)
-    preview_command = ["sudo", "pacman", "-Syu", "--print", "--print-format", PACMAN_PRINT_FORMAT]
+    trusted_executables: Dict[str, TrustedExecutable] = {}
+    try:
+        trusted_executables["sudo"] = capture_trusted_executable("sudo", TRUSTED_SUDO_PATH)
+        trusted_executables["pacman"] = capture_trusted_executable("pacman", TRUSTED_PACMAN_PATH)
+    except UnsafeUpgradeExecutable as exc:
+        return UpgradePlan(
+            selected_helper="none",
+            preview_error=f"upgrade executable trust check failed: {exc}",
+            command_source="unavailable",
+            trusted_executables=trusted_executables,
+        )
+
+    helper, helper_executable, helper_error = _resolve_trusted_aur_helper(options.aur_helper, which=which)
+    if helper_executable is not None:
+        trusted_executables[helper] = helper_executable
+    shelly_modern = (
+        shelly_uses_modern_cli(helper_executable, runner=runner)
+        if helper == "shelly" and helper_executable is not None
+        else True
+    )
+    final_command = helper_upgrade_command(
+        helper,
+        shelly_modern=shelly_modern,
+        executable=helper_executable,
+    )
+    preview_command = [
+        trusted_executables["sudo"].path,
+        trusted_executables["pacman"].path,
+        "-Syu",
+        "--print",
+        "--print-format",
+        PACMAN_PRINT_FORMAT,
+    ]
     plan = UpgradePlan(
         selected_helper=helper,
         helper_error=helper_error,
         preview_command=preview_command,
         final_command=final_command,
         command_source=helper if helper != "none" else "pacman",
+        trusted_executables=trusted_executables,
     )
     if helper_error and options.aur_helper in {"paru", "yay", "shelly"}:
         plan.preview_error = helper_error
@@ -1789,8 +2146,15 @@ def build_upgrade_plan(
 
     progress("Building pacman upgrade preview. This may sync package databases and can take a moment.")
     try:
-        result = runner(preview_command, capture_output=True, text=True, check=False)
-    except OSError as exc:
+        result = _run_trusted_command(
+            preview_command,
+            [trusted_executables["sudo"], trusted_executables["pacman"]],
+            runner=runner,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, UnsafeUpgradeExecutable) as exc:
         plan.preview_error = f"pacman upgrade preview failed: {exc}"
         return plan
     if int(getattr(result, "returncode", 0)) != 0:
@@ -1807,6 +2171,7 @@ def build_upgrade_plan(
         progress(f"Checking AUR updates with {helper}.")
         helper_result = query_helper_updates(
             helper,
+            executable=helper_executable,
             runner=runner,
             shelly_modern=shelly_modern,
         )
@@ -1814,35 +2179,70 @@ def build_upgrade_plan(
             plan.final_command = helper_upgrade_command(
                 helper,
                 shelly_modern=bool(helper_result["shelly_modern"]),
+                executable=helper_executable,
             )
         if helper_result["ok"]:
             plan.aur_packages = helper_result["packages"]
         else:
             plan.helper_error = str(helper_result["error"])
 
+        # A helper query is advisory. When it finds no planned AUR source
+        # builds, use the trusted repository-only pacman handoff so a later
+        # helper refresh cannot silently expand the approved transaction.
+        if not plan.aur_packages:
+            plan.final_command = helper_upgrade_command("none")
+            plan.command_source = "pacman"
+
     return plan
 
 
 def resolve_aur_helper(selection: str, *, which: Callable[[str], Optional[str]] = shutil.which) -> Tuple[str, str]:
+    helper, _executable, error = _resolve_trusted_aur_helper(selection, which=which)
+    return helper, error
+
+
+def _resolve_trusted_aur_helper(
+    selection: str,
+    *,
+    which: Callable[[str], Optional[str]] = shutil.which,
+) -> Tuple[str, Optional[TrustedExecutable], str]:
     if selection == "none":
-        return "none", ""
+        return "none", None, ""
     if selection in {"paru", "yay", "shelly"}:
-        return (selection, "") if which(selection) else ("none", f"requested AUR helper '{selection}' was not found in PATH")
+        path = which(selection)
+        if not path:
+            return "none", None, f"requested AUR helper '{selection}' was not found in PATH"
+        try:
+            executable = capture_trusted_executable(selection, path)
+        except UnsafeUpgradeExecutable as exc:
+            return "none", None, f"requested AUR helper '{selection}' failed its executable trust check: {exc}"
+        return selection, executable, ""
+    unsafe_helpers: List[str] = []
     for helper in ("paru", "yay", "shelly"):
-        if which(helper):
-            return helper, ""
-    return "none", "no supported AUR helper found; foreign packages will be reported as advisory context only"
+        path = which(helper)
+        if not path:
+            continue
+        try:
+            executable = capture_trusted_executable(helper, path)
+        except UnsafeUpgradeExecutable:
+            unsafe_helpers.append(helper)
+            continue
+        return helper, executable, ""
+    suffix = f"; rejected unsafe helpers: {', '.join(unsafe_helpers)}" if unsafe_helpers else ""
+    return "none", None, "no supported trusted AUR helper found; foreign packages will be reported as advisory context only" + suffix
 
 
-def shelly_uses_modern_cli(*, runner: Callable = subprocess.run) -> bool:
+def shelly_uses_modern_cli(executable: TrustedExecutable, *, runner: Callable = subprocess.run) -> bool:
     try:
-        result = runner(
-            ["shelly", "--version"],
+        result = _run_trusted_command(
+            [executable.path, "--version"],
+            [executable],
+            runner=runner,
             capture_output=True,
             text=True,
             check=False,
         )
-    except OSError:
+    except (OSError, UnsafeUpgradeExecutable):
         return True
     if int(getattr(result, "returncode", 0)) != 0:
         return True
@@ -1856,17 +2256,23 @@ def shelly_uses_modern_cli(*, runner: Callable = subprocess.run) -> bool:
     return int(match.group(1)) >= SHELLY_MODERN_MAJOR
 
 
-def helper_upgrade_command(helper: str, *, shelly_modern: bool = True) -> List[str]:
+def helper_upgrade_command(
+    helper: str,
+    *,
+    shelly_modern: bool = True,
+    executable: Optional[TrustedExecutable] = None,
+) -> List[str]:
     if helper == "none":
-        return ["sudo", "pacman", "-Syu"]
+        return [TRUSTED_SUDO_PATH, TRUSTED_PACMAN_PATH, "-Syu"]
+    executable_path = executable.path if executable is not None else f"/usr/bin/{helper}"
     if helper == "shelly":
         command = (
             SHELLY_MODERN_UPGRADE_COMMAND
             if shelly_modern
             else SHELLY_LEGACY_UPGRADE_COMMAND
         )
-        return list(command)
-    return [helper, "-Syu"]
+        return [executable_path] + list(command[1:])
+    return [executable_path, "-Syu"]
 
 
 def _shelly_syntax_error(output: str) -> bool:
@@ -1886,23 +2292,34 @@ def _shelly_syntax_error(output: str) -> bool:
 def query_helper_updates(
     helper: str,
     *,
+    executable: Optional[TrustedExecutable],
     runner: Callable = subprocess.run,
     shelly_modern: bool = True,
 ) -> Dict[str, object]:
+    if executable is None:
+        return {"ok": False, "packages": [], "error": f"{helper} AUR update query has no trusted executable"}
     if helper == "shelly":
-        query_commands = (
+        query_templates = (
             [SHELLY_MODERN_AUR_QUERY, SHELLY_LEGACY_AUR_QUERY]
             if shelly_modern
             else [SHELLY_LEGACY_AUR_QUERY, SHELLY_MODERN_AUR_QUERY]
         )
+        query_commands = [[executable.path] + list(command[1:]) for command in query_templates]
         parser = parse_shelly_updates
     else:
-        query_commands = [[helper, "-Qua"]]
+        query_commands = [[executable.path, "-Qua"]]
         parser = parse_aur_updates
     for index, cmd in enumerate(query_commands):
         try:
-            result = runner(cmd, capture_output=True, text=True, check=False)
-        except OSError as exc:
+            result = _run_trusted_command(
+                cmd,
+                [executable],
+                runner=runner,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except (OSError, UnsafeUpgradeExecutable) as exc:
             return {"ok": False, "packages": [], "error": f"{helper} AUR update query failed: {exc}"}
         stdout = str(getattr(result, "stdout", "") or "")
         stderr = str(getattr(result, "stderr", "") or "").strip()
@@ -1929,7 +2346,7 @@ def query_helper_updates(
             "error": "",
         }
         if helper == "shelly":
-            response["shelly_modern"] = list(cmd) == SHELLY_MODERN_AUR_QUERY
+            response["shelly_modern"] = list(cmd[1:]) == SHELLY_MODERN_AUR_QUERY[1:]
         return response
     return {
         "ok": False,
@@ -2063,6 +2480,18 @@ def analyze_upgrade_risks(
             evidence,
         ))
         return findings
+
+    if plan.aur_packages:
+        findings.append(_finding(
+            "UPG-AUR-BUILD-UNSCANNED",
+            Severity.CRITICAL,
+            "Automatic AUR source-build handoff is blocked.",
+            "The helper query found planned AUR package builds, but AuraScan cannot prove that the helper will route each build through AuraScan's scan wrapper.",
+            "An AUR helper can acquire and execute package build instructions after preflight. A trusted helper binary does not establish trust in the PKGBUILD, install hook, or downloaded sources it will process.",
+            "Run the repository-only upgrade with --aur-helper none. Inspect and build each AUR update through aurascan-makepkg before installing it.",
+            f"planned AUR builds={len(plan.aur_packages)}; helper={plan.selected_helper}; verified scan-wrapper integration=no",
+            blocking=True,
+        ))
 
     if plan.helper_error:
         severity = Severity.MEDIUM if snapshot.foreign_packages else Severity.LOW
@@ -2293,7 +2722,11 @@ def apply_ai_upgrade_review(
 
     config = resolve_ai_config(os.environ)
     if config.error:
-        report.ai_review = {"enabled": False, "status": "config_error", "error": config.error}
+        report.ai_review = {
+            "enabled": False,
+            "status": "config_error",
+            "error": "AI provider configuration is invalid",
+        }
         return
     if not config.ready:
         report.ai_review = {"enabled": False, "status": "not_configured"}
@@ -2303,23 +2736,32 @@ def apply_ai_upgrade_review(
     try:
         text = call_ai_provider(config, prompt, timeout=20, urlopen=urlopen)
     except Exception as exc:
-        report.ai_review = {"enabled": True, "provider": config.provider, "status": "error", "error": str(exc)}
+        report.ai_review = {
+            "enabled": True,
+            "provider": config.provider,
+            "status": "error",
+            "error": safe_provider_error_detail(exc),
+        }
         return
 
     try:
-        data = json.loads(text)
-        if not isinstance(data, dict):
-            raise ValueError("AI response was not a JSON object")
-    except Exception as exc:
-        report.ai_review = {"enabled": True, "provider": config.provider, "status": "invalid_response", "error": str(exc)}
+        data = load_strict_json_object(text, max_chars=UPGRADE_AI_MAX_RESPONSE_CHARS)
+        validated = validate_upgrade_ai_response(report, data)
+    except Exception:
+        report.ai_review = {
+            "enabled": True,
+            "provider": config.provider,
+            "status": "invalid_response",
+            "error": "AI response rejected by guarded advisory contract",
+        }
         return
 
-    applied = apply_ai_risk_raises(report, data)
+    applied = apply_ai_risk_raises(report, validated)
     report.ai_review = {
         "enabled": True,
         "provider": config.provider,
         "status": "ok",
-        "summary": normalize_upgrade_ai_summary(report, str(data.get("summary") or "")),
+        "summary": normalize_upgrade_ai_summary(report, str(validated["summary"])),
         "raises_applied": applied,
     }
 
@@ -2391,6 +2833,7 @@ def build_upgrade_ai_prompt(report: UpgradePreflightReport) -> str:
         "You are AuraScan's upgrade preflight reviewer for Arch-family systems.\n"
         "Use only the JSON data below. Do not claim the upgrade is safe.\n"
         "You may only suggest risk raises, never risk reductions. Do not suggest hard blocking.\n"
+        "Never dismiss or reinterpret an existing deterministic blocker; only AuraScan policy determines whether a handoff is allowed.\n"
         "Do not create package commands or package-fix plans; AuraScan's deterministic kernel/module autopilot owns those decisions.\n"
         "Do not propose arbitrary pacman.conf or mirrorlist edits; AuraScan's deterministic repository_health repair owns mirrorlist recovery decisions.\n"
         "Do not dismiss, lower, or reinterpret deterministic security_audit campaign matches or Arch security advisories.\n"
@@ -2402,69 +2845,92 @@ def build_upgrade_ai_prompt(report: UpgradePreflightReport) -> str:
         "Do not raise risk merely because foreign/AUR packages exist when AuraScan's foreign package dependency check reports no issues and the helper query succeeded.\n"
         "Avoid telling the user to manually verify compatibility unless AuraScan found a concrete issue or a named check could not run.\n"
         "For .pacnew/.pacsave config drift, do not recommend rebooting or restarting services merely because files exist; recommend merging config and restarting only affected services when config actually changes.\n"
-        "Return strict JSON only, with this shape:\n"
-        "{\"summary\":\"short plain-language summary\",\"risk_raises\":[{\"target_rule_id\":\"existing rule id or empty\",\"severity\":\"MEDIUM or HIGH\",\"reason\":\"why\",\"recommended_action\":\"what to do\"}]}\n"
-        "Do not include secrets, markdown, or extra text.\n\n"
+        "A risk raise must target one rule_id already present in deterministic_findings. Return an empty risk_raises list when no listed rule needs a higher severity.\n"
+        "Every prose value must be one short line without terminal labels, controls, URLs, credentials, commands, executable instructions, or claims that an upgrade, transaction, package, or machine is safe or compromised.\n"
+        "Return strict JSON only, with exactly this shape and no extra keys:\n"
+        "{\"summary\":\"short plain-language summary\",\"risk_raises\":[{\"target_rule_id\":\"listed deterministic rule id\",\"severity\":\"MEDIUM or HIGH\",\"reason\":\"why this existing finding warrants the higher severity\"}]}\n"
+        "Do not include secrets, markdown, actions, commands, or extra text.\n\n"
         + json.dumps(payload, sort_keys=True)
     )
 
 
-def apply_ai_risk_raises(report: UpgradePreflightReport, data: Mapping[str, object]) -> int:
-    raises = data.get("risk_raises", [])
-    if not isinstance(raises, list):
-        return 0
+def validate_upgrade_ai_response(
+    report: UpgradePreflightReport,
+    data: Mapping[str, object],
+) -> Dict[str, object]:
+    if set(data) != {"summary", "risk_raises"}:
+        raise ValueError("AI upgrade response schema did not match")
+    summary = _validate_upgrade_ai_text(
+        data.get("summary"),
+        max_chars=UPGRADE_AI_MAX_SUMMARY_CHARS,
+        allow_empty=False,
+    )
+    raises = data.get("risk_raises")
+    if not isinstance(raises, list) or len(raises) > UPGRADE_AI_MAX_RISK_RAISES:
+        raise ValueError("AI upgrade risk_raises must be a bounded list")
+    known_rules = {
+        finding.rule_id
+        for finding in report.findings
+        if finding.source == "deterministic"
+    }
+    validated_raises: List[Dict[str, str]] = []
+    seen_targets = set()
+    for item in raises:
+        if not isinstance(item, Mapping) or set(item) != {"target_rule_id", "severity", "reason"}:
+            raise ValueError("AI upgrade risk entry schema did not match")
+        target = item.get("target_rule_id")
+        severity = item.get("severity")
+        if not isinstance(target, str) or not target or len(target) > 200 or target not in known_rules:
+            raise ValueError("AI upgrade risk target was not a known deterministic rule")
+        if target in seen_targets:
+            raise ValueError("AI upgrade risk target was duplicated")
+        if not isinstance(severity, str) or severity not in {"MEDIUM", "HIGH"}:
+            raise ValueError("AI upgrade risk severity was invalid")
+        reason = _validate_upgrade_ai_text(
+            item.get("reason"),
+            max_chars=UPGRADE_AI_MAX_REASON_CHARS,
+            allow_empty=False,
+        )
+        seen_targets.add(target)
+        validated_raises.append({
+            "target_rule_id": target,
+            "severity": severity,
+            "reason": reason,
+        })
+    return {"summary": summary, "risk_raises": validated_raises}
+
+
+def _validate_upgrade_ai_text(value: object, *, max_chars: int, allow_empty: bool = True) -> str:
+    text = validate_model_advisory_text(
+        value,
+        max_chars=max_chars,
+        allow_empty=allow_empty,
+    )
+    if UPGRADE_AI_UNSUPPORTED_CONCLUSION_RE.search(text):
+        raise ValueError("AI upgrade text made an unsupported upgrade-state claim")
+    return text
+
+
+def apply_ai_risk_raises(
+    report: UpgradePreflightReport,
+    data: Mapping[str, object],
+) -> int:
+    normalized = validate_upgrade_ai_response(report, data)
+    raises = normalized["risk_raises"]
     by_rule = {finding.rule_id: finding for finding in report.findings}
     applied = 0
     for item in raises:
-        if not isinstance(item, Mapping):
-            continue
-        severity = _ai_severity(str(item.get("severity") or ""))
-        if severity is None:
-            continue
-        target = str(item.get("target_rule_id") or item.get("rule_id") or "").strip()
-        reason = str(item.get("reason") or "").strip()
-        action = str(item.get("recommended_action") or "Review this risk before upgrading.").strip()
-        if _is_vague_foreign_ai_raise(report, target, reason):
-            continue
+        severity = Severity(str(item["severity"]))
+        target = str(item["target_rule_id"])
+        reason = str(item["reason"])
         if _is_metadata_only_transition_ai_raise(report, target, reason):
             continue
-        if target and target in by_rule:
-            finding = by_rule[target]
-            if SEVERITY_ORDER.index(severity) > SEVERITY_ORDER.index(finding.severity):
-                finding.severity = severity
-                finding.summary = f"{finding.summary} AI review raised this risk: {reason}" if reason else finding.summary
-                applied += 1
-            continue
-        report.findings.append(UpgradeFinding(
-            rule_id="UPG-AI-RISK",
-            severity=severity,
-            title="AI review found an additional upgrade risk.",
-            summary=reason or "AI review found a risk correlation worth reviewing.",
-            why_it_matters="AI review can connect multiple preflight signals, but it can be wrong and cannot prove the upgrade is unsafe by itself.",
-            recommended_action=action,
-            evidence="AI raise-only preflight review",
-            source="ai_review",
-        ))
-        applied += 1
+        finding = by_rule[target]
+        if SEVERITY_ORDER.index(severity) > SEVERITY_ORDER.index(finding.severity):
+            finding.severity = severity
+            finding.summary = f"{finding.summary} AI review raised this risk: {reason}"
+            applied += 1
     return applied
-
-
-def _is_vague_foreign_ai_raise(report: UpgradePreflightReport, target: str, reason: str) -> bool:
-    if target:
-        return False
-    text = reason.lower()
-    if not any(token in text for token in ("foreign", "aur package", "aur packages", "aur ")):
-        return False
-    foreign_coverage_gap_rules = {
-        "UPG-AUR-HELPER-UNAVAILABLE",
-        "UPG-AUR-NOT-CHECKED",
-        "UPG-AUR-DEPENDENCY-MISSING",
-        "UPG-AUR-CONFLICTS",
-    }
-    has_foreign_coverage_gap = any(finding.rule_id in foreign_coverage_gap_rules for finding in report.findings)
-    helper_succeeded = report.plan.selected_helper != "none" and not report.plan.helper_error
-    local_issues = foreign_package_dependency_issues(report.snapshot, report.plan)
-    return helper_succeeded and not has_foreign_coverage_gap and not local_issues
 
 
 def _is_metadata_only_transition_ai_raise(report: UpgradePreflightReport, target: str, reason: str) -> bool:
@@ -2480,6 +2946,8 @@ def _is_metadata_only_transition_ai_raise(report: UpgradePreflightReport, target
 
 def normalize_upgrade_ai_summary(report: UpgradePreflightReport, summary: str) -> str:
     text = summary.strip()
+    if report.blocks_upgrade:
+        return "AI review is advisory and cannot clear AuraScan's deterministic AUR source-build blocker."
     lowered = text.lower()
     manual_transition_claim = (
         any(token in lowered for token in ("manual resolution", "resolve manually", "manually resolve"))
@@ -2493,15 +2961,6 @@ def normalize_upgrade_ai_summary(report: UpgradePreflightReport, summary: str) -
             "and AuraScan will verify the planned versions afterward."
         )
     return text
-
-
-def _ai_severity(value: str) -> Optional[Severity]:
-    normalized = value.strip().upper()
-    if normalized == "CRITICAL":
-        return Severity.HIGH
-    if normalized in {"MEDIUM", "HIGH"}:
-        return Severity(normalized)
-    return None
 
 
 def is_kernel_package(name: str) -> bool:
@@ -2560,10 +3019,20 @@ def count_pacnew_pacsave(root: Path, *, max_entries: int = 20000) -> Tuple[int, 
     return pacnew, pacsave, False
 
 
-def collect_foreign_package_info(packages: Iterable[str], *, runner: Callable = subprocess.run) -> List[ForeignPackageInfo]:
+def collect_foreign_package_info(
+    packages: Iterable[str],
+    *,
+    runner: Callable = subprocess.run,
+    pacman_executable: Optional[TrustedExecutable] = None,
+) -> List[ForeignPackageInfo]:
     info: List[ForeignPackageInfo] = []
+    if pacman_executable is None:
+        try:
+            pacman_executable = capture_trusted_executable("pacman", TRUSTED_PACMAN_PATH)
+        except UnsafeUpgradeExecutable:
+            return [ForeignPackageInfo(name=package) for package in packages]
     for package in packages:
-        text = _command_text(runner, ["pacman", "-Qi", package])
+        text = _trusted_command_text(runner, pacman_executable, ["-Qi", package])
         if not text:
             info.append(ForeignPackageInfo(name=package))
             continue
@@ -2571,7 +3040,11 @@ def collect_foreign_package_info(packages: Iterable[str], *, runner: Callable = 
         if not item.name:
             item.name = package
         if item.depends:
-            missing = _command_stdout_lines(runner, ["pacman", "-T"] + item.depends)
+            missing = _trusted_command_stdout_lines(
+                runner,
+                pacman_executable,
+                ["-T"] + item.depends,
+            )
             item.missing_depends = missing
         info.append(item)
     return info
@@ -2633,6 +3106,8 @@ def _finding(
     why: str,
     action: str,
     evidence: str,
+    *,
+    blocking: bool = False,
 ) -> UpgradeFinding:
     return UpgradeFinding(
         rule_id=rule_id,
@@ -2642,6 +3117,7 @@ def _finding(
         why_it_matters=why,
         recommended_action=action,
         evidence=evidence,
+        blocking=blocking,
     )
 
 
@@ -2661,6 +3137,60 @@ def _command_text(runner: Callable, cmd: Sequence[str]) -> str:
     if int(getattr(result, "returncode", 0)) != 0:
         return ""
     return str(getattr(result, "stdout", "") or "").strip()
+
+
+def _trusted_command_text(
+    runner: Callable,
+    executable: TrustedExecutable,
+    args: Sequence[str],
+) -> str:
+    try:
+        result = _run_trusted_command(
+            [executable.path] + list(args),
+            [executable],
+            runner=runner,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except UnsafeUpgradeExecutable:
+        raise
+    except OSError:
+        return ""
+    if int(getattr(result, "returncode", 0)) != 0:
+        return ""
+    return str(getattr(result, "stdout", "") or "").strip()
+
+
+def _trusted_command_lines(
+    runner: Callable,
+    executable: TrustedExecutable,
+    args: Sequence[str],
+) -> List[str]:
+    text = _trusted_command_text(runner, executable, args)
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _trusted_command_stdout_lines(
+    runner: Callable,
+    executable: TrustedExecutable,
+    args: Sequence[str],
+) -> List[str]:
+    try:
+        result = _run_trusted_command(
+            [executable.path] + list(args),
+            [executable],
+            runner=runner,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except UnsafeUpgradeExecutable:
+        raise
+    except OSError:
+        return []
+    text = str(getattr(result, "stdout", "") or "")
+    return [line.strip() for line in text.splitlines() if line.strip()]
 
 
 def _command_lines(runner: Callable, cmd: Sequence[str]) -> List[str]:

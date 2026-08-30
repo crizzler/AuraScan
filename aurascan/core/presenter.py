@@ -3,6 +3,7 @@ from typing import Dict, Iterable, List, Tuple
 
 from aurascan.core.models import Finding, Severity
 from aurascan.core.rule_metadata import RuleCategory, get_display_group, get_display_priority, get_rule_metadata
+from aurascan.core.text_safety import sanitize_terminal_text
 
 
 _SEVERITY_ORDER = [Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL]
@@ -102,6 +103,62 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
         "not_prove": "This static match does not prove that a push ran, succeeded, or changed any remote repository, but the propagation chain is unsafe enough to block the package.",
         "action": "Do not build or install this revision. Preserve the package metadata and review the full repository-modification logic from a trusted environment.",
     },
+    "SUPPLYCHAIN-REMOTE-STAGE-EXEC-001": {
+        "title": "Package downloads content and then executes it.",
+        "summary": "The PKGBUILD or install hook writes remote content to a local artifact and later executes that artifact or content derived from it.",
+        "why": "A harmless-looking first stage can defer its real behavior to mutable content fetched during a build or privileged install hook.",
+        "checked": "AuraScan correlated command-position fetch, bounded transformation, and execution paths as static shell text. It did not fetch, decode, or execute the content.",
+        "not_prove": "The static chain does not prove a connection occurred, what bytes a server returned, or that execution succeeded. It is still unsafe enough to block automatic installation.",
+        "action": "Do not build or install this revision until the complete remote-content integrity and execution chain has been reviewed from a trusted environment.",
+    },
+    "SUPPLYCHAIN-OPAQUE-CARRIER-EXEC-001": {
+        "title": "Package executes code through an opaque carrier.",
+        "summary": "The PKGBUILD or install hook decodes local content into a file and later executes that exact file, or invokes a media, document, or font-named file as code.",
+        "why": "Executable content can be disguised as an ordinary picture, document, font, or encoded asset so a surface review sees only an apparently inert file.",
+        "checked": "AuraScan correlated active decode, artifact, and execution commands as bounded text. It did not decode, render, import, or execute the carrier.",
+        "not_prove": "The static chain does not establish what bytes the carrier contains, why it was named this way, or whether execution would succeed. The behavior is still unsafe enough to block automatically.",
+        "action": "Do not build or install this revision until the complete carrier and every transformation and execution step have been independently reviewed.",
+    },
+    "STATIC-REMOTE-STAGE-INSPECTION-INCOMPLETE-001": {
+        "title": "Remote-stage inspection did not complete.",
+        "summary": "AuraScan could not finish its bounded correlation of downloaded artifacts and later execution in package text.",
+        "why": "Treating a parser or resource limit as a clear result could let a padded or malformed loader hide beyond the inspected command set.",
+        "checked": "AuraScan parsed package logic as inert text with fixed input and command limits and did not execute any command.",
+        "not_prove": "Incomplete inspection is not evidence that a download or execution occurred; it means AuraScan cannot safely authorize this revision.",
+        "action": "Do not build or install until the complete package logic can be inspected within the static-analysis bounds.",
+    },
+    "DEEPSTATIC-REMOTE-STAGE-EXEC-001": {
+        "title": "Downloaded source contains a second-stage execution chain.",
+        "summary": "A source file writes additional remote content to a local artifact and later executes that artifact or content derived from it.",
+        "why": "A reviewed source archive can still act as a loader for mutable code that is absent from the declared, checksummed source set.",
+        "checked": "AuraScan inspected bounded source text and correlated the fetch and execution paths without running the source or acquiring the second stage.",
+        "not_prove": "The static chain does not prove a connection occurred, what bytes were returned, or that execution succeeded.",
+        "action": "Do not build this source revision until the undeclared remote stage and its integrity controls have been independently reviewed.",
+    },
+    "DEEPSTATIC-OPAQUE-CARRIER-EXEC-001": {
+        "title": "Downloaded source executes code through an opaque carrier.",
+        "summary": "A source file decodes local content into a file and later executes that exact file, or invokes a media, document, or font-named file as code.",
+        "why": "A source archive can disguise executable content as an ordinary asset so its filename and surrounding project appear harmless during review.",
+        "checked": "AuraScan correlated the active carrier and execution commands in bounded source text. It did not decode, render, import, or execute the carrier.",
+        "not_prove": "The static chain does not establish the carrier's bytes, intent, or whether execution would succeed, but this source revision should not be built automatically.",
+        "action": "Do not build this source revision until the complete carrier and every transformation and execution step have been independently reviewed.",
+    },
+    "DEEPSTATIC-INSPECTION-INCOMPLETE-001": {
+        "title": "Acquired-source inspection did not complete safely.",
+        "summary": "AuraScan reached a source-tree entry or candidate-file bound, or could not bind a candidate to an unchanged regular-file read.",
+        "why": "Allowing a build after only part of an acquired source tree was inspected would let relevant build or loader logic remain outside the static review.",
+        "checked": "AuraScan enumerated and read source candidates with fixed entry, candidate, and file-size limits and without following symlinks or executing content.",
+        "not_prove": "An incomplete inspection does not prove that the source is malicious; it means AuraScan cannot safely authorize this source revision.",
+        "action": "Do not build or install until the complete source tree can be inspected within the configured bounds from a trusted environment.",
+    },
+    "DEEPSTATIC-NESTED-ARCHIVE-UNINSPECTED-001": {
+        "title": "A nested source archive remains uninspected.",
+        "summary": "An acquired source tree contains another archive that AuraScan did not recursively expand.",
+        "why": "Build logic can unpack and execute files from nested archives, so scanning only the outer tree would leave part of the source outside static review.",
+        "checked": "AuraScan identified the nested archive as inert source-tree content and did not extract or execute it.",
+        "not_prove": "A nested archive is not evidence of malware; this blocker records incomplete inspection.",
+        "action": "Inspect every nested archive independently with equivalent bounds before building or installing.",
+    },
     "INSTALL-HOOK-UNINSPECTED-001": {
         "title": "Declared install hook could not be inspected safely.",
         "summary": "The PKGBUILD declares local install code, but AuraScan could not bind it to a bounded, unchanged regular file inside the package directory.",
@@ -109,6 +166,14 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
         "checked": "AuraScan parsed the literal install declaration and attempted a bounded no-follow read without sourcing the PKGBUILD or executing the hook.",
         "not_prove": "An inspection failure does not prove the package or hook is malicious; it means the scan is incomplete and cannot safely authorize the build.",
         "action": "Repair or fully materialize the package checkout, ensure the hook is a local regular file with no symlinked path component, and scan again.",
+    },
+    "PACKAGE-INSTALL-HOOK-UNINSPECTED-001": {
+        "title": "Built package install hook could not be inspected safely.",
+        "summary": "AuraScan could not obtain a bounded, stable text view of the package archive's install-time control file.",
+        "why": "A built package install hook can run with package-manager privileges, so an incomplete archive inspection cannot authorize installation.",
+        "checked": "AuraScan opened the package without following a symlink and asked the system archive reader for a bounded member listing and hook payload.",
+        "not_prove": "The inspection failure does not prove the package is malicious; it means privileged install code may remain unreviewed.",
+        "action": "Do not install this archive. Obtain a valid unchanged package and scan it again, or inspect its structure from a trusted environment.",
     },
     "EXEC-INSTALL-HOOK-SUDO-001": {
         "title": "Install hook launches a command through sudo.",
@@ -382,6 +447,30 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
         "not_prove": "This does not prove the repository is malicious; the network, host, or ref may have failed.",
         "action": "Manually verify the repository and requested ref before installing.",
     },
+    "SOURCE-OFFLINE-UNINSPECTED": {
+        "title": "Offline mode left a remote source uninspected.",
+        "summary": "AuraScan made no network request, so it could not inspect one declared remote source.",
+        "why": "A deep-static result is incomplete when any declared source content was unavailable for analysis.",
+        "checked": "AuraScan classified the source declaration and enforced offline mode before any HTTP or Git acquisition call.",
+        "not_prove": "This does not mean the source is malicious; it means AuraScan cannot call this deep-static scan complete.",
+        "action": "Inspect a trusted local copy or rerun explicit deep-static acquisition with network access before installing.",
+    },
+    "SOURCE-LOCAL-UNSAFE": {
+        "title": "A local source could not be captured safely.",
+        "summary": "AuraScan refused a local source that escaped the package directory, used a link or special file, exceeded its bound, or changed while being copied.",
+        "why": "Following unsafe paths or scanning unstable bytes could expose unrelated files or produce a misleading source result.",
+        "checked": "AuraScan used bounded no-follow file-descriptor reads and required an unchanged regular file beneath the package directory.",
+        "not_prove": "This does not prove malicious intent; it means the declared local source was not safely inspectable.",
+        "action": "Use a complete package checkout containing ordinary local source files, then scan again before installing.",
+    },
+    "SOURCE-UNINSPECTED": {
+        "title": "Deep source inspection is incomplete.",
+        "summary": "At least one declared source did not become inspectable content during this deep-static run.",
+        "why": "A clear deep-static result must cover every declared source rather than silently skipping one.",
+        "checked": "AuraScan tracked each declared source acquisition independently.",
+        "not_prove": "This does not prove the package is malicious; it records missing inspection evidence.",
+        "action": "Do not install until every declared source can be acquired and inspected safely.",
+    },
     "SOURCE-GIT-COMMIT-NOT-FULL": {
         "title": "Git source is pinned with a short commit identifier.",
         "summary": "AuraScan found a Git source commit fragment that is not a full commit hash.",
@@ -413,6 +502,38 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
         "checked": "AuraScan checked whether the file was a supported tar or zip archive before extraction.",
         "not_prove": "This does not prove the archive is unsafe; it means AuraScan could not complete archive safety checks.",
         "action": "Inspect the archive manually or use a supported source format.",
+    },
+    "ARCHIVE-INPUT-UNSAFE": {
+        "title": "Archive input could not be captured safely.",
+        "summary": "AuraScan refused an archive that was linked, non-regular, oversized, unavailable, or changing during capture.",
+        "why": "Scanning bytes that differ from the bytes later extracted can create a false clear result.",
+        "checked": "AuraScan captured the archive with bounded no-follow reads and verified its identity and digest around inspection.",
+        "not_prove": "This does not prove malicious intent; it means AuraScan could not bind the result to stable archive bytes.",
+        "action": "Use an unchanged regular archive from a trusted package checkout and scan it again before installing.",
+    },
+    "ARCHIVE-EXTRACTION-FAILED": {
+        "title": "Archive extraction was incomplete.",
+        "summary": "AuraScan stopped and removed its temporary output because the archive could not be extracted safely and completely.",
+        "why": "A partial source tree can hide behavior in entries that were never reached or fully copied.",
+        "checked": "AuraScan extracted into private staging and required consistent member sizes and an unchanged input snapshot.",
+        "not_prove": "This does not prove the archive is malicious; it records incomplete static inspection.",
+        "action": "Do not install until the complete archive can be inspected independently.",
+    },
+    "ARCHIVE-SPECIAL-FILE": {
+        "title": "Archive contains a special entry type.",
+        "summary": "AuraScan found a device, FIFO, or other unsupported non-regular archive member.",
+        "why": "Materializing special entries is unsafe and skipping them would leave the archive only partially inspected.",
+        "checked": "AuraScan classified archive members before transactional extraction.",
+        "not_prove": "This does not prove compromise; it means the archive cannot be treated as a fully inspected ordinary source tree.",
+        "action": "Inspect the archive provenance and contents independently; do not extract it automatically.",
+    },
+    "ARCHIVE-LINK-UNINSPECTED": {
+        "title": "Archive link behavior was not fully inspected.",
+        "summary": "AuraScan found an internal symbolic or hard link that its safe extractor deliberately did not materialize.",
+        "why": "Silently skipping a link can hide which content a build accesses through that linked path.",
+        "checked": "AuraScan validated the link metadata and refused to call the resulting partial tree a complete inspection.",
+        "not_prove": "This does not prove the link is malicious; it records a deliberate static-analysis limitation.",
+        "action": "Inspect the link target and build-time use independently before installing.",
     },
     "ARCHIVE-SUSPICIOUS-FILE": {
         "title": "Source archive contains a file worth reviewing.",
@@ -658,22 +779,27 @@ class FindingPresenter:
                 current_section = group.section
             elif index:
                 lines.append("")
-            lines.append(group.title)
+            lines.append(sanitize_terminal_text(group.title))
             if group.summary:
-                lines.append(group.summary)
+                lines.append(sanitize_terminal_text(group.summary))
             if group.why_it_matters:
-                lines.append(f"Why it matters: {group.why_it_matters}")
+                lines.append("Why it matters: " + sanitize_terminal_text(group.why_it_matters))
             if group.checked:
-                lines.append(f"What AuraScan checked: {group.checked}")
+                lines.append("What AuraScan checked: " + sanitize_terminal_text(group.checked))
             if group.not_prove:
-                lines.append(f"What AuraScan did not prove: {group.not_prove}")
+                lines.append("What AuraScan did not prove: " + sanitize_terminal_text(group.not_prove))
             if group.recommended_action:
-                lines.append(f"Recommended action: {group.recommended_action}")
+                lines.append("Recommended action: " + sanitize_terminal_text(group.recommended_action))
             if verbose:
                 lines.append("Technical details:")
                 for finding in group.findings:
                     detail = finding.technical_details or finding.evidence_snippet or finding.file_path
-                    lines.append(f"- {finding.rule_id} ({finding.severity.value}): {detail}")
+                    lines.append(
+                        "- "
+                        + sanitize_terminal_text(finding.rule_id, max_chars=256)
+                        + f" ({finding.severity.value}): "
+                        + sanitize_terminal_text(detail)
+                    )
 
         if hidden and not verbose:
             note = "lower-risk note hidden" if len(hidden) == 1 else "lower-risk notes hidden"
@@ -774,6 +900,13 @@ class FindingPresenter:
         )
 
     def _template(self, finding: Finding) -> Dict[str, str]:
+        if finding.rule_id in {"CLAMAV-TIMEOUT", "CLAMAV-INCOMPLETE"}:
+            return {
+                "title": "ClamAV inspection did not complete safely.",
+                "summary": "The trusted ClamAV process could not finish within AuraScan's time and output limits.",
+                "why": "An incomplete malware-signature scan is not evidence that a file is clean or malicious.",
+                "action": "Do not install until the file can be scanned completely or inspected independently.",
+            }
         if finding.rule_id.startswith("CLAMAV-"):
             return {
                 "title": "Known malware signature detected.",

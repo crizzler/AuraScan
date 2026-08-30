@@ -11,6 +11,7 @@ from aurascan.analyzers.history import HistoryAnalyzer
 from aurascan.analyzers.source_metadata import SourceMetadataAnalyzer
 from aurascan.core.cache import ScanCache
 from aurascan.core.engine import AuraScanEngine
+from aurascan.core.trusted_tools import TrustedTool
 from aurascan.makepkg_wrapper import run as run_makepkg_wrapper
 
 
@@ -151,11 +152,22 @@ def test_curated_makepkg_wrapper_fixtures(manifest, tmp_path):
         return Completed(0)
 
     stdout = io.StringIO()
+    makepkg_tool = TrustedTool(
+        "makepkg",
+        "/usr/bin/makepkg",
+        1,
+        2,
+        0,
+        0,
+        0o100755,
+    )
     code = run_makepkg_wrapper(
         ["--aurascan-json"],
         cwd=work,
         engine_factory=factory,
         makepkg_locator=lambda: "/usr/bin/makepkg",
+        makepkg_tool_capture=lambda *_args, **_kwargs: makepkg_tool,
+        makepkg_tool_revalidate=lambda _tool: None,
         subprocess_run=runner,
         stdout=stdout,
         stderr=io.StringIO(),

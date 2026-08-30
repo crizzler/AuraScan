@@ -17,6 +17,12 @@ from aurascan.core.install_hook import (
     PackageScanInputError,
     capture_package_scan_input,
 )
+from aurascan.core.trusted_tools import (
+    TrustedTool,
+    TrustedToolError,
+    capture_trusted_system_tool,
+    revalidate_trusted_system_tool,
+)
 from aurascan.core.review import (
     ReviewDecision,
     ReviewDecisionStatus,
@@ -107,6 +113,8 @@ def run(
     cwd: Optional[Path] = None,
     engine_factory: Callable[..., AuraScanEngine] = AuraScanEngine,
     makepkg_locator: Callable[[], str] = None,
+    makepkg_tool_capture: Callable[..., Optional[TrustedTool]] = None,
+    makepkg_tool_revalidate: Callable[[TrustedTool], None] = None,
     subprocess_run: Callable[..., object] = subprocess.run,
     review_store: Optional[ReviewDecisionStore] = None,
     stdout: TextIO = None,
@@ -116,6 +124,8 @@ def run(
     stderr = stderr or sys.stderr
     cwd_path = Path(cwd or os.getcwd())
     makepkg_locator = makepkg_locator or locate_real_makepkg
+    makepkg_tool_capture = makepkg_tool_capture or capture_trusted_system_tool
+    makepkg_tool_revalidate = makepkg_tool_revalidate or revalidate_trusted_system_tool
     raw_argv = list(argv if argv is not None else sys.argv[1:])
     json_requested = _argv_requests_json(raw_argv)
 
@@ -308,23 +318,26 @@ def run(
             candidates,
         )
 
-    makepkg_path = makepkg_locator()
-    if not makepkg_path:
-        error = "Could not locate a real makepkg executable in PATH."
-        if options.json_output:
-            _emit_json(stdout, _wrapper_envelope(
-                options,
-                action="error",
-                wrapper_exit_code=EXIT_MAKEPKG_NOT_FOUND,
-                pkgbuild_path=str(pkgbuild_path),
-                scan_report=report,
-                makepkg_invoked=False,
-                errors=[error],
-                warnings=scan_warnings,
-            ))
-        else:
-            print(f"[AuraScan] {error}", file=stderr)
-        return EXIT_MAKEPKG_NOT_FOUND
+    try:
+        makepkg_tool = makepkg_tool_capture(
+            "makepkg",
+            which=lambda _name: makepkg_locator() or None,
+        )
+    except (OSError, TypeError, TrustedToolError):
+        makepkg_tool = None
+    if (
+        makepkg_tool is None
+        or makepkg_tool.name != "makepkg"
+        or os.path.normpath(makepkg_tool.path) != "/usr/bin/makepkg"
+    ):
+        return _emit_makepkg_tool_unavailable(
+            options,
+            report,
+            pkgbuild_path,
+            stdout,
+            stderr,
+            scan_warnings,
+        )
 
     if _matching_scan_input(engine, pkgbuild_path) is None:
         return _emit_scan_input_changed(
@@ -360,9 +373,20 @@ def run(
         if not options.json_output:
             _print_review_accepted(stdout)
 
+    try:
+        makepkg_tool_revalidate(makepkg_tool)
+    except (OSError, TypeError, TrustedToolError):
+        return _emit_makepkg_tool_unavailable(
+            options,
+            report,
+            pkgbuild_path,
+            stdout,
+            stderr,
+            scan_warnings,
+        )
     if not options.json_output:
         _print_passed(stdout)
-    result = subprocess_run([makepkg_path] + options.makepkg_args, cwd=str(cwd_path), check=False)
+    result = subprocess_run([makepkg_tool.path] + options.makepkg_args, cwd=str(cwd_path), check=False)
     makepkg_exit_code = int(getattr(result, "returncode", 0))
     if options.json_output:
         if makepkg_exit_code != 0:
@@ -383,6 +407,31 @@ def run(
             warnings=scan_warnings,
         ))
     return makepkg_exit_code
+
+
+def _emit_makepkg_tool_unavailable(
+    options: MakepkgWrapperOptions,
+    report,
+    pkgbuild_path: Path,
+    stdout: TextIO,
+    stderr: TextIO,
+    scan_warnings,
+) -> int:
+    error = "Could not locate or safely revalidate the trusted system makepkg executable."
+    if options.json_output:
+        _emit_json(stdout, _wrapper_envelope(
+            options,
+            action="error",
+            wrapper_exit_code=EXIT_MAKEPKG_NOT_FOUND,
+            pkgbuild_path=str(pkgbuild_path),
+            scan_report=report,
+            makepkg_invoked=False,
+            errors=[error],
+            warnings=scan_warnings,
+        ))
+    else:
+        print(f"[AuraScan] {error}", file=stderr)
+    return EXIT_MAKEPKG_NOT_FOUND
 
 
 def _matching_scan_input(engine, pkgbuild_path: Path) -> Optional[PackageScanInput]:

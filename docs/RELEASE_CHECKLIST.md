@@ -16,6 +16,18 @@ candidate.
   configured-remote AUR push binding, incomplete correlations, comments and
   quoted documentation, dry-run pushes, explicitly non-AUR pushes, and the
   arbitrary acquired-source release-tooling negative.
+- Remote-stage and opaque-carrier tests cover complete artifact-bound chains,
+  local decode/execute and carrier-named invocation, every incomplete
+  correlation, overwritten/moved artifacts, parser truncation, comments,
+  messages, quoted examples, arrays, and inert image/font/archive/text assets.
+- Source-parser tests cover literal assignment/append, indentation, trailing
+  comments, quoted delimiters, malformed/dynamic/indirect mutations,
+  subscripts, eval/sourcing, reads, and declare/typeset namerefs without
+  executing Bash.
+- Trusted-tool tests cover hostile PATH resolution, symlinked components,
+  unsafe ownership/modes, executable replacement, and fixed secret-free failure
+  text. Parser subprocess tests cover every output/runtime bound claimed by
+  their workflow; unbounded native-process exposure is documented as residual.
 - Declared install-hook tests cover literal and dot-prefixed targets, bounded
   no-follow reads, missing and unreadable files, ambiguous or unsafe
   declarations, every component of the declared relative hook path under the
@@ -75,6 +87,57 @@ candidate.
 - Pacman hook is documented as archive/install-stage protection.
 - For v0.9.2, the package-scanner rule version is `1.3.0`; results cached under
   `1.2.0` cannot authorize a package under the new deterministic semantics.
+- The current unreleased package-scanner rule version is `1.4.0`; cached
+  results from earlier rule versions cannot authorize the new remote-stage,
+  built-package hook, source-acquisition, or bounded deep-static semantics.
+- `SUPPLYCHAIN-REMOTE-STAGE-EXEC-001` and
+  `DEEPSTATIC-REMOTE-STAGE-EXEC-001` remain CRITICAL blockers only for a
+  complete static fetch/artifact/execute chain. An unexecuted download, source
+  URL, picture/media name, quoted example, or unmatched artifact is negative.
+- `SUPPLYCHAIN-OPAQUE-CARRIER-EXEC-001` and
+  `DEEPSTATIC-OPAQUE-CARRIER-EXEC-001` require local decode-to-artifact followed
+  by execution of that artifact or active invocation of a recognized
+  carrier-named path as code. File extensions, bundled assets, archives, and
+  decode steps alone remain negative.
+- Bounded command-parser failure produces an incomplete-inspection blocker, not
+  a malware or successful-execution claim.
+- Built package `.INSTALL` text is scanned deterministically through a bounded
+  no-follow archive reader. Missing, invalid, binary, oversized, or changing
+  install control text fails closed without being labeled malware.
+- Deep-static parses the captured PKGBUILD, never a mutable sibling `.SRCINFO`;
+  `--offline` performs no HTTP, Git, or key fetch; every uninspected declared
+  source blocks; and acquired-source allow results are not cached without a
+  complete immutable acquisition identity.
+- Deep-static source traversal, candidate count, candidate bytes, archive
+  entries, and actual extracted bytes are bounded. Linked or incomplete
+  archive content, nested archives that were not recursively inspected, and
+  incomplete source-tree inspection fail closed.
+- Explicit source URLs reject embedded credentials, localhost, and non-public
+  IP literals before transport and after redirects. Persisted source URL
+  metadata omits userinfo, query strings, and fragments.
+- Source-array parsing fails closed instead of evaluating malformed, dynamic,
+  indirect, sourced/eval, subscripted, read-populated, or nameref-aliased source
+  declarations.
+- Source Git/GPG use captured and revalidated `/usr/bin/git` and
+  `/usr/bin/gpg`, isolated configuration, timeouts, and bounded combined child
+  output. Cached/configured public keys use bounded stable no-follow byte
+  snapshots; fetched cache files publish privately without replacement, and
+  GPG imports the captured bytes from a private temporary file. Persisted GPG
+  status contains only allowlisted machine status and hexadecimal key IDs.
+- Package and advisory AI responses use bounded duplicate-key-rejecting JSON,
+  exact schemas, allowlisted IDs/labels, bounded one-line interpretation, fixed
+  failure text, and no tools. Focused tests reject recognized scheme/bare/IP/
+  email/obfuscated destinations, direct and actor/modal instructions,
+  sentence-leading imperatives, prescriptive/recommendation wording, named and
+  generic package-helper advice, actionable nominalized operation/invocation
+  forms, credential-copy/share instructions, questions, commands, terminal
+  controls, and unsupported trust/compromise claims. Rejected raw responses and
+  raw transport errors are not accepted into reports; validated prose remains
+  untrusted interpretation and has no tool, URL, command, policy, or execution
+  authority.
+- Upgrade AI may raise only a rule ID already present in deterministic findings,
+  at most to HIGH. It cannot create standalone findings/actions, change
+  blocking policy, lower risk, or authorize a handoff.
 - `SUPPLYCHAIN-AUR-REPO-PROPAGATION-001` remains a CRITICAL, non-reviewable
   blocker limited to deterministic PKGBUILD and declared install-hook control
   text. It requires a canonical AUR Git target, repository mutation or staging,
@@ -127,11 +190,13 @@ candidate.
   uses a read-only home and private writable state, and exits successfully after
   recording a security finding.
 - Instruction Guard AI has a separate opt-in, processes at most one job per
-  timer run, receives no more than 12 KiB of redacted evidence, has no tools,
-  and accepts only strict bounded JSON.
+  timer run, receives no more than 12 KiB of opaque evidence IDs, fixed reasons,
+  semantic labels, and deterministic locations but no path/snippet, has no
+  tools, and accepts only strict bounded JSON.
 - Instruction Guard AI cannot lower deterministic severity, trust an integrity
-  change, or propose executable commands; disabled, malformed, or timed-out AI
-  preserves deterministic findings and disabled AI makes zero calls.
+  change, invent/change a line, claim execution/compromise, or propose
+  executable commands; disabled, malformed, or timed-out AI preserves
+  deterministic findings and disabled AI makes zero calls.
 - Incident root collectors are installed disabled, have no network access, and
   perform no AI requests or repairs themselves.
 - Weekly incident timer is installed disabled, persistent, randomized, and
@@ -164,7 +229,8 @@ candidate.
   tray's own Quit action until rollback-sensitive operations finish.
 - Incident repair actions are allowlisted and freshly revalidated as root.
 - AI-generated commands and fabricated incident evidence/action IDs are
-  rejected outside an explicitly granted foreground Repair Agent shell session.
+  rejected outside an explicitly configured foreground Policy-Gated Repair
+  Agent command profile; that profile still applies its local allowlist.
 - Fabricated diagnostic probe IDs and provider-supplied targets are rejected.
 - Follow-up contexts are private, fingerprinted, redacted before persistence,
   and retained for no more than 30 days or 50 records.
@@ -183,11 +249,26 @@ candidate.
   confirmation, and are never authorized by a parent `--yes`.
 - JSON, non-interactive, `--yes`, `--no-ai`, hook, root collector, background
   service, and recovery runtime paths do not open follow-up chat.
-- Repair Agent defaults to `guarded`; user-shell and root-shell require explicit
-  user configuration and an interactive foreground terminal.
+- Policy-Gated Repair Agent defaults to `guarded`; the compatibility profiles
+  `user-shell` and `root-shell` require explicit user configuration and an
+  interactive foreground terminal, but neither is a general shell grant.
+- Every exact model-authored diagnostic/root-repair command requires a fresh
+  foreground confirmation. Legacy `whole-plan` and `session` configuration
+  values normalize to effective `each-command` behavior and cannot authorize a
+  later command proposed after terminal output.
+- Repair Agent responses use an exact bounded schema and a fail-closed command
+  allowlist. Only documented shell output/test builtins, allowlisted absolute
+  `/usr/bin` or `/usr/sbin` read-only diagnostics, and constrained exact
+  `/usr/bin/pacman` query/sync/removal workflows pass. Command-specific tests
+  reject mutating/escape flags, bare/custom executables, remote references,
+  network/Git/AUR/build/interpreter/decode/eval paths, shell
+  expansion/redirection, unsafe pacman operations/targets, and direct AuraScan
+  modification. Privileged broker calls revalidate package-managed
+  `/usr/bin/sudo` and `/usr/bin/aurascan`.
 - Root-shell also requires a safe root-owned policy, package-managed helper,
-  exact typed per-session grant, short-lived PID/start-time/TTY/context-bound
-  capability, and a snapshot or exact typed rollback waiver.
+  exact typed `GRANT AI ROOT REPAIR COMMANDS` per-session grant, short-lived
+  PID/start-time/TTY/context-bound capability, and a snapshot or exact typed
+  rollback waiver.
 - `--yes`, JSON, noninteractive, hook, collector, background, and recovery paths
   cannot start Repair Agent command execution.
 - Root executor requests are regular `0600` files owned by the invoking user,
@@ -197,10 +278,12 @@ candidate.
   and root audits are private, bounded, redacted, and retention-limited.
 - Raw terminal output sharing requires a separate exact phrase and remains
   bounded to 32 KiB per command and 128 KiB per session.
-- Documentation explicitly states that unrestricted root is user-authorized
-  remote code execution and can defeat AuraScan safeguards after execution.
-- The warning uses the phrase "user-authorized remote code execution" without
-  presenting snapshots, auditing, or process termination as containment.
+- Documentation calls this the Policy-Gated Repair Agent rather than Full
+  Control, unrestricted shell, arbitrary commands, or remote code execution.
+  It states that approved pacman repairs still alter installed software and
+  that read-only diagnostic output may contain private data; redaction, typed
+  grants, snapshots, auditing, and process controls do not make every permitted
+  query or package transaction harmless.
 - Recovery image installation is explicit, staged, fully validated, and atomic;
   package installation never modifies an ESP or bootloader.
 - The complete UKI and ISO are scanned to ensure no API key, Wi-Fi profile,
@@ -229,8 +312,8 @@ candidate.
 - "No new dependencies" is not treated as proof that scanning can be skipped.
 - Package installation does not build or enable AuraScan Recovery; the wizard
   offers it only after compatibility checks pass.
-- Repair Agent access defaults to `guarded`, approval defaults to
-  `each-command`, output sharing defaults to `redacted`, and root policy
+- Policy-Gated Repair Agent access defaults to `guarded`, approval defaults to
+  `each-command`, output sharing defaults to `redacted`, and root repair policy
   defaults to disabled.
 - Instruction Guard monitor and AI timers default to disabled; its default scan
   mode is `agent-surfaces`, while `all-markdown` remains explicit.
@@ -243,8 +326,14 @@ candidate.
 - `aurascan-makepkg` console script points to `aurascan.makepkg_wrapper:main`.
 - Runtime dependencies remain minimal and documented.
 - Test dependencies are optional and documented.
-- External tools such as ClamAV, GPG, makepkg, pacman, and vercmp are treated as
-  optional or workflow-specific where appropriate.
+- External tools remain optional or workflow-specific only where a workflow can
+  safely continue. Hostile-input paths use documented absolute trusted
+  executables: `/usr/bin/git`, `/usr/bin/gpg`, `/usr/bin/bsdtar`,
+  `/usr/bin/clamscan`, `/usr/bin/freshclam`, `/usr/bin/notify-send`,
+  `/usr/bin/makepkg`, and the applicable upgrade/privileged-agent tools.
+- ClamAV scan limits and no-follow behavior are present, raw ClamAV output is
+  not persisted as evidence, and unavailable trusted ClamAV is reported as an
+  explicit skip rather than a clean result.
 - If a pacman hook is packaged, the installed hook path and `Exec` command are
   checked for the target package format.
 - If the AuraScan Updater tray applet is packaged, the desktop file and icon
@@ -291,6 +380,10 @@ candidate.
 - README states that Instruction Guard is periodic detection, not
   pasted-command/link preflight, privileged fanotify/process interception,
   automatic quarantine, or a boundary against same-UID/root malware.
+- README documents that fixed tool identities and bounded parsers are not a
+  sandbox, and calls out native-parser defects, same-UID/root attackers, DNS
+  rebinding, steganography/unknown decoders, and explicit acquisition/build
+  exposure without presenting a clear scan as proof of safety.
 - README explains incident evidence bounds, redaction, AI opt-in behavior, and
   the repair allowlist boundary.
 - README and privacy documentation explain contextual follow-up retention,

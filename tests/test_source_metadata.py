@@ -10,6 +10,22 @@ def findings_for(content: str):
     return SourceMetadataAnalyzer().analyze_pkgbuild("PKGBUILD", content).findings
 
 
+def test_ambiguous_dynamic_source_metadata_is_a_default_scan_blocker():
+    result = SourceMetadataAnalyzer().analyze_pkgbuild(
+        "PKGBUILD",
+        'source=("https://example.invalid/static.tar")\n'
+        'selector=source\n'
+        'printf -v "$selector" "%s" dynamic.tar\n',
+    )
+
+    assert result.is_safe is False
+    assert any(
+        finding.rule_id == "SOURCE-PARSER-AMBIGUOUS"
+        and finding.blocks_installation
+        for finding in result.findings
+    )
+
+
 def test_source_metadata_analyzer_emits_metadata_findings_without_acquisition():
     findings = findings_for('pkgname=demo\npkgver=1\nsource=("http://example.invalid/src.tar.gz")\nsha256sums=(SKIP)\n')
     rule_ids = {finding.rule_id for finding in findings}
@@ -96,16 +112,18 @@ sha256sums_x86_64=(x86_64)
     assert not any(f.rule_id == "SOURCE-META-MISSING-CHECKSUM" for f in findings)
 
 
-def test_arch_specific_srcinfo_checksums_do_not_look_mismatched(tmp_path: Path):
+def test_neighbor_srcinfo_does_not_override_captured_pkgbuild_metadata(tmp_path: Path):
     pkgbuild = tmp_path / "PKGBUILD"
-    pkgbuild.write_text("pkgname=demo\n", encoding="utf-8")
+    pkgbuild.write_text(
+        'pkgname=demo\nsource=("package.tar.gz")\nsha256sums=(package-digest)\n',
+        encoding="utf-8",
+    )
     (tmp_path / ".SRCINFO").write_text(
         """
 pkgbase = demo
-	source = common.tar.gz
-	source_x86_64 = x86_64.tar.gz
-	sha256sums = common
-	sha256sums_x86_64 = x86_64
+	source = unrelated-one.tar.gz
+	source_x86_64 = unrelated-two.tar.gz
+	sha256sums = unrelated-one
 """,
         encoding="utf-8",
     )

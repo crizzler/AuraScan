@@ -369,6 +369,7 @@ class ScanReport:
 
     def render_terminal(self, use_color: bool = True, verbose: bool = False) -> str:
         from aurascan.core.presenter import FindingPresenter
+        from aurascan.core.text_safety import sanitize_terminal_text
 
         reset = "\033[0m" if use_color else ""
         red = "\033[91m" if use_color else ""
@@ -379,7 +380,10 @@ class ScanReport:
         color = red if risk.blocks_installation else yellow if risk.requires_manual_review else green
 
         lines = [
-            f"\n[AuraScan] Audit Complete: {self.package_metadata.name} {self.package_metadata.version}",
+            "\n[AuraScan] Audit Complete: "
+            + sanitize_terminal_text(self.package_metadata.name, max_chars=256)
+            + " "
+            + sanitize_terminal_text(self.package_metadata.version, max_chars=256),
             "=" * 50,
             f"Risk Score: {color}{risk.severity.value}{reset} | Action: {color}{action}{reset}",
             "-" * 50,
@@ -401,7 +405,7 @@ class ScanReport:
             lines.append("Update Scan Policy:")
             if self.context_user_warning:
                 lines.append("Update context was provided manually.")
-                lines.append(self.context_user_warning)
+                lines.append(sanitize_terminal_text(self.context_user_warning))
             elif (
                 self.context_eligible_for_fast_path
                 and self.scan_context == "update"
@@ -424,17 +428,17 @@ class ScanReport:
                 lines.append("What AuraScan checked: AuraScan checked the available local package information.")
                 lines.append("What AuraScan did not check: AuraScan did not prove this is an already-installed package update.")
                 lines.append("Recommended action: No action needed. AuraScan used the safer normal scan.")
-            lines.append(str(decision.get("title") or "Update scan decision recorded."))
+            lines.append(sanitize_terminal_text(decision.get("title") or "Update scan decision recorded."))
             if decision.get("summary"):
-                lines.append(str(decision["summary"]))
+                lines.append(sanitize_terminal_text(decision["summary"]))
             if decision.get("why_it_matters"):
-                lines.append(f"Why it matters: {decision['why_it_matters']}")
+                lines.append("Why it matters: " + sanitize_terminal_text(decision["why_it_matters"]))
             if decision.get("what_checked"):
-                lines.append(f"What AuraScan checked: {decision['what_checked']}")
+                lines.append("What AuraScan checked: " + sanitize_terminal_text(decision["what_checked"]))
             if decision.get("what_not_checked"):
-                lines.append(f"What AuraScan did not check: {decision['what_not_checked']}")
+                lines.append("What AuraScan did not check: " + sanitize_terminal_text(decision["what_not_checked"]))
             if decision.get("recommended_action"):
-                lines.append(f"Recommended action: {decision['recommended_action']}")
+                lines.append("Recommended action: " + sanitize_terminal_text(decision["recommended_action"]))
             if verbose and decision.get("technical_details"):
                 lines.append("Technical details:")
                 lines.append(json.dumps(decision["technical_details"], indent=2, sort_keys=True))
@@ -443,7 +447,7 @@ class ScanReport:
         lines.extend(presented_lines)
 
         if risk.reason:
-            lines.append(f"\nRisk reason: {risk.reason}")
+            lines.append("\nRisk reason: " + sanitize_terminal_text(risk.reason))
         if risk.blocks_installation:
             final_action = "DO NOT INSTALL."
         elif risk.requires_manual_review:

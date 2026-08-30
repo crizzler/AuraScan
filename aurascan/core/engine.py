@@ -1,12 +1,10 @@
 import sys
 import os
 import json
-import subprocess
 from pathlib import Path
 from typing import List
 from aurascan.core.audit import log_audit
 from aurascan.core.ai_provider import resolve_ai_config
-from aurascan.core.config import MAX_SCRIPT_SIZE
 from aurascan.analyzers.clamav import ClamAVAnalyzer
 from aurascan.analyzers.ai_static import AIStaticAnalyzer
 from aurascan.analyzers.dynamic import DynamicSandboxAnalyzer
@@ -36,6 +34,10 @@ from aurascan.core.risk import RiskEngine
 from aurascan.core.cache import ScanCache
 from aurascan.core.context_provider import build_scan_context_proof
 from aurascan.core.local_package_db import LocalPackageDbContextProvider
+from aurascan.core.package_archive import (
+    PACKAGE_IDENTITY_RESOLVED,
+    capture_package_identity,
+)
 from aurascan.core.source_acquisition import SourceFetcher, SourcePolicy
 from aurascan.core.trust_diff import HistoryTrustDiffAdapter
 from aurascan.core.update_policy import (
@@ -67,7 +69,7 @@ class AuraScanEngine:
         self.last_scan_input_digest = ""
         self.last_scan_input = None
         self.scanner_version = "2.5.0"
-        self.rule_version = "1.3.0"
+        self.rule_version = "1.4.0"
         self.cache = ScanCache()
         self.risk_engine = RiskEngine()
         self.trust_diff_adapter = HistoryTrustDiffAdapter()
@@ -93,24 +95,10 @@ class AuraScanEngine:
             print(msg, file=sys.stderr if is_err else sys.stdout)
 
     def scan_package(self, pkg_path: str, pkg_name: str = "unknown", pkg_ver: str = "unknown") -> bool:
-        cache_flags = self._cache_flags()
+        # Built-package analyzers still consume a filesystem path independently.
+        # Do not read or write their cache until all phases share one immutable,
+        # no-follow archive snapshot and digest.
         pkg_name, pkg_ver = self._resolve_package_identity(pkg_path, pkg_name, pkg_ver)
-        cached_res = self.cache.get_cached_result(pkg_path, self.scanner_version, self.rule_version, config_flags=cache_flags)
-        if cached_res:
-            self._fill_report_package_identity(cached_res, pkg_path, pkg_name, pkg_ver)
-            self.last_report = cached_res
-            self._print(f"\n[AuraScan] --- Auditing Package: {pkg_path} (CACHED) ---", True)
-            if self.json_output:
-                print(json.dumps(cached_res, indent=2))
-            else:
-                print(ScanReport.from_dict(cached_res).render_terminal(verbose=self.verbose))
-
-            risk = cached_res.get("risk_summary", {})
-            is_safe = not risk.get("blocks_installation") and risk.get("action") != "BLOCKED"
-            if not is_safe:
-                log_audit(pkg_path, [f["explanation"] for f in cached_res.get("findings", []) if f.get("blocks_installation")])
-                return False
-            return True
 
         self._print(f"\n[AuraScan] --- Auditing Package: {pkg_path} ---", True)
         all_findings = []
@@ -134,8 +122,6 @@ class AuraScanEngine:
         else:
             print(report.render_terminal(verbose=self.verbose))
 
-        self.cache.set_cached_result(pkg_path, self.scanner_version, self.rule_version, out_dict, config_flags=cache_flags)
-
         if report.risk_summary.blocks_installation:
             log_audit(pkg_path, [f.explanation for f in all_findings if f.blocks_installation])
             return False
@@ -154,42 +140,11 @@ class AuraScanEngine:
             resolved_version = info_version or file_version or "unknown"
         return resolved_name, resolved_version
 
-    def _fill_report_package_identity(self, report_dict: dict, pkg_path: str, pkg_name: str, pkg_ver: str) -> None:
-        metadata = report_dict.setdefault("package_metadata", {})
-        current_name = str(metadata.get("name") or "unknown")
-        current_version = str(metadata.get("version") or "unknown")
-        base_name = pkg_name if self._is_unknown_identity(current_name) else current_name
-        base_version = pkg_ver if self._is_unknown_identity(current_version) else current_version
-        resolved_name, resolved_version = self._resolve_package_identity(pkg_path, base_name, base_version)
-        if self._is_unknown_identity(current_name) and not self._is_unknown_identity(resolved_name):
-            metadata["name"] = resolved_name
-        if self._is_unknown_identity(current_version) and not self._is_unknown_identity(resolved_version):
-            metadata["version"] = resolved_version
-
     def _package_identity_from_pkginfo(self, pkg_path: str):
-        try:
-            result = subprocess.run(
-                ["bsdtar", "-xOf", str(pkg_path), ".PKGINFO"],
-                capture_output=True,
-                check=False,
-                timeout=10,
-            )
-        except (OSError, subprocess.SubprocessError):
+        captured = capture_package_identity(Path(pkg_path))
+        if captured.status != PACKAGE_IDENTITY_RESOLVED:
             return "", ""
-        if result.returncode != 0 or not result.stdout:
-            return "", ""
-        text = result.stdout[:MAX_SCRIPT_SIZE].decode("utf-8", errors="replace")
-        name = ""
-        version = ""
-        for line in text.splitlines():
-            if "=" not in line:
-                continue
-            key, value = (part.strip() for part in line.split("=", 1))
-            if key == "pkgname":
-                name = value
-            elif key == "pkgver":
-                version = value
-        return name, version
+        return captured.name, captured.version
 
     def _package_identity_from_filename(self, pkg_path: str):
         filename = Path(pkg_path).name
@@ -250,7 +205,12 @@ class AuraScanEngine:
             "input_digest": scan_input_digest,
         }
         cached_res = None
-        if self.scan_context != ScanContext.auto:
+        # A deep-static result depends on bytes acquired after this point.  Its
+        # current cache identity covers only the PKGBUILD/install-hook snapshot,
+        # so a moving or replaced remote source must never reuse an older clear
+        # report.  Keep deep-static uncached until an immutable acquisition
+        # manifest is part of the key.
+        if not self.deep_static and self.scan_context != ScanContext.auto:
             cached_res = self.cache.get_cached_result(
                 pkgbuild_path,
                 self.scanner_version,
@@ -308,13 +268,14 @@ class AuraScanEngine:
                 print(json.dumps(out_dict, indent=2))
             else:
                 print(report.render_terminal(verbose=self.verbose))
-            self.cache.set_cached_result(
-                pkgbuild_path,
-                self.scanner_version,
-                self.rule_version,
-                out_dict,
-                **cache_key_parts,
-            )
+            if not self.deep_static:
+                self.cache.set_cached_result(
+                    pkgbuild_path,
+                    self.scanner_version,
+                    self.rule_version,
+                    out_dict,
+                    **cache_key_parts,
+                )
             self._finalize_history(report.risk_summary, update_decision)
             if report.risk_summary.blocks_installation:
                 log_audit(pkgbuild_path, [f.explanation for f in all_findings if f.blocks_installation])
@@ -366,13 +327,14 @@ class AuraScanEngine:
         else:
             print(report.render_terminal(verbose=self.verbose))
 
-        self.cache.set_cached_result(
-            pkgbuild_path,
-            self.scanner_version,
-            self.rule_version,
-            out_dict,
-            **cache_key_parts,
-        )
+        if not self.deep_static:
+            self.cache.set_cached_result(
+                pkgbuild_path,
+                self.scanner_version,
+                self.rule_version,
+                out_dict,
+                **cache_key_parts,
+            )
 
         if report.risk_summary.blocks_installation:
             log_audit(pkgbuild_path, [f.explanation for f in all_findings if f.blocks_installation])

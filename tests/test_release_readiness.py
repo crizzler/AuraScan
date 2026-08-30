@@ -107,8 +107,11 @@ def test_readme_contains_release_safety_boundaries():
         "parent `--yes` flags never authorize follow-up actions",
         "aurascan agent --latest",
         "ai cannot generate commands in guarded mode",
-        "grant ai full root control",
-        "user-authorized remote code execution",
+        "policy-gated repair agent",
+        "grant ai root repair commands",
+        "absolute read-only diagnostics",
+        "constrained exact `/usr/bin/pacman`",
+        "remote acquisition, arbitrary executables",
         "aurascan_agent_access",
         "/etc/aurascan/agent.conf",
         "share full terminal output",
@@ -120,6 +123,8 @@ def test_readme_contains_release_safety_boundaries():
     ]
     for phrase in required_phrases:
         assert phrase in readme
+    assert "grant ai full root control" not in readme
+    assert "user-authorized remote code execution" not in readme
 
 
 def test_license_is_mit_for_public_release():
@@ -130,24 +135,53 @@ def test_license_is_mit_for_public_release():
     assert "THE SOFTWARE IS PROVIDED \"AS IS\"" in license_text
 
 
-def test_privacy_document_covers_full_control_agent_boundaries():
+def test_privacy_document_covers_policy_gated_agent_boundaries():
     privacy = read_text("docs/PRIVACY.md").lower()
 
     required = [
-        "foreground full-control repair agent",
-        "grant ai full root control",
+        "foreground policy-gated repair agent",
+        "general shell grant",
+        "grant ai root repair commands",
+        "read-only diagnostics",
+        "the policy gate does not authorize arbitrary model-authored code",
+        "repairs are still consequential",
+        "redaction is best effort",
         "share full terminal output",
         "continue without rollback",
         "/run/aurascan-agent/",
         "~/.local/state/aurascan/agent/",
         "/var/lib/aurascan/agent/",
-        "user-authorized remote code execution",
-        "can defeat these software boundaries",
         "hardware-related questions can trigger a foreground read-only hardware probe",
         "does not read or transmit system serial numbers",
     ]
     for phrase in required:
         assert phrase in privacy
+    assert "foreground full-control repair agent" not in privacy
+    assert "grant ai full root control" not in privacy
+    assert "user-authorized remote code execution" not in privacy
+
+
+def test_advisory_ai_documentation_keeps_model_prose_untrusted():
+    readme = " ".join(read_text("README.md").lower().split())
+    privacy = " ".join(read_text("docs/PRIVACY.md").lower().split())
+    developing = " ".join(read_text("DEVELOPING.md").lower().split())
+    checklist = " ".join(read_text("docs/RELEASE_CHECKLIST.md").lower().split())
+
+    assert "model prose remains untrusted interpretation" in readme
+    assert "sentence-leading imperative verbs" in readme
+    assert "generic package-manager/install-helper advice" in readme
+    assert "nominalized operation or invocation advice" in readme
+    assert "not proof that arbitrary natural language is harmless" in readme
+    assert "model prose remains untrusted interpretation" in privacy
+    assert "sentence-leading imperative verbs" in privacy
+    assert "generic package-manager/install-helper advice" in privacy
+    assert "nominalized operation or invocation advice" in privacy
+    assert "cannot prove arbitrary natural language harmless" in privacy
+    assert "validated model prose is still untrusted interpretation" in developing
+    assert "lexical guard cannot prove every natural-language construction inert" in developing
+    assert "validated prose remains untrusted interpretation" in checklist
+    assert "raw model prose is not persisted or rendered" not in readme
+    assert "raw model responses are not persisted or rendered" not in privacy
 
 
 def test_instruction_guard_v090_documentation_contract():
@@ -269,7 +303,7 @@ def test_aur_maintainer_worm_v092_release_contract():
     assert propagation.default_severity == Severity.CRITICAL
     assert uninspected is not None
     assert uninspected.default_severity == Severity.HIGH
-    assert 'self.rule_version = "1.3.0"' in engine_source
+    assert 'self.rule_version = "1.4.0"' in engine_source
 
     release_phrases = [
         "# aurascan v0.9.2",
@@ -344,16 +378,19 @@ def test_release_checklist_references_required_validation_and_safety_items():
         "Incident repair actions are allowlisted and freshly revalidated as root.",
         "Follow-up contexts are private, fingerprinted, redacted before persistence",
         "Follow-up AI accepts only known fact, probe, and action IDs",
-        "Repair Agent defaults to `guarded`",
+        "Policy-Gated Repair Agent defaults to `guarded`",
         "Root-shell also requires a safe root-owned policy",
-        "user-authorized remote code execution",
+        "GRANT AI ROOT REPAIR COMMANDS",
+        "fail-closed command",
+        "rather than Full",
         "Hardware-aware follow-up runs only in an opted-in foreground AI workflow",
         "SUPPLYCHAIN-AUR-REPO-PROPAGATION-001",
         "INSTALL-HOOK-UNINSPECTED-001",
-        "package-scanner rule version is `1.3.0`",
+        "current unreleased package-scanner rule version is `1.4.0`",
     ]
     for phrase in required_phrases:
         assert phrase in checklist
+    assert "user-authorized remote code execution" not in checklist
 
 
 def test_gitignore_excludes_release_local_artifacts():

@@ -20,6 +20,10 @@ from aurascan.core.hardware_health import (
     collect_hardware_health,
     question_requests_hardware_context,
 )
+from aurascan.core.text_safety import (
+    load_strict_json_object,
+    validate_model_advisory_text,
+)
 
 
 FOLLOWUP_SCHEMA_VERSION = "1.0"
@@ -31,6 +35,7 @@ FOLLOWUP_MAX_PROVIDER_REQUESTS = 12
 FOLLOWUP_MAX_PROMPT_CHARS = 12000
 FOLLOWUP_MAX_QUESTION_CHARS = 2000
 FOLLOWUP_MAX_ANSWER_CHARS = 4000
+FOLLOWUP_MAX_AI_RESPONSE_CHARS = 12000
 FOLLOWUP_MAX_CONTEXT_BYTES = 2 * 1024 * 1024
 FOLLOWUP_AI_TIMEOUT_SECONDS = 60
 FOLLOWUP_ACTION_REPOSITORY = "fua-upgrade-repository-restore"
@@ -42,6 +47,9 @@ FOLLOWUP_RECOVERY_RUNTIME_MARKER = Path("/run/aurascan-recovery/environment")
 EXIT_FOLLOWUP_UNAVAILABLE = 70
 EXIT_FOLLOWUP_PROVIDER_ERROR = 71
 EXIT_FOLLOWUP_ACTION_FAILED = 72
+FOLLOWUP_AI_REJECTION_DETAIL = "AI response rejected by guarded follow-up contract"
+FOLLOWUP_AI_PROVIDER_FAILURE_DETAIL = "AI provider request failed"
+FOLLOWUP_AI_TIMEOUT_DETAIL = "AI provider request timed out"
 
 SAFE_CONTEXT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 PRIVATE_KEY_RE = re.compile(
@@ -1067,7 +1075,8 @@ def build_followup_ai_prompt(
             )
         )
         +
-        "Return strict JSON only with this shape:\n"
+        "The answer must be bounded, single-line, non-executable prose: no URLs, commands, credentials, terminal controls, product impersonation, or unsupported safe/compromised claims.\n"
+        "Return strict JSON only with exactly this shape and no additional keys:\n"
         "{\"answer\":\"plain-language answer\",\"referenced_fact_ids\":[\"known fact id\"],\"requested_probe_ids\":[\"known probe id\"],\"requested_action_ids\":[\"known action id\"]}\n\n"
     )
     facts = []
@@ -1128,25 +1137,47 @@ def validate_followup_ai_response(
     *,
     allow_probe_requests: bool = True,
 ) -> FollowUpResponse:
-    if not isinstance(data.get("answer"), str):
-        raise ValueError("follow-up response answer must be a string")
-    for key in ("referenced_fact_ids", "requested_probe_ids", "requested_action_ids"):
-        if not isinstance(data.get(key), list):
-            raise ValueError(f"follow-up response {key} must be a list")
+    expected_keys = {
+        "answer",
+        "referenced_fact_ids",
+        "requested_probe_ids",
+        "requested_action_ids",
+    }
+    if set(data.keys()) != expected_keys:
+        raise ValueError("follow-up response did not match the exact schema")
     known_facts = {item.fact_id for item in context.facts}
     known_probes = {item.probe_id for item in context.probes}
     known_actions = {item.action_id for item in context.actions if item.verified}
-    if not allow_probe_requests and data.get("requested_probe_ids"):
+    answer = validate_model_advisory_text(
+        data["answer"],
+        max_chars=FOLLOWUP_MAX_ANSWER_CHARS,
+        allow_empty=False,
+    )
+    fact_ids = _validate_known_id_list(
+        data["referenced_fact_ids"],
+        known_facts,
+        field_name="referenced_fact_ids",
+        limit=20,
+    )
+    probe_ids = _validate_known_id_list(
+        data["requested_probe_ids"],
+        known_probes,
+        field_name="requested_probe_ids",
+        limit=6,
+    )
+    action_ids = _validate_known_id_list(
+        data["requested_action_ids"],
+        known_actions,
+        field_name="requested_action_ids",
+        limit=20,
+    )
+    if not allow_probe_requests and probe_ids:
         raise ValueError("final follow-up review cannot request additional probes")
     return FollowUpResponse(
-        answer=redact_followup_text(str(data.get("answer") or ""))[:FOLLOWUP_MAX_ANSWER_CHARS],
-        referenced_fact_ids=_known_unique_ids(data.get("referenced_fact_ids"), known_facts, 20),
-        requested_probe_ids=(
-            _known_unique_ids(data.get("requested_probe_ids"), known_probes, 6)
-            if allow_probe_requests
-            else []
-        ),
-        requested_action_ids=_known_unique_ids(data.get("requested_action_ids"), known_actions, 20),
+        answer=answer,
+        referenced_fact_ids=fact_ids,
+        requested_probe_ids=probe_ids if allow_probe_requests else [],
+        requested_action_ids=action_ids,
     )
 
 
@@ -1182,19 +1213,21 @@ def ask_followup_ai(
             timeout=FOLLOWUP_AI_TIMEOUT_SECONDS,
             urlopen=urlopen,
         )
-        data = json.loads(text)
-        if not isinstance(data, Mapping):
-            raise ValueError("follow-up response was not a JSON object")
+        data = load_strict_json_object(
+            text,
+            max_chars=FOLLOWUP_MAX_AI_RESPONSE_CHARS,
+        )
         return validate_followup_ai_response(
             context,
             data,
             allow_probe_requests=allow_probe_requests,
         )
     except Exception as exc:
+        status = classify_followup_failure(exc)
         return FollowUpResponse(
             "",
-            status=classify_followup_failure(exc),
-            error=redact_followup_text(str(exc))[:500],
+            status=status,
+            error=_fixed_followup_failure_detail(status),
         )
 
 
@@ -2380,16 +2413,24 @@ def build_maintenance_runtime(
     )
 
 
-def _known_unique_ids(raw: object, known: set, limit: int) -> List[str]:
-    values: List[str] = []
+def _validate_known_id_list(
+    raw: object,
+    known: set,
+    *,
+    field_name: str,
+    limit: int,
+) -> List[str]:
     if not isinstance(raw, list):
-        return values
+        raise ValueError(f"follow-up response {field_name} must be a list")
+    if len(raw) > limit:
+        raise ValueError(f"follow-up response {field_name} exceeded its item limit")
+    values: List[str] = []
     for item in raw:
-        value = str(item)
-        if value in known and value not in values:
-            values.append(value)
-        if len(values) >= limit:
-            break
+        if not isinstance(item, str) or item not in known:
+            raise ValueError(f"follow-up response {field_name} contained an unknown ID")
+        if item in values:
+            raise ValueError(f"follow-up response {field_name} contained a duplicate ID")
+        values.append(item)
     return values
 
 
@@ -2428,6 +2469,14 @@ def classify_followup_failure(exc: Exception) -> str:
     if isinstance(exc, (json.JSONDecodeError, ValueError, TypeError, KeyError)):
         return "invalid_response"
     return "provider_error"
+
+
+def _fixed_followup_failure_detail(status: str) -> str:
+    if status == "timeout":
+        return FOLLOWUP_AI_TIMEOUT_DETAIL
+    if status == "invalid_response":
+        return FOLLOWUP_AI_REJECTION_DETAIL
+    return FOLLOWUP_AI_PROVIDER_FAILURE_DETAIL
 
 
 def redact_followup_text(text: object) -> str:

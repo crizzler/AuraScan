@@ -1,14 +1,20 @@
 import io
 import json
+import os
+import stat
 import subprocess
 from pathlib import Path
 from urllib.error import HTTPError
 
+import pytest
+
 from aurascan.core import ai_provider
+from aurascan.core import upgrade_preflight
 from aurascan.core.models import Severity
 from aurascan.core.upgrade_preflight import (
     EXIT_PREFLIGHT_UNAVAILABLE,
     EXIT_PREFLIGHT_DISABLED,
+    EXIT_UPGRADE_BLOCKED,
     EXIT_UPGRADE_COMMAND_FAILED_TO_START,
     EXIT_UPGRADE_VERIFICATION_FAILED,
     EXIT_USER_DECLINED,
@@ -21,6 +27,8 @@ from aurascan.core.upgrade_preflight import (
     UpgradePlan,
     UpgradePreflightReport,
     SystemSnapshot,
+    TrustedExecutable,
+    UnsafeUpgradeExecutable,
     analyze_upgrade_risks,
     apply_repository_health_repairs,
     apply_ai_risk_raises,
@@ -42,6 +50,34 @@ from aurascan.core.upgrade_preflight import (
     run_upgrade,
     verify_upgrade_handoff,
 )
+
+
+SUDO_PATH = "/usr/bin/sudo"
+PACMAN_PATH = "/usr/bin/pacman"
+REAL_CAPTURE_TRUSTED_EXECUTABLE = upgrade_preflight.capture_trusted_executable
+REAL_REVALIDATE_TRUSTED_EXECUTABLE = upgrade_preflight.revalidate_trusted_executable
+
+
+def fake_trusted_executable(name, path):
+    return TrustedExecutable(
+        name=name,
+        path=str(path),
+        device=1,
+        inode=abs(hash((name, str(path)))) or 1,
+        owner=0,
+        group=0,
+        mode=stat.S_IFREG | 0o755,
+    )
+
+
+@pytest.fixture(autouse=True)
+def trusted_upgrade_executables(monkeypatch):
+    monkeypatch.setattr(
+        upgrade_preflight,
+        "capture_trusted_executable",
+        lambda name, path: fake_trusted_executable(name, path),
+    )
+    monkeypatch.setattr(upgrade_preflight, "revalidate_trusted_executable", lambda _executable: None)
 
 
 class FakeResponse:
@@ -75,11 +111,11 @@ def completed(stdout="", stderr="", returncode=0):
 
 
 def preview_cmd():
-    return ["sudo", "pacman", "-Syu", "--print", "--print-format", PACMAN_PRINT_FORMAT]
+    return [SUDO_PATH, PACMAN_PATH, "-Syu", "--print", "--print-format", PACMAN_PRINT_FORMAT]
 
 
 def installed_q_cmd(*names):
-    return tuple(["pacman", "-Q", *names])
+    return tuple([PACMAN_PATH, "-Q", *names])
 
 
 def base_snapshot(**overrides):
@@ -161,8 +197,8 @@ Install Script  : Yes
     assert item.install_script is True
 
     runner = FakeRunner({
-        ("pacman", "-Qi", "demo-bin"): completed(qi),
-        ("pacman", "-T", "glibc", "missing-lib>=2"): completed("missing-lib>=2\n", returncode=127),
+        (PACMAN_PATH, "-Qi", "demo-bin"): completed(qi),
+        (PACMAN_PATH, "-T", "glibc", "missing-lib>=2"): completed("missing-lib>=2\n", returncode=127),
     })
     info = collect_foreign_package_info(["demo-bin"], runner=runner)
 
@@ -179,18 +215,89 @@ def test_resolve_aur_helper_prefers_paru_then_yay():
 def test_resolve_aur_helper_auto_detects_shelly_after_paru_yay():
     assert resolve_aur_helper("auto", which=lambda name: "/usr/bin/shelly" if name == "shelly" else None) == ("shelly", "")
     assert helper_upgrade_command("shelly") == [
-        "shelly",
+        "/usr/bin/shelly",
         "upgrade",
         "all",
         "--no-flatpak",
         "--no-appimage",
     ]
     assert helper_upgrade_command("shelly", shelly_modern=False) == [
-        "shelly",
+        "/usr/bin/shelly",
         "upgrade-all",
         "--no-flatpak",
         "--no-appimage",
     ]
+
+
+def test_trusted_executable_capture_rejects_symlink_and_writable_binary(tmp_path):
+    target = tmp_path / "helper-real"
+    target.write_text("fixture\n", encoding="utf-8")
+    target.chmod(0o755)
+    link = tmp_path / "helper-link"
+    link.symlink_to(target)
+
+    with pytest.raises(UnsafeUpgradeExecutable, match="symlink"):
+        REAL_CAPTURE_TRUSTED_EXECUTABLE("paru", str(link))
+
+    target.chmod(0o777)
+    with pytest.raises(UnsafeUpgradeExecutable, match="root-owned|writable"):
+        REAL_CAPTURE_TRUSTED_EXECUTABLE("paru", str(target))
+
+
+def test_helper_resolution_rejects_hostile_path_entry(monkeypatch):
+    def capture(name, path):
+        if name == "paru":
+            raise UnsafeUpgradeExecutable("fixture helper is user-controlled")
+        return fake_trusted_executable(name, path)
+
+    monkeypatch.setattr(upgrade_preflight, "capture_trusted_executable", capture)
+
+    helper, error = resolve_aur_helper("paru", which=lambda _name: "/home/example/bin/paru")
+
+    assert helper == "none"
+    assert "trust check" in error
+
+
+def test_hostile_path_cannot_replace_fixed_sudo_or_pacman(monkeypatch):
+    monkeypatch.setenv("PATH", "/home/example/bin")
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+    })
+
+    plan = build_upgrade_plan(
+        UpgradeOptions(aur_helper="none"),
+        runner=runner,
+        which=lambda name: f"/home/example/bin/{name}",
+    )
+
+    assert plan.available is True
+    assert plan.preview_command[:2] == [SUDO_PATH, PACMAN_PATH]
+    assert plan.final_command == [SUDO_PATH, PACMAN_PATH, "-Syu"]
+    assert runner.calls == [preview_cmd()]
+
+
+def test_trusted_executable_revalidation_rejects_inode_replacement(monkeypatch):
+    executable = fake_trusted_executable("pacman", PACMAN_PATH)
+    replacement = os.stat_result((
+        executable.mode,
+        executable.inode + 1,
+        executable.device,
+        1,
+        executable.owner,
+        executable.group,
+        1,
+        0,
+        0,
+        0,
+    ))
+    monkeypatch.setattr(
+        upgrade_preflight,
+        "_trusted_executable_stat",
+        lambda _name, _path, required_owner=0: replacement,
+    )
+
+    with pytest.raises(UnsafeUpgradeExecutable, match="changed after preflight"):
+        REAL_REVALIDATE_TRUSTED_EXECUTABLE(executable)
 
 
 def test_upgrade_options_default_to_enabled_and_read_env():
@@ -257,13 +364,13 @@ def test_upgrade_options_trusted_handoff_defaults_on_and_can_be_disabled():
 def test_build_upgrade_plan_uses_helper_and_parses_aur_updates():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
-        ("paru", "-Qua"): completed("aur/demo 1 -> 2\n"),
+        ("/usr/bin/paru", "-Qua"): completed("aur/demo 1 -> 2\n"),
     })
 
     plan = build_upgrade_plan(UpgradeOptions(aur_helper="auto"), runner=runner, which=lambda name: "/usr/bin/paru" if name == "paru" else None)
 
     assert plan.selected_helper == "paru"
-    assert plan.final_command == ["paru", "-Syu"]
+    assert plan.final_command == ["/usr/bin/paru", "-Syu"]
     assert plan.repo_packages[0].name == "glibc"
     assert plan.aur_packages[0].name == "demo"
 
@@ -271,15 +378,15 @@ def test_build_upgrade_plan_uses_helper_and_parses_aur_updates():
 def test_build_upgrade_plan_uses_shelly_and_parses_json_aur_updates():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
-        ("shelly", "--version"): completed("3.0.1\n"),
-        ("shelly", "list-updates", "aur", "--json"): completed('[{"Name":"demo-bin","OldVersion":"1","Version":"2"}]\n'),
+        ("/usr/bin/shelly", "--version"): completed("3.0.1\n"),
+        ("/usr/bin/shelly", "list-updates", "aur", "--json"): completed('[{"Name":"demo-bin","OldVersion":"1","Version":"2"}]\n'),
     })
 
     plan = build_upgrade_plan(UpgradeOptions(aur_helper="shelly"), runner=runner, which=lambda name: "/usr/bin/shelly" if name == "shelly" else None)
 
     assert plan.selected_helper == "shelly"
     assert plan.final_command == [
-        "shelly",
+        "/usr/bin/shelly",
         "upgrade",
         "all",
         "--no-flatpak",
@@ -288,12 +395,34 @@ def test_build_upgrade_plan_uses_shelly_and_parses_json_aur_updates():
     assert plan.aur_packages[0].name == "demo-bin"
 
 
+def test_preview_and_helper_queries_revalidate_each_executable(monkeypatch):
+    checked = []
+    monkeypatch.setattr(
+        upgrade_preflight,
+        "revalidate_trusted_executable",
+        lambda executable: checked.append(executable.name),
+    )
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+        ("/usr/bin/shelly", "--version"): completed("3.0.1\n"),
+        ("/usr/bin/shelly", "list-updates", "aur", "--json"): completed("[]\n"),
+    })
+
+    build_upgrade_plan(
+        UpgradeOptions(aur_helper="shelly"),
+        runner=runner,
+        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
+    )
+
+    assert checked == ["shelly", "sudo", "pacman", "shelly"]
+
+
 def test_build_upgrade_plan_supports_legacy_shelly_cli():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
-        ("shelly", "--version"): completed("2.4.0\n"),
-        ("shelly", "check-updates", "--aur", "--json"): completed(
-            '{"Packages":[],"Aur":[]}\n'
+        ("/usr/bin/shelly", "--version"): completed("2.4.0\n"),
+        ("/usr/bin/shelly", "check-updates", "--aur", "--json"): completed(
+            '{"Packages":[],"Aur":[{"Name":"demo-bin","OldVersion":"1","Version":"2"}]}\n'
         ),
     })
 
@@ -305,7 +434,7 @@ def test_build_upgrade_plan_supports_legacy_shelly_cli():
 
     assert plan.helper_error == ""
     assert plan.final_command == [
-        "shelly",
+        "/usr/bin/shelly",
         "upgrade-all",
         "--no-flatpak",
         "--no-appimage",
@@ -315,13 +444,13 @@ def test_build_upgrade_plan_supports_legacy_shelly_cli():
 def test_shelly_query_syntax_fallback_updates_final_handoff():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
-        ("shelly", "--version"): completed("version unavailable\n"),
-        ("shelly", "list-updates", "aur", "--json"): completed(
+        ("/usr/bin/shelly", "--version"): completed("version unavailable\n"),
+        ("/usr/bin/shelly", "list-updates", "aur", "--json"): completed(
             stderr="Unrecognized command 'list-updates'.",
             returncode=1,
         ),
-        ("shelly", "check-updates", "--aur", "--json"): completed(
-            '{"Packages":[],"Aur":[]}\n'
+        ("/usr/bin/shelly", "check-updates", "--aur", "--json"): completed(
+            '{"Packages":[],"Aur":[{"Name":"demo-bin","OldVersion":"1","Version":"2"}]}\n'
         ),
     })
 
@@ -333,7 +462,7 @@ def test_shelly_query_syntax_fallback_updates_final_handoff():
 
     assert plan.helper_error == ""
     assert plan.final_command == [
-        "shelly",
+        "/usr/bin/shelly",
         "upgrade-all",
         "--no-flatpak",
         "--no-appimage",
@@ -369,7 +498,7 @@ def test_deterministic_rules_cover_system_breakage_risks():
         conflicts=["old-lib"],
         selected_helper="none",
         helper_error="no supported AUR helper found",
-        final_command=["sudo", "pacman", "-Syu"],
+        final_command=[SUDO_PATH, PACMAN_PATH, "-Syu"],
     )
     snapshot = base_snapshot(
         boot_free_mib=128,
@@ -429,7 +558,7 @@ def test_replacement_metadata_only_does_not_create_high_risk_false_alarm():
             UpgradePackage("linux-cachyos", "7.1.3-2", replaces=["linux-cachyos-lto"]),
         ],
         replacements=["nvidia-libgl", "linux-cachyos-lto"],
-        final_command=["sudo", "pacman", "-Syu"],
+        final_command=[SUDO_PATH, PACMAN_PATH, "-Syu"],
     )
     report = UpgradePreflightReport(plan=plan, snapshot=base_snapshot(installed_packages=["linux-cachyos", "nvidia-utils"]))
 
@@ -445,7 +574,7 @@ def test_installed_replacement_target_is_reported_without_always_forcing_high():
     plan = UpgradePlan(
         repo_packages=[UpgradePackage("demo-new", "2-1", replaces=["demo-old"])],
         replacements=["demo-old"],
-        final_command=["sudo", "pacman", "-Syu"],
+        final_command=[SUDO_PATH, PACMAN_PATH, "-Syu"],
     )
 
     findings = analyze_upgrade_risks(plan, base_snapshot(installed_packages=["linux-cachyos", "demo-old"]))
@@ -523,6 +652,26 @@ def test_preview_failure_returns_only_unavailable_finding():
     assert findings[0].severity == Severity.CRITICAL
 
 
+def test_planned_aur_build_creates_non_overridable_blocking_finding():
+    plan = UpgradePlan(
+        aur_packages=[UpgradePackage("demo-bin", "2", "1", package_type="aur")],
+        selected_helper="paru",
+        final_command=["/usr/bin/paru", "-Syu"],
+        command_source="paru",
+    )
+    report = UpgradePreflightReport(plan=plan, snapshot=base_snapshot())
+    report.findings = analyze_upgrade_risks(plan, report.snapshot)
+
+    finding = next(item for item in report.findings if item.rule_id == "UPG-AUR-BUILD-UNSCANNED")
+
+    assert finding.severity == Severity.CRITICAL
+    assert finding.blocking is True
+    assert report.blocks_upgrade is True
+    assert report.action == "block"
+    assert report.to_dict()["risk_summary"]["blocks_upgrade"] is True
+    assert "aurascan-makepkg" in finding.recommended_action
+
+
 def test_repository_health_detects_empty_mirrorlist_with_backup(tmp_path):
     pacman_conf = tmp_path / "pacman.conf"
     mirrorlist = tmp_path / "mirrorlist"
@@ -584,7 +733,7 @@ def test_preview_no_servers_finding_points_to_aurascan_repair(tmp_path):
     assert str(mirrorlist) in findings[0].evidence
 
 
-def test_ai_raise_only_caps_critical_and_never_lowers():
+def test_ai_raise_only_escalates_known_rule_without_replacing_deterministic_action():
     report = UpgradePreflightReport(
         plan=UpgradePlan(),
         snapshot=base_snapshot(),
@@ -601,22 +750,22 @@ def test_ai_raise_only_caps_critical_and_never_lowers():
     )
 
     applied = apply_ai_risk_raises(report, {
+        "summary": "The existing space finding warrants more attention.",
         "risk_raises": [
-            {"target_rule_id": "UPG-ROOT-SPACE", "severity": "CRITICAL", "reason": "combined risk"},
-            {"target_rule_id": "UPG-ROOT-SPACE", "severity": "LOW", "reason": "lower it"},
-            {"severity": "HIGH", "reason": "new correlation", "recommended_action": "review"},
+            {"target_rule_id": "UPG-ROOT-SPACE", "severity": "HIGH", "reason": "Multiple bounded space signals overlap."},
         ]
     })
 
-    assert applied == 2
+    assert applied == 1
     assert report.findings[0].severity == Severity.HIGH
-    assert report.findings[1].rule_id == "UPG-AI-RISK"
+    assert report.findings[0].recommended_action == "action"
+    assert len(report.findings) == 1
     assert report.highest_severity == Severity.HIGH
 
 
 def test_terminal_renders_high_severity_findings_before_medium_notices():
     report = UpgradePreflightReport(
-        plan=UpgradePlan(final_command=["sudo", "pacman", "-Syu"]),
+        plan=UpgradePlan(final_command=[SUDO_PATH, PACMAN_PATH, "-Syu"]),
         snapshot=base_snapshot(),
         findings=[
             UpgradeFinding("UPG-KERNEL-REBOOT", Severity.MEDIUM, "Medium notice", "summary", "why", "action"),
@@ -629,7 +778,7 @@ def test_terminal_renders_high_severity_findings_before_medium_notices():
     assert rendered.index("1. High risk [HIGH]") < rendered.index("2. Medium notice [MEDIUM]")
 
 
-def test_ai_vague_foreign_raise_is_ignored_when_local_helper_checks_pass():
+def test_ai_raise_without_a_known_deterministic_target_is_rejected():
     report = UpgradePreflightReport(
         plan=UpgradePlan(selected_helper="shelly", aur_packages=[]),
         snapshot=base_snapshot(
@@ -639,17 +788,20 @@ def test_ai_vague_foreign_raise_is_ignored_when_local_helper_checks_pass():
         findings=[],
     )
 
-    applied = apply_ai_risk_raises(report, {
-        "risk_raises": [
-            {"severity": "MEDIUM", "reason": "1 foreign package is installed but was not shown in the upgrade list"}
-        ]
-    })
+    with pytest.raises(ValueError, match="known deterministic rule"):
+        apply_ai_risk_raises(report, {
+            "summary": "A foreign package count was observed.",
+            "risk_raises": [{
+                "target_rule_id": "UPG-INVENTED-RULE",
+                "severity": "MEDIUM",
+                "reason": "A foreign package was not shown in the upgrade list.",
+            }],
+        })
 
-    assert applied == 0
     assert report.findings == []
 
 
-def test_ai_vague_foreign_raise_is_ignored_when_rebuild_risk_already_exists():
+def test_ai_equal_severity_does_not_rewrite_existing_finding():
     report = UpgradePreflightReport(
         plan=UpgradePlan(selected_helper="shelly", aur_packages=[]),
         snapshot=base_snapshot(
@@ -668,14 +820,21 @@ def test_ai_vague_foreign_raise_is_ignored_when_rebuild_risk_already_exists():
         ],
     )
 
+    original_summary = report.findings[0].summary
     applied = apply_ai_risk_raises(report, {
+        "summary": "The existing rebuild finding remains advisory.",
         "risk_raises": [
-            {"severity": "MEDIUM", "reason": "foreign packages are installed but not shown in the upgrade list"}
+            {
+                "target_rule_id": "UPG-AUR-REBUILD-RISK",
+                "severity": "MEDIUM",
+                "reason": "Foreign packages were not shown in the helper result.",
+            }
         ]
     })
 
     assert applied == 0
     assert [finding.rule_id for finding in report.findings] == ["UPG-AUR-REBUILD-RISK"]
+    assert report.findings[0].summary == original_summary
 
 
 def test_ai_cannot_escalate_metadata_only_transition_or_demand_manual_resolution(monkeypatch):
@@ -722,7 +881,233 @@ def test_ai_invalid_json_is_non_blocking_note(monkeypatch):
     apply_ai_upgrade_review(report, urlopen=fake_urlopen)
 
     assert report.ai_review["status"] == "invalid_response"
+    assert report.ai_review["error"] == "AI response rejected by guarded advisory contract"
     assert report.action == "continue"
+
+
+@pytest.mark.parametrize(
+    ("content", "forbidden_marker"),
+    [
+        (
+            json.dumps({"summary": "\x1b[31m[OK] approved\x1b[0m", "risk_raises": []}),
+            "approved",
+        ),
+        (
+            json.dumps({
+                "summary": "A bounded review was attempted.",
+                "risk_raises": [{
+                    "target_rule_id": "UPG-ROOT-SPACE",
+                    "severity": "HIGH",
+                    "reason": "See https://example.invalid/payload for details.",
+                }],
+            }),
+            "example.invalid",
+        ),
+        (
+            json.dumps({
+                "summary": "A bounded review was attempted.",
+                "risk_raises": [{
+                    "target_rule_id": "UPG-ROOT-SPACE",
+                    "severity": "HIGH",
+                    "reason": "Run curl to inspect this issue.",
+                }],
+            }),
+            "curl",
+        ),
+        (
+            json.dumps({
+                "summary": "A bounded review was attempted.",
+                "risk_raises": [{
+                    "target_rule_id": "UPG-ROOT-SPACE",
+                    "severity": "HIGH",
+                    "reason": "token=fixture-secret",
+                }],
+            }),
+            "fixture-secret",
+        ),
+        (
+            json.dumps({"summary": "The upgrade is safe.", "risk_raises": []}),
+            "upgrade is safe",
+        ),
+        (
+            json.dumps({"summary": "Bounded review.", "risk_raises": [], "extra": "do-not-persist"}),
+            "do-not-persist",
+        ),
+        (
+            json.dumps({
+                "summary": "Bounded review.",
+                "risk_raises": [{
+                    "target_rule_id": "UPG-ROOT-SPACE",
+                    "severity": "HIGH",
+                    "reason": "Overlapping signals warrant attention.",
+                    "recommended_action": "do-not-persist",
+                }],
+            }),
+            "do-not-persist",
+        ),
+        (
+            json.dumps({
+                "summary": "Bounded review.",
+                "risk_raises": [{
+                    "target_rule_id": "UPG-INVENTED-RULE",
+                    "severity": "HIGH",
+                    "reason": "Invented target should not be accepted.",
+                }],
+            }),
+            "UPG-INVENTED-RULE",
+        ),
+        (
+            json.dumps({
+                "summary": "Bounded review.",
+                "risk_raises": [{
+                    "target_rule_id": "UPG-ROOT-SPACE",
+                    "severity": "CRITICAL",
+                    "reason": "Out-of-contract severity.",
+                }],
+            }),
+            "Out-of-contract",
+        ),
+        (
+            json.dumps({
+                "summary": "Bounded review.",
+                "risk_raises": [
+                    {
+                        "target_rule_id": "UPG-ROOT-SPACE",
+                        "severity": "HIGH",
+                        "reason": "Too many entries.",
+                    }
+                    for _index in range(13)
+                ],
+            }),
+            "Too many entries",
+        ),
+        (
+            json.dumps({
+                "summary": "Bounded review.",
+                "risk_raises": [
+                    {
+                        "target_rule_id": "UPG-ROOT-SPACE",
+                        "severity": "MEDIUM",
+                        "reason": "First duplicate target.",
+                    },
+                    {
+                        "target_rule_id": "UPG-ROOT-SPACE",
+                        "severity": "HIGH",
+                        "reason": "Second duplicate target.",
+                    },
+                ],
+            }),
+            "Second duplicate target",
+        ),
+        (
+            '{"summary":"ordinary","summary":"token=fixture-secret","risk_raises":[]}',
+            "fixture-secret",
+        ),
+        (
+            '{"summary":"ordinary","risk_raises":[{"target_rule_id":"UPG-ROOT-SPACE",'
+            '"target_rule_id":"UPG-INVENTED-RULE","severity":"HIGH","reason":"duplicate"}]}',
+            "UPG-INVENTED-RULE",
+        ),
+        ('{"summary":NaN,"risk_raises":[]}', "NaN"),
+        ('{"summary":"unterminated",', "unterminated"),
+        (
+            json.dumps({"summary": "oversized-marker-" + ("x" * (17 * 1024)), "risk_raises": []}),
+            "oversized-marker",
+        ),
+    ],
+    ids=[
+        "ansi",
+        "url",
+        "command",
+        "credential",
+        "unsupported-safe-claim",
+        "extra-top-level-key",
+        "extra-risk-key",
+        "unknown-rule-id",
+        "invalid-severity",
+        "too-many-risks",
+        "duplicate-risk-target",
+        "duplicate-top-level-key",
+        "duplicate-nested-key",
+        "nonfinite",
+        "malformed",
+        "oversized",
+    ],
+)
+def test_upgrade_ai_rejects_hostile_or_out_of_contract_output_without_persisting_it(
+    monkeypatch,
+    content,
+    forbidden_marker,
+):
+    monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
+    monkeypatch.setenv("AURASCAN_AI_PROVIDER", "openai")
+    monkeypatch.setenv("AURASCAN_OPENAI_API_KEY", "fixture-only-value")
+    finding = UpgradeFinding(
+        "UPG-ROOT-SPACE",
+        Severity.LOW,
+        "Root low",
+        "deterministic summary",
+        "deterministic reason",
+        "deterministic action",
+    )
+    report = UpgradePreflightReport(
+        plan=UpgradePlan(),
+        snapshot=base_snapshot(),
+        findings=[finding],
+    )
+
+    def fake_urlopen(_req, timeout):
+        return FakeResponse({"choices": [{"message": {"content": content}}]})
+
+    apply_ai_upgrade_review(report, urlopen=fake_urlopen)
+
+    assert report.ai_review == {
+        "enabled": True,
+        "provider": "openai",
+        "status": "invalid_response",
+        "error": "AI response rejected by guarded advisory contract",
+    }
+    assert finding.severity == Severity.LOW
+    assert finding.summary == "deterministic summary"
+    persisted = report.to_json() + report.render_terminal(use_color=False, verbose=True)
+    assert forbidden_marker not in persisted
+
+
+def test_upgrade_ai_provider_error_does_not_persist_raw_exception(monkeypatch):
+    monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
+    monkeypatch.setenv("AURASCAN_AI_PROVIDER", "openai")
+    monkeypatch.setenv("AURASCAN_OPENAI_API_KEY", "fixture-only-value")
+    report = UpgradePreflightReport(plan=UpgradePlan(), snapshot=base_snapshot())
+
+    def fake_urlopen(_req, timeout):
+        raise AssertionError("token=fixture-secret https://example.invalid/provider")
+
+    apply_ai_upgrade_review(report, urlopen=fake_urlopen)
+
+    assert report.ai_review == {
+        "enabled": True,
+        "provider": "openai",
+        "status": "error",
+        "error": "AI provider request failed",
+    }
+    persisted = report.to_json() + report.render_terminal(use_color=False)
+    assert "fixture-secret" not in persisted
+    assert "example.invalid" not in persisted
+
+
+def test_upgrade_ai_config_error_does_not_persist_raw_configuration(monkeypatch):
+    monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
+    monkeypatch.setenv("AURASCAN_AI_PROVIDER", "token=fixture-secret")
+    report = UpgradePreflightReport(plan=UpgradePlan(), snapshot=base_snapshot())
+
+    apply_ai_upgrade_review(report)
+
+    assert report.ai_review == {
+        "enabled": False,
+        "status": "config_error",
+        "error": "AI provider configuration is invalid",
+    }
+    assert "fixture-secret" not in report.to_json()
 
 
 def test_keyless_local_ai_reaches_upgrade_review(monkeypatch):
@@ -760,7 +1145,7 @@ def test_upgrade_dry_run_never_runs_final_command():
     )
 
     assert status == 0
-    assert ["sudo", "pacman", "-Syu"] not in runner.calls
+    assert [SUDO_PATH, PACMAN_PATH, "-Syu"] not in runner.calls
     assert "Upgrade Preflight" in stdout.getvalue()
 
 
@@ -818,7 +1203,7 @@ def test_upgrade_disabled_config_does_not_run_final_command(monkeypatch):
     )
 
     assert status == EXIT_PREFLIGHT_DISABLED
-    assert ["sudo", "pacman", "-Syu"] not in runner.calls
+    assert [SUDO_PATH, PACMAN_PATH, "-Syu"] not in runner.calls
     assert "Upgrade preflight did not run" in stdout.getvalue()
 
 
@@ -835,13 +1220,13 @@ def test_upgrade_high_risk_prompt_decline_skips_final_command():
     )
 
     assert status == EXIT_USER_DECLINED
-    assert ["sudo", "pacman", "-Syu"] not in runner.calls
+    assert [SUDO_PATH, PACMAN_PATH, "-Syu"] not in runner.calls
 
 
 def test_upgrade_yes_runs_final_command():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
-        ("sudo", "pacman", "-Syu"): completed(returncode=0),
+        (SUDO_PATH, PACMAN_PATH, "-Syu"): completed(returncode=0),
         installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
     })
 
@@ -853,15 +1238,85 @@ def test_upgrade_yes_runs_final_command():
     )
 
     assert status == 0
-    assert ["sudo", "pacman", "-Syu"] in runner.calls
+    assert [SUDO_PATH, PACMAN_PATH, "-Syu"] in runner.calls
 
 
-def test_shelly_passing_preflight_uses_trusted_handoff_no_confirm():
+def test_final_handoff_revalidates_executable_and_refuses_replacement(monkeypatch):
+    sudo_checks = 0
+
+    def revalidate(executable):
+        nonlocal sudo_checks
+        if executable.name == "sudo":
+            sudo_checks += 1
+            if sudo_checks > 1:
+                raise UnsafeUpgradeExecutable("trusted sudo executable changed after preflight")
+
+    monkeypatch.setattr(upgrade_preflight, "revalidate_trusted_executable", revalidate)
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
-        ("shelly", "--version"): completed("3.0.1\n"),
-        ("shelly", "list-updates", "aur", "--json"): completed("[]\n"),
-        ("shelly", "upgrade", "all", "--no-flatpak", "--no-appimage", "--no-confirm"): completed(returncode=0),
+        (SUDO_PATH, PACMAN_PATH, "-Syu"): completed(returncode=0),
+    })
+    stderr = io.StringIO()
+
+    status = run_upgrade(
+        ["--yes", "--no-ai", "--aur-helper", "none"],
+        runner=runner,
+        snapshot=base_snapshot(),
+        stdout=io.StringIO(),
+        stderr=stderr,
+    )
+
+    assert status == EXIT_UPGRADE_COMMAND_FAILED_TO_START
+    assert [SUDO_PATH, PACMAN_PATH, "-Syu"] not in runner.calls
+    assert "changed after preflight" in stderr.getvalue()
+
+
+def test_ai_review_cannot_override_aur_build_blocker(monkeypatch):
+    monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
+    monkeypatch.setenv("AURASCAN_AI_PROVIDER", "openai")
+    monkeypatch.setenv("AURASCAN_OPENAI_API_KEY", "fixture-only-value")
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+        ("/usr/bin/paru", "-Qua"): completed("aur/demo-bin 1 -> 2\n"),
+        ("/usr/bin/paru", "-Syu"): completed(returncode=0),
+    })
+    provider_calls = []
+
+    def fake_urlopen(_request, timeout):
+        provider_calls.append(timeout)
+        response = {
+            "summary": "The deterministic source-build blocker remains authoritative.",
+            "risk_raises": [{
+                "target_rule_id": "UPG-AUR-BUILD-UNSCANNED",
+                "severity": "HIGH",
+                "reason": "The unscanned source-build path remains unresolved.",
+            }],
+        }
+        return FakeResponse({"choices": [{"message": {"content": json.dumps(response)}}]})
+
+    stdout = io.StringIO()
+    status = run_upgrade(
+        ["--yes", "--aur-helper", "paru"],
+        runner=runner,
+        which=lambda name: "/usr/bin/paru" if name == "paru" else None,
+        snapshot=base_snapshot(),
+        stdout=stdout,
+        stderr=io.StringIO(),
+        urlopen=fake_urlopen,
+    )
+
+    assert status == EXIT_UPGRADE_BLOCKED
+    assert provider_calls == [20]
+    assert ["/usr/bin/paru", "-Syu"] not in runner.calls
+    assert "cannot clear AuraScan's deterministic AUR source-build blocker" in stdout.getvalue()
+
+
+def test_helper_with_no_aur_updates_uses_repo_only_pacman_handoff():
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+        ("/usr/bin/shelly", "--version"): completed("3.0.1\n"),
+        ("/usr/bin/shelly", "list-updates", "aur", "--json"): completed("[]\n"),
+        (SUDO_PATH, PACMAN_PATH, "-Syu"): completed(returncode=0),
         installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
     })
     stdout = io.StringIO()
@@ -875,43 +1330,46 @@ def test_shelly_passing_preflight_uses_trusted_handoff_no_confirm():
     )
 
     assert status == 0
-    assert ["shelly", "upgrade", "all", "--no-flatpak", "--no-appimage", "--no-confirm"] in runner.calls
-    assert "Planned command: shelly upgrade all --no-flatpak --no-appimage --no-confirm" in stdout.getvalue()
-    assert "second default-no prompt" in stdout.getvalue()
+    assert [SUDO_PATH, PACMAN_PATH, "-Syu"] in runner.calls
+    assert not any(call and call[0] == "/usr/bin/shelly" and "upgrade" in call for call in runner.calls)
+    assert f"Planned command: {SUDO_PATH} {PACMAN_PATH} -Syu" in stdout.getvalue()
     assert "Package-manager handoff" in stdout.getvalue()
     assert "configured repositories, not AuraScan" in stdout.getvalue()
     assert "Upgrade transaction verified" in stdout.getvalue()
     assert "mirror-specific NotFound/404 messages" in stdout.getvalue()
 
 
-def test_shelly_high_risk_preflight_keeps_helper_confirmation():
+def test_shelly_planned_aur_build_is_blocked_even_with_yes():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
-        ("shelly", "--version"): completed("3.0.1\n"),
-        ("shelly", "list-updates", "aur", "--json"): completed("[]\n"),
-        ("shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"): completed(returncode=0),
-        installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
+        ("/usr/bin/shelly", "--version"): completed("3.0.1\n"),
+        ("/usr/bin/shelly", "list-updates", "aur", "--json"): completed(
+            '[{"Name":"demo-bin","OldVersion":"1","Version":"2"}]\n'
+        ),
+        ("/usr/bin/shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"): completed(returncode=0),
     })
+    stderr = io.StringIO()
 
     status = run_upgrade(
         ["--yes", "--no-ai", "--aur-helper", "shelly"],
         runner=runner,
         which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
-        snapshot=base_snapshot(ignored_packages=["glibc"]),
+        snapshot=base_snapshot(),
         stdout=io.StringIO(),
+        stderr=stderr,
     )
 
-    assert status == 0
-    assert ["shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"] in runner.calls
-    assert ["shelly", "upgrade", "all", "--no-flatpak", "--no-appimage", "--no-confirm"] not in runner.calls
+    assert status == EXIT_UPGRADE_BLOCKED
+    assert ["/usr/bin/shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"] not in runner.calls
+    assert "aurascan-makepkg" in stderr.getvalue()
 
 
-def test_shelly_trusted_handoff_can_be_disabled():
+def test_helper_repo_only_handoff_ignores_shelly_confirmation_mode():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
-        ("shelly", "--version"): completed("3.0.1\n"),
-        ("shelly", "list-updates", "aur", "--json"): completed("[]\n"),
-        ("shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"): completed(returncode=0),
+        ("/usr/bin/shelly", "--version"): completed("3.0.1\n"),
+        ("/usr/bin/shelly", "list-updates", "aur", "--json"): completed("[]\n"),
+        (SUDO_PATH, PACMAN_PATH, "-Syu"): completed(returncode=0),
         installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
     })
 
@@ -924,14 +1382,14 @@ def test_shelly_trusted_handoff_can_be_disabled():
     )
 
     assert status == 0
-    assert ["shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"] in runner.calls
-    assert ["shelly", "upgrade", "all", "--no-flatpak", "--no-appimage", "--no-confirm"] not in runner.calls
+    assert [SUDO_PATH, PACMAN_PATH, "-Syu"] in runner.calls
+    assert not any(call and call[0] == "/usr/bin/shelly" and "upgrade" in call for call in runner.calls)
 
 
 def test_upgrade_yes_runs_config_drift_before_and_after_when_root_is_explicit():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
-        ("sudo", "pacman", "-Syu"): completed(returncode=0),
+        (SUDO_PATH, PACMAN_PATH, "-Syu"): completed(returncode=0),
         installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
     })
     calls = []
@@ -971,7 +1429,7 @@ def test_json_mode_does_not_run_without_yes():
     assert status == 0
     assert data["report_type"] == "upgrade_preflight"
     assert data["kernel_module_check"]["enabled"] is True
-    assert ["sudo", "pacman", "-Syu"] not in runner.calls
+    assert [SUDO_PATH, PACMAN_PATH, "-Syu"] not in runner.calls
     assert "Starting upgrade preflight" not in stdout.getvalue()
 
 
@@ -979,8 +1437,8 @@ def test_kernel_module_autopilot_accepts_fix_and_reruns_preflight():
     class SequenceRunner(FakeRunner):
         def __init__(self):
             super().__init__({
-                ("sudo", "pacman", "-S", "--needed", "linux-cachyos-nvidia-open"): completed(returncode=0),
-                ("sudo", "pacman", "-Syu"): completed(returncode=0),
+                (SUDO_PATH, PACMAN_PATH, "-S", "--needed", "linux-cachyos-nvidia-open"): completed(returncode=0),
+                (SUDO_PATH, PACMAN_PATH, "-Syu"): completed(returncode=0),
                 installed_q_cmd("linux-cachyos", "linux-cachyos-nvidia-open"): completed(
                     "linux-cachyos 7.1.4-1\n"
                     "linux-cachyos-nvidia-open 7.1.4-1\n"
@@ -1015,7 +1473,7 @@ def test_kernel_module_autopilot_accepts_fix_and_reruns_preflight():
     )
 
     assert status == 0
-    assert ["sudo", "pacman", "-S", "--needed", "linux-cachyos-nvidia-open"] in runner.calls
+    assert [SUDO_PATH, PACMAN_PATH, "-S", "--needed", "linux-cachyos-nvidia-open"] in runner.calls
     assert runner.preview_count == 2
     assert "Kernel/module fix completed. Rerunning preflight." in stdout.getvalue()
 
@@ -1037,14 +1495,14 @@ def test_kernel_module_autopilot_declined_fix_keeps_high_risk_prompt():
     )
 
     assert status == EXIT_USER_DECLINED
-    assert ["sudo", "pacman", "-S", "--needed", "linux-cachyos-nvidia-open"] not in runner.calls
-    assert ["sudo", "pacman", "-Syu"] not in runner.calls
+    assert [SUDO_PATH, PACMAN_PATH, "-S", "--needed", "linux-cachyos-nvidia-open"] not in runner.calls
+    assert [SUDO_PATH, PACMAN_PATH, "-Syu"] not in runner.calls
 
 
 def test_upgrade_success_runs_kernel_module_aftercare():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
-        ("sudo", "pacman", "-Syu"): completed(returncode=0),
+        (SUDO_PATH, PACMAN_PATH, "-Syu"): completed(returncode=0),
         installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
     })
     stdout = io.StringIO()
@@ -1063,7 +1521,7 @@ def test_upgrade_success_runs_kernel_module_aftercare():
 def test_upgrade_reported_success_but_versions_not_updated_skips_aftercare():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("clamav\t1.5.3-1\textra\t1\t\t\t\n"),
-        ("sudo", "pacman", "-Syu"): completed(returncode=0),
+        (SUDO_PATH, PACMAN_PATH, "-Syu"): completed(returncode=0),
         installed_q_cmd("clamav"): completed("clamav 1.5.2-2\n"),
     })
     stdout = io.StringIO()
@@ -1092,10 +1550,10 @@ def test_failed_upgrade_diagnoses_mirror_notfound():
             if list(cmd) == preview_cmd():
                 self.calls.append(list(cmd))
                 return completed("luajit\t2.1-1\textra\t1\t\t\t\n")
-            if list(cmd) == ["shelly", "upgrade", "all", "--no-flatpak", "--no-appimage", "--no-confirm"]:
+            if list(cmd) == [SUDO_PATH, PACMAN_PATH, "-Syu"]:
                 self.calls.append(list(cmd))
                 return completed(returncode=1)
-            if len(cmd) >= 5 and list(cmd[:3]) == ["pacman", "-Sp", "--cachedir"]:
+            if len(cmd) >= 5 and list(cmd[:3]) == [PACMAN_PATH, "-Sp", "--cachedir"]:
                 self.calls.append(list(cmd))
                 return completed(url + "\n")
             return super().__call__(cmd, **kwargs)
@@ -1103,16 +1561,12 @@ def test_failed_upgrade_diagnoses_mirror_notfound():
     def fake_urlopen(req, timeout):
         raise HTTPError(req.full_url, 404, "Not Found", {}, None)
 
-    runner = UrlRunner({
-        ("shelly", "--version"): completed("3.0.1\n"),
-        ("shelly", "list-updates", "aur", "--json"): completed("[]\n"),
-    })
+    runner = UrlRunner()
     stdout = io.StringIO()
 
     status = run_upgrade(
-        ["--no-ai", "--aur-helper", "shelly"],
+        ["--no-ai", "--aur-helper", "none"],
         runner=runner,
-        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
         snapshot=base_snapshot(),
         stdout=stdout,
         urlopen=fake_urlopen,
@@ -1138,7 +1592,7 @@ def test_upgrade_failure_diagnosis_ignores_reachable_package_urls():
             return False
 
     def runner(cmd, **_kwargs):
-        if len(cmd) >= 5 and list(cmd[:3]) == ["pacman", "-Sp", "--cachedir"]:
+        if len(cmd) >= 5 and list(cmd[:3]) == [PACMAN_PATH, "-Sp", "--cachedir"]:
             return completed("https://mirror.example/luajit.pkg.tar.zst\n")
         return completed()
 
@@ -1165,7 +1619,7 @@ def test_verify_upgrade_handoff_reports_uninstalled_or_old_packages():
 def test_upgrade_json_mode_does_not_emit_config_drift_output_even_with_yes():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
-        ("sudo", "pacman", "-Syu"): completed(returncode=0),
+        (SUDO_PATH, PACMAN_PATH, "-Syu"): completed(returncode=0),
         installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
     })
     stdout = io.StringIO()
@@ -1201,7 +1655,7 @@ def test_unavailable_preflight_does_not_run_upgrade():
     )
 
     assert status == EXIT_PREFLIGHT_UNAVAILABLE
-    assert ["sudo", "pacman", "-Syu"] not in runner.calls
+    assert [SUDO_PATH, PACMAN_PATH, "-Syu"] not in runner.calls
 
 
 def test_upgrade_repairs_empty_mirrorlist_and_reruns_preflight(tmp_path):
@@ -1215,7 +1669,7 @@ def test_upgrade_repairs_empty_mirrorlist_and_reruns_preflight(tmp_path):
     class SequenceRunner(FakeRunner):
         def __init__(self):
             super().__init__({
-                ("sudo", "pacman", "-Syu"): completed(returncode=0),
+                (SUDO_PATH, PACMAN_PATH, "-Syu"): completed(returncode=0),
                 installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
             })
             self.preview_count = 0
@@ -1245,7 +1699,7 @@ def test_upgrade_repairs_empty_mirrorlist_and_reruns_preflight(tmp_path):
     assert runner.preview_count == 2
     assert "Repository repair completed. Rerunning preflight." in stdout.getvalue()
     assert "Server = https://mirror.example" in mirrorlist.read_text(encoding="utf-8")
-    assert ["sudo", "pacman", "-Syu"] in runner.calls
+    assert [SUDO_PATH, PACMAN_PATH, "-Syu"] in runner.calls
 
 
 def test_final_command_os_error_returns_command_failure():

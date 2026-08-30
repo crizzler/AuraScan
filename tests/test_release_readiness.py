@@ -20,7 +20,7 @@ def test_pyproject_console_scripts_are_registered():
     data = tomllib.loads(read_text("pyproject.toml"))
 
     scripts = data["project"]["scripts"]
-    assert data["project"]["version"] == "0.9.1"
+    assert data["project"]["version"] == "0.9.2"
     assert scripts["aurascan"] == "aurascan.cli:main"
     assert scripts["aurascan-makepkg"] == "aurascan.makepkg_wrapper:main"
     assert data["project"]["requires-python"] == ">=3.8"
@@ -232,9 +232,6 @@ def test_instruction_guard_v090_documentation_contract():
 
 def test_instruction_guard_tray_v091_release_contract():
     release = " ".join(read_text("docs/releases/v0.9.1.md").lower().split())
-    unreleased = " ".join(
-        read_text("docs/releases/unreleased.md").lower().split()
-    )
 
     required = [
         "# aurascan v0.9.1",
@@ -251,10 +248,9 @@ def test_instruction_guard_tray_v091_release_contract():
     ]
     for phrase in required:
         assert phrase in release
-    assert "changes after v0.9.1 will be recorded here" in unreleased
 
 
-def test_aur_maintainer_worm_v092_unreleased_contract():
+def test_aur_maintainer_worm_v092_release_contract():
     def normalized(relative: str) -> str:
         return " ".join(read_text(relative).lower().split())
 
@@ -263,6 +259,7 @@ def test_aur_maintainer_worm_v092_unreleased_contract():
     agents = normalized("AGENTS.md")
     skill = normalized("SKILL.md")
     checklist = normalized("docs/RELEASE_CHECKLIST.md")
+    release = normalized("docs/releases/v0.9.2.md")
     unreleased = normalized("docs/releases/unreleased.md")
     engine_source = read_text("aurascan/core/engine.py")
 
@@ -274,20 +271,24 @@ def test_aur_maintainer_worm_v092_unreleased_contract():
     assert uninspected.default_severity == Severity.HIGH
     assert 'self.rule_version = "1.3.0"' in engine_source
 
-    unreleased_phrases = [
-        "`supplychain-aur-repo-propagation-001` is a critical hard blocker",
+    release_phrases = [
+        "# aurascan v0.9.2",
+        "released on 2026-08-30",
+        "added `supplychain-aur-repo-propagation-001`, a critical hard blocker",
         "non-dry-run push bound to that aur endpoint or configured remote",
-        "a push explicitly bound to another host",
-        "intentionally not a blanket deep-static source rule",
-        "`install-hook-uninspected-001` is a high hard blocker",
-        "declared relative path under the package directory is a symlink",
-        "potential static propagation chain",
-        "do not claim that package code ran",
-        "for aurascan v0.9.2, the package-scanner rule version advances from `1.2.0` to `1.3.0`",
-        "instruction guard report schema and rule version remain `1.0`",
+        "explicit pushes to another host",
+        "arbitrary release tooling found only in acquired deep-static source",
+        "added `install-hook-uninspected-001`, a high hard blocker",
+        "bounded no-follow reads",
+        "revalidates the complete input after scanning and again immediately before invoking",
+        "does not prove package code ran",
+        "package-scanner rule version advances from `1.2.0` to `1.3.0`",
+        "instruction guard's report schema and rule version remain `1.0`",
+        "application and arch/aur package advance to v0.9.2",
     ]
-    for phrase in unreleased_phrases:
-        assert phrase in unreleased
+    for phrase in release_phrases:
+        assert phrase in release
+    assert "changes after v0.9.2 will be recorded here" in unreleased
 
     readme_phrases = [
         "`supplychain-aur-repo-propagation-001` applies only to deterministic pkgbuild or declared install-hook control text",

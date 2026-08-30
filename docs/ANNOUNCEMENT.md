@@ -9,10 +9,16 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
-The v0.9.1 release adds right-click tray toggles for the Agent Instruction
-Guard's deterministic background monitor and separately consented raise-only AI
-analysis. The controls reuse AuraScan's transactional CLI, stay responsive,
-fail closed on configuration drift, and keep notifications secret-free.
+The v0.9.2 release adds a CRITICAL offline blocker for package logic that
+modifies an AUR repository and pushes the result back to the bound AUR remote.
+It also makes declared local install hooks mandatory scan evidence: changed,
+missing, ambiguous, symlinked, or otherwise uninspectable hooks stop before
+makepkg instead of reusing an older clear report.
+
+Agent Instruction Guard reviews now show the suspicious behavior, deterministic
+line range, and reason behind a finding. The existing tray toggles still control
+the deterministic background monitor and separately consented raise-only AI
+analysis without exposing paths or secrets in notifications.
 
 Agent Instruction Guard periodically reviews recognized Claude Code,
 `AGENTS.md`, and Agent Skill control files without executing them. Suspicious
@@ -105,12 +111,18 @@ behavior, checksum/signature drift, local history changes, and optional ClamAV
 or AI signals. It can also be used through `aurascan-makepkg` so the review
 happens before makepkg runs package functions.
 
-The v0.9.1 update makes Agent Instruction Guard easier to operate from the
-desktop: its periodic deterministic scan and separate raise-only AI assistant
-can now be enabled or disabled independently from the tray's right-click menu.
-State is refreshed from the private consent and user-timer configuration, and
-failed operations never put paths, command output, or credentials in public
-notifications.
+The v0.9.2 security update blocks a generic AUR-maintainer-worm chain only when
+package control text combines an AUR Git destination, repository mutation or
+staging, and a non-dry-run push bound to that destination. Ordinary upstream
+release scripts found only in acquired source remain outside the rule. Static
+evidence does not prove a push ran, credentials worked, or compromise occurred.
+
+Declared local install hooks now use bounded no-follow reads and exact cache,
+history, trust-diff, and review binding. The makepkg wrapper revalidates the
+PKGBUILD and hook after scanning and immediately before invoking makepkg.
+Agent Instruction Guard also explains suspicious behavior with line ranges and
+fixed reasons, while its periodic monitor and raise-only AI assistant remain
+independently controllable from the tray's right-click menu.
 
 The v0.8 security update adds exact `hyprland-fixes` source and exposure
 intelligence plus generic correlated detection for privileged Tailscale SSH,

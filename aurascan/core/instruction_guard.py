@@ -4280,7 +4280,8 @@ def _queue_ai_job(state_root: Path, report: InstructionReport) -> Tuple[str, Opt
         ),
         separators=(",", ":"),
     ).encode("ascii")
-    job_id = f"job-{hashlib.sha256(evidence_bytes + b'\0' + content_binding).hexdigest()[:24]}"
+    job_digest = hashlib.sha256(evidence_bytes + b"\0" + content_binding).hexdigest()
+    job_id = f"job-{job_digest[:24]}"
     path = state_root / "ai-jobs" / f"{job_id}.json"
     existing = _load_private_json(path, required_schema=AI_JOB_SCHEMA)
     if existing is not None:

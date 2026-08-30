@@ -1,6 +1,7 @@
 """Bounded, no-follow reads of package metadata members through system bsdtar."""
 
 import os
+import re
 import selectors
 import signal
 import stat
@@ -20,6 +21,7 @@ PACKAGE_IDENTITY_RESOLVED = "resolved"
 PACKAGE_IDENTITY_UNINSPECTABLE = "uninspectable"
 _BSDTAR = Path("/usr/bin/bsdtar")
 _MAX_LISTING_BYTES = 5 * 1024 * 1024
+_MAX_MEMBER_METADATA_BYTES = 4096
 _MAX_ERROR_BYTES = 4096
 _ARCHIVE_TIMEOUT_SECONDS = 10
 _MAX_IDENTITY_VALUE_BYTES = 1024
@@ -100,10 +102,20 @@ def capture_package_identity(
                 PACKAGE_IDENTITY_UNINSPECTABLE,
                 reason="invalid_member_name_encoding",
             )
-        identity_names = [name for name in names if name in {".PKGINFO", "./.PKGINFO"}]
+        identity_names = _control_member_names(names, ".PKGINFO")
         if len(identity_names) != 1:
             reason = "missing_pkginfo" if not identity_names else "duplicate_pkginfo"
             return PackageIdentityCapture(PACKAGE_IDENTITY_UNINSPECTABLE, reason=reason)
+        if not _member_is_regular(
+            archive_fd,
+            bsdtar_fd,
+            identity_names[0],
+            timeout,
+        ):
+            return PackageIdentityCapture(
+                PACKAGE_IDENTITY_UNINSPECTABLE,
+                reason="pkginfo_member_uninspectable",
+            )
 
         payload, _error, returncode, run_status = _run_bsdtar(
             archive_fd,
@@ -200,7 +212,7 @@ def capture_package_install_hook(
             names = listing.decode("utf-8", errors="strict").splitlines()
         except UnicodeDecodeError:
             return PackageInstallHookCapture(PACKAGE_HOOK_UNINSPECTABLE, reason="invalid_member_name_encoding")
-        hook_names = [name for name in names if name in {".INSTALL", "./.INSTALL"}]
+        hook_names = _control_member_names(names, ".INSTALL")
         if not hook_names:
             result = PackageInstallHookCapture(PACKAGE_HOOK_ABSENT)
             if not _capture_is_stable(
@@ -217,6 +229,11 @@ def capture_package_install_hook(
             return result
         if len(hook_names) != 1:
             return PackageInstallHookCapture(PACKAGE_HOOK_UNINSPECTABLE, reason="duplicate_install_hook")
+        if not _member_is_regular(fd, bsdtar_fd, hook_names[0], timeout):
+            return PackageInstallHookCapture(
+                PACKAGE_HOOK_UNINSPECTABLE,
+                reason="install_hook_member_uninspectable",
+            )
 
         payload, _error, returncode, run_status = _run_bsdtar(
             fd,
@@ -277,6 +294,59 @@ def _capture_is_stable(
         _stat_identity(archive_before) == _stat_identity(archive_after)
         and _stat_identity(archive_before) == _stat_identity(path_after)
         and _stat_identity(bsdtar_before) == _stat_identity(bsdtar_after)
+    )
+
+
+def _control_member_names(names, expected: str):
+    """Return exact control-member candidates, including directory spelling.
+
+    Libarchive commonly appends ``/`` when listing directory entries. Treating
+    that spelling as absent would let a non-regular control member bypass the
+    mandatory type check.
+    """
+
+    candidates = []
+    for name in names:
+        normalized = name
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        if normalized in {expected, expected + "/"}:
+            candidates.append(name)
+    return candidates
+
+
+def _member_is_regular(
+    archive_fd: int,
+    bsdtar_fd: int,
+    member_name: str,
+    timeout: int,
+) -> bool:
+    """Require one unambiguous regular-file entry before extracting bytes."""
+
+    listing, _error, returncode, run_status = _run_bsdtar(
+        archive_fd,
+        bsdtar_fd,
+        ("-tvf", member_name),
+        _MAX_MEMBER_METADATA_BYTES,
+        timeout,
+    )
+    if run_status != "ok" or returncode != 0 or not listing:
+        return False
+    try:
+        lines = listing.decode("utf-8", errors="strict").splitlines()
+    except UnicodeDecodeError:
+        return False
+    # In bsdtar's C-locale verbose listing the first character is the archive
+    # entry type: '-' is regular, while l/h/d/p/c/b identify links,
+    # directories, FIFOs, and devices. Multiple or malformed records are
+    # ambiguous and therefore fail closed.
+    if len(lines) != 1 or len(lines[0]) < 11:
+        return False
+    mode = lines[0][:10]
+    separator = lines[0][10]
+    return bool(
+        re.fullmatch(r"-[rwxStTs-]{9}", mode)
+        and (separator.isspace() or separator in {"+", "@", "."})
     )
 
 

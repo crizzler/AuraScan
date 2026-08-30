@@ -1,6 +1,9 @@
 import io
+import os
 import tarfile
 from pathlib import Path
+
+import pytest
 
 import aurascan.core.package_archive as package_archive_module
 from aurascan.analyzers.deterministic import DeterministicAnalyzer
@@ -26,6 +29,125 @@ def _write_package(path: Path, members):
             archive.addfile(info, io.BytesIO(data))
 
 
+def _write_special_control_member(path: Path, member_name: str, member_type: str):
+    payload = (
+        "pkgname = linked-fixture\npkgver = 1-1\n"
+        if member_name == ".PKGINFO"
+        else "post_install() { printf 'inert fixture\\n'; }\n"
+    ).encode("utf-8")
+    with tarfile.open(path, "w") as archive:
+        payload_info = tarfile.TarInfo("control-payload")
+        payload_info.size = len(payload)
+        archive.addfile(payload_info, io.BytesIO(payload))
+        if member_name != ".PKGINFO":
+            identity = b"pkgname = fixture\npkgver = 1-1\n"
+            identity_info = tarfile.TarInfo(".PKGINFO")
+            identity_info.size = len(identity)
+            archive.addfile(identity_info, io.BytesIO(identity))
+
+        special = tarfile.TarInfo(member_name)
+        if member_type == "symlink":
+            special.type = tarfile.SYMTYPE
+            special.linkname = "control-payload"
+        elif member_type == "hardlink":
+            special.type = tarfile.LNKTYPE
+            special.linkname = "control-payload"
+        elif member_type == "directory":
+            special.type = tarfile.DIRTYPE
+        elif member_type == "fifo":
+            special.type = tarfile.FIFOTYPE
+        elif member_type == "character":
+            special.type = tarfile.CHRTYPE
+            special.devmajor = 1
+            special.devminor = 3
+        elif member_type == "block":
+            special.type = tarfile.BLKTYPE
+            special.devmajor = 1
+            special.devminor = 0
+        else:
+            raise AssertionError("unsupported fixture member type")
+        archive.addfile(special)
+
+
+def _member_listing_name(member):
+    name = member.name
+    return name + "/" if member.isdir() and not name.endswith("/") else name
+
+
+class _FakeBsdtarRunner:
+    """Deterministic tar reader for orchestration tests; never executes data."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, fd, bsdtar_fd, arguments, max_stdout, timeout):
+        self.calls.append((fd, bsdtar_fd, tuple(arguments), max_stdout, timeout))
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            with os.fdopen(os.dup(fd), "rb") as source:
+                with tarfile.open(fileobj=source, mode="r:*") as archive:
+                    members = archive.getmembers()
+                    if arguments == ("-tf",):
+                        output = "".join(
+                            _member_listing_name(member) + "\n"
+                            for member in members
+                        ).encode("utf-8")
+                    elif len(arguments) == 2 and arguments[0] == "-tvf":
+                        selected = [
+                            member for member in members
+                            if _member_listing_name(member) == arguments[1]
+                        ]
+                        if len(selected) != 1:
+                            return b"", b"", 1, "ok"
+                        member = selected[0]
+                        entry_type = (
+                            "-" if member.isreg()
+                            else "l" if member.issym()
+                            else "h" if member.islnk()
+                            else "d" if member.isdir()
+                            else "p" if member.isfifo()
+                            else "c" if member.ischr()
+                            else "b" if member.isblk()
+                            else "?"
+                        )
+                        output = (
+                            entry_type + "rw-r--r-- fixture " + arguments[1] + "\n"
+                        ).encode("utf-8")
+                    elif len(arguments) == 2 and arguments[0] == "-xOf":
+                        selected = [
+                            member for member in members
+                            if _member_listing_name(member) == arguments[1]
+                        ]
+                        if len(selected) != 1 or not selected[0].isreg():
+                            return b"", b"", 1, "ok"
+                        extracted = archive.extractfile(selected[0])
+                        output = extracted.read() if extracted is not None else b""
+                    else:
+                        return b"", b"", 2, "failed"
+        except (OSError, tarfile.TarError, UnicodeError):
+            return b"", b"", 2, "failed"
+        if len(output) > max_stdout:
+            return output[:max_stdout], b"", -9, "oversized"
+        return output, b"", 0, "ok"
+
+
+@pytest.fixture(autouse=True)
+def deterministic_bsdtar(monkeypatch, tmp_path):
+    fake_tool = tmp_path / "trusted-bsdtar-fixture"
+    fake_tool.write_bytes(b"inert trusted-tool identity")
+    original_opener = package_archive_module._open_trusted_bsdtar
+    runner = _FakeBsdtarRunner()
+
+    def open_fake_tool(path):
+        if path != package_archive_module._BSDTAR:
+            return original_opener(path)
+        return os.open(fake_tool, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+
+    monkeypatch.setattr(package_archive_module, "_open_trusted_bsdtar", open_fake_tool)
+    monkeypatch.setattr(package_archive_module, "_run_bsdtar", runner)
+    return runner
+
+
 def test_package_identity_is_captured_from_bounded_pkginfo(tmp_path):
     package = tmp_path / "misleading-name-0-0-any.pkg.tar"
     _write_package(
@@ -41,37 +163,113 @@ def test_package_identity_is_captured_from_bounded_pkginfo(tmp_path):
     assert captured.reason == ""
 
 
-def test_package_identity_executes_the_opened_trusted_bsdtar_not_a_path_name(
+@pytest.mark.parametrize(
+    "member_type",
+    ["symlink", "hardlink", "directory", "fifo", "character", "block"],
+)
+@pytest.mark.parametrize(
+    "member_name,capture,reason",
+    [
+        (
+            ".PKGINFO",
+            capture_package_identity,
+            "pkginfo_member_uninspectable",
+        ),
+        (
+            ".INSTALL",
+            capture_package_install_hook,
+            "install_hook_member_uninspectable",
+        ),
+    ],
+    ids=["pkginfo", "install-hook"],
+)
+def test_package_control_members_must_be_regular_files(
+    tmp_path,
+    member_name,
+    capture,
+    reason,
+    member_type,
+):
+    package = tmp_path / f"fixture-{member_type}.pkg.tar"
+    _write_special_control_member(package, member_name, member_type)
+
+    captured = capture(package)
+
+    assert captured.status in {
+        PACKAGE_IDENTITY_UNINSPECTABLE,
+        PACKAGE_HOOK_UNINSPECTABLE,
+    }
+    assert captured.reason == reason
+    assert "control-payload" not in repr(captured)
+
+    if member_name == ".INSTALL":
+        result = DeterministicAnalyzer().analyze_package(str(package))
+        blocker = next(
+            finding for finding in result.findings
+            if finding.rule_id == "PACKAGE-INSTALL-HOOK-UNINSPECTED-001"
+        )
+        assert blocker.blocks_installation is True
+        assert "control-payload" not in blocker.explanation
+        assert "control-payload" not in blocker.evidence_snippet
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        b"",
+        b"?rw-r--r-- fixture .INSTALL\n",
+        b"-\n",
+        b"-rw-r--r-- fixture .INSTALL\n-rw-r--r-- duplicate .INSTALL\n",
+        b"\xffmember-type",
+    ],
+)
+def test_package_control_member_type_metadata_must_be_unambiguous(
     tmp_path,
     monkeypatch,
+    metadata,
+):
+    package = tmp_path / "fixture.pkg.tar"
+    _write_package(
+        package,
+        [
+            (".PKGINFO", "pkgname = fixture\npkgver = 1-1\n"),
+            (".INSTALL", "post_install() { :; }\n"),
+        ],
+    )
+    real_runner = package_archive_module._run_bsdtar
+
+    def ambiguous_runner(fd, bsdtar_fd, arguments, max_stdout, timeout):
+        if arguments[0] == "-tvf":
+            return metadata, b"", 0, "ok"
+        return real_runner(fd, bsdtar_fd, arguments, max_stdout, timeout)
+
+    monkeypatch.setattr(package_archive_module, "_run_bsdtar", ambiguous_runner)
+
+    captured = capture_package_install_hook(package)
+
+    assert captured.status == PACKAGE_HOOK_UNINSPECTABLE
+    assert captured.reason == "install_hook_member_uninspectable"
+    assert "member-type" not in repr(captured)
+
+
+def test_package_identity_uses_open_descriptors_and_type_checks_before_extracting(
+    tmp_path,
+    deterministic_bsdtar,
 ):
     package = tmp_path / "fixture-1-1-any.pkg.tar"
     _write_package(
         package,
         [(".PKGINFO", "pkgname = fixture\npkgver = 1-1\n")],
     )
-    real_popen = package_archive_module.subprocess.Popen
-    executed = []
-
-    def guarded_popen(arguments, *args, **kwargs):
-        executed.append((list(arguments), tuple(kwargs.get("pass_fds", ()))))
-        assert arguments[0].startswith("/proc/self/fd/")
-        assert arguments[0] != "bsdtar"
-        assert kwargs["cwd"] == "/"
-        assert kwargs["env"] == {
-            "PATH": "/usr/bin:/bin",
-            "LANG": "C",
-            "LC_ALL": "C",
-        }
-        return real_popen(arguments, *args, **kwargs)
-
-    monkeypatch.setattr(package_archive_module.subprocess, "Popen", guarded_popen)
-
     captured = capture_package_identity(package)
 
     assert captured.status == PACKAGE_IDENTITY_RESOLVED
-    assert len(executed) == 2
-    assert all(len(pass_fds) == 2 for _arguments, pass_fds in executed)
+    assert [call[2] for call in deterministic_bsdtar.calls] == [
+        ("-tf",),
+        ("-tvf", ".PKGINFO"),
+        ("-xOf", ".PKGINFO"),
+    ]
+    assert all(call[0] >= 0 and call[1] >= 0 for call in deterministic_bsdtar.calls)
 
 
 def test_package_identity_rejects_a_bare_bsdtar_name_without_execution(

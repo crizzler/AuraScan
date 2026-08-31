@@ -37,6 +37,13 @@ EXIT_REVIEW = 1
 EXIT_ERROR = 2
 
 
+def _output_terminal_width(stream) -> int:
+    try:
+        return os.get_terminal_size(stream.fileno()).columns
+    except (AttributeError, OSError, TypeError, ValueError):
+        return shutil.get_terminal_size(fallback=(100, 24)).columns
+
+
 @dataclass(frozen=True)
 class InstructionGuardPreferences:
     monitor_enabled: bool = False
@@ -514,7 +521,12 @@ def build_instruction_audit_parser() -> argparse.ArgumentParser:
     ai.add_argument("--no-ai", action="store_true", help="perform deterministic analysis only")
     ai.add_argument("--ai", action="store_true", help="perform one explicitly requested raise-only AI review")
     parser.add_argument("--review", nargs="?", const="", metavar="REPORT_ID", help="review the latest or selected report")
-    parser.add_argument("--approve", metavar="FILE_ID", help="approve an unchanged file from the latest report")
+    parser.add_argument(
+        "-A",
+        "--approve",
+        metavar="FILE_ID",
+        help="approve an unchanged file from the latest report",
+    )
     parser.add_argument("--disable", metavar="FILE_ID", help="disable an eligible unchanged standalone instruction file")
     parser.add_argument("--restore", metavar="ACTION_ID", help="restore an unchanged file disabled by AuraScan")
     parser.add_argument("--yes", action="store_true", help="confirm an eligible disable or restore action non-interactively")
@@ -707,7 +719,13 @@ def run_instruction_audit(
         if args.json_mode:
             print(json.dumps(payload, indent=2, sort_keys=True), file=stdout)
         else:
-            print(guard.render_instruction_report(report), file=stdout)
+            print(
+                guard.render_instruction_report(
+                    report,
+                    terminal_width=_output_terminal_width(stdout),
+                ),
+                file=stdout,
+            )
         return EXIT_REVIEW if payload.get("review_required") else EXIT_CLEAR
 
     if args.approve:
@@ -827,5 +845,11 @@ def run_instruction_audit(
     if args.json_mode:
         print(json.dumps(payload, indent=2, sort_keys=True), file=stdout)
     else:
-        print(guard.render_instruction_report(report), file=stdout)
+        print(
+            guard.render_instruction_report(
+                report,
+                terminal_width=_output_terminal_width(stdout),
+            ),
+            file=stdout,
+        )
     return EXIT_REVIEW if payload.get("review_required") else EXIT_CLEAR

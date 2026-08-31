@@ -6,6 +6,7 @@ import json
 import os
 import re
 import stat
+import textwrap
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -15,7 +16,10 @@ from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, 
 
 INSTRUCTION_GUARD_SCHEMA_VERSION = "1.0"
 INSTRUCTION_GUARD_RULE_VERSION = "1.0"
+# Keep the AI alias binding stable so persisted 1.1 evidence explanations stay
+# addressable.  Location-analysis changes use their own cache version below.
 INSTRUCTION_GUARD_EVIDENCE_VERSION = "1.1"
+INSTRUCTION_GUARD_ANALYSIS_EVIDENCE_VERSION = "1.2"
 REPORT_SCHEMA = "instruction_guard_report/1.0"
 MANIFEST_SCHEMA = "instruction_guard_manifest/1.0"
 AI_JOB_SCHEMA = "instruction_guard_ai_job/1.0"
@@ -367,6 +371,7 @@ class _ReadResult:
 class _LocatedCorrelation:
     families: Set[str]
     line_numbers: Set[int] = field(default_factory=set)
+    line_families: Dict[int, Set[str]] = field(default_factory=dict)
 
 
 def _safe_int(value: object, default: int = 0) -> int:
@@ -482,6 +487,57 @@ def _locations_from_lines(
             "behavior_families": list(selected_families),
         }
         for start_line, end_line in ranges[:MAX_EVIDENCE_LOCATIONS]
+    ], truncated
+
+
+def _locations_from_line_families(
+    line_families: Mapping[int, Iterable[str]],
+    families: Iterable[str],
+) -> Tuple[List[Dict[str, object]], bool]:
+    """Build bounded evidence ranges without assigning every role to every line."""
+
+    allowed = {
+        family for family in families if family in AI_ALLOWED_FAMILIES
+    }
+    located: List[Tuple[int, Tuple[str, ...]]] = []
+    for raw_line, raw_families in line_families.items():
+        if isinstance(raw_line, bool):
+            continue
+        try:
+            line = int(raw_line)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not 1 <= line <= MAX_EVIDENCE_LINE:
+            continue
+        selected = tuple(sorted({
+            family
+            for family in raw_families
+            if family in allowed and family in AI_ALLOWED_FAMILIES
+        }))
+        if selected:
+            located.append((line, selected[:16]))
+    located.sort()
+    if not located:
+        return [], False
+
+    ranges: List[Tuple[int, int, Tuple[str, ...]]] = []
+    start, previous, selected = located[0][0], located[0][0], located[0][1]
+    for line, roles in located[1:]:
+        if line == previous + 1 and roles == selected:
+            previous = line
+            continue
+        ranges.append((start, previous, selected))
+        start = previous = line
+        selected = roles
+    ranges.append((start, previous, selected))
+    truncated = len(ranges) > MAX_EVIDENCE_LOCATIONS
+    return [
+        {
+            "start_line": start_line,
+            "end_line": end_line,
+            "behavior_families": list(roles),
+        }
+        for start_line, end_line, roles in ranges[:MAX_EVIDENCE_LOCATIONS]
     ], truncated
 
 
@@ -709,6 +765,7 @@ def _validate_report_structure(data: Mapping[str, object]) -> None:
         raise ValueError("Instruction Guard AI status does not match its interpretation")
     if isinstance(analysis, Mapping):
         expected_evidence: Optional[Dict[str, object]] = None
+        evidence_report: Optional[InstructionReport] = None
         if analysis.get("schema") == "instruction_guard_ai_interpretation/1.1":
             evidence_report = InstructionReport(
                 report_id=str(report_id),
@@ -725,15 +782,37 @@ def _validate_report_structure(data: Mapping[str, object]) -> None:
             _prompt, expected_evidence = _ai_prompt_and_evidence(
                 _ai_evidence(evidence_report)
             )
-        validated_analysis = _validate_ai_interpretation(
-            analysis,
-            (
-                str(expected_evidence["highest_deterministic_severity"])
-                if expected_evidence is not None
-                else deterministic_highest
-            ),
-            evidence=expected_evidence,
-        )
+        try:
+            validated_analysis = _validate_ai_interpretation(
+                analysis,
+                (
+                    str(expected_evidence["highest_deterministic_severity"])
+                    if expected_evidence is not None
+                    else deterministic_highest
+                ),
+                evidence=expected_evidence,
+            )
+        except ValueError:
+            # Reports written before invalid configuration was separated from
+            # suspicious content may contain evidence-mapped AI explanations
+            # for those now-coverage-only findings.  Accept that exact legacy
+            # deterministic evidence when loading, while all newly queued
+            # evidence excludes coverage findings.
+            if evidence_report is None or expected_evidence is None:
+                raise
+            _legacy_prompt, legacy_evidence = _ai_prompt_and_evidence(
+                _ai_evidence(
+                    evidence_report,
+                    include_legacy_configuration_coverage=True,
+                )
+            )
+            if legacy_evidence == expected_evidence:
+                raise
+            validated_analysis = _validate_ai_interpretation(
+                analysis,
+                str(legacy_evidence["highest_deterministic_severity"]),
+                evidence=legacy_evidence,
+            )
         severities.append(str(validated_analysis["severity"]))
     expected_highest = max(severities or ["LOW"], key=lambda item: SEVERITY_RANK[item])
     expected_review = bool(
@@ -2477,7 +2556,12 @@ def _active_text(text: str) -> Tuple[str, bool, bool, bool, List[int]]:
 
 
 def _behavior_families(active: str) -> Set[str]:
-    lowered = active.lower()
+    # Shell line continuations remain separate physical evidence lines, but the
+    # backslash itself must not prevent the bounded text detector from seeing
+    # the command that the shell would join.  Keep the newline so later
+    # location attribution can still bind both contributing source lines.
+    normalized = re.sub(r"\\[ \t]*\r?\n[ \t]*", "\n", active)
+    lowered = normalized.lower()
     families: Set[str] = set()
     if re.search(r"\b(?:curl|wget)\b|\b(?:fetch|download)\s+https?://|https?://", lowered):
         families.add("fetch")
@@ -2512,7 +2596,7 @@ def _behavior_families(active: str) -> Set[str]:
         lowered,
     )) or bool(re.search(
         r"\bcurl\b[^\n]*(?:\s-T(?=\s|=)|\s-F(?=\s|=))",
-        active,
+        normalized,
     ))
     wget_transfer = bool(re.search(
         r"\bwget\b[^\n]*--(?:post|body)-(?:file|data)\b",
@@ -2586,19 +2670,127 @@ def _behavior_families(active: str) -> Set[str]:
         lowered,
     ):
         families.add("destructive-action")
-    if re.search(r"(?m)^\s*!`[^`]+`\s*$", active):
+    if re.search(r"(?m)^\s*!`[^`]+`\s*$", normalized):
         families.add("dynamic-command")
     return families
+
+
+def _active_line_family_map(
+    active: str,
+    source_line_numbers: Sequence[int],
+) -> Dict[int, Set[str]]:
+    active_lines = active.splitlines()
+    if len(active_lines) != len(source_line_numbers):
+        return {}
+    result: Dict[int, Set[str]] = {}
+    direct_by_index: List[Set[str]] = []
+    for line, source_line in zip(active_lines, source_line_numbers):
+        if isinstance(source_line, bool) or int(source_line) <= 0:
+            direct_by_index.append(set())
+            continue
+        families = _behavior_families(line)
+        if HIDDEN_COMMENT_MARKER in line and families & {
+            "fetch", "execute", "credential-access", "upload", "persistence",
+            "privilege-abuse",
+        }:
+            families.add("concealment")
+        direct_by_index.append(set(families))
+        if families:
+            result.setdefault(int(source_line), set()).update(families)
+    continuation_pairs: Set[int] = set()
+    index = 0
+    while index < len(active_lines) - 1:
+        if not re.search(r"\\[ \t]*$", active_lines[index]):
+            index += 1
+            continue
+        start = index
+        end = index
+        while (
+            end < len(active_lines) - 1
+            and re.search(r"\\[ \t]*$", active_lines[end])
+        ):
+            continuation_pairs.add(end)
+            end += 1
+        chain_families = _behavior_families("\n".join(active_lines[start:end + 1]))
+        individual_families: Set[str] = set()
+        for direct in direct_by_index[start:end + 1]:
+            individual_families.update(direct)
+        cross_line_families = chain_families - individual_families
+        if cross_line_families:
+            for source_line in source_line_numbers[start:end + 1]:
+                if isinstance(source_line, bool) or int(source_line) <= 0:
+                    continue
+                result.setdefault(int(source_line), set()).update(
+                    cross_line_families
+                )
+        index = end
+    # A small set of shell-like constructs is intentionally recognized across
+    # a physical newline (for example ``curl ... |`` followed by ``bash``, or
+    # ``chmod`` followed by a setuid mode).  Re-running the detector only on
+    # individual lines would correctly identify the overall correlation but
+    # omit one or all of the source lines that actually form the construct.
+    # Attribute only families that require the adjacent pair, and bind that
+    # role to both contributing lines.  Existing one-line roles are left
+    # untouched, so ordinary fetch-then-execute prose remains line-specific.
+    cross_line_hint = re.compile(
+        r"https?://|[|`]|\b(?:curl|wget|fetch|download|bash|sh|zsh|fish|"
+        r"python\d*|node|perl|ruby|run|execute|invoke|launch|pipe|eval|exec|"
+        r"source|automatic|always|on|every|session|sessionstart|load|loads|opens|"
+        r"starts|login|pretooluse|posttooluse|silently|conceal|hide|tell|telling|"
+        r"showing|disclose|report|notify|clear|journalctl|history|"
+        r"systemd|timer|cron|autostart|startup|recreate|restore|repair|removed|"
+        r"hourly|base64|xxd|decode|deobfuscat|openssl|fromcharcode|ask|prompt|"
+        r"capture|harvest|collect|steal|read|write|create|edit|modify|configure|"
+        r"grant|enable|install|set|sudo|sudoers|nopasswd|passwordless|setuid|"
+        r"suid|chmod|chown|pkexec|rm|shred|wipefs|truncate|delete|credentials?|"
+        r"passwords?|secrets?|archive|upload|exfiltrat\w*|[24][0-7]{3})\b",
+        re.IGNORECASE,
+    )
+    for index in range(max(0, len(active_lines) - 1)):
+        if index in continuation_pairs:
+            continue
+        left = active_lines[index]
+        right = active_lines[index + 1]
+        if not left.strip() or not right.strip():
+            continue
+        if not (
+            cross_line_hint.search(left[-256:])
+            or cross_line_hint.search(right[:256])
+        ):
+            continue
+        pair_families = _behavior_families(left + "\n" + right)
+        individual_families = direct_by_index[index] | direct_by_index[index + 1]
+        cross_line_families = pair_families - individual_families
+        if not cross_line_families:
+            continue
+        pair_source_lines = source_line_numbers[index:index + 2]
+        if any(
+            isinstance(source_line, bool) or int(source_line) <= 0
+            for source_line in pair_source_lines
+        ):
+            continue
+        for source_line in pair_source_lines:
+            result.setdefault(int(source_line), set()).update(cross_line_families)
+    return result
 
 
 def _correlation_sets(
     active: str,
     source_line_numbers: Optional[Sequence[int]] = None,
+    line_family_map: Optional[Mapping[int, Iterable[str]]] = None,
 ) -> List[_LocatedCorrelation]:
     active_lines = active.splitlines()
     if source_line_numbers is None or len(source_line_numbers) != len(active_lines):
         source_line_numbers = list(range(1, len(active_lines) + 1))
     located_lines = list(zip(active_lines, source_line_numbers))
+    if line_family_map is None:
+        direct_roles = _active_line_family_map(active, source_line_numbers)
+    else:
+        direct_roles = {
+            int(line): set(families)
+            for line, families in line_family_map.items()
+            if not isinstance(line, bool) and int(line) > 0
+        }
     blocks: List[List[Tuple[str, int]]] = []
     current: List[Tuple[str, int]] = []
     list_section: List[Tuple[str, int]] = []
@@ -2663,7 +2855,10 @@ def _correlation_sets(
                 int(source_line)
                 for line, source_line in block
                 if line.strip()
-                and (_behavior_families(line) or correlation_anchor(line))
+                and (
+                    set(direct_roles.get(int(source_line), set())) & families
+                    or correlation_anchor(line)
+                )
                 and int(source_line) > 0
             },
         ))
@@ -2696,7 +2891,10 @@ def _correlation_sets(
                     int(source_line)
                     for line, source_line in section
                     if line.strip()
-                    and (_behavior_families(line) or correlation_anchor(line))
+                    and (
+                        set(direct_roles.get(int(source_line), set())) & families
+                        or correlation_anchor(line)
+                    )
                     and int(source_line) > 0
                 },
             ))
@@ -2722,7 +2920,7 @@ def _correlation_sets(
     fetched_paths: Dict[str, Set[int]] = {}
     dangerous = {"fetch", "execute", "credential-access", "upload", "privilege-abuse"}
     for line, source_line in located_lines:
-        line_families = _behavior_families(line)
+        line_families = set(direct_roles.get(int(source_line), set()))
         lowered_line = line.lower()
         current_lines = {int(source_line)} if int(source_line) > 0 else set()
         line_fetched_paths: Set[str] = set()
@@ -2851,6 +3049,12 @@ def _correlation_sets(
         for family in line_families & dangerous:
             seen_dangerous.add(family)
             seen_dangerous_lines[family] = set(current_lines)
+    for correlation in result:
+        correlation.line_families = {
+            line: set(direct_roles.get(line, set())) & correlation.families
+            for line in correlation.line_numbers
+            if set(direct_roles.get(line, set())) & correlation.families
+        }
     return result
 
 
@@ -2863,12 +3067,21 @@ def _finding(
     *,
     confidence: str = "high",
     line_numbers: Optional[Iterable[int]] = None,
+    line_families: Optional[Mapping[int, Iterable[str]]] = None,
 ) -> InstructionFinding:
     selected_families = sorted(set(families))[:16]
-    evidence_locations, evidence_truncated = _locations_from_lines(
-        line_numbers or [],
-        selected_families,
-    )
+    evidence_locations: List[Dict[str, object]] = []
+    evidence_truncated = False
+    if line_families:
+        evidence_locations, evidence_truncated = _locations_from_line_families(
+            line_families,
+            selected_families,
+        )
+    if not evidence_locations:
+        evidence_locations, evidence_truncated = _locations_from_lines(
+            line_numbers or [],
+            selected_families,
+        )
     return InstructionFinding(
         rule_id=rule_id,
         severity=severity,
@@ -2879,28 +3092,6 @@ def _finding(
         evidence_locations=evidence_locations,
         evidence_truncated=evidence_truncated,
     )
-
-
-def _active_family_lines(
-    active: str,
-    source_line_numbers: Sequence[int],
-    selected_families: Iterable[str],
-) -> Set[int]:
-    targets = set(selected_families)
-    result: Set[int] = set()
-    active_lines = active.splitlines()
-    if len(active_lines) != len(source_line_numbers):
-        return result
-    for line, source_line in zip(active_lines, source_line_numbers):
-        families = _behavior_families(line)
-        if HIDDEN_COMMENT_MARKER in line and families & {
-            "fetch", "execute", "credential-access", "upload", "persistence",
-            "privilege-abuse",
-        }:
-            families.add("concealment")
-        if families & targets and int(source_line) > 0:
-            result.add(int(source_line))
-    return result
 
 
 def _first_matching_line(text: str, pattern: str, *, flags: int = 0) -> List[int]:
@@ -3158,9 +3349,14 @@ def _analyze_text(text: str, surface: str) -> List[InstructionFinding]:
         # configuration fields and grants structurally so an unrelated
         # homepage plus a documentation note cannot form a synthetic chain.
         return _json_config_findings(text, surface)
-    active, hidden, invalid_frontmatter, unterminated_fence, source_line_numbers = _active_text(text)
+    active, _hidden, invalid_frontmatter, unterminated_fence, source_line_numbers = _active_text(text)
     families = _behavior_families(active)
-    correlated = _correlation_sets(active, source_line_numbers)
+    active_line_families = _active_line_family_map(active, source_line_numbers)
+    correlated = _correlation_sets(
+        active,
+        source_line_numbers,
+        line_family_map=active_line_families,
+    )
     findings: List[InstructionFinding] = []
     if len(text.splitlines()) > 50_000:
         findings.append(_finding(
@@ -3219,6 +3415,7 @@ def _analyze_text(text: str, surface: str) -> List[InstructionFinding]:
             "The active instruction text correlates fetching content with a shell or interpreter execution path.",
             ["fetch", "execute"],
             line_numbers=fetch_execute.line_numbers,
+            line_families=fetch_execute.line_families,
         ))
     credential_transfers = [
         item for item in correlated
@@ -3239,6 +3436,7 @@ def _analyze_text(text: str, surface: str) -> List[InstructionFinding]:
             "Credential locations are paired with archiving or outbound transfer behavior in active instruction text.",
             credential_transfer.families & {"credential-access", "archive", "upload", "fetch"},
             line_numbers=credential_transfer.line_numbers,
+            line_families=credential_transfer.line_families,
         ))
     stealth_activation = next((
         item for item in correlated
@@ -3252,6 +3450,7 @@ def _analyze_text(text: str, surface: str) -> List[InstructionFinding]:
             "The file asks an agent to act automatically while hiding the activity from the user.",
             ["automatic-activation", "concealment"],
             line_numbers=stealth_activation.line_numbers,
+            line_families=stealth_activation.line_families,
         ))
     dangerous = {"fetch", "execute", "credential-access", "upload", "privilege-abuse"}
     persistent_danger = next((
@@ -3266,6 +3465,7 @@ def _analyze_text(text: str, surface: str) -> List[InstructionFinding]:
             "The active text would make a dangerous behavior recur or restore itself.",
             persistent_danger.families & (dangerous | {"persistence"}),
             line_numbers=persistent_danger.line_numbers,
+            line_families=persistent_danger.line_families,
         ))
     obfuscated_execution = next((
         item for item in correlated
@@ -3279,29 +3479,48 @@ def _analyze_text(text: str, surface: str) -> List[InstructionFinding]:
             "Decoded or transformed content is connected to an execution primitive.",
             ["obfuscation", "execute"],
             line_numbers=obfuscated_execution.line_numbers,
+            line_families=obfuscated_execution.line_families,
         ))
     if "privilege-abuse" in families:
+        privilege_line_families = {
+            line: roles & {"privilege-abuse", "persistence"}
+            for line, roles in active_line_families.items()
+            if "privilege-abuse" in roles
+        }
+        privilege_families = {
+            family
+            for roles in privilege_line_families.values()
+            for family in roles
+        } or {"privilege-abuse"}
         findings.append(_finding(
             "IG-BEHAVIOR-PRIVILEGE-ABUSE",
             "HIGH",
             "An agent instruction requests unsafe privilege or sudo-policy changes.",
             "The active text references password capture, sudo-policy weakening, or setuid-root behavior.",
-            ["privilege-abuse"] + (["persistence"] if "persistence" in families else []),
-            line_numbers=_active_family_lines(
-                active, source_line_numbers, ["privilege-abuse"]
-            ),
+            privilege_families,
+            line_numbers=privilege_line_families,
+            line_families=privilege_line_families,
         ))
     if "dynamic-command" in families:
-        severity = "HIGH" if families & dangerous else "MEDIUM"
+        dynamic_line_families = {
+            line: set(roles)
+            for line, roles in active_line_families.items()
+            if "dynamic-command" in roles
+        }
+        dynamic_families = {
+            family
+            for roles in dynamic_line_families.values()
+            for family in roles
+        } or {"dynamic-command"}
+        severity = "HIGH" if dynamic_families & dangerous else "MEDIUM"
         findings.append(_finding(
             "IG-ACTIVE-CLAUDE-DYNAMIC-COMMAND",
             severity,
             "A Claude dynamic command block requires review.",
             "Dynamic !command syntax can execute during agent context loading and was analyzed only as text.",
-            families | {"dynamic-command"},
-            line_numbers=_active_family_lines(
-                active, source_line_numbers, ["dynamic-command"]
-            ),
+            dynamic_families,
+            line_numbers=dynamic_line_families,
+            line_families=dynamic_line_families,
         ))
     if re.search(r"\b(?:bash|shell)\(\*\)", active, re.IGNORECASE):
         findings.append(_finding(
@@ -3424,7 +3643,7 @@ def _manifest_entry(
         "symlink_state": candidate.symlink_state,
         "imports": list(imports)[:128],
         "analysis_rule_version": INSTRUCTION_GUARD_RULE_VERSION,
-        "analysis_evidence_version": INSTRUCTION_GUARD_EVIDENCE_VERSION,
+        "analysis_evidence_version": INSTRUCTION_GUARD_ANALYSIS_EVIDENCE_VERSION,
         "analysis_findings": [
             finding.to_dict()
             for finding in candidate.findings
@@ -3624,12 +3843,19 @@ def _ai_finding_evidence(
     }
 
 
-def _ai_evidence(report: InstructionReport) -> Dict[str, object]:
+def _ai_evidence(
+    report: InstructionReport,
+    *,
+    include_legacy_configuration_coverage: bool = False,
+) -> Dict[str, object]:
     ranked: List[Tuple[int, int, int, str, InstructionFinding]] = []
     for candidate_index, candidate in enumerate(report.candidates):
         candidate_alias = _candidate_ai_alias(candidate)
         for finding_index, finding in enumerate(candidate.findings):
-            if finding.rule_id.startswith("IG-INTEGRITY-"):
+            if finding.rule_id.startswith("IG-INTEGRITY-") or (
+                not include_legacy_configuration_coverage
+                and _is_coverage_finding(finding)
+            ):
                 continue
             ranked.append((
                 -SEVERITY_RANK.get(finding.severity, 0),
@@ -3640,7 +3866,10 @@ def _ai_evidence(report: InstructionReport) -> Dict[str, object]:
             ))
     global_offset = len(report.candidates)
     for finding_index, finding in enumerate(report.findings):
-        if finding.rule_id.startswith("IG-INTEGRITY-"):
+        if finding.rule_id.startswith("IG-INTEGRITY-") or (
+            not include_legacy_configuration_coverage
+            and _is_coverage_finding(finding)
+        ):
             continue
         ranked.append((
             -SEVERITY_RANK.get(finding.severity, 0),
@@ -4659,7 +4888,7 @@ def scan_instruction_files(
             and str(old.get("approved_hash") or "") == str(old.get("sha256") or "")
             and str(old.get("approval_binding") or "") == binding
             and old.get("analysis_rule_version") == INSTRUCTION_GUARD_RULE_VERSION
-            and old.get("analysis_evidence_version") == INSTRUCTION_GUARD_EVIDENCE_VERSION
+            and old.get("analysis_evidence_version") == INSTRUCTION_GUARD_ANALYSIS_EVIDENCE_VERSION
             and stored_analysis is not None
             and _metadata_matches(old, metadata)
         )
@@ -4923,7 +5152,12 @@ def scan_instruction_files(
     _validate_private_payload_size(manifest)
     _validated_report_payload(report)
 
-    if ai_enabled and ai_reviewer is not None and report.highest_severity in {"MEDIUM", "HIGH", "CRITICAL"}:
+    has_ai_content = any(
+        _is_content_finding(finding)
+        for candidate in report.candidates
+        for finding in candidate.findings
+    ) or any(_is_content_finding(finding) for finding in report.findings)
+    if ai_enabled and ai_reviewer is not None and has_ai_content:
         try:
             prompt, evidence = _ai_prompt_and_evidence(_ai_evidence(report))
             if evidence.get("candidates"):
@@ -4939,7 +5173,7 @@ def scan_instruction_files(
         except Exception:
             report.ai_status = "error-preserved-deterministic"
             report.notes.append("Optional AI interpretation failed; deterministic findings were preserved unchanged.")
-    elif ai_enabled and report.highest_severity in {"MEDIUM", "HIGH", "CRITICAL"}:
+    elif ai_enabled and has_ai_content:
         queue_status, reused_analysis = _queue_ai_job(selected_state, report)
         report.ai_status = queue_status
         if reused_analysis is not None:
@@ -5066,18 +5300,122 @@ def _is_integrity_finding(finding: InstructionFinding) -> bool:
 
 
 def _is_coverage_finding(finding: InstructionFinding) -> bool:
-    return _is_integrity_finding(finding) and finding.rule_id not in {
-        "IG-INTEGRITY-CONTENT-CHANGED",
-        "IG-INTEGRITY-MACHINE-BINDING",
-    }
+    return (
+        finding.rule_id.startswith("IG-CONFIG-INVALID-")
+        or finding.rule_id == "IG-CONFIG-UNTERMINATED-FENCE"
+        or (
+            _is_integrity_finding(finding)
+            and finding.rule_id not in {
+                "IG-INTEGRITY-CONTENT-CHANGED",
+                "IG-INTEGRITY-MACHINE-BINDING",
+            }
+        )
+    )
+
+
+def _is_content_finding(finding: InstructionFinding) -> bool:
+    return not _is_integrity_finding(finding) and not _is_coverage_finding(finding)
+
+
+BEHAVIOR_DISPLAY_NAMES = {
+    "fetch": "network retrieval",
+    "execute": "shell or interpreter execution",
+    "credential-access": "credential or secret access",
+    "archive": "collection or archiving",
+    "upload": "outbound transfer",
+    "automatic-activation": "automatic activation",
+    "concealment": "concealment or history suppression",
+    "persistence": "persistence or self-repair",
+    "obfuscation": "decoding or obfuscation",
+    "privilege-abuse": "privilege or sudo-policy abuse",
+    "dynamic-command": "Claude dynamic command",
+    "dangerous-hook": "automatically triggered hook",
+    "destructive-action": "destructive action",
+    "broad-tool-grant": "broad tool permission",
+    "integrity": "integrity or scan-coverage condition",
+    "invalid-configuration": "invalid or incompletely parsed configuration",
+}
+
+
+def _terminal_render_width(value: Optional[int]) -> int:
+    try:
+        selected = int(value) if value is not None else 100
+    except (TypeError, ValueError, OverflowError):
+        selected = 100
+    return max(60, min(selected, 120))
+
+
+def _append_wrapped(
+    lines: List[str],
+    prefix: str,
+    text: object,
+    *,
+    width: int,
+    break_long_words: bool = True,
+) -> None:
+    value = str(text or "")
+    wrapper = textwrap.TextWrapper(
+        width=width,
+        initial_indent=prefix,
+        subsequent_indent=" " * len(prefix),
+        break_long_words=break_long_words,
+        break_on_hyphens=False,
+        replace_whitespace=True,
+        drop_whitespace=True,
+    )
+    lines.extend(wrapper.wrap(value) or [prefix.rstrip()])
+
+
+def _behavior_display(family: str) -> str:
+    description = BEHAVIOR_DISPLAY_NAMES.get(family, family.replace("-", " "))
+    return f"{family} ({description})"
+
+
+def _counted(count: int, singular: str, plural: Optional[str] = None) -> str:
+    return f"{count} {singular if count == 1 else (plural or singular + 's')}"
+
+
+def _candidate_can_offer_approval(candidate: InstructionCandidate) -> bool:
+    return (
+        candidate.baseline
+        and candidate.symlink_state == "regular"
+        and not candidate.read_error
+        and candidate.integrity_state in {"first-seen", "unreviewed", "changed"}
+    )
+
+
+def _render_candidate_next_step(
+    lines: List[str],
+    candidate: InstructionCandidate,
+    *,
+    width: int,
+) -> None:
+    if _candidate_can_offer_approval(candidate):
+        lines.append("     Next: read the file, then approve this exact hash with:")
+        _append_wrapped(
+            lines,
+            "       ",
+            f"aurascan instruction-audit -A {candidate.file_id}",
+            width=width,
+        )
+    else:
+        _append_wrapped(
+            lines,
+            "     Next: ",
+            "manual file and state review is required; AuraScan cannot safely offer "
+            "hash approval for this file state.",
+            width=width,
+        )
 
 
 def _format_evidence_location(location: Mapping[str, object]) -> str:
     start = int(location["start_line"])
     end = int(location["end_line"])
     line_label = f"line {start}" if start == end else f"lines {start}-{end}"
-    families = " + ".join(str(item) for item in location["behavior_families"])
-    return f"{line_label} [part of correlated pattern: {families}]"
+    families = " + ".join(
+        _behavior_display(str(item)) for item in location["behavior_families"]
+    )
+    return f"{line_label} — {families}"
 
 
 def _render_finding(
@@ -5087,95 +5425,87 @@ def _render_finding(
     indent: str,
     candidate_id: str,
     ai_explanations: Mapping[str, str],
+    finding_kind: str,
+    width: int,
 ) -> None:
-    lines.append(f"{indent}[{finding.severity}] {finding.rule_id}: {finding.title}")
-    pattern = " + ".join(finding.behavior_families) or "file-integrity condition"
-    lines.append(f"{indent}Pattern: {pattern}")
+    _append_wrapped(
+        lines,
+        f"{indent}[{finding.severity}] ",
+        finding.title,
+        width=width,
+    )
+    _append_wrapped(lines, f"{indent}Rule: ", finding.rule_id, width=width)
+    pattern = " + ".join(
+        _behavior_display(family) for family in finding.behavior_families
+    ) or "file-integrity condition"
+    _append_wrapped(lines, f"{indent}Pattern: ", pattern, width=width)
     if finding.evidence_locations:
-        locations = "; ".join(
-            _format_evidence_location(item) for item in finding.evidence_locations
+        lines.append(f"{indent}Lines:")
+        for location in finding.evidence_locations:
+            _append_wrapped(
+                lines,
+                f"{indent}  - ",
+                _format_evidence_location(location),
+                width=width,
+            )
+        if finding.evidence_truncated:
+            lines.append(f"{indent}  - additional bounded locations omitted")
+    elif finding_kind == "content":
+        _append_wrapped(
+            lines,
+            f"{indent}Lines: ",
+            "unavailable — this report has no precise source location for the "
+            "finding. Inspect the file directly; if the report predates line-aware "
+            "evidence, a fresh scan can regenerate it.",
+            width=width,
         )
-        suffix = "; additional locations omitted" if finding.evidence_truncated else ""
-        lines.append(f"{indent}Location: {locations}{suffix}")
+    elif "DIRECTORY" in finding.rule_id:
+        _append_wrapped(
+            lines,
+            f"{indent}Lines: ",
+            "not applicable — this concerns directory traversal, not file text.",
+            width=width,
+        )
     else:
-        lines.append(f"{indent}Location: file-level; an exact source line is unavailable")
-    lines.append(f"{indent}Why (deterministic): {finding.reason}")
-    lines.append(f"{indent}Confidence: {finding.confidence}")
+        _append_wrapped(
+            lines,
+            f"{indent}Lines: ",
+            "not applicable — this concerns scan coverage or file integrity, "
+            "not suspicious source text.",
+            width=width,
+        )
+    why_label = "Why flagged" if finding_kind == "content" else "Why review is required"
+    _append_wrapped(
+        lines,
+        f"{indent}{why_label}: ",
+        finding.reason,
+        width=width,
+    )
     evidence_id = _finding_evidence_id(finding, candidate_id=candidate_id)
-    if evidence_id in ai_explanations:
-        lines.append(f"{indent}Why (AI, advisory): {ai_explanations[evidence_id]}")
+    if finding_kind == "content" and evidence_id in ai_explanations:
+        _append_wrapped(
+            lines,
+            f"{indent}AI explanation (advisory): ",
+            ai_explanations[evidence_id],
+            width=width,
+        )
+    elif finding_kind == "content" and ai_explanations:
+        _append_wrapped(
+            lines,
+            f"{indent}AI explanation (advisory): ",
+            "not included in the bounded AI evidence selection; the deterministic "
+            "line roles and reason above remain authoritative.",
+            width=width,
+        )
+    lines.append(f"{indent}Confidence: {finding.confidence}")
 
 
-def render_instruction_report(report: InstructionReport) -> str:
-    all_candidate_findings = [
-        finding for candidate in report.candidates for finding in candidate.findings
-    ]
-    content_findings = [
-        finding for finding in all_candidate_findings + report.findings
-        if not _is_integrity_finding(finding)
-    ]
-    integrity_findings = [
-        finding for finding in all_candidate_findings + report.findings
-        if _is_integrity_finding(finding)
-    ]
-    coverage_findings = [
-        finding for finding in integrity_findings if _is_coverage_finding(finding)
-    ]
-    first_seen = sum(
-        candidate.integrity_state == "first-seen" for candidate in report.candidates
-    )
-    changed = sum(
-        candidate.integrity_state in {"changed", "machine-binding-invalidated", "unsafe"}
-        for candidate in report.candidates
-    )
-    review_basis: List[str] = []
-    if report.truncated or report.continuation_pending:
-        review_basis.append("inventory incomplete")
-    if first_seen:
-        review_basis.append(f"{first_seen} first-seen file{'s' if first_seen != 1 else ''}")
-    if changed:
-        review_basis.append(f"{changed} changed or unsafe file{'s' if changed != 1 else ''}")
-    if content_findings:
-        review_basis.append(
-            f"{len(content_findings)} suspicious static finding"
-            f"{'s' if len(content_findings) != 1 else ''}"
-        )
-    if integrity_findings:
-        review_basis.append(
-            f"{len(integrity_findings)} integrity or coverage finding"
-            f"{'s' if len(integrity_findings) != 1 else ''}"
-        )
-
-    lines = [
-        "AuraScan Agent Instruction Guard",
-        f"Report: {report.report_id}",
-        f"Result: {'REVIEW REQUIRED' if report.review_required else 'CLEAR'}",
-        f"Highest severity: {report.highest_severity}",
-        (
-            f"Agent files discovered so far: {len(report.candidates)}"
-            if report.truncated or report.continuation_pending
-            else f"Agent files: {len(report.candidates)}"
-        ),
-        f"Review basis: {'; '.join(review_basis) if review_basis else 'none'}",
-    ]
-    if report.truncated or report.continuation_pending:
-        lines.append(
-            "Discovery: incomplete; a lossless continuation is saved. Run instruction-audit "
-            "again to continue before treating the inventory as complete."
-        )
-    if content_findings:
-        lines.append(f"Content analysis: {len(content_findings)} suspicious static finding(s) require explanation below.")
-    elif coverage_findings:
-        lines.append(
-            "Content analysis: no suspicious static behavior pattern was detected in the "
-            "content AuraScan could safely analyze; integrity or coverage findings below "
-            "prevent a clear result."
-        )
-    else:
-        lines.append(
-            "Content analysis: no suspicious static behavior pattern was detected in the files listed here."
-        )
-
+def render_instruction_report(
+    report: InstructionReport,
+    *,
+    terminal_width: Optional[int] = None,
+) -> str:
+    width = _terminal_render_width(terminal_width)
     ai_explanations: Dict[str, str] = {}
     analysis = report.ai_analysis if isinstance(report.ai_analysis, Mapping) else None
     if analysis and analysis.get("schema") == "instruction_guard_ai_interpretation/1.1":
@@ -5183,116 +5513,536 @@ def render_instruction_report(report: InstructionReport) -> str:
             if isinstance(item, Mapping):
                 ai_explanations[str(item.get("evidence_id") or "")] = str(item.get("reason") or "")
 
-    lines.append("")
-    if report.ai_status in {"complete", "reused"} and analysis:
+    candidate_content: Dict[str, List[InstructionFinding]] = {}
+    candidate_integrity: Dict[str, List[InstructionFinding]] = {}
+    candidate_coverage: Dict[str, List[InstructionFinding]] = {}
+    for candidate in report.candidates:
+        candidate_content[candidate.file_id] = [
+            finding for finding in candidate.findings if _is_content_finding(finding)
+        ]
+        candidate_integrity[candidate.file_id] = [
+            finding
+            for finding in candidate.findings
+            if _is_integrity_finding(finding) and not _is_coverage_finding(finding)
+        ]
+        candidate_coverage[candidate.file_id] = [
+            finding for finding in candidate.findings if _is_coverage_finding(finding)
+        ]
+    report_content = [
+        finding for finding in report.findings if _is_content_finding(finding)
+    ]
+    report_integrity = [
+        finding
+        for finding in report.findings
+        if _is_integrity_finding(finding) and not _is_coverage_finding(finding)
+    ]
+    report_coverage = [
+        finding for finding in report.findings if _is_coverage_finding(finding)
+    ]
+    content_findings = report_content + [
+        finding
+        for candidate in report.candidates
+        for finding in candidate_content[candidate.file_id]
+    ]
+    coverage_entries: List[Tuple[Optional[InstructionCandidate], InstructionFinding]] = [
+        (None, finding) for finding in report_coverage
+    ]
+    integrity_entries: List[Tuple[Optional[InstructionCandidate], InstructionFinding]] = [
+        (None, finding) for finding in report_integrity
+    ]
+    for candidate in report.candidates:
+        coverage_entries.extend(
+            (candidate, finding)
+            for finding in candidate_coverage[candidate.file_id]
+        )
+        integrity_entries.extend(
+            (candidate, finding)
+            for finding in candidate_integrity[candidate.file_id]
+        )
+
+    suspicious_candidates = [
+        candidate for candidate in report.candidates if candidate_content[candidate.file_id]
+    ]
+    new_candidates = [
+        candidate
+        for candidate in report.candidates
+        if candidate.integrity_state == "first-seen"
+        and not candidate_content[candidate.file_id]
+    ]
+    changed_candidates = [
+        candidate
+        for candidate in report.candidates
+        if candidate.integrity_state in {
+            "changed", "machine-binding-invalidated", "unreviewed", "unsafe",
+        }
+        and not candidate_content[candidate.file_id]
+    ]
+    changed_file_ids = {candidate.file_id for candidate in changed_candidates}
+    integrity_entries = [
+        (candidate, finding)
+        for candidate, finding in integrity_entries
+        if candidate is None or candidate.file_id not in changed_file_ids
+    ]
+    incomplete = bool(report.truncated or report.continuation_pending)
+    content_highest = max(
+        (finding.severity for finding in content_findings),
+        default="",
+        key=lambda severity: SEVERITY_RANK.get(severity, -1),
+    )
+    coverage_highest = max(
+        (finding.severity for _candidate, finding in coverage_entries),
+        default="",
+        key=lambda severity: SEVERITY_RANK.get(severity, -1),
+    )
+
+    if content_findings:
+        status = "SUSPICIOUS INSTRUCTIONS FOUND — REVIEW REQUIRED"
+    elif incomplete or coverage_entries:
+        status = "SCAN COVERAGE REVIEW REQUIRED"
+    elif report.review_required:
+        status = "INTEGRITY APPROVAL REQUIRED"
+    else:
+        status = "CLEAR"
+    lines: List[str] = []
+    _append_wrapped(
+        lines,
+        "",
+        f"AuraScan Instruction Guard — {status}",
+        width=width,
+    )
+    _append_wrapped(lines, "Report: ", report.report_id, width=width)
+    lines.extend(["", "SECURITY RESULT"])
+    if content_findings:
+        _append_wrapped(
+            lines,
+            "  ",
+            f"Suspicious instruction patterns: {len(content_findings)} FOUND — "
+            f"highest severity: {content_highest}",
+            width=width,
+        )
+        _append_wrapped(
+            lines,
+            "  ",
+            "These are static behavior correlations, not proof that an instruction ran "
+            "or that the machine is compromised.",
+            width=width,
+        )
+    else:
+        _append_wrapped(
+            lines,
+            "  ",
+            "Suspicious instruction patterns: NONE FOUND in the content AuraScan "
+            "could safely analyze on this page.",
+            width=width,
+        )
+        review_label = "integrity/coverage" if incomplete or coverage_entries else "integrity"
+        _append_wrapped(
+            lines,
+            "  ",
+            f"This is an {review_label} review, not a malware-content alert.",
+            width=width,
+        )
+    files_label = "Agent files scanned on this page" if incomplete else "Agent files scanned"
+    lines.append(f"  {files_label}: {len(report.candidates)}")
+    if incomplete:
+        _append_wrapped(
+            lines,
+            "  Scan coverage: ",
+            "INCOMPLETE — a lossless continuation is saved; run "
+            "aurascan instruction-audit again before treating the home inventory as complete.",
+            width=width,
+        )
+    elif coverage_entries:
+        issue_text = _counted(len(coverage_entries), "issue")
+        verb = "requires" if len(coverage_entries) == 1 else "require"
+        lines.append(f"  Scan coverage: {issue_text} {verb} review")
+    else:
+        lines.append("  Scan coverage: complete for this bounded report page")
+    if not content_findings:
+        _append_wrapped(
+            lines,
+            "  AI analysis: ",
+            "NOT NEEDED — there is no suspicious content finding to explain. AI cannot "
+            "approve a new or changed file hash.",
+            width=width,
+        )
+    elif report.ai_status in {"complete", "reused"} and analysis:
         confidence = float(analysis.get("confidence", 0.0))
-        lines.append("AI interpretation (advisory, raise-only; deterministic evidence remains authoritative):")
-        lines.append(
-            f"- Verdict: {analysis.get('verdict')}; severity: {analysis.get('severity')}; "
-            f"confidence: {confidence:.0%}"
-        )
-        families = analysis.get("matched_behavior_families")
-        if isinstance(families, list) and families:
-            lines.append(f"- Matched patterns: {' + '.join(str(item) for item in families)}")
-        if analysis.get("schema") == "instruction_guard_ai_interpretation/1.0":
-            lines.append(
-                "- Legacy rationale omitted under the current privacy policy; run a fresh AI analysis for evidence-mapped reasons."
+        explained_count = 0
+        for candidate in report.candidates:
+            candidate_id = _candidate_ai_alias(candidate)
+            explained_count += sum(
+                _finding_evidence_id(finding, candidate_id=candidate_id)
+                in ai_explanations
+                for finding in candidate_content[candidate.file_id]
             )
-        else:
-            reasons = analysis.get("reasons")
-            if isinstance(reasons, list):
-                lines.extend(f"- Why: {reason}" for reason in reasons[:12])
-    elif report.ai_status == "not-needed":
-        lines.append(
-            "AI interpretation: not run — no MEDIUM-or-higher suspicious content finding was eligible for interpretation."
+        explained_count += sum(
+            _finding_evidence_id(finding, candidate_id="global") in ai_explanations
+            for finding in report_content
         )
-        lines.append(
-            "AI does not approve first-seen or changed files and does not resolve integrity or coverage findings."
+        ai_summary = (
+            f"COMPLETE (advisory, raise-only) — verdict {analysis.get('verdict')}; "
+            f"severity {analysis.get('severity')}; confidence {confidence:.0%}."
+        )
+        if analysis.get("schema") == "instruction_guard_ai_interpretation/1.1":
+            ai_summary += (
+                f" Mapped explanations: {explained_count} of "
+                f"{len(content_findings)} content findings in this report."
+            )
+        _append_wrapped(lines, "  AI analysis: ", ai_summary, width=width)
+        if analysis.get("schema") == "instruction_guard_ai_interpretation/1.0":
+            _append_wrapped(
+                lines,
+                "  ",
+                "Legacy rationale omitted under the current privacy policy; run a fresh "
+                "AI analysis for evidence-mapped reasons.",
+                width=width,
+            )
+    elif report.ai_status in {"queued", "retry"}:
+        _append_wrapped(
+            lines,
+            "  AI analysis: ",
+            "PENDING — deterministic findings are available below",
+            width=width,
         )
     elif report.ai_status == "disabled":
-        lines.append("AI interpretation: disabled for this scan; deterministic analysis is shown below.")
-    elif report.ai_status in {"queued", "retry"}:
-        lines.append("AI interpretation: pending; deterministic evidence is available now and remains authoritative.")
-    elif report.ai_status in {"error-preserved-deterministic", "failed", "saturated"}:
-        lines.append("AI interpretation: unavailable; deterministic findings were preserved unchanged.")
+        _append_wrapped(
+            lines,
+            "  AI analysis: ",
+            "DISABLED — deterministic findings are available below",
+            width=width,
+        )
     else:
-        lines.append("AI interpretation: unavailable due to an unrecognized private state.")
+        _append_wrapped(
+            lines,
+            "  AI analysis: ",
+            "UNAVAILABLE — deterministic findings remain authoritative",
+            width=width,
+        )
 
-    if report.findings:
-        lines.append("")
-        lines.append("Scan-level findings:")
-        for finding in report.findings[:20]:
-            _render_finding(
-                lines,
-                finding,
-                indent="  ",
-                candidate_id="global",
-                ai_explanations=ai_explanations,
+    if report.review_required:
+        lines.extend(["", "WHY REVIEW IS REQUIRED"])
+        if content_findings:
+            finding_text = _counted(
+                len(content_findings),
+                "suspicious static behavior finding",
             )
-        if len(report.findings) > 20:
-            lines.append(f"  ... {len(report.findings) - 20} additional scan-level findings omitted")
+            verb = "needs" if len(content_findings) == 1 else "need"
+            lines.append(
+                f"  - {finding_text} {verb} inspection."
+            )
+        if new_candidates:
+            file_text = _counted(len(new_candidates), "new agent file")
+            _append_wrapped(
+                lines,
+                "  - ",
+                f"{file_text} {'has' if len(new_candidates) == 1 else 'have'} never been "
+                "approved on this machine.",
+                width=width,
+            )
+        if changed_candidates:
+            file_text = _counted(
+                len(changed_candidates),
+                "changed or unsafe file",
+            )
+            _append_wrapped(
+                lines,
+                "  - ",
+                f"{file_text} {'needs' if len(changed_candidates) == 1 else 'need'} an "
+                "integrity decision.",
+                width=width,
+            )
+        if coverage_entries:
+            issue_text = _counted(
+                len(coverage_entries),
+                "scan-coverage or file-safety issue",
+            )
+            _append_wrapped(
+                lines,
+                "  - ",
+                f"{issue_text} {'prevents' if len(coverage_entries) == 1 else 'prevent'} "
+                "a clear result.",
+                width=width,
+            )
+        if incomplete:
+            _append_wrapped(
+                lines,
+                "  - ",
+                "Discovery is incomplete and has a saved continuation.",
+                width=width,
+            )
 
-    if report.candidates:
-        lines.append("")
-        lines.append("Files (suspicious content first):")
-    indexed_candidates = list(enumerate(report.candidates))
-    indexed_candidates.sort(key=lambda pair: (
-        -SEVERITY_RANK.get(pair[1].content_risk, 0),
-        -int(any(not _is_integrity_finding(item) for item in pair[1].findings)),
-        -int(pair[1].review_required),
-        pair[0],
-    ))
+    if content_findings:
+        lines.extend(["", f"SUSPICIOUS INSTRUCTIONS ({len(content_findings)})"])
     rendered_finding_count = 0
     max_rendered_findings = 200
     max_findings_per_candidate = 12
-    for _index, candidate in indexed_candidates[:200]:
-        marker = "review" if candidate.review_required else "handled"
-        lines.append(
-            f"- {candidate.file_id} [{marker}; {candidate.content_risk}] {candidate.relative_path}"
+    suspicious_candidates.sort(key=lambda candidate: (
+        -SEVERITY_RANK.get(candidate.content_risk, 0),
+        candidate.relative_path,
+    ))
+    for candidate_index, candidate in enumerate(suspicious_candidates[:200], 1):
+        findings = candidate_content[candidate.file_id]
+        candidate_highest = max(
+            (finding.severity for finding in findings),
+            key=lambda severity: SEVERITY_RANK.get(severity, 0),
         )
-        lines.append(f"  Integrity: {_integrity_review_text(candidate)}")
-        candidate_content = [
-            finding for finding in candidate.findings if not _is_integrity_finding(finding)
-        ]
-        candidate_integrity = [
-            finding for finding in candidate.findings if _is_integrity_finding(finding)
-        ]
-        if candidate_content:
-            lines.append(f"  Content scan: {len(candidate_content)} suspicious static finding(s).")
-        else:
-            lines.append("  Content scan: no suspicious static behavior pattern detected.")
-        ordered_findings = candidate_content + candidate_integrity
+        _append_wrapped(
+            lines,
+            f"  {candidate_index}. [{candidate_highest}] ",
+            candidate.relative_path,
+            width=width,
+            break_long_words=True,
+        )
+        _append_wrapped(lines, "     File ID: ", candidate.file_id, width=width)
+        _append_wrapped(
+            lines,
+            "     Integrity: ",
+            _integrity_review_text(candidate),
+            width=width,
+        )
         remaining = max(0, max_rendered_findings - rendered_finding_count)
-        selected_findings = ordered_findings[:min(max_findings_per_candidate, remaining)]
-        for finding in selected_findings:
+        selected_findings = findings[:min(max_findings_per_candidate, remaining)]
+        for finding_index, finding in enumerate(selected_findings, 1):
+            lines.append(f"     Finding {finding_index}:")
+            _render_finding(
+                lines,
+                finding,
+                indent="       ",
+                candidate_id=_candidate_ai_alias(candidate),
+                ai_explanations=ai_explanations,
+                finding_kind="content",
+                width=width,
+            )
+        rendered_finding_count += len(selected_findings)
+        omitted = len(findings) - len(selected_findings)
+        if omitted:
+            _append_wrapped(
+                lines,
+                "       ... ",
+                f"{omitted} additional finding(s) omitted from terminal output",
+                width=width,
+            )
+    if len(suspicious_candidates) > 200:
+        _append_wrapped(
+            lines,
+            "  ... ",
+            f"{len(suspicious_candidates) - 200} additional suspicious file(s) omitted",
+            width=width,
+        )
+    if report_content:
+        lines.append("  Report-level suspicious findings:")
+        for finding in report_content[:20]:
             _render_finding(
                 lines,
                 finding,
                 indent="    ",
-                candidate_id=_candidate_ai_alias(candidate),
+                candidate_id="global",
                 ai_explanations=ai_explanations,
+                finding_kind="content",
+                width=width,
             )
-        rendered_finding_count += len(selected_findings)
-        omitted_findings = len(ordered_findings) - len(selected_findings)
-        if omitted_findings:
-            lines.append(
-                f"    ... {omitted_findings} additional finding(s) omitted from terminal output"
+
+    if coverage_entries:
+        lines.extend(["", f"SCAN COVERAGE ({len(coverage_entries)})"])
+        lines.append(f"  Coverage severity: {coverage_highest}")
+        _append_wrapped(
+            lines,
+            "  ",
+            "These conditions mean AuraScan skipped or could not safely inspect something; "
+            "they are not evidence of malware.",
+            width=width,
+        )
+        for index, (candidate, finding) in enumerate(coverage_entries[:20], 1):
+            if candidate is not None:
+                _append_wrapped(
+                    lines,
+                    f"  {index}. ",
+                    candidate.relative_path,
+                    width=width,
+                    break_long_words=True,
+                )
+                _append_wrapped(lines, "     File ID: ", candidate.file_id, width=width)
+                indent = "     "
+                candidate_id = _candidate_ai_alias(candidate)
+            else:
+                lines.append(f"  Finding {index}:")
+                indent = "    "
+                candidate_id = "global"
+            _render_finding(
+                lines,
+                finding,
+                indent=indent,
+                candidate_id=candidate_id,
+                ai_explanations=ai_explanations,
+                finding_kind="coverage",
+                width=width,
             )
-        if candidate.review_required and not candidate.findings:
-            lines.append(
-                f"  Next: inspect this file, then use --approve {candidate.file_id} only if it is expected."
+        if len(coverage_entries) > 20:
+            _append_wrapped(
+                lines,
+                "  ... ",
+                f"{len(coverage_entries) - 20} additional coverage finding(s) omitted",
+                width=width,
             )
-    if len(indexed_candidates) > 200:
-        lines.append(f"... {len(indexed_candidates) - 200} additional files omitted from terminal output")
+
+    if integrity_entries:
+        lines.extend(["", f"FILE INTEGRITY FINDINGS ({len(integrity_entries)})"])
+        _append_wrapped(
+            lines,
+            "  ",
+            "These findings concern file identity or approval, not a detected malicious text pattern.",
+            width=width,
+        )
+        for index, (candidate, finding) in enumerate(integrity_entries[:20], 1):
+            if candidate is not None:
+                _append_wrapped(
+                    lines,
+                    f"  {index}. ",
+                    candidate.relative_path,
+                    width=width,
+                    break_long_words=True,
+                )
+                _append_wrapped(lines, "     File ID: ", candidate.file_id, width=width)
+                candidate_id = _candidate_ai_alias(candidate)
+            else:
+                lines.append(f"  Finding {index}:")
+                candidate_id = "global"
+            _render_finding(
+                lines,
+                finding,
+                indent="     ",
+                candidate_id=candidate_id,
+                ai_explanations=ai_explanations,
+                finding_kind="integrity",
+                width=width,
+            )
+
+    if new_candidates:
+        lines.extend(["", f"NEW FILES AWAITING APPROVAL ({len(new_candidates)})"])
+        _append_wrapped(
+            lines,
+            "  ",
+            "These files are not flagged as malicious; their exact content hashes are "
+            "simply new on this machine.",
+            width=width,
+        )
+        lines.append("  Static content scan: no suspicious pattern found.")
+        for index, candidate in enumerate(new_candidates[:200], 1):
+            _append_wrapped(
+                lines,
+                f"  {index}. ",
+                candidate.relative_path,
+                width=width,
+                break_long_words=True,
+            )
+            _append_wrapped(lines, "     File ID: ", candidate.file_id, width=width)
+            _append_wrapped(
+                lines,
+                "     Why approval is needed: ",
+                _integrity_review_text(candidate),
+                width=width,
+            )
+            _render_candidate_next_step(lines, candidate, width=width)
+        if len(new_candidates) > 200:
+            _append_wrapped(
+                lines,
+                "  ... ",
+                f"{len(new_candidates) - 200} additional new file(s) omitted",
+                width=width,
+            )
+
+    if changed_candidates:
+        lines.extend(["", f"CHANGED OR UNTRUSTED FILES ({len(changed_candidates)})"])
+        _append_wrapped(
+            lines,
+            "  ",
+            "No suspicious content pattern was detected in these files, but their identity "
+            "or safe readability changed and must not be trusted automatically.",
+            width=width,
+        )
+        rendered_integrity_findings = 0
+        max_rendered_integrity_findings = 200
+        max_integrity_findings_per_candidate = 12
+        for index, candidate in enumerate(changed_candidates[:200], 1):
+            _append_wrapped(
+                lines,
+                f"  {index}. ",
+                candidate.relative_path,
+                width=width,
+                break_long_words=True,
+            )
+            _append_wrapped(lines, "     File ID: ", candidate.file_id, width=width)
+            _append_wrapped(
+                lines,
+                "     Integrity state: ",
+                _integrity_review_text(candidate),
+                width=width,
+            )
+            integrity_findings = candidate_integrity[candidate.file_id]
+            remaining = max(
+                0,
+                max_rendered_integrity_findings - rendered_integrity_findings,
+            )
+            selected_integrity_findings = integrity_findings[:min(
+                max_integrity_findings_per_candidate,
+                remaining,
+            )]
+            for finding in selected_integrity_findings:
+                _render_finding(
+                    lines,
+                    finding,
+                    indent="     ",
+                    candidate_id=_candidate_ai_alias(candidate),
+                    ai_explanations=ai_explanations,
+                    finding_kind="integrity",
+                    width=width,
+                )
+            rendered_integrity_findings += len(selected_integrity_findings)
+            omitted = len(integrity_findings) - len(selected_integrity_findings)
+            if omitted:
+                _append_wrapped(
+                    lines,
+                    "     ... ",
+                    f"{omitted} additional integrity finding(s) omitted from terminal output",
+                    width=width,
+                )
+            _render_candidate_next_step(lines, candidate, width=width)
+        if len(changed_candidates) > 200:
+            _append_wrapped(
+                lines,
+                "  ... ",
+                f"{len(changed_candidates) - 200} additional changed or untrusted file(s) omitted",
+                width=width,
+            )
+
     if report.notes:
-        lines.append("")
-        lines.extend(f"Note: {note}" for note in report.notes[:20])
+        lines.extend(["", "DISCOVERY NOTES"])
+        for note in report.notes[:20]:
+            _append_wrapped(lines, "  - ", note, width=width)
     lines.append("")
-    lines.append(
-        "Line references and behavior labels are deterministic, secret-free evidence; labels describe the correlated pattern across the listed locations, and no source snippets are stored or shown."
-    )
-    lines.append(
-        "Static evidence and AI interpretation do not prove execution or compromise. Review files before an AI agent loads them."
+    if content_findings:
+        _append_wrapped(
+            lines,
+            "",
+            "Line references and behavior roles are deterministic, secret-free evidence. "
+            "AuraScan does not store or print source snippets in this report.",
+            width=width,
+        )
+    else:
+        _append_wrapped(
+            lines,
+            "",
+            "There is no suspicious source line to show because no suspicious content "
+            "pattern matched on this report page.",
+            width=width,
+        )
+    _append_wrapped(
+        lines,
+        "",
+        "Static evidence and AI interpretation do not prove execution or compromise. "
+        "Review files before an AI agent loads them.",
+        width=width,
     )
     return "\n".join(lines)
 

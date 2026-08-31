@@ -86,6 +86,13 @@ evidence actually collected.
 - Keep instruction content risk separate from integrity approval. First-seen
   or changed files require review even when content looks benign; approval is
   bound to the current machine and UID. Never auto-quarantine a file.
+- Present suspicious instructions, scan coverage, and integrity approval as
+  distinct review states. Never render a clean first-seen file with a LOW
+  threat badge. For a real correlation, attribute each line range only to its
+  observed behavior role and keep its deterministic reason plus mapped AI
+  rationale adjacent without printing source text or secrets. Treat malformed
+  configuration as scan coverage, disclose bounded AI explanation counts, and
+  give safely approvable new or changed files a concrete next step.
 - Keep Instruction Guard review explanatory and evidence-bound. Prioritize
   suspicious files; show deterministic one-based line ranges, semantic
   behavior labels, and fixed reasons without source snippets. Describe clean

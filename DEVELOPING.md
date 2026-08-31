@@ -204,19 +204,40 @@ or that compromise succeeded.
 
 Preserve original, one-based physical line locations while normalizing active
 text. A content finding should carry bounded deterministic line ranges,
-semantic behavior labels, and a fixed reason, but no source snippet. Correlated
-multi-line behavior must identify the contributing ranges; file-level
-integrity, read, or parser findings must explicitly omit a precise location
-when one cannot be established safely. The terminal renderer prioritizes
-suspicious files, prints the deterministic reason and locations, and separates
-them from integrity-only inventory. A truncated page must be labeled as
-incomplete and explain that its committed continuation remains pending.
+semantic behavior labels, and a fixed reason, but no source snippet. For a
+multi-line correlation, retain the role contributed by each range rather than
+copying the complete correlated family set onto every location: for example,
+identify the retrieval range separately from the later execution range while
+the finding still explains why those roles matter together. File-level
+integrity, read, parser, and legacy-report findings must explicitly omit a
+precise location when one cannot be established safely. Never reconstruct,
+print, or persist the source text to make the explanation more vivid.
 
-Keep content risk distinct from integrity state. Suspicious first-seen files
-alert immediately; otherwise clean first-seen recognized files form one
-unreviewed inventory. Render that state as an integrity-only approval request,
-not as a suspicious-content finding; AI remains `not-needed` when the clean
-first-seen file has no deterministic content finding. Store SHA-256 plus
+Keep suspicious-content risk, integrity approval, and coverage limitations as
+three separate presentation concepts. `review_required` may be true because of
+any one of them and must not be rendered as if it always means malware was
+detected. The terminal renderer should lead with their separate counts, avoid
+presenting the report's fallback LOW value as a suspicious-content severity
+when there is no content finding, and group suspicious instructions ahead of
+changed/unsafe files, clean first-seen inventory, and coverage limitations.
+Wrap prose and long paths predictably for narrow terminals without corrupting
+IDs, line ranges, or JSON output. A truncated page must be labeled as incomplete
+and explain that its committed continuation remains pending.
+
+Suspicious first-seen files alert immediately; otherwise clean first-seen
+recognized files form one unreviewed inventory. Render that state as an
+integrity-only approval request and explicitly say that first-seen means no
+machine-bound approval exists, not that suspicious content or malware was
+found. AI remains `not-needed` when a clean first-seen file has no eligible
+deterministic content finding. For eligible findings, place a fixed
+deterministic explanation beside its exact evidence roles and show only an
+evidence-mapped AI rationale labeled as advisory. AI prose cannot replace the
+deterministic explanation, create or move a location, establish trust, or enter
+the integrity-only inventory. Disclose how many displayed findings received a
+bounded AI explanation, and label malformed or incompletely parsed
+configuration as scan coverage rather than suspicious content. Give safely
+approvable new or changed files a concrete next step; unsafe identities must
+remain manual-only. Store SHA-256 plus
 device/inode, size, timestamps, mode, owner, and symlink state. An approval is
 valid only for the exact content and a binding derived from machine identity
 plus UID. Corrupt, symlinked, wrongly owned, or permission-weakened state must
@@ -285,6 +306,14 @@ approval invalidation, corrupt state, alert deduplication, and exact
 disable/restore refusal and round trips. Mock AI, systemd, tray, and
 notifications; tests must not scan a real home, start a model, contact a
 provider, require root, or invoke live systemd.
+
+Presentation tests must cover inventory-only, suspicious-only, mixed, changed,
+coverage-limited, continuation, and legacy reports. Assert that clean first-seen
+files are never labeled as suspicious; contributing ranges retain their exact
+one-based locations and per-range roles; deterministic and advisory AI reasons
+remain distinct; narrow-terminal wrapping preserves IDs and meaning; `--json`
+remains schema-stable and unwrapped; and source snippets, credentials, URLs,
+terminal controls, and rejected or unmapped AI prose never enter review output.
 
 Document the residual boundary in user-facing changes: this is periodic
 detection, not pasted-command/link preflight, privileged fanotify or process

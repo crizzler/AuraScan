@@ -543,6 +543,7 @@ aurascan instruction-audit --ai --json
 aurascan instruction-audit --review
 aurascan instruction-audit --review REPORT_ID
 aurascan instruction-audit --approve FILE_ID
+aurascan instruction-audit -A FILE_ID  # compact approval form shown in terminal reviews
 aurascan instruction-audit --disable FILE_ID
 aurascan instruction-audit --restore ACTION_ID
 aurascan instruction-audit --status
@@ -582,24 +583,50 @@ configuration where possible. A match reports suspicious static instructions;
 it does not prove that an assistant obeyed them or that credentials left the
 machine.
 
-Terminal review separates suspicious content from integrity-only review and
-lists suspicious files first. Each content finding includes deterministic,
-one-based line ranges from the bounded source file, semantic behavior labels,
-and a fixed explanation of why the correlation needs review. It does not print
-the source lines themselves. File-level integrity or parser findings say when
-no precise line is available rather than inventing a location. When bounded
-discovery is incomplete, the review identifies the displayed files as the
-current page and explains that a saved continuation still needs to complete.
+Terminal review starts with a short outcome summary and keeps three different
+reasons for attention visibly separate:
 
-Content risk and integrity trust remain separate. Suspicious first-seen files
-alert immediately; otherwise clean first-seen files enter one unreviewed
-inventory. Their review state means that AuraScan has no machine-bound approval
-for the content; it does not mean that a suspicious pattern was found. AI
-analysis remains `not-needed` for a clean first-seen file with no deterministic
-content finding. Approval records the exact hash and is bound to the local
-machine identity and UID, so restoring an old manifest onto a rebuilt machine
-does not silently establish trust. Reports, manifests, queued AI jobs, alert
-state, and disable receipts use private permissions under
+- **Suspicious instructions** are deterministic content findings such as a
+  fetch-and-execute chain. These findings have a severity and an explanation.
+- **Integrity approval** covers recognized files that are new, changed, or no
+  longer covered by the approval for this machine and UID. A clean first-seen
+  file is listed here because AuraScan has no prior trusted hash for it, not
+  because AuraScan detected malware in it.
+- **Coverage limitations** identify content or parts of discovery that AuraScan
+  could not safely or completely inspect. They prevent a clear result without
+  being presented as proof of malicious content.
+
+The terminal groups those sections instead of presenting every item as the
+same kind of alert, prioritizes suspicious instructions, and wraps explanatory
+text for ordinary terminal widths. For a suspicious correlation, each
+contributing one-based line range is paired with the semantic role found at
+that location, such as network retrieval or later execution. The finding then
+states the fixed deterministic reason those roles matter together. An eligible
+AI interpretation appears only as a separately labeled, advisory explanation
+mapped to that deterministic evidence; it cannot supply or move a line number.
+The summary states how many report content findings received a mapped AI
+explanation; findings outside the bounded AI selection say so explicitly and
+retain their deterministic line roles and reason. Malformed configuration is
+reported as incomplete scan coverage, not as a suspicious-instruction match.
+AuraScan does not print or persist the source lines, snippets, or potential
+secrets. File-level integrity, read, parser, and legacy-report findings say when
+no precise line is available rather than inventing one.
+
+Suspicious first-seen files alert immediately; otherwise clean first-seen files
+enter one unreviewed inventory for integrity approval. Their review state is an
+approval request, not a malware verdict, and AI analysis remains `not-needed`
+when there is no eligible
+deterministic suspicious-content finding to explain. Approval records the exact
+hash and is bound to the local machine identity and UID, so restoring an old
+manifest onto a rebuilt machine does not silently establish trust. When bounded
+discovery is incomplete, the review identifies the displayed files as the
+current page and keeps the saved continuation visible as a coverage limitation.
+For an unchanged, safely readable regular file, the inventory shows the compact
+approval command beside the next step. Changed files receive the same concrete
+next step after their integrity reason; unsafe or symlinked states instead say
+that manual review is required because AuraScan cannot safely offer approval.
+Reports, manifests, queued AI jobs, alert state, and disable receipts use
+private permissions under
 `$XDG_STATE_HOME/aurascan/instruction-guard/`. Version 0.9.0 introduces the
 `instruction_guard_report/1.0` schema and Instruction Guard rule version 1.0;
 the existing package-scanner rule version is unchanged.

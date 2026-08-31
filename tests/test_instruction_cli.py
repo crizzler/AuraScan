@@ -69,7 +69,9 @@ def install_fake_guard(
     module.default_instruction_guard_state_root = lambda _env=None: tmp_path / "state"
     module.scan_instruction_files = scan or (lambda *_args, **_kwargs: FakeReport())
     module.review_report = review or (lambda *_args, **_kwargs: FakeReport())
-    module.render_instruction_report = lambda report: "fixture instruction report"
+    module.render_instruction_report = (
+        lambda report, **_kwargs: "fixture instruction report"
+    )
     selected_status = status if status is not None else {
         "schema": "instruction_guard_status/1.0",
         "state": "clear",
@@ -92,6 +94,14 @@ def install_fake_guard(
 
 def completed(command, returncode=0, stdout="", stderr=""):
     return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+
+
+def test_instruction_approval_has_compact_review_alias():
+    args = instruction_cli.build_instruction_audit_parser().parse_args(
+        ["-A", "a" * 24]
+    )
+
+    assert args.approve == "a" * 24
 
 
 def test_instruction_preferences_parse_explicit_values_and_report_invalid_input():

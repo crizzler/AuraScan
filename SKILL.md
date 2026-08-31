@@ -86,12 +86,18 @@ Use this workflow for changes in the AuraScan repository.
 3. Correlate active behavior families and suppress quoted examples, fenced
    documentation, comments, and negated instructions where evidence permits.
    Preserve bounded, one-based physical line ranges for contributing active
-   text and report semantic behavior labels and fixed reasons without source
-   snippets.
+   text. Attribute only the behavior role actually present at each range, then
+   explain why the roles form a dangerous correlation; never copy the complete
+   family set onto every line or expose source snippets.
 4. Keep first-seen/change integrity review separate from content severity.
    Describe a clean first-seen file as integrity-only review with AI
-   `not-needed`; prioritize actual suspicious findings in terminal output and
-   clearly label an incomplete continuation page. Machine-and-UID-bound
+   `not-needed`, never give a zero-finding file a LOW threat badge, and present
+   suspicious instructions, scan coverage, and integrity approval as distinct
+   sections. Put line roles, the fixed deterministic reason, and any mapped AI
+   rationale together under the actual finding; disclose bounded AI explanation
+   counts, keep malformed configuration in scan coverage, and give safely
+   approvable files a concrete next step. Wrap output without splitting file
+   IDs. Clearly label an incomplete continuation page. Machine-and-UID-bound
    approval cannot be restored onto a rebuilt host.
 5. Keep the periodic deterministic service offline and credential-free. AI is
    separately enabled, raise-only, tool-free, strict-JSON, and limited to

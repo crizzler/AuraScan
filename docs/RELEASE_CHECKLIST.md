@@ -172,6 +172,18 @@ candidate.
 - Instruction Guard behavior findings require documented correlations and
   distinguish active constructs from comments, quoted/fenced examples,
   negation, frontmatter, and invalid configuration.
+- For v0.10.1, Instruction Guard terminal reviews keep suspicious content,
+  scan coverage, and integrity approval in distinct sections. A clean
+  first-seen file has no threat badge; every located correlation attributes
+  only the observed behavior role to each exact one-based range, keeps the
+  fixed deterministic reason adjacent, and labels mapped AI reasoning as
+  advisory. Narrow-terminal wrapping preserves IDs and locations, JSON output
+  bypasses presentation formatting, and neither path exposes source snippets
+  or secrets.
+- Instruction Guard report schema and rule version remain `1.0` for v0.10.1,
+  and AI evidence aliases remain `1.1`. Internal analysis evidence version
+  `1.2` causes a conservative one-time reanalysis for improved line-role
+  attribution without importing old machine approval as new trust.
 - Content risk and integrity state remain separate; suspicious first-seen files
   alert immediately and clean first-seen files remain unreviewed until explicit
   approval.

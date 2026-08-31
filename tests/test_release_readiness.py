@@ -20,7 +20,7 @@ def test_pyproject_console_scripts_are_registered():
     data = tomllib.loads(read_text("pyproject.toml"))
 
     scripts = data["project"]["scripts"]
-    assert data["project"]["version"] == "0.10.0"
+    assert data["project"]["version"] == "0.10.1"
     assert scripts["aurascan"] == "aurascan.cli:main"
     assert scripts["aurascan-makepkg"] == "aurascan.makepkg_wrapper:main"
     assert data["project"]["requires-python"] == ">=3.8"
@@ -361,12 +361,8 @@ def test_hostile_content_v0100_release_contract():
         return " ".join(read_text(relative).lower().split())
 
     release = normalized("docs/releases/v0.10.0.md")
-    unreleased = normalized("docs/releases/unreleased.md")
     checklist = normalized("docs/RELEASE_CHECKLIST.md")
-    pkgbuild = read_text("packaging/arch/PKGBUILD")
-    srcinfo = read_text("packaging/arch/.SRCINFO")
     engine_source = read_text("aurascan/core/engine.py")
-    recovery_source = read_text("aurascan/core/recovery_cli.py")
 
     required_release_phrases = [
         "# aurascan v0.10.0",
@@ -386,15 +382,55 @@ def test_hostile_content_v0100_release_contract():
     for phrase in required_release_phrases:
         assert phrase in release
 
-    assert "changes after v0.10.0 will be recorded here" in unreleased
     assert "for v0.10.0, the package-scanner rule version is `1.4.0`" in checklist
-    assert "pkgver=0.10.0" in pkgbuild
-    assert "pkgrel=1" in pkgbuild
-    assert "\tpkgver = 0.10.0" in srcinfo
-    assert "aurascan-0.10.0.tar.gz" in srcinfo
     assert 'self.scanner_version = "2.5.0"' in engine_source
     assert 'self.rule_version = "1.4.0"' in engine_source
-    assert 'return "0.10.0-dev"' in recovery_source
+
+
+def test_instruction_review_v0101_release_contract():
+    def normalized(relative: str) -> str:
+        return " ".join(read_text(relative).lower().split())
+
+    release = normalized("docs/releases/v0.10.1.md")
+    unreleased = normalized("docs/releases/unreleased.md")
+    checklist = normalized("docs/RELEASE_CHECKLIST.md")
+    announcement = normalized("docs/ANNOUNCEMENT.md")
+    pkgbuild = read_text("packaging/arch/PKGBUILD")
+    srcinfo = read_text("packaging/arch/.SRCINFO")
+    engine_source = read_text("aurascan/core/engine.py")
+    instruction_source = read_text("aurascan/core/instruction_guard.py")
+    recovery_source = read_text("aurascan/core/recovery_cli.py")
+
+    required_release_phrases = [
+        "# aurascan v0.10.1",
+        "released on 2026-08-31",
+        "actionable instruction guard reviews",
+        "suspicious instructions, incomplete scan or discovery coverage, and new or changed files awaiting integrity approval",
+        "exact one-based contributing line ranges",
+        "bounded ai explanations are mapped to deterministic evidence and labeled advisory",
+        "`-a file_id` is the compact alias",
+        "internal analysis evidence version advances to `1.2`",
+        "package scanner remains scanner version `2.5.0` and rule version `1.4.0`",
+        "application and arch/aur package advance to v0.10.1",
+    ]
+    for phrase in required_release_phrases:
+        assert phrase in release
+
+    assert "changes after v0.10.1 will be recorded here" in unreleased
+    assert "for v0.10.1, instruction guard terminal reviews keep suspicious content" in checklist
+    assert "instruction guard report schema and rule version remain `1.0` for v0.10.1" in checklist
+    assert "v0.10.1 release redesigns agent instruction guard reviews" in announcement
+    assert "pkgver=0.10.1" in pkgbuild
+    assert "pkgrel=1" in pkgbuild
+    assert "\tpkgver = 0.10.1" in srcinfo
+    assert "aurascan-0.10.1.tar.gz" in srcinfo
+    assert 'self.scanner_version = "2.5.0"' in engine_source
+    assert 'self.rule_version = "1.4.0"' in engine_source
+    assert 'INSTRUCTION_GUARD_SCHEMA_VERSION = "1.0"' in instruction_source
+    assert 'INSTRUCTION_GUARD_RULE_VERSION = "1.0"' in instruction_source
+    assert 'INSTRUCTION_GUARD_EVIDENCE_VERSION = "1.1"' in instruction_source
+    assert 'INSTRUCTION_GUARD_ANALYSIS_EVIDENCE_VERSION = "1.2"' in instruction_source
+    assert 'return "0.10.1-dev"' in recovery_source
 
 
 def test_release_checklist_references_required_validation_and_safety_items():
@@ -425,6 +461,7 @@ def test_release_checklist_references_required_validation_and_safety_items():
         "SUPPLYCHAIN-AUR-REPO-PROPAGATION-001",
         "INSTALL-HOOK-UNINSPECTED-001",
         "For v0.10.0, the package-scanner rule version is `1.4.0`",
+        "For v0.10.1, Instruction Guard terminal reviews keep suspicious content",
     ]
     for phrase in required_phrases:
         assert phrase in checklist

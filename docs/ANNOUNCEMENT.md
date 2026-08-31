@@ -9,11 +9,18 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
-The v0.10.0 release makes hostile package and model content data-only. AI
-responses have strict raise-only schemas and no download, repository, shell,
-tool, policy, or execution authority. The foreground Repair Agent is now a
-policy-gated allowlist for read-only diagnostics and constrained exact pacman
-operations, with fresh confirmation for every command.
+The v0.10.1 release redesigns Agent Instruction Guard reviews around the
+question users actually need answered: what was found, on which exact lines,
+and why the behavior matters. Suspicious instructions, incomplete scan
+coverage, and new or changed files awaiting integrity approval now appear as
+separate states instead of sharing an ambiguous LOW-style review list.
+
+Each suspicious correlation pairs its contributing line ranges with their
+actual roles, such as retrieval or later execution, followed by a fixed
+deterministic explanation. Optional AI reasoning is clearly advisory and
+evidence-mapped; it cannot move a line, lower severity, or establish trust.
+Clean first-seen files get a concrete compact approval step without being
+described as malware.
 
 New deterministic blockers correlate remote downloads with later execution
 across bounded variables, pipelines, decoders, install hooks, built-package
@@ -119,6 +126,12 @@ looks for risky PKGBUILD patterns, install hooks, unsafe source/archive
 behavior, checksum/signature drift, local history changes, and optional ClamAV
 or AI signals. It can also be used through `aurascan-makepkg` so the review
 happens before makepkg runs package functions.
+
+The v0.10.1 review update separates suspicious instructions, incomplete scan
+coverage, and integrity approval; adds exact per-line behavior roles and fixed
+reasons; and keeps optional AI explanations bounded, evidence-mapped, and
+advisory. Terminal output wraps cleanly without displaying source snippets or
+potential secrets, while schema-compatible JSON bypasses terminal wrapping.
 
 The v0.10.0 security update separates AI interpretation from authority. Model
 output cannot select network targets, create commands, lower deterministic

@@ -1,4 +1,5 @@
 import io
+import json
 import subprocess
 import sys
 import types
@@ -394,6 +395,88 @@ def test_instruction_audit_exit_codes(monkeypatch, tmp_path, review_required, ra
         assert "scan failed" in stderr.getvalue().lower()
     else:
         assert "fixture instruction report" in stdout.getvalue()
+
+
+def test_instruction_review_forwards_terminal_width_to_renderer(monkeypatch, tmp_path):
+    module = install_fake_guard(
+        monkeypatch,
+        tmp_path,
+        review=lambda *_args, **_kwargs: FakeReport(review_required=True),
+    )
+    rendered = []
+
+    def render(report, **kwargs):
+        rendered.append((report, kwargs))
+        return "width-aware review"
+
+    module.render_instruction_report = render
+    monkeypatch.setattr(instruction_cli, "_output_terminal_width", lambda _stream: 77)
+    stdout = io.StringIO()
+
+    status = run_instruction_audit(
+        ["--review", "--state-root", str(tmp_path / "state")],
+        stdout=stdout,
+        stderr=io.StringIO(),
+        env={"HOME": str(tmp_path / "home")},
+        env_path=tmp_path / "missing.env",
+    )
+
+    assert status == EXIT_REVIEW
+    assert stdout.getvalue() == "width-aware review\n"
+    assert len(rendered) == 1
+    assert rendered[0][1] == {"terminal_width": 77}
+
+
+def test_instruction_review_json_bypasses_terminal_renderer(monkeypatch, tmp_path):
+    module = install_fake_guard(
+        monkeypatch,
+        tmp_path,
+        review=lambda *_args, **_kwargs: FakeReport(review_required=True),
+    )
+
+    def unexpected_render(*_args, **_kwargs):
+        raise AssertionError("JSON review must not invoke the terminal renderer")
+
+    module.render_instruction_report = unexpected_render
+    stdout = io.StringIO()
+
+    status = run_instruction_audit(
+        ["--review", "--json", "--state-root", str(tmp_path / "state")],
+        stdout=stdout,
+        stderr=io.StringIO(),
+        env={"HOME": str(tmp_path / "home")},
+        env_path=tmp_path / "missing.env",
+    )
+
+    assert status == EXIT_REVIEW
+    assert json.loads(stdout.getvalue()) == {
+        "report_id": "fixture-report",
+        "review_required": True,
+        "schema": "instruction_guard_report/1.0",
+    }
+
+
+def test_output_terminal_width_uses_stream_then_safe_fallback(monkeypatch):
+    stream = types.SimpleNamespace(fileno=lambda: 42)
+    monkeypatch.setattr(
+        instruction_cli.os,
+        "get_terminal_size",
+        lambda descriptor: types.SimpleNamespace(columns=88) if descriptor == 42 else None,
+    )
+
+    assert instruction_cli._output_terminal_width(stream) == 88
+
+    def unavailable(_descriptor):
+        raise OSError("fixture stream has no terminal")
+
+    monkeypatch.setattr(instruction_cli.os, "get_terminal_size", unavailable)
+    monkeypatch.setattr(
+        instruction_cli.shutil,
+        "get_terminal_size",
+        lambda fallback: types.SimpleNamespace(columns=73),
+    )
+
+    assert instruction_cli._output_terminal_width(stream) == 73
 
 
 @pytest.mark.parametrize(

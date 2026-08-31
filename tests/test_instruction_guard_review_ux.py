@@ -5,6 +5,13 @@ import pytest
 import aurascan.core.instruction_guard as guard
 
 
+def test_terminal_review_width_is_bounded():
+    assert guard._terminal_render_width(20) == 60
+    assert guard._terminal_render_width(80) == 80
+    assert guard._terminal_render_width(200) == 120
+    assert guard._terminal_render_width("invalid") == 100
+
+
 def _scan(root, state, **kwargs):
     return guard.scan_instruction_files(
         root,

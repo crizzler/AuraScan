@@ -251,7 +251,10 @@ Use this path only when the user explicitly authorizes external publication:
    artifacts, built readiness markers, and fixed packaged/prepared firmware
    before Bash, then drops the run to an unmapped UID in a fresh network
    namespace. Internal harness checks cannot retroactively make a
-   user-writable launch script trustworthy.
+   user-writable launch script trustworthy. Preserve the launcher's exact
+   attested private runtime as `TMPDIR` through every nested `env -i` helper;
+   guards must validate that value and the harness must write its strict smoke
+   result only at the launcher-expected path below that runtime.
    Audit the exact package build inputs/outputs, package repository, assembled
    image, validation UKI, profile overlay, and expanded root. Do not classify
    the sanitized package-test HOME as shipped recovery state, but do not relax

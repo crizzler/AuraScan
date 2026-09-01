@@ -234,6 +234,13 @@ for Secure Boot, unsigned-rejection controls. The receipt retains only their
 roles, outcomes, sizes, and SHA-256 values, not raw serial text. A failed,
 interrupted, malformed, or incomplete launch writes no `PASS` result.
 
+The launcher supplies one exact attested private runtime as `TMPDIR`. Every
+nested minimal-environment wrapper must preserve that value unchanged when it
+invokes a guard; it must not fall back to a system temporary directory or
+derive a replacement. The harness writes its strict outcome only to the fixed
+launcher-expected filename below that runtime, so losing this binding is a
+failed gate even if QEMU reached the readiness marker.
+
 Secure Boot is a distinct two-control test. It refuses to run without a
 signature-bearing UKI, Secure Boot OVMF code, and a vars template containing
 only disposable enrolled test keys. The harness derives an unsigned control by

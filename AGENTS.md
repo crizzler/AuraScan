@@ -59,7 +59,10 @@ evidence actually collected.
   positive service PID and allow only zero, one, or two trailing carriage
   returns at the line boundary; guest/serial framing may duplicate that
   transport character. Never strip arbitrary control bytes or accept a bare
-  marker.
+  marker. Preserve the launcher's exact attested private runtime as `TMPDIR`
+  through every nested minimal-environment helper: guards and harnesses must
+  not unset, replace, or independently derive it, and the strict smoke result
+  belongs only at the launcher-expected path below that runtime.
   Local UKIs remain machine/kernel/key-specific test artifacts, not universal
   downloads. Never describe an unrun recovery gate as passing.
 - Keep the recovery privacy audit fail closed across regular bytes and bounded

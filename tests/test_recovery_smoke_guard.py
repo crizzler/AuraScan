@@ -384,7 +384,54 @@ def test_trusted_tool_guard_checks_the_complete_absolute_component_chain(tmp_pat
     assert b"path-component boundary" in symlink_component.stderr
 
 
-def test_minimal_tool_environment_strips_python_and_loader_influence():
+def _run_minimal_tool_environment(runtime: str = "attested") -> subprocess.CompletedProcess:
+    expected_runtime = (
+        "/var/lib/aurascan-recovery-builder/recovery-archiso-test.12345678/"
+        "recovery-validation-run-0123456789abcdef01234567/runtime"
+    )
+    environment = {
+        "PATH": "/usr/bin:/bin",
+        "AURASCAN_RECOVERY_SMOKE_CLEAN_ENV": "1",
+        "AURASCAN_RECOVERY_ATTESTATION_PATH": (
+            expected_runtime[: -len("/runtime")]
+            + "/inputs/recovery-validation-attestation.json"
+        ),
+    }
+    if runtime in {
+        "attested",
+        "closed-fd",
+        "missing-fd",
+        "wrong-attestation",
+        "wrong-clean-marker",
+    }:
+        environment["TMPDIR"] = expected_runtime
+    elif runtime == "unsafe":
+        environment["TMPDIR"] = "/tmp/unattested-runtime"
+    elif runtime == "traversal":
+        environment["TMPDIR"] = (
+            "/var/lib/aurascan-recovery-builder/../"
+            "recovery-validation-run-0123456789abcdef01234567/runtime"
+        )
+    elif runtime != "missing":
+        raise AssertionError("unsupported test runtime")
+    read_fd, write_fd = os.pipe()
+    environment["AURASCAN_RECOVERY_ATTESTATION_FD"] = str(read_fd)
+    if runtime == "wrong-attestation":
+        environment["AURASCAN_RECOVERY_ATTESTATION_PATH"] = (
+            expected_runtime[: -len("/runtime")]
+            + "/inputs/unrelated-attestation.json"
+        )
+    elif runtime == "traversal":
+        environment["AURASCAN_RECOVERY_ATTESTATION_PATH"] = (
+            environment["TMPDIR"][: -len("/runtime")]
+            + "/inputs/recovery-validation-attestation.json"
+        )
+    elif runtime == "missing-fd":
+        del environment["AURASCAN_RECOVERY_ATTESTATION_FD"]
+    elif runtime == "closed-fd":
+        environment["AURASCAN_RECOVERY_ATTESTATION_FD"] = "99"
+    elif runtime == "wrong-clean-marker":
+        environment["AURASCAN_RECOVERY_SMOKE_CLEAN_ENV"] = "0"
     probe = "\n".join(
         (
             f'source "{TOOL_GUARD_PATH}"',
@@ -395,28 +442,65 @@ def test_minimal_tool_environment_strips_python_and_loader_influence():
             "run_smoke_minimal /usr/bin/env",
         )
     )
-    result = subprocess.run(
-        [
-            "/usr/bin/env",
-            "-i",
-            "PATH=/usr/bin:/bin",
-            "/usr/bin/bash",
-            "--noprofile",
-            "--norc",
-            "-c",
-            probe,
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            [
+                "/usr/bin/bash",
+                "--noprofile",
+                "--norc",
+                "-c",
+                probe,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            env=environment,
+            pass_fds=() if runtime == "closed-fd" else (read_fd,),
+        )
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+
+def test_minimal_tool_environment_passes_only_attested_runtime():
+    result = _run_minimal_tool_environment()
 
     assert result.returncode == 0, result.stderr.decode(errors="replace")
     child_environment = result.stdout.decode("utf-8").splitlines()
-    assert "PATH=/usr/bin:/bin" in child_environment
-    assert "AURASCAN_AI_ENABLED=0" in child_environment
-    assert "AURASCAN_INSTRUCTION_AI_ENABLED=0" in child_environment
-    assert "AURASCAN_INCIDENT_AI_ENABLED=0" in child_environment
-    assert "AURASCAN_RECOVERY_AI_ENABLED=0" in child_environment
-    assert not any(line.startswith("PYTHON") for line in child_environment)
-    assert not any(line.startswith("LD_") for line in child_environment)
+    assert set(child_environment) == {
+        "PATH=/usr/bin:/bin",
+        "HOME=/nonexistent",
+        "USER=aurascan",
+        "LOGNAME=aurascan",
+        "LANG=C.UTF-8",
+        "LC_ALL=C.UTF-8",
+        "TZ=UTC",
+        (
+            "TMPDIR=/var/lib/aurascan-recovery-builder/"
+            "recovery-archiso-test.12345678/"
+            "recovery-validation-run-0123456789abcdef01234567/runtime"
+        ),
+        "AURASCAN_AI_ENABLED=0",
+        "AURASCAN_INSTRUCTION_AI_ENABLED=0",
+        "AURASCAN_INCIDENT_AI_ENABLED=0",
+        "AURASCAN_RECOVERY_AI_ENABLED=0",
+    }
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    (
+        "closed-fd",
+        "missing",
+        "missing-fd",
+        "traversal",
+        "unsafe",
+        "wrong-attestation",
+        "wrong-clean-marker",
+    ),
+)
+def test_minimal_tool_environment_refuses_unattested_runtime(runtime):
+    result = _run_minimal_tool_environment(runtime)
+
+    assert result.returncode == 1
+    assert result.stdout == b""

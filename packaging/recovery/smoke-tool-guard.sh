@@ -57,12 +57,30 @@ if ! bootstrap_trusted_stat; then
 fi
 
 run_smoke_minimal() {
+  local smoke_runtime="${TMPDIR-}" smoke_run_root smoke_builder attestation_fd
   (( $# > 0 )) || return 2
   validate_trusted_executable /usr/bin/env || return 1
   validate_trusted_executable "$1" || return 1
+  # Recheck the launcher-shaped runtime and inherited private-attestation
+  # descriptor before preserving TMPDIR.  The guard's verify-attestation
+  # operation performs the content binding; no other caller environment is
+  # forwarded to the selected tool.
+  [[ "${AURASCAN_RECOVERY_SMOKE_CLEAN_ENV-}" == "1" \
+     && "$smoke_runtime" =~ ^/var/lib/aurascan-recovery-builder/([A-Za-z0-9._-]+)/recovery-validation-run-[0-9a-f]{24}/runtime$ ]] \
+    || return 1
+  smoke_builder="${BASH_REMATCH[1]}"
+  [[ "$smoke_builder" != "." && "$smoke_builder" != ".." ]] || return 1
+  smoke_run_root="${smoke_runtime%/runtime}"
+  attestation_fd="${AURASCAN_RECOVERY_ATTESTATION_FD-}"
+  [[ "${AURASCAN_RECOVERY_ATTESTATION_PATH-}" \
+       == "$smoke_run_root/inputs/recovery-validation-attestation.json" \
+     && "$attestation_fd" =~ ^([3-9]|[1-9][0-9]+)$ ]] \
+    || return 1
+  builtin : <&"$attestation_fd" || return 1
   /usr/bin/env -i \
     PATH=/usr/bin:/bin HOME=/nonexistent USER=aurascan LOGNAME=aurascan \
     LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+    TMPDIR="$smoke_runtime" \
     AURASCAN_AI_ENABLED=0 AURASCAN_INSTRUCTION_AI_ENABLED=0 \
     AURASCAN_INCIDENT_AI_ENABLED=0 AURASCAN_RECOVERY_AI_ENABLED=0 \
     "$@"

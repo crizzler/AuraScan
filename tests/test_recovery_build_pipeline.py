@@ -458,6 +458,7 @@ def test_secure_boot_harness_derives_and_payload_binds_its_unsigned_control():
     assert "firmware-rejection" in harness
     assert "complete bounded run" in harness
     assert "AURASCAN_RECOVERY_READY" in harness
+    assert "aurascan-recovery-marker" in harness
     assert 'if=virtio,format=raw,readonly=on,file=fat:ro:$run_dir/esp' in harness
     assert 'ulimit -f "$((16 * 1024))"' in harness
     assert "ulimit -f 64" in harness

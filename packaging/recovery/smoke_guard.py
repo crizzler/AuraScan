@@ -77,7 +77,11 @@ _FIRMWARE_REJECTION = re.compile(
     rb"(?m)^BdsDxe: failed to load Boot[0-9A-Fa-f]{4} [^\r\n]*: "
     rb"(?:Security Violation|Access Denied -- rejected probably by Secure Boot)\r?$"
 )
-_READY_LINE = re.compile(rb"(?m)^AURASCAN_RECOVERY_READY\r?$")
+_READY_LINE = re.compile(
+    rb"(?m)^(?:AURASCAN_RECOVERY_READY|"
+    rb"\[ *[0-9]+\.[0-9]{6}\] aurascan-recovery-marker\[[1-9][0-9]*\]: "
+    rb"AURASCAN_RECOVERY_READY)\r?$"
+)
 
 
 class GuardFailure(RuntimeError):

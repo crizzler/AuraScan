@@ -63,10 +63,9 @@ def test_iso_and_local_uki_use_the_same_bounded_boot_readiness_marker():
     assert "ConditionVirtualization=vm" in packaged
     assert "ConditionVirtualization=qemu" not in packaged
     assert "ExecStart=/usr/bin/echo AURASCAN_RECOVERY_READY" in packaged
-    assert "StandardOutput=tty" in packaged
-    assert "StandardError=tty" in packaged
-    assert "TTYPath=/dev/ttyS0" in packaged
-    assert "journal+console" not in packaged
+    assert "StandardOutput=journal+console" in packaged
+    assert "StandardError=journal+console" in packaged
+    assert "SyslogIdentifier=aurascan-recovery-marker" in packaged
     assert "DynamicUser=yes" in packaged
     assert "CapabilityBoundingSet=\n" in packaged
     assert "PrivateNetwork=yes" in packaged
@@ -175,7 +174,8 @@ def test_qemu_uki_smoke_harness_requires_digest_and_ovmf():
     assert "/usr/bin/sbverify --list" in harness
     assert '/usr/bin/sbattach "$@"' in harness
     assert "(( status == 124 ))" in harness
-    assert "grep -Fxq 'AURASCAN_RECOVERY_READY'" in harness
+    assert "grep -Eq" in harness
+    assert "aurascan-recovery-marker" in harness
     for tool in (
         "/usr/bin/bash",
         "/usr/bin/chmod",

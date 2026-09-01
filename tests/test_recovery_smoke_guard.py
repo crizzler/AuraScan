@@ -216,10 +216,27 @@ def test_boot_log_requires_an_exact_ready_line(tmp_path):
     exact.write_bytes(b"firmware output\nAURASCAN_RECOVERY_READY\n")
     guard.evaluate_log(exact, "ready")
 
+    journal = tmp_path / "journal-ready.log"
+    journal.write_bytes(
+        b"firmware output\n"
+        b"[   18.501600] aurascan-recovery-marker[217]: "
+        b"AURASCAN_RECOVERY_READY\r\n"
+    )
+    guard.evaluate_log(journal, "ready")
+
     broad = tmp_path / "broad.log"
     broad.write_bytes(b"guest quoted AURASCAN_RECOVERY_READY but did not reach it\n")
     with pytest.raises(guard.GuardFailure, match="not observed"):
         guard.evaluate_log(broad, "ready")
+
+    for near_miss in (
+        b"[   18.501600] echo[217]: AURASCAN_RECOVERY_READY\n",
+        b"[   18.501600] aurascan-recovery-marker[0]: AURASCAN_RECOVERY_READY\n",
+        b"[ 18.5016] aurascan-recovery-marker[217]: AURASCAN_RECOVERY_READY\n",
+    ):
+        broad.write_bytes(near_miss)
+        with pytest.raises(guard.GuardFailure, match="not observed"):
+            guard.evaluate_log(broad, "ready")
 
 
 def test_unsigned_log_requires_no_ready_and_narrow_firmware_rejection(tmp_path):

@@ -257,7 +257,11 @@ def test_launcher_requires_strict_result_and_serial_evidence_before_pass(
     runtime.mkdir()
     monkeypatch.setattr(launcher, "DROP_UID", os.getuid())
     monkeypatch.setattr(launcher, "DROP_GID", os.getgid())
-    ready = b"firmware output\nAURASCAN_RECOVERY_READY\n"
+    ready = (
+        b"firmware output\n"
+        b"[   18.501600] aurascan-recovery-marker[217]: "
+        b"AURASCAN_RECOVERY_READY\r\n"
+    )
     ready_path = runtime / "recovery-smoke-readiness.log"
     ready_path.write_bytes(ready)
     ready_path.chmod(0o400)

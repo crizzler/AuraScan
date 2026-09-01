@@ -249,6 +249,13 @@ payload binding. Passing requires independent mutable copies of that immutable
 template to reject the derived unsigned control and boot the signed UKI through
 the readiness marker; firmware-mutated state is never reused between controls:
 
+Signature-table helpers operate only on private, size-validated UKI copies.
+Their elapsed time and combined stdout/stderr are capped independently from
+artifact mutation. The file-size resource ceiling must allow a complete UKI
+rewrite up to the separately enforced artifact-size limit; the smaller
+diagnostic-output budget must never be reused as that ceiling. Each resulting
+file is revalidated before it becomes a boot-gate input.
+
 ```bash
 RECOVERY_PREPARER="$RECOVERY_HARNESS_ROOT/packaging/recovery/prepare-secure-boot.py"
 /usr/bin/env -i PATH=/usr/bin:/bin HOME=/root USER=root LOGNAME=root \

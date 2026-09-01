@@ -63,6 +63,12 @@ evidence actually collected.
   through every nested minimal-environment helper: guards and harnesses must
   not unset, replace, or independently derive it, and the strict smoke result
   belongs only at the launcher-expected path below that runtime.
+  Keep Secure Boot signature-table mutation limits separate from diagnostic
+  transport limits: bound helper runtime and combined stdout/stderr, while the
+  file-size resource ceiling must still permit a complete rewrite of the
+  independently size-validated UKI. Never derive an artifact file-size limit
+  from the much smaller output-capture budget, and revalidate the resulting
+  file before using it as gate input.
   Local UKIs remain machine/kernel/key-specific test artifacts, not universal
   downloads. Never describe an unrun recovery gate as passing.
 - Keep the recovery privacy audit fail closed across regular bytes and bounded

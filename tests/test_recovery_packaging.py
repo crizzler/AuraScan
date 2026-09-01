@@ -173,6 +173,16 @@ def test_qemu_uki_smoke_harness_requires_digest_and_ovmf():
     assert "run_smoke_minimal /usr/bin/timeout" in harness
     assert "/usr/bin/sbverify --list" in harness
     assert '/usr/bin/sbattach "$@"' in harness
+    sbattach_function = harness.split("run_sbattach() {", 1)[1].split(
+        "\nbuild_qemu() {", 1
+    )[0]
+    assert 'ulimit -Sf "$((512 * 1024))" || exit 1' in sbattach_function
+    assert "ulimit -f 64" not in sbattach_function
+    assert "--signal=TERM --kill-after=2s 15s" in sbattach_function
+    assert '/usr/bin/sbattach "$@" 2>&1 \\\n' in sbattach_function
+    assert '| /usr/bin/head -c "$((64 * 1024 + 1))" --' in sbattach_function
+    assert "status=$?" in sbattach_function
+    assert "status == 0 && output_size < 64 * 1024" in sbattach_function
     assert "(( status == 124 ))" in harness
     assert "grep -Eq" in harness
     assert "aurascan-recovery-marker" in harness
@@ -182,6 +192,7 @@ def test_qemu_uki_smoke_harness_requires_digest_and_ovmf():
         "/usr/bin/cp",
         "/usr/bin/env",
         "/usr/bin/grep",
+        "/usr/bin/head",
         "/usr/bin/install",
         "/usr/bin/kill",
         "/usr/bin/mktemp",

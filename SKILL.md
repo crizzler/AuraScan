@@ -279,6 +279,12 @@ Use this path only when the user explicitly authorizes external publication:
    release claims that live outcome; otherwise record them as `NOT RUN` in the
    public limitations. Do not publish local UKIs as universal assets, and
    never claim an unrun gate passed.
+   For trusted Secure Boot signature-table helpers, cap elapsed time and
+   combined stdout/stderr independently from artifact mutation. Their
+   file-size resource ceiling must accommodate a complete rewrite of the
+   already size-validated UKI; never reuse the smaller diagnostic-output cap
+   as that artifact ceiling. Revalidate the resulting file before a boot gate
+   consumes it.
    Keep removable-media writing separately fail closed: require trusted bounded
    absolute `findmnt`/`lsblk` probes, identify the running root, repeat device
    eligibility after confirmation and again while the exclusive descriptor is

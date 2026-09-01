@@ -125,7 +125,8 @@ python_bin="$(/usr/bin/readlink -e -- /usr/bin/python3)" || {
 }
 for tool in /usr/bin/bash "$python_bin" /usr/bin/qemu-system-x86_64 \
   /usr/bin/setsid /usr/bin/timeout /usr/bin/env /usr/bin/sbverify \
-  /usr/bin/sbattach /usr/bin/cp /usr/bin/chmod /usr/bin/grep /usr/bin/install \
+  /usr/bin/sbattach /usr/bin/cp /usr/bin/chmod /usr/bin/grep /usr/bin/head \
+  /usr/bin/install \
   /usr/bin/kill /usr/bin/mktemp /usr/bin/readlink /usr/bin/rm /usr/bin/sleep \
   /usr/bin/stat; do
   validate_trusted_executable "$tool" || {
@@ -205,7 +206,7 @@ run_signature_inventory() {
   invoke_smoke_guard verify-snapshot --kind uki \
     --path "$image" --sha256 "$image_digest" || return 1
   if (
-    ulimit -f 64
+    ulimit -Sf 64 || exit 1
     run_smoke_minimal /usr/bin/timeout --signal=TERM --kill-after=2s 15s \
       /usr/bin/sbverify --list "$image"
   ) > "$output" 2>&1; then
@@ -233,10 +234,15 @@ run_sbattach() {
     return 1
   }
   if (
-    ulimit -f 64
+    # sbattach mutates the UKI in place, so its file-size limit must cover the
+    # complete bounded image.  Bound diagnostic output independently: head
+    # retains one byte beyond the accepted limit so the size check below can
+    # distinguish exact-limit output from a complete bounded capture.
+    ulimit -Sf "$((512 * 1024))" || exit 1
     run_smoke_minimal /usr/bin/timeout --signal=TERM --kill-after=2s 15s \
-      /usr/bin/sbattach "$@"
-  ) > "$output" 2>&1; then
+      /usr/bin/sbattach "$@" 2>&1 \
+      | /usr/bin/head -c "$((64 * 1024 + 1))" --
+  ) > "$output"; then
     status=0
   else
     status=$?

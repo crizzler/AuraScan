@@ -481,7 +481,30 @@ def test_secure_boot_harness_derives_and_payload_binds_its_unsigned_control():
     assert "aurascan-recovery-marker" in harness
     assert 'if=virtio,format=raw,readonly=on,file=fat:ro:$run_dir/esp' in harness
     assert 'ulimit -f "$((16 * 1024))"' in harness
-    assert "ulimit -f 64" in harness
+
+
+def test_secure_boot_signature_mutation_has_separate_image_and_output_bounds():
+    harness = (ROOT / "packaging/recovery/qemu-uki-smoke.sh").read_text(
+        encoding="utf-8"
+    )
+    inventory = harness.split("run_signature_inventory() {", 1)[1].split(
+        "\nrun_sbattach() {", 1
+    )[0]
+    function = harness.split("run_sbattach() {", 1)[1].split("\nbuild_qemu() {", 1)[0]
+    validation = harness.split("for tool in", 1)[1].split("done", 1)[0]
+
+    assert "set -euo pipefail" in harness[: harness.index("run_sbattach() {")]
+    assert "/usr/bin/head" in validation
+    assert "ulimit -Sf 64 || exit 1" in inventory
+    assert 'ulimit -Sf "$((512 * 1024))" || exit 1' in function
+    assert "ulimit -f 64" not in function
+    assert "--signal=TERM --kill-after=2s 15s" in function
+    assert '/usr/bin/sbattach "$@" 2>&1 \\\n' in function
+    assert '| /usr/bin/head -c "$((64 * 1024 + 1))" --' in function
+    assert ') > "$output"; then' in function
+    assert ') > "$output" 2>&1; then' not in function
+    assert "status=$?" in function
+    assert "status == 0 && output_size < 64 * 1024" in function
 
 
 def test_qemu_harness_poll_accepts_only_journal_bound_ready_lines(tmp_path):

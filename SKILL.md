@@ -267,8 +267,12 @@ Use this path only when the user explicitly authorizes external publication:
    rejection, run the deterministic storage/network/repair/rollback fixtures,
    and audit expanded artifacts using the documented bounded byte, normalized
    path/link, PAX metadata, and decoded-xattr checks. Reject empty/short
-   explicit markers and short host identities instead of omitting them. Run
-   booted platform scenarios when their subsystem changed or the
+   explicit markers and short host identities instead of omitting them.
+   Require serial-readiness checks against the complete journal-bound marker and
+   positive service PID. Permit only zero, one, or two trailing carriage
+   returns at its line boundary to cover systemd/QEMU transport framing; do not
+   strip arbitrary control bytes or accept a bare marker. Run booted platform
+   scenarios when their subsystem changed or the
    release claims that live outcome; otherwise record them as `NOT RUN` in the
    public limitations. Do not publish local UKIs as universal assets, and
    never claim an unrun gate passed.

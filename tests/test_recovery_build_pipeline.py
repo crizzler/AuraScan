@@ -493,7 +493,7 @@ def test_qemu_harness_poll_accepts_only_journal_bound_ready_lines(tmp_path):
         )
         assert match is not None
         encoded_pattern = match.group(1)
-        assert r"\r?$" in encoded_pattern
+        assert r"\r{0,2}$" in encoded_pattern
         pattern = encoded_pattern.replace(r"\r", "\r").replace(r"\\", "\\")
         log = tmp_path / (name + ".log")
         for line in (
@@ -503,6 +503,8 @@ def test_qemu_harness_poll_accepts_only_journal_bound_ready_lines(tmp_path):
             b"AURASCAN_RECOVERY_READY\r\n",
             b"aurascan-recovery-marker[220]: AURASCAN_RECOVERY_READY\n",
             b"aurascan-recovery-marker[220]: AURASCAN_RECOVERY_READY\r\n",
+            b"aurascan-recovery-marker[220]: AURASCAN_RECOVERY_READY\r\r\n",
+            b"aurascan-recovery-marker[220]: AURASCAN_RECOVERY_READY\r\r",
         ):
             log.write_bytes(line)
             assert subprocess.run(
@@ -515,6 +517,8 @@ def test_qemu_harness_poll_accepts_only_journal_bound_ready_lines(tmp_path):
             b"aurascan-recovery-marker[0]: AURASCAN_RECOVERY_READY\n",
             b"[ 17.0613] aurascan-recovery-marker[220]: "
             b"AURASCAN_RECOVERY_READY\n",
+            b"aurascan-recovery-marker[220]: AURASCAN_RECOVERY_READY\r\r\r\n",
+            b"aurascan-recovery-marker[220]: AURASCAN_RECOVERY_READY \r\r\n",
         ):
             log.write_bytes(line)
             assert subprocess.run(

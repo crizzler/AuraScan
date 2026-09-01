@@ -105,7 +105,7 @@ SERIAL_EVIDENCE_FIELDS = {"role", "expect", "file", "sha256", "size"}
 _READY_LINE = re.compile(
     rb"(?m)^(?:\[ *[0-9]+\.[0-9]{6}\] )?"
     rb"aurascan-recovery-marker\[[1-9][0-9]*\]: "
-    rb"AURASCAN_RECOVERY_READY\r?$"
+    rb"AURASCAN_RECOVERY_READY\r{0,2}$"
 )
 _FIRMWARE_REJECTION = re.compile(
     rb"(?m)^BdsDxe: failed to load Boot[0-9A-Fa-f]{4} [^\r\n]*: "

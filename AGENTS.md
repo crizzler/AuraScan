@@ -55,6 +55,11 @@ evidence actually collected.
   gates pass. Booted target-disk/network scenarios are mandatory when their
   subsystem changed or the release claims that live outcome; otherwise record
   them explicitly as not run and keep that limitation in the public record.
+  For serial readiness, require the complete journal-bound marker with a
+  positive service PID and allow only zero, one, or two trailing carriage
+  returns at the line boundary; guest/serial framing may duplicate that
+  transport character. Never strip arbitrary control bytes or accept a bare
+  marker.
   Local UKIs remain machine/kernel/key-specific test artifacts, not universal
   downloads. Never describe an unrun recovery gate as passing.
 - Keep the recovery privacy audit fail closed across regular bytes and bounded

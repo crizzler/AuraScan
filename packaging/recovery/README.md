@@ -191,7 +191,11 @@ The ISO exposes the fixed, secret-free `AURASCAN_RECOVERY_READY` serial marker
 only after systemd has started the recovery service and reached the marker
 unit. The smoke harnesses use a 300-second default timeout (configurable only
 from 30 through 900 seconds), cap their serial log, disable networking, and
-fail unless the expected marker is observed:
+fail unless the expected journal-bound marker and positive service PID are
+observed. Their line parser accepts zero, one, or two carriage returns at the
+line boundary because the systemd/QEMU serial path can duplicate that
+transport character; it does not strip other control bytes or accept a bare
+marker:
 
 ```bash
 # Copy the exact four shell assignments printed by the successful builder:

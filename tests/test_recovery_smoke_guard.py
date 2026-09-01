@@ -218,6 +218,8 @@ def test_boot_log_requires_an_exact_ready_line(tmp_path):
         b"AURASCAN_RECOVERY_READY\r\n",
         b"aurascan-recovery-marker[217]: AURASCAN_RECOVERY_READY\n",
         b"aurascan-recovery-marker[217]: AURASCAN_RECOVERY_READY\r\n",
+        b"aurascan-recovery-marker[217]: AURASCAN_RECOVERY_READY\r\r\n",
+        b"aurascan-recovery-marker[217]: AURASCAN_RECOVERY_READY\r\r",
     ):
         journal.write_bytes(b"firmware output\n" + marker)
         guard.evaluate_log(journal, "ready")
@@ -232,6 +234,8 @@ def test_boot_log_requires_an_exact_ready_line(tmp_path):
         b"[   18.501600] echo[217]: AURASCAN_RECOVERY_READY\n",
         b"[   18.501600] aurascan-recovery-marker[0]: AURASCAN_RECOVERY_READY\n",
         b"[ 18.5016] aurascan-recovery-marker[217]: AURASCAN_RECOVERY_READY\n",
+        b"aurascan-recovery-marker[217]: AURASCAN_RECOVERY_READY\r\r\r\n",
+        b"aurascan-recovery-marker[217]: AURASCAN_RECOVERY_READY \r\r\n",
     ):
         broad.write_bytes(near_miss)
         with pytest.raises(guard.GuardFailure, match="not observed"):

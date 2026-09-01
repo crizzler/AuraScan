@@ -20,8 +20,94 @@ python -m compileall aurascan tests tools
 
 GitHub Actions runs the editable test install, compile check, complete pytest
 suite, and both strict presenter audits on Python 3.8 and 3.14. Provider calls
-are mocked; CI explicitly disables general and Instruction Guard AI and never
-starts a live local model server.
+are mocked; CI explicitly disables general, Instruction Guard, Incident, and
+Recovery AI and never starts a live local model server.
+
+## Recovery release disposition
+
+Every release must be classified in its release note and checklist as either
+`recovery-bearing` or `package-only`. Recovery is optional at runtime in both
+cases; this disposition says what the release publisher built and validated,
+not what package installation enables.
+
+A recovery-bearing release is mandatory when a change affects the recovery
+runtime or recipes, recovery boot or image integration, the recovery package
+set/build tooling, or a security boundary shared with recovery such as provider
+validation or guarded AI response handling. A periodic refresh may also be
+chosen to prevent the downloadable environment from falling too far behind the
+host package. Other releases may be package-only, but their notes must name the
+exact retained recovery image version/tag and SHA-256 and say explicitly that
+the ISO and local-UKI gates were not rerun. Its packaged manifest must advance
+`application_version`, declare `package-only`, retain and re-verify the exact
+prior ISO version, filename, public tag URL, digest, and `release-ready` status,
+and publish no newly relabeled recovery assets. A retained image may be at most
+90 days old on the new release date; when it would exceed that window, the
+release must become recovery-bearing. Do not reset `released_at` without
+building and validating new bytes.
+
+The packaged recovery ISO manifest uses the exact on-disk
+`aurascan_recovery_iso/2.0` field set. Do not reinterpret the older six-field
+`1.0` document or persist derived status/display fields into the manifest.
+Runtime age is measured against the UTC date, with at most one day accepted as
+bounded clock skew; dates farther in the future fail closed and the 90-day
+refresh policy remains unchanged.
+
+For a recovery-bearing release:
+
+1. Prepare a clean, committed release candidate with the recovery download
+   digest empty/build-required and the Arch source checksum temporarily set to
+   `SKIP`. Use a fresh root-owned, non-writable checkout and fresh root-owned
+   work and output directories inside a freshly provisioned, disposable, and
+   externally CPU/RAM/disk-bounded Arch VM or host with no host disk or home
+   share. Never elevate the builder over a user-writable release tree,
+   profile, local package repository, work path, or output path. Disable every
+   AI mode and use the fixed trusted tool paths and minimal environment
+   documented by the recovery builder; never select an artifact from an older
+   output directory. Invoke the QEMU harnesses only from the exact retained
+   root-owned source snapshot printed by the builder. Selecting a
+   user-writable harness is already unsafe before its internal checks run.
+2. Build one hybrid x86-64 ISO and generate its SHA-256 sidecar and sorted
+   package manifest from that same build. Treat the exact three files as an
+   indivisible candidate and fail if the ISO is not strictly smaller than
+   2 GiB (2,147,483,648 bytes).
+3. Validate the finalized ISO under both SeaBIOS and OVMF UEFI. Build and boot
+   the local UKI in ordinary OVMF and enrolled-key Secure Boot modes, including
+   rejection of its unsigned counterpart. Run the documented deterministic
+   storage, networking, package-repair, rollback, and bootloader fixtures plus
+   the bounded privacy and expanded-image artifact checks, including normalized
+   entry/link names, PAX metadata, and decoded libarchive xattrs. Empty/short
+   explicit markers and short host identities fail closed. Booted platform
+   scenarios are required when their subsystem changed or the release claims
+   the live outcome; otherwise keep them visibly `NOT RUN`. Build the local UKI
+   from the exact candidate code/package rather than whatever AuraScan version
+   happens to be installed on the builder. A local UKI is
+   machine/kernel/key-specific evidence, not a universal GitHub asset.
+4. Record the exact release-candidate commit, then pin the tested ISO filename,
+   public release URL, and SHA-256 in the packaged
+   manifest, then commit. Reject the final candidate if its manifest remains
+   `build-required` or release metadata still says pending. Create the
+   immutable annotated tag only after that commit is final, create a draft
+   GitHub release, upload exactly the ISO, `.iso.sha256`, and
+   `.iso.packages.txt`, verify their remote names, sizes, and digests, and only
+   then publish the release. Do not rebuild the ISO after pinning: the final
+   pre-tag delta from the recorded candidate is limited to the packaged ISO
+   manifest and bounded release metadata, and the pinned digest must still
+   match the retained candidate bytes. Push this branch candidate and require
+   the Python 3.8/3.14 GitHub Actions matrix to pass before creating the tag.
+   Require the exact tag's matrix to pass before publishing the draft release;
+   skipped, cancelled, stale, or unrelated runs do not satisfy either gate.
+5. Download and hash the exact public tag archive, replace the Arch recipe's
+   `SKIP`, regenerate `.SRCINFO`, validate the trusted package, and only then
+   update GitHub `main` and the separate AUR repository. Never move or rewrite
+   the public tag to include this post-tag package checksum commit.
+
+Do not report a recovery or release gate as passing unless it was actually run
+against the exact candidate being published. A missing privilege boundary,
+firmware, required boot test, deterministic scenario, artifact audit, or size
+check stops a recovery-bearing publication; it does not silently turn into a
+successful package-only release. An optional booted platform scenario may be
+omitted only with an explicit public `NOT RUN` limitation and no corresponding
+live-support claim.
 
 ## Real-world warning tuning
 

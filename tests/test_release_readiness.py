@@ -1,3 +1,7 @@
+import json
+import os
+import re
+from datetime import date
 from pathlib import Path
 
 from aurascan.core.models import Severity
@@ -16,11 +20,39 @@ def read_text(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
+def test_current_release_recovery_manifest_policy_is_versioned_and_fresh():
+    version = tomllib.loads(read_text("pyproject.toml"))["project"]["version"]
+    manifest = json.loads(read_text("aurascan/assets/aurascan-recovery-iso.json"))
+    release = read_text(f"docs/releases/v{version}.md")
+    match = re.search(r"^Released on ([0-9]{4}-[0-9]{2}-[0-9]{2})\.$", release, re.MULTILINE)
+
+    assert match is not None
+    application_date = date.fromisoformat(match.group(1))
+    image_date = date.fromisoformat(manifest["released_at"])
+    image_release = read_text(f"docs/releases/v{manifest['version']}.md")
+    image_release_dates = re.findall(
+        r"^Released on ([0-9]{4}-[0-9]{2}-[0-9]{2})\.$",
+        image_release,
+        re.MULTILINE,
+    )
+    assert image_release_dates == [manifest["released_at"]]
+    assert manifest["application_version"] == version
+    assert 0 <= (application_date - image_date).days <= 90
+    assert manifest["release_disposition"] in {"recovery-bearing", "package-only"}
+    if manifest["release_disposition"] == "recovery-bearing":
+        assert manifest["version"] == version
+    else:
+        assert manifest["status"] == "release-ready"
+        assert tuple(map(int, manifest["version"].split("."))) < tuple(
+            map(int, version.split("."))
+        )
+
+
 def test_pyproject_console_scripts_are_registered():
     data = tomllib.loads(read_text("pyproject.toml"))
 
     scripts = data["project"]["scripts"]
-    assert data["project"]["version"] == "0.10.2"
+    assert data["project"]["version"] == "0.10.3"
     assert scripts["aurascan"] == "aurascan.cli:main"
     assert scripts["aurascan-makepkg"] == "aurascan.makepkg_wrapper:main"
     assert data["project"]["requires-python"] == ">=3.8"
@@ -425,16 +457,12 @@ def test_repository_provenance_v0102_release_contract():
         return " ".join(read_text(relative).lower().split())
 
     release = normalized("docs/releases/v0.10.2.md")
-    unreleased = normalized("docs/releases/unreleased.md")
     checklist = normalized("docs/RELEASE_CHECKLIST.md")
     announcement = normalized("docs/ANNOUNCEMENT.md")
-    pkgbuild = read_text("packaging/arch/PKGBUILD")
-    srcinfo = read_text("packaging/arch/.SRCINFO")
     engine_source = read_text("aurascan/core/engine.py")
     scan_input_source = read_text("aurascan/core/install_hook.py")
     repository_source = read_text("aurascan/core/repository_provenance.py")
     instruction_source = read_text("aurascan/core/instruction_guard.py")
-    recovery_source = read_text("aurascan/core/recovery_cli.py")
 
     required_release_phrases = [
         "# aurascan v0.10.2",
@@ -457,24 +485,135 @@ def test_repository_provenance_v0102_release_contract():
     for phrase in required_release_phrases:
         assert phrase in release
 
-    assert "changes after v0.10.2 will be recorded here" in unreleased
     assert "for v0.10.2, the package-scanner rule version is `1.5.0`" in checklist
     assert "v0.10.2 release adds an always-on static provenance check" in announcement
-    assert "pkgver=0.10.2" in pkgbuild
-    assert "pkgrel=1" in pkgbuild
-    assert "\tpkgver = 0.10.2" in srcinfo
-    assert "aurascan-0.10.2.tar.gz" in srcinfo
     assert 'self.scanner_version = "2.5.0"' in engine_source
     assert 'self.rule_version = "1.5.0"' in engine_source
     assert 'PACKAGE_SCAN_INPUT_VERSION = "2.0"' in scan_input_source
     assert 'REPOSITORY_SNAPSHOT_VERSION = "1.0"' in repository_source
     assert 'INSTRUCTION_GUARD_SCHEMA_VERSION = "1.0"' in instruction_source
     assert 'INSTRUCTION_GUARD_RULE_VERSION = "1.0"' in instruction_source
-    assert 'return "0.10.2-dev"' in recovery_source
     assert get_rule_metadata("AUR-REPO-OPAQUE-ARTIFACT-001").default_severity == Severity.MEDIUM
     assert get_rule_metadata("AUR-REPO-OPAQUE-BINARY-001").default_severity == Severity.HIGH
     assert get_rule_metadata("AUR-REPO-OPAQUE-BINARY-EXEC-001").default_severity == Severity.CRITICAL
     assert get_rule_metadata("AUR-REPO-INSPECTION-INCOMPLETE-001").default_severity == Severity.HIGH
+
+
+def test_recovery_bearing_v0103_release_contract():
+    import json
+
+    def normalized(relative: str) -> str:
+        return " ".join(read_text(relative).lower().split())
+
+    release_text = read_text("docs/releases/v0.10.3.md")
+    release = " ".join(release_text.lower().split())
+    unreleased = normalized("docs/releases/unreleased.md")
+    checklist = normalized("docs/RELEASE_CHECKLIST.md")
+    announcement = normalized("docs/ANNOUNCEMENT.md")
+    pkgbuild = read_text("packaging/arch/PKGBUILD")
+    srcinfo = read_text("packaging/arch/.SRCINFO")
+    recovery_source = read_text("aurascan/core/recovery_cli.py")
+    profile = read_text("packaging/recovery/archiso/profiledef.sh")
+    archiso_issue = read_text("packaging/recovery/archiso/airootfs/etc/issue")
+    uki_issue = read_text("packaging/recovery/rootfs/etc/issue")
+    manifest = json.loads(read_text("aurascan/assets/aurascan-recovery-iso.json"))
+
+    required_release_phrases = [
+        "# aurascan v0.10.3",
+        "released on 2026-09-01",
+        "recovery-bearing release",
+        "first time since v0.6.0",
+        "`aurascan-recovery-0.10.3-x86_64.iso`",
+        "sorted `.iso.packages.txt` manifest",
+        "rejects a github release asset at or above 2 gib",
+        "fresh work and output locations",
+        "either `recovery-bearing` or `package-only`",
+        "locally built ukis remain specific",
+        "package-scanner rule version remains `1.5.0`",
+        "previous release or tag is rewritten",
+        "application and arch/aur package advance to v0.10.3",
+    ]
+    for phrase in required_release_phrases:
+        assert phrase in release
+
+    assert "changes after v0.10.3 will be recorded here" in unreleased
+    assert "release disposition" in checklist
+    assert "strictly smaller than 2 gib (2,147,483,648 bytes)" in checklist
+    assert "v0.10.3 release refreshes the optional hybrid bios/uefi" in announcement
+    assert "pkgver=0.10.3" in pkgbuild
+    assert "pkgrel=1" in pkgbuild
+    assert "sha256sums=('SKIP')" in pkgbuild or re.search(r"sha256sums=\('[0-9a-f]{64}'\)", pkgbuild)
+    assert "\tpkgver = 0.10.3" in srcinfo
+    assert "aurascan-0.10.3.tar.gz" in srcinfo
+    assert "\tsha256sums = SKIP" in srcinfo or re.search(r"\tsha256sums = [0-9a-f]{64}", srcinfo)
+    assert 'return "0.10.3-dev"' in recovery_source
+    assert ': "${AURASCAN_RECOVERY_VERSION:' in profile
+    assert 'iso_version="$AURASCAN_RECOVERY_VERSION"' in profile
+    assert "AuraScan Recovery v@AURASCAN_VERSION@" in archiso_issue
+    assert "AuraScan Recovery" in uki_issue
+    assert "v0.6.0" not in uki_issue
+    assert manifest["schema"] == "aurascan_recovery_iso/2.0"
+    assert manifest["application_version"] == "0.10.3"
+    assert manifest["release_disposition"] == "recovery-bearing"
+    assert manifest["version"] == "0.10.3"
+    assert manifest["architecture"] == "x86_64"
+    assert manifest["filename"] == "aurascan-recovery-0.10.3-x86_64.iso"
+    assert manifest["released_at"] == "2026-09-01"
+    assert manifest["status"] in {"build-required", "release-ready"}
+    if manifest["status"] == "build-required":
+        assert manifest["url"] == ""
+        assert manifest["sha256"] == ""
+    else:
+        assert manifest["url"].endswith(
+            "/v0.10.3/aurascan-recovery-0.10.3-x86_64.iso"
+        )
+        assert re.fullmatch(r"[0-9a-f]{64}", manifest["sha256"])
+
+    if os.environ.get("AURASCAN_RELEASE_FINAL") == "1":
+        assert os.environ.get("AURASCAN_RELEASE_TAG") == "v0.10.3"
+        assert manifest["status"] == "release-ready"
+        assert re.fullmatch(r"[0-9a-f]{64}", manifest["sha256"])
+        forbidden_release_phrases = (
+            "pending-validation",
+            "will be pinned",
+            "will name",
+            "final release record will",
+            "required recovery-bearing gates include",
+            "remaining required gates",
+        )
+        for phrase in forbidden_release_phrases:
+            assert phrase not in release
+        rc_commits = re.findall(
+            r"^Recovery build candidate: `([0-9a-f]{40})`$",
+            release_text,
+            re.MULTILINE,
+        )
+        assert len(rc_commits) == 1
+        release_digests = re.findall(
+            r"^ISO SHA-256: `([0-9a-f]{64})`$",
+            release_text,
+            re.MULTILINE,
+        )
+        assert release_digests == [manifest["sha256"]]
+        required_boot_outcomes = (
+            "- hybrid iso, seabios readiness: `pass`",
+            "- hybrid iso, ovmf uefi readiness: `pass`",
+            "- local uki, ordinary ovmf uefi readiness: `pass`",
+            "- local uki, disposable-key secure boot unsigned rejection and signed readiness: `pass`",
+        )
+        for outcome in required_boot_outcomes:
+            assert outcome in release
+        required_additional_outcomes = (
+            "- complete python suite and python 3.8/3.14 ci matrix: `pass`",
+            "- presenter, shell-syntax, unit, and package-metadata audits: `pass`",
+            "- clean arch release-candidate package build: `pass`",
+            "- expanded-artifact privacy/path audit: `pass`",
+            "- strict sub-2-gib iso size gate: `pass`",
+            "- deterministic recovery scenario fixtures: `pass`",
+        )
+        for outcome in required_additional_outcomes:
+            assert outcome in release
+        assert "sha256sums=('skip')" in pkgbuild.lower()
 
 
 def test_release_checklist_references_required_validation_and_safety_items():
@@ -509,6 +648,11 @@ def test_release_checklist_references_required_validation_and_safety_items():
         "For v0.10.2, the package-scanner rule version is `1.5.0`",
         "AUR-REPO-OPAQUE-BINARY-EXEC-001",
         "AUR-REPO-INSPECTION-INCOMPLETE-001",
+        "Release Disposition",
+        "recovery-bearing",
+        "package-only",
+        "strictly smaller than 2 GiB",
+        "Any unrun or failed gate is reported exactly",
     ]
     for phrase in required_phrases:
         assert phrase in checklist

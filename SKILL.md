@@ -20,7 +20,9 @@ Use this workflow for changes in the AuraScan repository.
    - injected-root host artifacts; or
    - bounded AI-agent instruction and skill files under an explicit root; or
    - upgrade transaction context; or
-   - explicit cloud/local AI provider configuration and transport.
+   - explicit cloud/local AI provider configuration and transport; or
+   - recovery runtime, image construction, boot validation, or release
+     disposition.
 4. State what the evidence can and cannot prove. Keep static intent, attempted
    behavior, successful execution, and confirmed compromise distinct.
 
@@ -220,23 +222,83 @@ Use this path only when the user explicitly authorizes external publication:
 1. Read `docs/RELEASE_CHECKLIST.md` and `packaging/arch/README.md`. Verify the
    GitHub and AUR remote heads, target branches, SSH identities, version, tag
    availability, and clean scope; stop on divergence rather than forcing.
-2. Commit the completed implementation. Prepare a versioned release note and
-   synchronize the version in `pyproject.toml`, the recovery CLI development
-   fallback, release tests, `packaging/arch/PKGBUILD`, and `.SRCINFO`. Use
-   `SKIP` only for this pre-tag release candidate.
-3. Run all release gates, create an annotated tag, and push the GitHub branch
-   and tag over the verified SSH remote. Publish the matching GitHub release
-   before advertising the package source.
-4. Download the exact public tag archive, compute its SHA-256, replace `SKIP`,
+2. Declare the release `recovery-bearing` or `package-only` in its versioned
+   release note. Recovery runtime/recipe, boot or image tooling, image package
+   dependencies, and security-boundary changes shared with recovery require a
+   recovery-bearing release. A package-only release must name the exact
+   retained recovery image version/tag/digest and explicitly mark ISO/UKI gates
+   as not rerun. Update its packaged manifest's application version and
+   `package-only` disposition while retaining and re-verifying the exact prior
+   ISO version, filename, public URL, digest, and `release-ready` state. Do not
+   attach renamed recovery artifacts to a package-only release. If the retained
+   image would be more than 90 days old on release day, require a recovery-
+   bearing release; never reset its `released_at` without new validated bytes.
+3. Commit the completed implementation. Synchronize the version in
+   `pyproject.toml`, the recovery CLI development fallback, release tests,
+   `packaging/arch/PKGBUILD`, and `.SRCINFO`. Use `SKIP` only for this pre-tag
+   release candidate.
+4. For a recovery-bearing release, commit a clean candidate whose recovery
+   manifest is empty/build-required. Build with every AI mode disabled in a
+   fresh root-owned, non-writable checkout and fresh root-owned work/output
+   roots inside a freshly provisioned, disposable, and externally
+   CPU/RAM/disk-bounded Arch VM or host with no host disk or home share. Never
+   elevate a builder over a user-writable checkout, profile, package repository,
+   work path, or output path; use fixed trusted tools and a minimal environment,
+   and never select an artifact from an earlier output directory. Run QEMU only
+   through the root preflight bootstrap/launcher and private build attestation
+   printed by the builder. Require the bootstrap to bind itself and the
+   supervisor before the latter verifies the retained harness, guards,
+   artifacts, built readiness markers, and fixed packaged/prepared firmware
+   before Bash, then drops the run to an unmapped UID in a fresh network
+   namespace. Internal harness checks cannot retroactively make a
+   user-writable launch script trustworthy.
+5. Treat these exact files as one recovery candidate:
+   `aurascan-recovery-VERSION-x86_64.iso`, its `.iso.sha256` sidecar, and its
+   sorted `.iso.packages.txt` manifest. Require the ISO to be strictly smaller
+   than 2 GiB. Boot the exact ISO under SeaBIOS and OVMF UEFI; boot the local
+   UKI built from the exact candidate code/package—not an older installed
+   AuraScan—under ordinary and enrolled-key Secure Boot OVMF, verify unsigned
+   rejection, run the deterministic storage/network/repair/rollback fixtures,
+   and audit expanded artifacts using the documented bounded byte, normalized
+   path/link, PAX metadata, and decoded-xattr checks. Reject empty/short
+   explicit markers and short host identities instead of omitting them. Run
+   booted platform scenarios when their subsystem changed or the
+   release claims that live outcome; otherwise record them as `NOT RUN` in the
+   public limitations. Do not publish local UKIs as universal assets, and
+   never claim an unrun gate passed.
+   Keep removable-media writing separately fail closed: require trusted bounded
+   absolute `findmnt`/`lsblk` probes, identify the running root, repeat device
+   eligibility after confirmation and again while the exclusive descriptor is
+   held, require the same positive `DISK-SEQ` at all three inspections, reject
+   malformed or incomplete `lsblk` JSON, and compare the inspected kernel
+   major/minor number with the final no-follow block-device descriptor before
+   writing and again before verification.
+6. For a recovery-bearing release, record the exact RC commit, then pin the
+   tested ISO filename, public URL, and SHA-256 in a final pre-tag commit.
+   Do not rebuild the ISO after pinning. Restrict the delta from the recorded RC
+   to the packaged manifest and bounded release metadata, rerun source/package
+   tests, and verify that the pinned digest still matches the retained RC bytes.
+   Refuse the final tag while the manifest is
+   `build-required` or release metadata contains a pending artifact value. For
+   either disposition, run all applicable gates, push the GitHub branch over
+   the verified SSH remote, and require the Python 3.8/3.14 branch matrix to be
+   green. Create and push an immutable annotated tag at the final candidate,
+   then require the exact tag's Python 3.8/3.14 matrix to be green. A skipped,
+   cancelled, stale, or unrelated run is not sufficient. For a recovery-bearing release, create a draft GitHub
+   release, upload the exact three recovery assets, verify their remote names,
+   sizes, and digests, and only then publish it; a package-only release carries
+   its retained-image disclosure and no newly labeled recovery assets.
+7. Download the exact public tag archive, compute its SHA-256, replace `SKIP`,
    and regenerate `.SRCINFO` using the sanitized PATH commands in
    `packaging/arch/README.md`. Explicitly disable AI so a user `makepkg` wrapper
    cannot contaminate metadata. Run the documented package build/check only for
    AuraScan's trusted recipe, then commit and push the finalized metadata.
-5. Use a separate clean AUR clone on `master`. Preserve its maintainer/SPDX
+   Never move or recreate the public tag to include this post-tag commit.
+8. Use a separate clean AUR clone on `master`. Preserve its maintainer/SPDX
    headers and AUR-only tracked files, copy only finalized package metadata,
    inspect the staged diff, commit, and push through
    `ssh://aur@aur.archlinux.org/aurascan.git` without force.
-6. Verify GitHub `main`, the annotated tag and release, and AUR `master` from
+9. Verify GitHub `main`, the annotated tag and release, and AUR `master` from
    public remotes. Report commit IDs, version, checksum, tests, and any release
    gate that was not run.
 

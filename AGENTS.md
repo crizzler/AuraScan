@@ -12,7 +12,7 @@ evidence actually collected.
   command, or fixture command while analyzing or testing it.
 - Keep the default scan local and non-fetching. Network source acquisition is
   allowed only in an existing explicit workflow such as `--deep-static`.
-- Keep AI explicitly enabled. Cloud providers require their own key; local
+- Keep AI opt-in and use it only when explicitly enabled. Cloud providers require their own key; local
   `lmstudio` and `llamacpp` providers may be keyless but must remain restricted
   to validated loopback HTTP(S), with proxies and redirects disabled and no
   cloud fallback.
@@ -32,6 +32,45 @@ evidence actually collected.
   snippets that may contain secrets. Prefer bounded, secret-free evidence.
 - Package install and upgrade scripts must remain non-interactive and must not
   contact the network, request secrets, or execute AuraScan scans.
+- Classify every release as recovery-bearing or package-only. Recovery runtime,
+  recipe, boot/image tooling, dependency, or shared security-boundary changes
+  require a fresh recovery build. Package-only notes must name the exact
+  retained image and say that ISO/UKI gates were not rerun; never imply an
+  application-version-matched image exists when none was built.
+  For package-only releases, advance the packaged manifest's application
+  version and disposition while retaining and re-verifying the exact prior ISO
+  version, filename, public URL, digest, and `release-ready` status; do not
+  upload newly relabeled recovery assets.
+- Do not ship a package-only release when the retained recovery image is more
+  than 90 days old on the release date. The manifest records the image date,
+  runtime status and Doctor warn when the window is exceeded, and the next
+  release must be recovery-bearing rather than resetting or hiding that age.
+- Build recovery artifacts only from a clean committed candidate in fresh
+  trusted work/output roots inside a freshly provisioned, disposable, and
+  externally CPU/RAM/disk-bounded Arch VM or host, with no host disk or home
+  share, AI disabled, fixed trusted tools, and a minimal environment. Publish
+  the ISO, checksum sidecar, and sorted package manifest as one indivisible set
+  only after the ISO is proven smaller than
+  2 GiB and the required BIOS, UEFI, UKI, deterministic-scenario, and privacy
+  gates pass. Booted target-disk/network scenarios are mandatory when their
+  subsystem changed or the release claims that live outcome; otherwise record
+  them explicitly as not run and keep that limitation in the public record.
+  Local UKIs remain machine/kernel/key-specific test artifacts, not universal
+  downloads. Never describe an unrun recovery gate as passing.
+- Keep the recovery privacy audit fail closed across regular bytes and bounded
+  filesystem/archive metadata: normalized entry names, link destinations,
+  owner/group names, PAX keys/values, and decoded libarchive xattrs. Metadata
+  bytes count toward global bounds. Empty or shorter-than-eight-byte explicit
+  markers and short nonempty host identities are audit failures, not silently
+  dropped exclusions.
+- Keep recovery USB writes fail closed: identify the running root through a
+  bounded, revalidated absolute `findmnt`; inspect the candidate twice through
+  a bounded, revalidated absolute `lsblk`, then inspect it a third time while
+  the exclusive no-follow descriptor is held. Refuse malformed or incomplete
+  `lsblk` JSON and require the same positive kernel `DISK-SEQ` at all three
+  inspections; bind the matching major/minor identity to the final descriptor
+  before writing and verification. A model, serial, pathname, size, or typed
+  confirmation is not sufficient device identity by itself.
 - Do not claim execution, compromise, enrollment, or attacker access from a
   static match alone. State the uncertainty in findings and recovery advice.
 - Keep AUR repository-propagation detection on deterministic PKGBUILD and
@@ -195,6 +234,8 @@ evidence actually collected.
 - `tests/fixtures/curated_packages/`: defanged regression scenarios.
 - `packaging/arch/`: source-tree reference for the public AUR recipe.
 - `docs/RELEASE_CHECKLIST.md`: release, packaging, and distribution gates.
+- `packaging/recovery/`: optional local-UKI and hybrid-ISO profiles, hardened
+  builders, boot smoke tests, and recovery artifact publication guidance.
 - `README.md`, `DEVELOPING.md`, and `docs/releases/unreleased.md`: user,
   contributor, and release documentation.
 
@@ -280,10 +321,40 @@ describe unrun checks as passing.
   never force-push, rewrite a public tag, or bypass a non-fast-forward update.
 - Keep the application version, release note, recovery CLI development
   fallback, `PKGBUILD`, `.SRCINFO`, and release-readiness tests synchronized.
+- Declare `recovery-bearing` or `package-only` before preparing the candidate.
+  Use recovery-bearing whenever recovery runtime, recipe, boot/image tooling,
+  dependencies, or a security boundary shared with recovery changed. A
+  package-only note must identify the retained image version/tag/digest and
+  disclose that ISO/UKI gates were not rerun.
 - Follow the repository's two-commit package sequence: prepare and validate a
   clean release candidate with `sha256sums=('SKIP')`, create and publish its
   annotated GitHub tag, hash that exact public tag archive, then commit the
   fixed checksum and regenerated `.SRCINFO` to the GitHub branch.
+- For a recovery-bearing candidate, first commit the empty/build-required ISO
+  manifest. Never elevate a builder over a user-writable checkout, profile,
+  package repository, work path, or output path: use a fresh root-owned,
+  non-writable checkout and root-owned build boundary with AI disabled. Run
+  release QEMU harnesses only through the root preflight bootstrap/launcher and
+  private build attestation emitted from the exact retained root-owned source
+  snapshot. The bootstrap must bind itself and the launcher before the launcher
+  verifies harness/guard/input identities ahead of candidate Bash, binds fixed
+  packaged firmware or strict preparation outputs, isolates the run below the
+  retained work tree, and drops QEMU to an unmapped UID in a fresh network
+  namespace. Validate the exact
+  three-file ISO/checksum/package-manifest set and the strict under-2-GiB gate,
+  run BIOS/UEFI/UKI/security/privacy checks, then pin the tested ISO hash and
+  URL in a final pre-tag commit. The local UKI must be built from that exact
+  candidate's code/package, not an older installed AuraScan. Reject a final tag
+  while the manifest is build-required or release metadata remains pending.
+  Tag that immutable commit, create a draft release, upload and verify the
+  three matching asset names, sizes, and digests, then publish; only afterward
+  hash the public tag archive for the post-tag Arch checksum commit. Do not
+  move the tag.
+- Push the release-candidate branch and require the existing Python 3.8/3.14
+  GitHub Actions matrix to pass before creating the tag. After pushing the
+  exact annotated tag, require that tag's matrix to pass before publishing the
+  draft GitHub release. A skipped, cancelled, stale, or unrelated run is not a
+  green gate.
 - Run the documented `updpkgsums`, `/usr/bin/makepkg --printsrcinfo`, and trusted
   package build commands with `PATH=/usr/bin:/bin` and AI explicitly disabled.
   This prevents a user `makepkg` wrapper from contaminating release metadata.

@@ -8,8 +8,17 @@ import subprocess
 import tempfile
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+
+from aurascan.core.trusted_tools import (
+    TrustedTool,
+    TrustedToolError,
+    capture_trusted_system_tool,
+    revalidate_trusted_system_tool,
+    run_bounded_trusted_tool,
+)
 
 
 RECOVERY_UKI_RELATIVE = Path("EFI/Linux/aurascan-recovery.efi")
@@ -18,6 +27,28 @@ RECOVERY_LIMINE_BEGIN = "# AURASCAN RECOVERY BEGIN"
 RECOVERY_LIMINE_END = "# AURASCAN RECOVERY END"
 RECOVERY_GRUB_SCRIPT = Path("etc/grub.d/41_aurascan_recovery")
 RECOVERY_MIN_IMAGE_SIZE = 1024 * 1024
+RECOVERY_ISO_MANIFEST_SCHEMA = "aurascan_recovery_iso/2.0"
+RECOVERY_ISO_MANIFEST_MAX_SIZE = 64 * 1024
+RECOVERY_ISO_MAX_RELEASE_SIZE = 2 * 1024 * 1024 * 1024 - 1
+RECOVERY_ISO_MAX_AGE_DAYS = 90
+RECOVERY_ISO_MAX_FUTURE_DAYS = 1
+RECOVERY_ISO_MANIFEST_FIELDS = frozenset(
+    {
+        "schema",
+        "application_version",
+        "release_disposition",
+        "version",
+        "architecture",
+        "filename",
+        "released_at",
+        "url",
+        "sha256",
+        "status",
+    }
+)
+RECOVERY_ISO_MANIFEST_DERIVED_FIELDS = frozenset(
+    {"valid", "ready", "message", "age_days", "stale"}
+)
 RECOVERY_IMAGE_SECRET_MARKERS = (
     b"AURASCAN_AI_KEY=",
     b"AURASCAN_OPENAI_API_KEY=",
@@ -114,6 +145,9 @@ class UsbDeviceInfo:
     size: int = 0
     model: str = ""
     serial: str = ""
+    device_major: int = -1
+    device_minor: int = -1
+    disk_sequence: int = -1
     mountpoints: List[str] = field(default_factory=list)
     children: List[str] = field(default_factory=list)
     eligible: bool = False
@@ -127,6 +161,9 @@ class UsbDeviceInfo:
             "size": self.size,
             "model": self.model,
             "serial": self.serial,
+            "device_major": self.device_major,
+            "device_minor": self.device_minor,
+            "disk_sequence": self.disk_sequence,
             "mountpoints": list(self.mountpoints),
             "children": list(self.children),
             "eligible": self.eligible,
@@ -255,7 +292,8 @@ def build_uki_command(
             "--kernel-command-line=rd.systemd.unit=multi-user.target "
             "systemd.unit=multi-user.target "
             "rd.systemd.wants=aurascan-recovery.service "
-            "systemd.wants=aurascan-recovery.service"
+            "systemd.wants=aurascan-recovery.service "
+            "console=tty0 console=ttyS0,115200n8"
         ),
         "--output-mode=600",
     ]
@@ -590,12 +628,206 @@ def recovery_image_status(
     return status
 
 
-def load_iso_manifest(path: Path) -> Dict[str, object]:
+def _manifest_object(pairs) -> Dict[str, object]:
+    result: Dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate manifest field")
+        result[key] = value
+    return result
+
+
+def _invalid_iso_manifest(message: str) -> Dict[str, object]:
+    return {
+        "valid": False,
+        "ready": False,
+        "message": message,
+    }
+
+
+def iso_manifest_status(
+    manifest: Mapping[str, object],
+    *,
+    expected_application_version: str = "",
+    today: Optional[date] = None,
+) -> Dict[str, object]:
+    """Return a strict, canonical and user-displayable ISO manifest state."""
+
+    keys = set(manifest)
+    status_fields = RECOVERY_ISO_MANIFEST_FIELDS | RECOVERY_ISO_MANIFEST_DERIVED_FIELDS
+    if manifest.get("schema") != RECOVERY_ISO_MANIFEST_SCHEMA:
+        return _invalid_iso_manifest("Recovery ISO manifest schema is unsupported.")
+    if keys != RECOVERY_ISO_MANIFEST_FIELDS and keys != status_fields:
+        return _invalid_iso_manifest("Recovery ISO manifest fields do not match schema 2.0.")
+    if any(not isinstance(manifest.get(field), str) for field in RECOVERY_ISO_MANIFEST_FIELDS):
+        return _invalid_iso_manifest("Recovery ISO manifest fields must be strings.")
+
+    payload = {field: str(manifest[field]) for field in RECOVERY_ISO_MANIFEST_FIELDS}
+    version_component = r"(?:0|[1-9][0-9]{0,5})"
+    version_re = rf"{version_component}(?:\.{version_component}){{2}}"
+    if not re.fullmatch(version_re, payload["application_version"]):
+        return _invalid_iso_manifest("Recovery ISO manifest application version is invalid.")
+    if not re.fullmatch(version_re, payload["version"]):
+        return _invalid_iso_manifest("Recovery ISO manifest image version is invalid.")
+    expected_release = expected_application_version[:-4] if expected_application_version.endswith("-dev") else expected_application_version
+    if expected_release and payload["application_version"] != expected_release:
+        return _invalid_iso_manifest("Recovery ISO manifest does not describe this AuraScan release.")
+    if payload["release_disposition"] not in {"recovery-bearing", "package-only"}:
+        return _invalid_iso_manifest("Recovery ISO release disposition is invalid.")
+    if payload["architecture"] != "x86_64":
+        return _invalid_iso_manifest("Recovery ISO manifest architecture is unsupported.")
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", payload["released_at"]):
+        return _invalid_iso_manifest("Recovery ISO manifest release date is invalid.")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return dict(data) if isinstance(data, Mapping) else {}
+        released_at = date.fromisoformat(payload["released_at"])
+    except ValueError:
+        return _invalid_iso_manifest("Recovery ISO manifest release date is invalid.")
+    current_date = today or datetime.now(timezone.utc).date()
+    future_days = (released_at - current_date).days
+    if future_days > RECOVERY_ISO_MAX_FUTURE_DAYS:
+        return _invalid_iso_manifest(
+            "Recovery ISO manifest release date exceeds the one-day clock-skew tolerance."
+        )
+    age_days = max(0, (current_date - released_at).days)
+    stale = age_days > RECOVERY_ISO_MAX_AGE_DAYS
+    clock_note = (
+        " The image date is one day ahead of the current UTC date and was accepted "
+        "within the bounded clock-skew tolerance."
+        if future_days == 1
+        else ""
+    )
+
+    expected_filename = f"aurascan-recovery-{payload['version']}-x86_64.iso"
+    if payload["filename"] != expected_filename:
+        return _invalid_iso_manifest("Recovery ISO manifest filename does not match its version and architecture.")
+    expected_url = (
+        "https://github.com/crizzler/AuraScan/releases/download/"
+        f"v{payload['version']}/{expected_filename}"
+    )
+    disposition = payload["release_disposition"]
+    status = payload["status"]
+    if status == "build-required":
+        if disposition != "recovery-bearing":
+            return _invalid_iso_manifest("Only a recovery-bearing release may require an ISO build.")
+        if payload["version"] != payload["application_version"]:
+            return _invalid_iso_manifest("A recovery-bearing ISO must match the AuraScan release version.")
+        if payload["url"] or payload["sha256"]:
+            return _invalid_iso_manifest("A build-required ISO manifest must not contain an unverified URL or digest.")
+        return {
+            **payload,
+            "valid": True,
+            "ready": False,
+            "age_days": age_days,
+            "stale": stale,
+            "message": (
+                f"Recovery-bearing release {payload['application_version']} requires its "
+                "ISO to be built, validated, and pinned before publication."
+                f"{clock_note}"
+            ),
+        }
+    if status != "release-ready":
+        return _invalid_iso_manifest("Recovery ISO manifest status is invalid.")
+    if disposition == "recovery-bearing" and payload["version"] != payload["application_version"]:
+        return _invalid_iso_manifest("A recovery-bearing ISO must match the AuraScan release version.")
+    if disposition == "package-only":
+        application_parts = tuple(int(part) for part in payload["application_version"].split("."))
+        image_parts = tuple(int(part) for part in payload["version"].split("."))
+        if image_parts >= application_parts:
+            return _invalid_iso_manifest(
+                "A package-only release must retain an earlier Recovery ISO version."
+            )
+    if payload["url"] != expected_url:
+        return _invalid_iso_manifest("Recovery ISO manifest URL does not match the named release artifact.")
+    if not re.fullmatch(r"[0-9a-f]{64}", payload["sha256"]):
+        return _invalid_iso_manifest("Recovery ISO manifest digest is not a lowercase SHA-256 value.")
+    if disposition == "package-only":
+        message = (
+            f"Package-only release {payload['application_version']} intentionally retains "
+            f"Recovery ISO {payload['version']}."
+        )
+    else:
+        message = f"Recovery-bearing release {payload['application_version']} pins its validated Recovery ISO."
+    message += clock_note
+    if stale:
+        message += (
+            f" The retained image is {age_days} days old and exceeds AuraScan's "
+            f"{RECOVERY_ISO_MAX_AGE_DAYS}-day refresh window."
+        )
+    return {
+        **payload,
+        "valid": True,
+        "ready": True,
+        "age_days": age_days,
+        "stale": stale,
+        "message": message,
+    }
+
+
+def load_iso_manifest(path: Path, *, expected_application_version: str = "") -> Dict[str, object]:
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size > RECOVERY_ISO_MANIFEST_MAX_SIZE:
+            return _invalid_iso_manifest("Recovery ISO manifest is not a bounded regular file.")
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        fd = os.open(str(path), flags)
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode) or (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+            ) != (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+            ):
+                return _invalid_iso_manifest("Recovery ISO manifest is not a bounded regular file.")
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                raw = handle.read(RECOVERY_ISO_MANIFEST_MAX_SIZE + 1)
+            opened_after = os.fstat(fd)
+        finally:
+            os.close(fd)
+        after = path.lstat()
+        identity_before = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        if identity_before != (
+            opened_after.st_dev,
+            opened_after.st_ino,
+            opened_after.st_size,
+            opened_after.st_mtime_ns,
+            opened_after.st_ctime_ns,
+        ) or identity_before != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            return _invalid_iso_manifest("Recovery ISO manifest changed while it was read.")
+        if len(raw) > RECOVERY_ISO_MANIFEST_MAX_SIZE:
+            return _invalid_iso_manifest("Recovery ISO manifest exceeds its size limit.")
+        if len(raw) != before.st_size:
+            return _invalid_iso_manifest("Recovery ISO manifest changed while it was read.")
+        data = json.loads(raw.decode("utf-8"), object_pairs_hook=_manifest_object)
+    except (OSError, UnicodeError, ValueError):
+        return _invalid_iso_manifest("Recovery ISO manifest could not be read as strict JSON.")
+    if not isinstance(data, Mapping):
+        return _invalid_iso_manifest("Recovery ISO manifest root must be an object.")
+    if data.get("schema") != RECOVERY_ISO_MANIFEST_SCHEMA:
+        return _invalid_iso_manifest("Recovery ISO manifest schema is unsupported.")
+    if set(data) != RECOVERY_ISO_MANIFEST_FIELDS:
+        return _invalid_iso_manifest("Recovery ISO manifest fields do not match schema 2.0.")
+    return iso_manifest_status(data, expected_application_version=expected_application_version)
 
 
 def download_recovery_iso(
@@ -603,12 +835,13 @@ def download_recovery_iso(
     destination: Path,
     *,
     urlopen: Callable = urllib.request.urlopen,
-    max_size: int = 4 * 1024 * 1024 * 1024,
+    max_size: int = RECOVERY_ISO_MAX_RELEASE_SIZE,
 ) -> BootOperationResult:
-    url = str(manifest.get("url") or "")
-    expected = str(manifest.get("sha256") or "").lower()
-    if not url.startswith("https://github.com/crizzler/AuraScan/releases/download/") or not re.fullmatch(r"[0-9a-f]{64}", expected):
-        return BootOperationResult(False, "unavailable", "The packaged recovery ISO manifest is not finalized for this release.")
+    state = iso_manifest_status(manifest)
+    if not state.get("ready"):
+        return BootOperationResult(False, "unavailable", str(state.get("message") or "The packaged recovery ISO manifest is unavailable."))
+    url = str(state["url"])
+    expected = str(state["sha256"])
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{destination.name}.", dir=str(destination.parent))
     digest = hashlib.sha256()
@@ -638,18 +871,70 @@ def download_recovery_iso(
             os.unlink(tmp_name)
 
 
-def sha256_file(path: Path, *, max_size: int = 4 * 1024 * 1024 * 1024) -> str:
+def _regular_file_identity(metadata: os.stat_result) -> Tuple[int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def sha256_file(path: Path, *, max_size: int = RECOVERY_ISO_MAX_RELEASE_SIZE) -> str:
+    """Hash one stable, bounded, no-follow regular-file snapshot."""
+
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise ValueError("recovery ISO is unavailable") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise ValueError("recovery ISO is not a no-follow regular file")
+    if before.st_size > max_size:
+        raise ValueError("recovery ISO exceeds the verification size bound")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(str(path), flags)
+    except OSError as exc:
+        raise ValueError("recovery ISO could not be opened without following links") from exc
     digest = hashlib.sha256()
     size = 0
-    with path.open("rb") as handle:
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino, opened.st_size)
+            != (before.st_dev, before.st_ino, before.st_size)
+        ):
+            raise ValueError("recovery ISO changed while it was opened")
         while True:
-            chunk = handle.read(4 * 1024 * 1024)
+            chunk = os.read(descriptor, 4 * 1024 * 1024)
             if not chunk:
                 break
             size += len(chunk)
             if size > max_size:
                 raise ValueError("recovery ISO exceeds the verification size bound")
             digest.update(chunk)
+        opened_after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise ValueError("recovery ISO changed while it was verified") from exc
+    identity = _regular_file_identity(before)
+    if (
+        identity != _regular_file_identity(opened_after)
+        or identity != _regular_file_identity(after)
+        or size != before.st_size
+    ):
+        raise ValueError("recovery ISO changed while it was verified")
     return digest.hexdigest()
 
 
@@ -659,10 +944,11 @@ def verify_recovery_iso(
     *,
     allow_local_sidecar: bool = False,
 ) -> Tuple[bool, str, str]:
-    expected = str(manifest.get("sha256") or "").strip().lower()
-    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+    state = iso_manifest_status(manifest)
+    expected = str(state.get("sha256") or "") if state.get("ready") else ""
+    if not expected:
         if not allow_local_sidecar:
-            return False, "The packaged recovery ISO digest is not finalized for this release.", ""
+            return False, str(state.get("message") or "The packaged recovery ISO manifest is unavailable."), ""
         sidecar = Path(str(path) + ".sha256")
         try:
             token = sidecar.read_text(encoding="utf-8", errors="replace").split()[0].lower()
@@ -690,80 +976,247 @@ def _flatten_lsblk(nodes: Sequence[Mapping[str, object]]) -> List[Mapping[str, o
     return flattened
 
 
+def _validated_lsblk_nodes(payload: object) -> Optional[List[Mapping[str, object]]]:
+    if not isinstance(payload, Mapping):
+        return None
+    nodes = payload.get("blockdevices")
+    if not isinstance(nodes, list) or len(nodes) > 4096:
+        return None
+    required = {
+        "name",
+        "path",
+        "type",
+        "rm",
+        "size",
+        "model",
+        "serial",
+        "disk-seq",
+        "maj:min",
+        "mountpoints",
+        "pkname",
+    }
+    pending = [(item, 0) for item in nodes]
+    count = 0
+    identities: Dict[str, Tuple[object, ...]] = {}
+    while pending:
+        item, depth = pending.pop()
+        count += 1
+        if count > 4096 or depth > 128 or not isinstance(item, Mapping):
+            return None
+        if not required.issubset(item):
+            return None
+        name = item.get("name")
+        path = item.get("path")
+        kind = item.get("type")
+        removable = item.get("rm")
+        size = item.get("size")
+        model = item.get("model")
+        serial = item.get("serial")
+        disk_sequence = item.get("disk-seq")
+        device_number = item.get("maj:min")
+        mountpoints = item.get("mountpoints")
+        parent_name = item.get("pkname")
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(r"[A-Za-z0-9._+:/-]{1,256}", name)
+            or not isinstance(path, str)
+            or len(path) > 512
+            or not path.startswith("/dev/")
+            or any(ord(character) < 32 or ord(character) == 127 for character in path)
+            or not isinstance(kind, str)
+            or not re.fullmatch(r"[A-Za-z0-9._+-]{1,64}", kind)
+            or not (isinstance(removable, (bool, int)) and removable in (False, True, 0, 1))
+            or isinstance(size, bool)
+            or not isinstance(size, int)
+            or not 0 <= size <= (1 << 63) - 1
+            or model is not None and (not isinstance(model, str) or len(model) > 4096)
+            or serial is not None and (not isinstance(serial, str) or len(serial) > 4096)
+            or isinstance(disk_sequence, bool)
+            or not isinstance(disk_sequence, int)
+            or not 1 <= disk_sequence <= (1 << 64) - 1
+            or not isinstance(device_number, str)
+            or not re.fullmatch(r"[0-9]+:[0-9]+", device_number)
+            or not isinstance(mountpoints, list)
+            or len(mountpoints) > 256
+            or any(
+                value is not None
+                and (not isinstance(value, str) or len(value) > 4096)
+                for value in mountpoints
+            )
+            or parent_name is not None
+            and (
+                not isinstance(parent_name, str)
+                or not re.fullmatch(r"[A-Za-z0-9._+:/-]{1,256}", parent_name)
+            )
+        ):
+            return None
+        identity = (
+            name,
+            kind,
+            removable,
+            size,
+            model,
+            serial,
+            disk_sequence,
+            device_number,
+            tuple(mountpoints),
+        )
+        previous = identities.setdefault(path, identity)
+        if previous != identity:
+            return None
+        children = item.get("children", [])
+        if not isinstance(children, list) or len(children) > 4096:
+            return None
+        pending.extend((child, depth + 1) for child in children)
+    return [item for item in nodes if isinstance(item, Mapping)]
+
+
+def _safe_device_label(value: object) -> str:
+    raw = str(value or "").strip()[:120]
+    return re.sub(r"[^A-Za-z0-9 ._+:/@#()\[\]-]", "?", raw)
+
+
 def inspect_usb_device(
     device: str,
     *,
-    runner: Callable = subprocess.run,
+    runner: Callable = run_bounded_trusted_tool,
     root_source: str = "",
+    trusted_lsblk: Optional[TrustedTool] = None,
 ) -> UsbDeviceInfo:
     info = UsbDeviceInfo(path=device)
     if not re.fullmatch(r"/dev/[A-Za-z0-9._+-]+", device):
         info.refusal = "USB target must be an absolute /dev whole-disk path."
         return info
-    command = ["lsblk", "--json", "--bytes", "--output", "PATH,TYPE,RM,SIZE,MODEL,SERIAL,MOUNTPOINTS,PKNAME"]
-    result = runner(command, capture_output=True, text=True, timeout=20, check=False)
+    try:
+        lsblk = trusted_lsblk or capture_trusted_system_tool(
+            "lsblk",
+            which=lambda _name: "/usr/bin/lsblk",
+        )
+        if lsblk is None:
+            raise TrustedToolError("lsblk was unavailable")
+        revalidate_trusted_system_tool(lsblk)
+        command = [
+            lsblk.path,
+            "--json",
+            "--bytes",
+            "--tree",
+            "--output",
+            "NAME,PATH,TYPE,RM,SIZE,MODEL,SERIAL,DISK-SEQ,MAJ:MIN,MOUNTPOINTS,PKNAME",
+        ]
+        result = runner(command, capture_output=True, text=True, timeout=20, check=False)
+    except (OSError, subprocess.SubprocessError, TrustedToolError):
+        info.refusal = "USB target inspection could not use the trusted bounded lsblk probe."
+        return info
     try:
         payload = json.loads(result.stdout) if result.returncode == 0 else {}
     except ValueError:
         payload = {}
-    nodes = payload.get("blockdevices", []) if isinstance(payload, Mapping) else []
-    flat = _flatten_lsblk([item for item in nodes if isinstance(item, Mapping)])
-    parent_by_path: Dict[str, str] = {}
+    nodes = _validated_lsblk_nodes(payload)
+    if nodes is None:
+        info.refusal = "USB target inspection returned malformed or incomplete lsblk data."
+        return info
+    flat = _flatten_lsblk(nodes)
+    parents_by_path: Dict[str, Set[str]] = {}
+    children_by_path: Dict[str, Set[str]] = {}
 
     def record_parents(items: Sequence[Mapping[str, object]], parent: str = "") -> None:
         for item in items:
             path = str(item.get("path") or "")
             if path and parent:
-                parent_by_path[path] = parent
+                parents_by_path.setdefault(path, set()).add(parent)
+                children_by_path.setdefault(parent, set()).add(path)
             children = item.get("children", [])
             if isinstance(children, list):
                 record_parents([child for child in children if isinstance(child, Mapping)], path)
 
     record_parents([item for item in nodes if isinstance(item, Mapping)])
+    paths_by_name: Dict[str, Set[str]] = {}
+    for item in flat:
+        path = str(item.get("path") or "")
+        name = str(item.get("name") or "")
+        if path and not name:
+            name = os.path.basename(path)
+        if path and name:
+            paths_by_name.setdefault(name, set()).add(path)
+    # `lsblk --tree` normally supplies nested children, while PKNAME retains a
+    # second, independent edge source and supports a safely parsed flat result.
+    # Repeated N:M device nodes can therefore retain every observed parent.
+    for item in flat:
+        child = str(item.get("path") or "")
+        parent_name = os.path.basename(str(item.get("pkname") or ""))
+        if not child or not parent_name:
+            continue
+        for parent in paths_by_name.get(parent_name, set()):
+            if parent != child:
+                parents_by_path.setdefault(child, set()).add(parent)
+                children_by_path.setdefault(parent, set()).add(child)
     selected = next((item for item in flat if str(item.get("path") or "") == device), None)
     if selected is None:
         info.refusal = "USB target was not found in lsblk output."
         return info
-    info.kind = str(selected.get("type") or "")
-    info.removable = bool(int(selected.get("rm") or 0))
-    info.size = int(selected.get("size") or 0)
-    info.model = str(selected.get("model") or "").strip()[:120]
-    info.serial = str(selected.get("serial") or "").strip()[:120]
+    try:
+        info.kind = str(selected.get("type") or "")
+        info.removable = bool(int(selected.get("rm") or 0))
+        info.size = int(selected.get("size") or 0)
+        device_number = str(selected.get("maj:min") or "")
+        if not re.fullmatch(r"[0-9]+:[0-9]+", device_number):
+            raise ValueError("invalid device number")
+        major, minor = device_number.split(":", 1)
+        info.device_major = int(major)
+        info.device_minor = int(minor)
+        info.disk_sequence = int(selected.get("disk-seq"))
+    except (TypeError, ValueError):
+        info.refusal = "USB target inspection returned invalid block-device identity data."
+        return info
+    info.model = _safe_device_label(selected.get("model"))
+    info.serial = _safe_device_label(selected.get("serial"))
     raw_mounts = selected.get("mountpoints") or []
     if isinstance(raw_mounts, list):
         info.mountpoints = [str(value) for value in raw_mounts if value]
     root_parent = root_source.split("[")[0]
     root_aliases = {root_parent, os.path.realpath(root_parent)} if root_parent else set()
-    root_node = next((str(item.get("path") or "") for item in flat if str(item.get("path") or "") in root_aliases or os.path.realpath(str(item.get("path") or "")) in root_aliases), "")
-    root_ancestors = set()
-    cursor = root_node
-    while cursor and cursor not in root_ancestors:
+    root_nodes = {
+        str(item.get("path") or "")
+        for item in flat
+        if str(item.get("path") or "") in root_aliases
+        or os.path.realpath(str(item.get("path") or "")) in root_aliases
+    }
+    root_nodes.discard("")
+    root_ancestors: Set[str] = set()
+    pending_ancestors = list(root_nodes)
+    while pending_ancestors:
+        cursor = pending_ancestors.pop()
+        if cursor in root_ancestors:
+            continue
         root_ancestors.add(cursor)
-        cursor = parent_by_path.get(cursor, "")
+        pending_ancestors.extend(parents_by_path.get(cursor, set()) - root_ancestors)
     selected_descendants = {device}
-    changed = True
-    while changed:
-        changed = False
-        for child, parent in parent_by_path.items():
-            if parent in selected_descendants and child not in selected_descendants:
+    pending_descendants = [device]
+    while pending_descendants:
+        parent = pending_descendants.pop()
+        for child in children_by_path.get(parent, set()):
+            if child not in selected_descendants:
                 selected_descendants.add(child)
-                changed = True
-    descendants = [item for item in flat if str(item.get("path") or "") in selected_descendants and str(item.get("path") or "") != device]
-    info.children = [str(item.get("path") or "") for item in descendants]
+                pending_descendants.append(child)
+    descendant_paths = selected_descendants - {device}
+    descendants = [
+        item for item in flat if str(item.get("path") or "") in descendant_paths
+    ]
+    info.children = sorted(descendant_paths)
     for child in descendants:
         mounts = child.get("mountpoints") or []
         if isinstance(mounts, list):
             info.mountpoints.extend(str(value) for value in mounts if value)
-    fallback_prefix = device.rstrip("0123456789")
     if info.kind != "disk":
         info.refusal = "USB target is not a whole-disk block device."
     elif not info.removable:
         info.refusal = "USB target is not reported as removable; AuraScan will not override this safety check."
+    elif root_parent and not root_nodes:
+        info.refusal = "USB target inspection could not correlate the running root filesystem."
     elif root_parent and (
         device in root_ancestors
-        or root_node in selected_descendants
+        or bool(root_nodes & selected_descendants)
         or root_parent == device
-        or (not root_node and root_parent.startswith(fallback_prefix))
     ):
         info.refusal = "USB target contains the running root filesystem."
     elif info.mountpoints:
@@ -775,50 +1228,183 @@ def inspect_usb_device(
     return info
 
 
+def _open_verified_usb_device(device: UsbDeviceInfo, *, write: bool) -> int:
+    """Open the exact inspected block device and bind it to its kernel identity."""
+
+    if device.device_major < 0 or device.device_minor < 0:
+        raise ValueError("USB target has no verified kernel block-device identity.")
+    flags = (
+        (os.O_RDWR if write else os.O_RDONLY)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    if write:
+        flags |= getattr(os, "O_EXCL", 0)
+    descriptor = os.open(device.path, flags)
+    try:
+        _verify_open_usb_descriptor(descriptor, device)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _verify_open_usb_descriptor(descriptor: int, device: UsbDeviceInfo) -> None:
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISBLK(metadata.st_mode)
+        or os.major(metadata.st_rdev) != device.device_major
+        or os.minor(metadata.st_rdev) != device.device_minor
+    ):
+        raise ValueError("USB target block-device identity changed after inspection.")
+
+
+def _same_usb_device(left: UsbDeviceInfo, right: UsbDeviceInfo) -> bool:
+    return bool(
+        left.eligible
+        and right.eligible
+        and left.path == right.path
+        and left.kind == right.kind
+        and left.removable == right.removable
+        and left.size == right.size
+        and left.model == right.model
+        and left.serial == right.serial
+        and left.device_major == right.device_major
+        and left.device_minor == right.device_minor
+        and left.disk_sequence > 0
+        and left.disk_sequence == right.disk_sequence
+    )
+
+
 def write_iso_to_usb(
     iso_path: Path,
     device: UsbDeviceInfo,
     *,
     confirmation: str,
+    reinspect_device: Callable[[], UsbDeviceInfo],
     progress: Optional[Callable[[int, int], None]] = None,
     chunk_size: int = 4 * 1024 * 1024,
     expected_sha256: str = "",
 ) -> BootOperationResult:
+    write_started = False
     if not device.eligible or confirmation.strip() != device.path:
         return BootOperationResult(False, "refused", "USB write requires an eligible device and exact typed device-path confirmation.")
     if not hasattr(os, "geteuid") or os.geteuid() != 0:
         return BootOperationResult(False, "refused", "Writing a recovery USB requires root privileges.")
+    expected = expected_sha256.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        return BootOperationResult(
+            False,
+            "refused",
+            "Recovery USB writing requires the manifest-pinned ISO SHA-256 digest.",
+        )
+    if chunk_size < 1 or chunk_size > 16 * 1024 * 1024:
+        return BootOperationResult(False, "refused", "Recovery USB write chunk size is invalid.")
     try:
-        total = iso_path.stat().st_size
-        if total <= 0 or total > device.size:
-            return BootOperationResult(False, "refused", "Recovery ISO does not fit on the selected USB device.")
-        digest = hashlib.sha256()
-        if expected_sha256 and sha256_file(iso_path) != expected_sha256.lower():
-            return BootOperationResult(False, "refused", "Recovery ISO changed after pre-write verification.")
-        written = 0
-        with iso_path.open("rb") as source, open(device.path, "wb", buffering=0) as target:
-            while True:
-                chunk = source.read(chunk_size)
-                if not chunk:
-                    break
-                target.write(chunk)
-                digest.update(chunk)
-                written += len(chunk)
-                if progress:
-                    progress(written, total)
-            target.flush()
-            os.fsync(target.fileno())
-        verify = hashlib.sha256()
-        with open(device.path, "rb", buffering=0) as target:
-            remaining = total
-            while remaining:
-                chunk = target.read(min(chunk_size, remaining))
-                if not chunk:
-                    break
-                verify.update(chunk)
-                remaining -= len(chunk)
-        if remaining or verify.digest() != digest.digest():
-            return BootOperationResult(False, "failed", "USB verification failed after writing.")
+        before = iso_path.lstat()
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+            return BootOperationResult(False, "refused", "Recovery ISO is not a no-follow regular file.")
+        if before.st_size <= 0 or before.st_size > RECOVERY_ISO_MAX_RELEASE_SIZE or before.st_size > device.size:
+            return BootOperationResult(False, "refused", "Recovery ISO does not fit within the release or selected-device size boundary.")
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        source_descriptor = os.open(str(iso_path), flags)
+        try:
+            opened = os.fstat(source_descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino, opened.st_size)
+                != (before.st_dev, before.st_ino, before.st_size)
+            ):
+                raise ValueError("Recovery ISO changed while its private write snapshot was opened.")
+            with tempfile.TemporaryFile(
+                mode="w+b", prefix=".aurascan-recovery-iso.", dir="/var/tmp"
+            ) as snapshot:
+                digest = hashlib.sha256()
+                captured = 0
+                while True:
+                    chunk = os.read(source_descriptor, 4 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    captured += len(chunk)
+                    if captured > RECOVERY_ISO_MAX_RELEASE_SIZE or captured > device.size:
+                        raise ValueError("Recovery ISO exceeded its bounded size while it was snapshotted.")
+                    snapshot.write(chunk)
+                    digest.update(chunk)
+                opened_after = os.fstat(source_descriptor)
+                try:
+                    path_after = iso_path.lstat()
+                except OSError as exc:
+                    raise ValueError("Recovery ISO changed while its private write snapshot was captured.") from exc
+                identity = _regular_file_identity(before)
+                if (
+                    identity != _regular_file_identity(opened_after)
+                    or identity != _regular_file_identity(path_after)
+                    or captured != before.st_size
+                ):
+                    raise ValueError("Recovery ISO changed while its private write snapshot was captured.")
+                if digest.hexdigest() != expected:
+                    raise ValueError("Recovery ISO changed after manifest verification.")
+                snapshot.flush()
+                os.fsync(snapshot.fileno())
+                snapshot.seek(0)
+
+                written = 0
+                written_digest = hashlib.sha256()
+                target_descriptor = _open_verified_usb_device(device, write=True)
+                with os.fdopen(target_descriptor, "r+b", buffering=0) as target:
+                    held_device = reinspect_device()
+                    if not isinstance(held_device, UsbDeviceInfo) or not _same_usb_device(
+                        device, held_device
+                    ):
+                        raise ValueError(
+                            "USB target identity or eligibility changed while its exclusive descriptor was held."
+                        )
+                    _verify_open_usb_descriptor(target.fileno(), held_device)
+                    while True:
+                        chunk = snapshot.read(chunk_size)
+                        if not chunk:
+                            break
+                        pending = memoryview(chunk)
+                        while pending:
+                            count = target.write(pending)
+                            if count is None or count <= 0:
+                                raise OSError("Recovery USB write stopped before the snapshot was complete.")
+                            write_started = True
+                            pending = pending[count:]
+                        written_digest.update(chunk)
+                        written += len(chunk)
+                        if progress:
+                            progress(written, captured)
+                    target.flush()
+                    os.fsync(target.fileno())
+                    if written != captured or written_digest.hexdigest() != expected:
+                        return BootOperationResult(False, "failed", "Recovery ISO snapshot changed during the USB write.")
+                    _verify_open_usb_descriptor(target.fileno(), device)
+                    target.seek(0)
+                    verify = hashlib.sha256()
+                    remaining = captured
+                    while remaining:
+                        chunk = target.read(min(chunk_size, remaining))
+                        if not chunk:
+                            break
+                        verify.update(chunk)
+                        remaining -= len(chunk)
+                    if remaining or verify.hexdigest() != expected:
+                        return BootOperationResult(False, "failed", "USB verification failed after writing.")
+        finally:
+            os.close(source_descriptor)
         return BootOperationResult(True, "written", f"AuraScan Recovery USB was written and verified on {device.path}.", [device.path])
+    except ValueError as exc:
+        return BootOperationResult(
+            False,
+            "failed" if write_started else "refused",
+            str(exc),
+        )
     except OSError as exc:
         return BootOperationResult(False, "failed", f"Recovery USB write failed: {exc}")

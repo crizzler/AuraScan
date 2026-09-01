@@ -4,7 +4,8 @@ iso_name="aurascan-recovery"
 iso_label="AURASCAN_RECOVER"
 iso_publisher="AuraScan <https://github.com/crizzler/AuraScan>"
 iso_application="AuraScan AI-Assisted Recovery"
-iso_version="0.6.0"
+: "${AURASCAN_RECOVERY_VERSION:?AURASCAN_RECOVERY_VERSION must match the packaged AuraScan release}"
+iso_version="$AURASCAN_RECOVERY_VERSION"
 install_dir="aurascan"
 buildmodes=('iso')
 bootmodes=('bios.syslinux' 'uefi.systemd-boot')

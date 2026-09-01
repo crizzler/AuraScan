@@ -104,8 +104,16 @@ python -m aurascan init
 python -m aurascan doctor
 ```
 
-Release notes and recovery-image artifacts are available from the
-[GitHub releases page](https://github.com/crizzler/AuraScan/releases).
+Release notes and any recovery-image artifacts are available from the
+[GitHub releases page](https://github.com/crizzler/AuraScan/releases). Starting
+with v0.10.3, every new release explicitly says whether it is
+**recovery-bearing** or **package-only**.
+A recovery-bearing release publishes the ISO, its SHA-256 sidecar, and its
+sorted package manifest as one set. A package-only release names the older
+recovery image it continues to use and states that ISO/UKI validation was not
+rerun for that release. AuraScan records the image date and Doctor warns when a
+retained image exceeds 90 days; a new package-only release may not carry an
+image beyond that window.
 
 Installation does not auto-run the wizard, collect API keys, write user config,
 enable monitoring or repair services, install tray autostart, or add a recovery
@@ -1218,7 +1226,9 @@ only `AURASCAN_INCIDENT_AUTO_REPAIR=off|safe` and contains no API credential.
 `aurascan recovery` manages an optional x86-64 recovery environment for Arch
 Linux, EndeavourOS, Manjaro, and CachyOS. It is intended for systems that cannot
 reach the normal desktop or console reliably enough to run the ordinary
-Incident Recovery Assistant.
+Incident Recovery Assistant. Installing or upgrading AuraScan does not require
+installing a recovery image, and recovery remains disabled until the user
+chooses it.
 
 ```bash
 aurascan recovery --status
@@ -1231,11 +1241,17 @@ aurascan recovery --write-usb /dev/sdX
 ```
 
 The internal image is built locally with mkosi's `mkosi-initrd` profile and `ukify` from an
-installed alternate/LTS kernel when available. AuraScan creates a
-credential-free zipapp containing the exact installed AuraScan code, builds in
-private staging, validates the complete image for forbidden key/profile
-material, signs it with an already enrolled sbctl-compatible owner key when
-Secure Boot is enabled, and then atomically installs
+installed alternate/LTS kernel when available. AuraScan creates a zipapp from
+the exact installed AuraScan code without intentionally copying provider or
+user configuration, builds in private staging, and performs bounded byte checks
+for credential assignments with bounded values, known provider-token prefixes,
+known private-state paths, and explicitly supplied private markers. These
+checks also cover bounded normalized entry/link metadata, PAX fields, and
+decoded libarchive xattrs; short explicit or host-identity markers fail closed
+instead of being ignored. The checks do not load arbitrary secret stores or
+prove that unknown material is absent from compressed or opaque content. The
+image is signed with an already enrolled sbctl-compatible owner key when Secure
+Boot is enabled and then atomically installed as
 `/boot/EFI/Linux/aurascan-recovery.efi`. Existing recovery image and
 bootloader configuration backups are retained. Secure Boot installation is
 refused when AuraScan cannot prove an enrolled signing key; USB recovery remains
@@ -1247,8 +1263,30 @@ script. Internal installation requires x86-64 UEFI. The release USB image is a
 hybrid BIOS/UEFI Archiso build from `packaging/recovery/`; its packaged manifest
 must contain a pinned SHA-256 digest before download is enabled. The guided USB
 writer accepts only an unmounted removable whole disk, rejects the running/root
-disk, requires the exact device path to be typed, flushes the device, and
-verifies the written bytes.
+disk, requires the exact device path to be typed, and repeats inspection after
+confirmation and while the exclusive no-follow descriptor is held. Malformed
+or incomplete `lsblk` JSON is a refusal, and the same positive kernel
+`DISK-SEQ` must be present at all three inspections. The final descriptor's
+major/minor number is revalidated before writing and verification; model,
+serial, path, size, and typed confirmation alone are not trusted as identity.
+AuraScan flushes the device and verifies the written bytes.
+
+Recovery-bearing GitHub releases publish exactly these three generated assets,
+in addition to GitHub's automatic source archives:
+
+```text
+aurascan-recovery-VERSION-x86_64.iso
+aurascan-recovery-VERSION-x86_64.iso.sha256
+aurascan-recovery-VERSION-x86_64.iso.packages.txt
+```
+
+The ISO must be smaller than 2 GiB, and all three files belong to the same
+tested build. Release notes identify package-only releases and the exact older
+image they retain, so the application version alone is never presented as
+proof that a matching recovery image was rebuilt. Locally built UKIs are tied
+to the installed kernel, boot setup, and Secure Boot owner key; they are tested
+as part of a recovery-bearing release but are not published as universal
+release assets.
 
 Package installation never installs a recovery boot entry. The wizard offers
 installation with default Yes only after UEFI, ESP space/mount, supported
@@ -1539,11 +1577,18 @@ Approved package repairs can still change installed software, and diagnostic
 output can contain private data, so each exact command remains a meaningful
 consent boundary.
 
-Recovery AI has a separate consent bit. Neither the locally built UKI nor the
-release ISO contains an API key, user config, saved WLAN profile, hostname,
-home path, or incident evidence. A validated target-user provider config is
-read only after target mount and runtime setup; an optional session key remains
-in memory. Recovery AI receives the same bounded redacted/facts-only evidence
+Recovery AI has a separate consent bit. The local-UKI and release-ISO workflows
+are designed not to copy API keys, user configuration, saved WLAN profiles,
+host identity, home paths, or incident evidence. Release validation performs
+bounded checks for credential assignments with bounded values, known provider-
+token prefixes, known private-state paths, the builder identity, and explicitly
+supplied private markers across regular bytes, normalized path/link metadata,
+PAX fields, and decoded libarchive xattrs. Short markers fail closed. This
+cannot prove the absence of every unknown secret or recursively inspect every
+opaque container.
+A validated target-user provider config is read only after target mount and
+runtime setup; an optional session key remains in memory. Recovery AI receives
+the same bounded redacted/facts-only evidence
 and opaque probe/action IDs as foreground incident AI. A local provider's
 `127.0.0.1` address refers to the recovery environment itself, not the installed
 system. Recovery neither starts nor forwards LM Studio or `llama-server`; if no

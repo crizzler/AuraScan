@@ -9,6 +9,28 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
+The v0.10.3 release refreshes the optional hybrid BIOS/UEFI AuraScan Recovery
+image for the first time since v0.6.0. Recovery artifacts now ship as one
+version-matched ISO, SHA-256 sidecar, and sorted package manifest, with a strict
+sub-2-GiB release gate and a bounded expanded-artifact privacy audit. The
+builder refuses stale output and requires a clean committed candidate, fresh
+work paths, and trusted build tools. AuraScan also validates the packaged
+manifest and reports whether a release is recovery-bearing or explicitly
+retains an older image.
+
+Recovery remains opt-in: the normal package neither changes the ESP nor
+enables a boot entry, and host-specific UKIs are not universal downloads.
+Future releases that change recovery behavior or its security boundary must
+publish a matching tested image; package-only releases must name the retained
+image and disclose that ISO and UKI gates were not rerun.
+
+The v0.10.3 release evidence is deliberately narrower than “all recovery paths
+were live-tested.” Controlled Ethernet/DHCP, interactive offline diagnosis,
+Wi-Fi, booted storage stacks, interrupted-target repair, snapshot/initramfs
+rollback, and live bootloader refusal/reinstall scenarios remain `NOT RUN` and
+are listed as public limitations; deterministic fixtures do not substitute for
+those booted outcomes.
+
 The v0.10.2 release adds an always-on static provenance check for opaque
 binaries and archives observed in the local package directory beside a
 PKGBUILD. Presence alone is a MEDIUM, non-hard-blocking,

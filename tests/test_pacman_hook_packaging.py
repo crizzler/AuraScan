@@ -84,7 +84,9 @@ def test_packaging_readme_documents_hook_limitations_and_recovery():
         "aurascan.install",
         "advisory text only",
         "must not prompt",
-        "path=/usr/bin:/bin aurascan_ai_enabled=0 /usr/bin/updpkgsums",
+        "/usr/bin/env -i path=/usr/bin:/bin home=\"$aurascan_package_build_home\"",
+        "aurascan_recovery_ai_enabled=0",
+        "/usr/bin/updpkgsums",
         "prevents a local `aurascan-makepkg` wrapper",
     ]
     for phrase in required:

@@ -57,6 +57,7 @@ from aurascan.core.recovery_boot import (
     RECOVERY_LIMINE_BEGIN,
     RECOVERY_LIMINE_END,
     RECOVERY_UKI_RELATIVE,
+    _same_usb_device,
     BootOperationResult,
     atomic_write,
     backup_file,
@@ -67,6 +68,7 @@ from aurascan.core.recovery_boot import (
     download_recovery_iso,
     inspect_usb_device,
     install_bootloader_entry,
+    iso_manifest_status,
     load_iso_manifest,
     recovery_image_status,
     sign_recovery_image,
@@ -83,6 +85,12 @@ from aurascan.core.recovery_network import (
     start_network_manager,
 )
 from aurascan.core.recovery_repairs import execute_recovery_plan, export_recovery_report, save_recovery_report
+from aurascan.core.trusted_tools import (
+    TrustedToolError,
+    capture_trusted_system_tool,
+    revalidate_trusted_system_tool,
+    run_bounded_trusted_tool,
+)
 
 
 RECOVERY_PROFILE_PATH = Path("/usr/lib/aurascan/recovery/mkosi.conf")
@@ -102,10 +110,7 @@ def _recovery_subprocess_runner(runner: Callable) -> Callable:
         "HOME": "/root",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
-        "PATH": os.environ.get(
-            "PATH",
-            "/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin",
-        ),
+        "PATH": "/usr/bin:/usr/sbin:/bin:/sbin",
     }
     if os.environ.get("TERM"):
         clean_env["TERM"] = os.environ["TERM"]
@@ -132,7 +137,7 @@ def recovery_version() -> str:
     try:
         return importlib.metadata.version("aurascan")
     except importlib.metadata.PackageNotFoundError:
-        return "0.10.2-dev"
+        return "0.10.3-dev"
 
 
 def rooted(root: Path, path: Path) -> Path:
@@ -323,7 +328,7 @@ def _normalize_mkosi_output(path: Path) -> Tuple[bool, str]:
 
 
 def create_recovery_overlay(destination: Path) -> Path:
-    """Create a credential-free zipapp and systemd overlay for the exact installed code."""
+    """Create the exact-code overlay without loading user or provider configuration."""
     if destination.exists():
         shutil.rmtree(destination)
     app_root = destination / ".zipapp-source"
@@ -350,6 +355,12 @@ def create_recovery_overlay(destination: Path) -> Path:
     service_target.parent.mkdir(parents=True, mode=0o755, exist_ok=True)
     shutil.copy2(service_source, service_target)
     os.chmod(service_target, 0o644)
+    marker_source = source_asset("aurascan-recovery-smoke-marker.service")
+    marker_target = destination / "usr/lib/systemd/system/aurascan-recovery-smoke-marker.service"
+    if not marker_source.is_file():
+        raise OSError("packaged recovery boot-readiness marker is missing")
+    shutil.copy2(marker_source, marker_target)
+    os.chmod(marker_target, 0o644)
     preset = destination / "usr/lib/systemd/system-preset/90-aurascan-recovery.preset"
     preset.parent.mkdir(parents=True, mode=0o755, exist_ok=True)
     preset.write_text("enable aurascan-recovery.service\nenable NetworkManager.service\n", encoding="utf-8")
@@ -358,6 +369,8 @@ def create_recovery_overlay(destination: Path) -> Path:
     wants.mkdir(parents=True, mode=0o755, exist_ok=True)
     service_link = wants / "aurascan-recovery.service"
     service_link.symlink_to("/usr/lib/systemd/system/aurascan-recovery.service")
+    marker_link = wants / "aurascan-recovery-smoke-marker.service"
+    marker_link.symlink_to("/usr/lib/systemd/system/aurascan-recovery-smoke-marker.service")
     getty_mask = destination / "etc/systemd/system/getty@tty1.service"
     getty_mask.parent.mkdir(parents=True, mode=0o755, exist_ok=True)
     getty_mask.symlink_to("/dev/null")
@@ -685,7 +698,7 @@ def recovery_status(
         },
         "profile_installed": profile.is_file(),
         "refresh_hook_installed": rooted(root, RECOVERY_REFRESH_HOOK).is_file() if root != Path("/") else RECOVERY_REFRESH_HOOK.is_file(),
-        "iso_manifest": load_iso_manifest(manifest),
+        "iso_manifest": load_iso_manifest(manifest, expected_application_version=recovery_version()),
         "last_recovery": last_recovery,
         "tools": {name: bool(which(name)) for name in ("mkosi", "ukify", "sbctl", "NetworkManager", "nmcli", "iwd", "cryptsetup", "lvm", "mdadm", "snapper", "btrfs", "arch-chroot")},
     }
@@ -700,6 +713,18 @@ def _print_status(status: Mapping[str, object], stream) -> None:
     bootloader = image.get("bootloader", {}) if isinstance(image, Mapping) else {}
     print(f"Bootloader: {bootloader.get('name', 'Unknown')} | Secure Boot: {image.get('secure_boot', 'unknown')}", file=stream)
     print(f"Build profile: {'ready' if status.get('profile_installed') else 'missing'} | refresh hook: {'installed' if status.get('refresh_hook_installed') else 'missing'}", file=stream)
+    iso = status.get("iso_manifest", {})
+    if isinstance(iso, Mapping):
+        disposition = str(iso.get("release_disposition") or "invalid")
+        application_version = str(iso.get("application_version") or "unknown")
+        iso_version = str(iso.get("version") or "unavailable")
+        iso_state = "ready" if iso.get("ready") else str(iso.get("status") or "unavailable")
+        print(
+            f"Release recovery: {disposition} | application: {application_version} | ISO: {iso_version} ({iso_state})",
+            file=stream,
+        )
+        if iso.get("message"):
+            print("Recovery ISO: " + str(iso.get("message")), file=stream)
     if policy.get("last_refresh_error"):
         print("Last refresh warning: " + str(policy.get("last_refresh_error")), file=stream)
 
@@ -1190,7 +1215,11 @@ def run_recovery(
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
     args = build_recovery_parser().parse_args(argv)
+    caller_runner = runner
     runner = _recovery_subprocess_runner(runner)
+    trusted_probe_runner = _recovery_subprocess_runner(
+        run_bounded_trusted_tool if caller_runner is subprocess.run else caller_runner
+    )
     root = args.root.resolve() if args.root else Path("/")
     if args.install or args.refresh or args.refresh_from_hook:
         if args.refresh_from_hook:
@@ -1235,17 +1264,20 @@ def run_recovery(
         print(json.dumps(result.to_dict(), indent=2) if args.json_output else result.message, file=stdout if result.ok else stderr)
         return 0 if result.ok else EXIT_RECOVERY_FAILED
     if args.download_iso:
-        manifest = load_iso_manifest(resolve_iso_manifest())
+        manifest = iso_manifest_status(
+            load_iso_manifest(resolve_iso_manifest()),
+            expected_application_version=recovery_version(),
+        )
         version = str(manifest.get("version") or recovery_version())
         destination = args.iso or (Path.home() / "Downloads" / f"AuraScan-Recovery-{version}.iso")
-        url = str(manifest.get("url") or "")
-        digest = str(manifest.get("sha256") or "").lower()
         if args.dry_run:
-            ready = url.startswith("https://github.com/crizzler/AuraScan/releases/download/") and bool(re.fullmatch(r"[0-9a-f]{64}", digest))
+            ready = bool(manifest.get("ready"))
             result = BootOperationResult(
                 ready,
                 "dry_run" if ready else "unavailable",
-                f"Would download and SHA-256 verify AuraScan Recovery {version} at {destination}." if ready else "The packaged recovery ISO manifest is not finalized for this release.",
+                f"Would download and SHA-256 verify AuraScan Recovery {version} at {destination}."
+                if ready
+                else str(manifest.get("message") or "The packaged recovery ISO manifest is unavailable."),
                 [str(destination)] if ready else [],
             )
         else:
@@ -1253,7 +1285,10 @@ def run_recovery(
         print(json.dumps(result.to_dict(), indent=2) if args.json_output else result.message, file=stdout if result.ok else stderr)
         return 0 if result.ok else EXIT_RECOVERY_FAILED
     if args.write_usb:
-        manifest = load_iso_manifest(resolve_iso_manifest())
+        manifest = iso_manifest_status(
+            load_iso_manifest(resolve_iso_manifest()),
+            expected_application_version=recovery_version(),
+        )
         version = str(manifest.get("version") or recovery_version())
         iso_path = args.iso or (Path.home() / "Downloads" / f"AuraScan-Recovery-{version}.iso")
         if not iso_path.is_file():
@@ -1263,11 +1298,36 @@ def run_recovery(
         if not iso_valid:
             print(iso_message, file=stderr)
             return EXIT_RECOVERY_UNAVAILABLE
+        try:
+            findmnt_tool = capture_trusted_system_tool("findmnt", which=which)
+            lsblk_tool = capture_trusted_system_tool("lsblk", which=which)
+            if findmnt_tool is None or lsblk_tool is None:
+                raise TrustedToolError("required USB inspection tool was unavailable")
+            revalidate_trusted_system_tool(findmnt_tool)
+            findmnt = trusted_probe_runner(
+                [findmnt_tool.path, "-no", "SOURCE", "/"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError, TrustedToolError):
+            print("USB inspection could not use trusted bounded system tools; the write was refused.", file=stderr)
+            return EXIT_RECOVERY_UNAVAILABLE
         root_source = ""
-        findmnt = runner(["findmnt", "-no", "SOURCE", "/"], capture_output=True, text=True, timeout=10, check=False)
         if findmnt.returncode == 0:
-            root_source = findmnt.stdout.strip()
-        device = inspect_usb_device(args.write_usb, runner=runner, root_source=root_source)
+            lines = findmnt.stdout.splitlines()
+            if len(lines) == 1 and len(lines[0]) <= 4096:
+                root_source = lines[0].strip()
+        if not root_source.startswith("/dev/"):
+            print("The running root block device could not be identified; the USB write was refused.", file=stderr)
+            return EXIT_RECOVERY_UNAVAILABLE
+        device = inspect_usb_device(
+            args.write_usb,
+            runner=trusted_probe_runner,
+            root_source=root_source,
+            trusted_lsblk=lsblk_tool,
+        )
         if not device.eligible:
             print(device.refusal, file=stderr)
             return EXIT_RECOVERY_UNAVAILABLE
@@ -1291,19 +1351,25 @@ def run_recovery(
             return EXIT_RECOVERY_DECLINED
         print(f"USB target: {device.path} | {device.model or 'unknown model'} | serial {device.serial or 'unknown'} | {device.size // (1024 ** 3)} GiB", file=stdout)
         confirmation = input_func(f"Type the exact device path {device.path} to erase and write it: ")
-        fresh_device = inspect_usb_device(args.write_usb, runner=runner, root_source=root_source)
-        if (
-            not fresh_device.eligible
-            or fresh_device.serial != device.serial
-            or fresh_device.model != device.model
-            or fresh_device.size != device.size
-        ):
+        fresh_device = inspect_usb_device(
+            args.write_usb,
+            runner=trusted_probe_runner,
+            root_source=root_source,
+            trusted_lsblk=lsblk_tool,
+        )
+        if not _same_usb_device(device, fresh_device):
             print("USB device identity or eligibility changed after confirmation; the write was refused.", file=stderr)
             return EXIT_RECOVERY_UNAVAILABLE
         result = write_iso_to_usb(
             iso_path,
             fresh_device,
             confirmation=confirmation,
+            reinspect_device=lambda: inspect_usb_device(
+                args.write_usb,
+                runner=trusted_probe_runner,
+                root_source=root_source,
+                trusted_lsblk=lsblk_tool,
+            ),
             expected_sha256=expected_digest,
             progress=lambda done, total: print(f"\rWriting and verifying: {done * 100 // max(1, total)}%", end="", file=stdout, flush=True),
         )

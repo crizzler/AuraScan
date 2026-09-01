@@ -4,6 +4,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -188,10 +189,15 @@ def test_recovery_runtime_loads_separate_ai_consent_from_mounted_target(tmp_path
 def test_internal_overlay_explicitly_enables_recovery_service(tmp_path):
     overlay = create_recovery_overlay(tmp_path / "overlay")
     link = overlay / "etc/systemd/system/multi-user.target.wants/aurascan-recovery.service"
+    marker_link = overlay / "etc/systemd/system/multi-user.target.wants/aurascan-recovery-smoke-marker.service"
+    marker_unit = overlay / "usr/lib/systemd/system/aurascan-recovery-smoke-marker.service"
     getty_mask = overlay / "etc/systemd/system/getty@tty1.service"
 
     assert link.is_symlink()
     assert os.readlink(link) == "/usr/lib/systemd/system/aurascan-recovery.service"
+    assert marker_link.is_symlink()
+    assert os.readlink(marker_link) == "/usr/lib/systemd/system/aurascan-recovery-smoke-marker.service"
+    assert "AURASCAN_RECOVERY_READY" in marker_unit.read_text(encoding="utf-8")
     assert getty_mask.is_symlink()
     assert os.readlink(getty_mask) == "/dev/null"
     assert not (overlay / "etc/hostname").exists()
@@ -729,11 +735,19 @@ def test_internal_install_dry_run_requires_no_esp_write(tmp_path):
 
 def test_recovery_iso_download_dry_run_never_opens_network(tmp_path, monkeypatch):
     manifest = {
-        "version": "0.6.0",
-        "url": "https://github.com/crizzler/AuraScan/releases/download/v0.6.0/AuraScan-Recovery-0.6.0.iso",
+        "schema": "aurascan_recovery_iso/2.0",
+        "application_version": "0.10.3",
+        "release_disposition": "recovery-bearing",
+        "version": "0.10.3",
+        "architecture": "x86_64",
+        "filename": "aurascan-recovery-0.10.3-x86_64.iso",
+        "released_at": "2026-09-01",
+        "url": "https://github.com/crizzler/AuraScan/releases/download/v0.10.3/aurascan-recovery-0.10.3-x86_64.iso",
         "sha256": "a" * 64,
+        "status": "release-ready",
     }
     monkeypatch.setattr("aurascan.core.recovery_cli.load_iso_manifest", lambda _path: manifest)
+    monkeypatch.setattr("aurascan.core.recovery_cli.recovery_version", lambda: "0.10.3")
     stdout = io.StringIO()
 
     status = run_recovery(
@@ -752,7 +766,22 @@ def test_recovery_usb_dry_run_is_read_only_and_noninteractive(tmp_path, monkeypa
     iso = tmp_path / "recovery.iso"
     iso.write_bytes(b"fixture")
     device = UsbDeviceInfo("/dev/sdz", "disk", True, 8 * 1024 ** 3, "Fixture USB", "SERIAL", eligible=True)
-    monkeypatch.setattr("aurascan.core.recovery_cli.load_iso_manifest", lambda _path: {"version": "0.6.0", "sha256": "a" * 64})
+    monkeypatch.setattr(
+        "aurascan.core.recovery_cli.load_iso_manifest",
+        lambda _path: {
+            "schema": "aurascan_recovery_iso/2.0",
+            "application_version": "0.10.3",
+            "release_disposition": "recovery-bearing",
+            "version": "0.10.3",
+            "architecture": "x86_64",
+            "filename": "aurascan-recovery-0.10.3-x86_64.iso",
+            "released_at": "2026-09-01",
+            "url": "https://github.com/crizzler/AuraScan/releases/download/v0.10.3/aurascan-recovery-0.10.3-x86_64.iso",
+            "sha256": "a" * 64,
+            "status": "release-ready",
+        },
+    )
+    monkeypatch.setattr("aurascan.core.recovery_cli.recovery_version", lambda: "0.10.3")
     monkeypatch.setattr("aurascan.core.recovery_cli.verify_recovery_iso", lambda *_args, **_kwargs: (True, "verified", "a" * 64))
     monkeypatch.setattr("aurascan.core.recovery_cli.inspect_usb_device", lambda *_args, **_kwargs: device)
     monkeypatch.setattr("aurascan.core.recovery_cli.write_iso_to_usb", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("dry-run wrote USB")))
@@ -769,6 +798,93 @@ def test_recovery_usb_dry_run_is_read_only_and_noninteractive(tmp_path, monkeypa
     assert status == 0
     assert data["status"] == "dry_run"
     assert data["details"]["device"]["path"] == "/dev/sdz"
+
+
+def test_recovery_usb_cli_refuses_same_path_when_disk_sequence_changes(
+    tmp_path, monkeypatch
+):
+    iso = tmp_path / "recovery.iso"
+    iso.write_bytes(b"fixture")
+    manifest = {
+        "schema": "aurascan_recovery_iso/2.0",
+        "application_version": "0.10.3",
+        "release_disposition": "recovery-bearing",
+        "version": "0.10.3",
+        "architecture": "x86_64",
+        "filename": "aurascan-recovery-0.10.3-x86_64.iso",
+        "released_at": "2026-09-01",
+        "url": "https://github.com/crizzler/AuraScan/releases/download/v0.10.3/aurascan-recovery-0.10.3-x86_64.iso",
+        "sha256": "a" * 64,
+        "status": "release-ready",
+    }
+    first = UsbDeviceInfo(
+        path="/dev/sdz",
+        kind="disk",
+        removable=True,
+        size=8 * 1024**3,
+        model="Fixture USB",
+        serial="SERIAL",
+        device_major=8,
+        device_minor=240,
+        disk_sequence=41,
+        eligible=True,
+    )
+    replacement = UsbDeviceInfo(
+        path=first.path,
+        kind=first.kind,
+        removable=first.removable,
+        size=first.size,
+        model=first.model,
+        serial=first.serial,
+        device_major=first.device_major,
+        device_minor=first.device_minor,
+        disk_sequence=42,
+        eligible=True,
+    )
+    inspections = iter((first, replacement))
+    monkeypatch.setattr(
+        "aurascan.core.recovery_cli.load_iso_manifest", lambda _path: manifest
+    )
+    monkeypatch.setattr(
+        "aurascan.core.recovery_cli.recovery_version", lambda: "0.10.3"
+    )
+    monkeypatch.setattr(
+        "aurascan.core.recovery_cli.verify_recovery_iso",
+        lambda *_args, **_kwargs: (True, "verified", "a" * 64),
+    )
+    monkeypatch.setattr(
+        "aurascan.core.recovery_cli.capture_trusted_system_tool",
+        lambda name, **_kwargs: SimpleNamespace(path="/usr/bin/{}".format(name)),
+    )
+    monkeypatch.setattr(
+        "aurascan.core.recovery_cli.revalidate_trusted_system_tool",
+        lambda _tool: None,
+    )
+    monkeypatch.setattr(
+        "aurascan.core.recovery_cli.inspect_usb_device",
+        lambda *_args, **_kwargs: next(inspections),
+    )
+    monkeypatch.setattr(
+        "aurascan.core.recovery_cli.write_iso_to_usb",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("changed USB identity reached the write boundary")
+        ),
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    status = run_recovery(
+        ["--write-usb", "/dev/sdz", "--iso", str(iso)],
+        stdout=stdout,
+        stderr=stderr,
+        input_func=lambda _prompt: "/dev/sdz",
+        runner=lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 0, "/dev/nvme0n1p2\n", ""
+        ),
+    )
+
+    assert status == 50
+    assert "identity or eligibility changed" in stderr.getvalue()
 
 
 def test_luks_target_is_opened_read_only_and_closed_after_mount_failure(tmp_path, monkeypatch):

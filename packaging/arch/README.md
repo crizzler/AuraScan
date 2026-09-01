@@ -8,26 +8,46 @@ Before publishing to the AUR, verify the checksum against the public GitHub
 release/tag source archive, then regenerate `.SRCINFO` from the final PKGBUILD:
 
 ```bash
-env PATH=/usr/bin:/bin AURASCAN_AI_ENABLED=0 AURASCAN_INSTRUCTION_AI_ENABLED=0 /usr/bin/updpkgsums
-env PATH=/usr/bin:/bin AURASCAN_AI_ENABLED=0 AURASCAN_INSTRUCTION_AI_ENABLED=0 /usr/bin/makepkg --printsrcinfo > .SRCINFO
-env PATH=/usr/bin:/bin AURASCAN_AI_ENABLED=0 AURASCAN_INSTRUCTION_AI_ENABLED=0 /usr/bin/makepkg -Ccsr
+AURASCAN_PACKAGE_BUILD_HOME=/private/empty/aurascan-package-build-home
+test -d "$AURASCAN_PACKAGE_BUILD_HOME" && \
+  test -z "$(/usr/bin/find "$AURASCAN_PACKAGE_BUILD_HOME" -mindepth 1 -print -quit)"
+/usr/bin/env -i PATH=/usr/bin:/bin HOME="$AURASCAN_PACKAGE_BUILD_HOME" \
+  USER=aurascan-release LOGNAME=aurascan-release LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+  TZ=UTC AURASCAN_AI_ENABLED=0 AURASCAN_INSTRUCTION_AI_ENABLED=0 \
+  AURASCAN_INCIDENT_AI_ENABLED=0 AURASCAN_RECOVERY_AI_ENABLED=0 \
+  /usr/bin/updpkgsums
+/usr/bin/env -i PATH=/usr/bin:/bin HOME="$AURASCAN_PACKAGE_BUILD_HOME" \
+  USER=aurascan-release LOGNAME=aurascan-release LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+  TZ=UTC AURASCAN_AI_ENABLED=0 AURASCAN_INSTRUCTION_AI_ENABLED=0 \
+  AURASCAN_INCIDENT_AI_ENABLED=0 AURASCAN_RECOVERY_AI_ENABLED=0 \
+  /usr/bin/makepkg --config /etc/makepkg.conf --printsrcinfo > .SRCINFO
+/usr/bin/env -i PATH=/usr/bin:/bin HOME="$AURASCAN_PACKAGE_BUILD_HOME" \
+  USER=aurascan-release LOGNAME=aurascan-release LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+  TZ=UTC AURASCAN_AI_ENABLED=0 AURASCAN_INSTRUCTION_AI_ENABLED=0 \
+  AURASCAN_INCIDENT_AI_ENABLED=0 AURASCAN_RECOVERY_AI_ENABLED=0 \
+  /usr/bin/makepkg --config /etc/makepkg.conf -Ccsr
 ```
 
-Use this sanitized PATH even for `updpkgsums`, because it invokes `makepkg`
-internally. This prevents a local `aurascan-makepkg` wrapper from performing a
-scan or writing diagnostic output into `PKGBUILD` or `.SRCINFO` during release
-metadata generation.
-The established `PATH=/usr/bin:/bin AURASCAN_AI_ENABLED=0 /usr/bin/updpkgsums`
-boundary is retained above with the separate Instruction Guard AI setting also
-forced to zero.
+Create the private build home as a fresh mode-`0700` directory and remove it
+afterward; do not reuse a normal user home. The empty environment matters even
+for `updpkgsums`, because it invokes `makepkg` internally. It excludes exported
+shell functions, loader/Python variables, proxies, destination/config
+overrides, provider credentials, and a user `makepkg.conf`, while the fixed
+PATH prevents a local `aurascan-makepkg` wrapper from contaminating metadata.
+General, Instruction Guard, Incident, and Recovery AI are all forced to zero.
 
 The public AUR package is a separate Git repository and uses SSH-key
 authentication rather than the GitHub remote:
 
 ```bash
-git clone ssh://aur@aur.archlinux.org/aurascan.git
-git push origin master
+/usr/bin/git clone ssh://aur@aur.archlinux.org/aurascan.git
+/usr/bin/git push origin master
 ```
+
+These are illustrative transport commands, not an identity shortcut. Before
+using them, validate the absolute Git/SSH tools, expected AUR host key and SSH
+account, remote URL, branch, and remote head as required by the release
+checklist. Never force-push.
 
 Publish only after the matching GitHub tag is public and this recipe contains
 its fixed archive checksum. Preserve the AUR repository's maintainer/SPDX
@@ -44,6 +64,15 @@ https://github.com/crizzler/AuraScan/archive/refs/tags/v${pkgver}.tar.gz
 
 The package version must match `pyproject.toml`, and `.SRCINFO` must be
 regenerated from the final PKGBUILD before publishing.
+
+The AUR package contains the strict recovery manifest and optional host-side
+recovery integration; it does not contain the large release ISO or a universal
+UKI. Package install/upgrade never downloads or builds an image, writes the
+ESP, or enables a recovery entry. User-facing recovery capabilities are split
+across the `mkosi`, `systemd-ukify`, `sbctl`, networking, storage, and
+filesystem `optdepends` in `PKGBUILD`. Archiso, QEMU, OVMF, `sbsigntools`, and
+`virt-firmware` are maintainer validation dependencies, not requirements for a
+normal AuraScan install.
 
 The release pacman hook is `packaging/arch/aurascan.hook`. It is intended to be
 installed by an Arch package to:

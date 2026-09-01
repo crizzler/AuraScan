@@ -353,6 +353,7 @@ def test_init_can_explicitly_install_recovery_with_separate_consent(tmp_path):
 def test_doctor_reports_optional_recovery_state(tmp_path, monkeypatch):
     manifest = Path(__file__).resolve().parents[1] / "aurascan/assets/aurascan-recovery-iso.json"
     monkeypatch.setattr(recovery_cli, "resolve_iso_manifest", lambda: manifest)
+    monkeypatch.setattr(recovery_cli, "recovery_version", lambda: "0.10.3")
     checks = build_doctor_checks(
         env_path=tmp_path / "missing.env",
         env={},
@@ -370,8 +371,83 @@ def test_doctor_reports_optional_recovery_state(tmp_path, monkeypatch):
     assert by_name["recovery_esp"].status == "warn"
     assert by_name["recovery_build_tools"].status == "warn"
     assert by_name["recovery_ai"].status == "warn"
-    assert by_name["recovery_iso"].status == "ok"
+    assert by_name["recovery_iso"].status in {"ok", "warn"}
+    assert by_name["recovery_iso"].details["manifest_valid"] is True
+    assert by_name["recovery_iso"].details["release_disposition"] == "recovery-bearing"
     assert by_name["recovery_last_result"].status == "ok"
+
+
+@pytest.mark.parametrize(
+    ("iso_manifest", "expected_status", "message_fragment"),
+    [
+        (
+            {
+                "schema": "aurascan_recovery_iso/2.0",
+                "application_version": "0.10.3",
+                "release_disposition": "recovery-bearing",
+                "version": "0.10.3",
+                "architecture": "x86_64",
+                "filename": "aurascan-recovery-0.10.3-x86_64.iso",
+                "released_at": "2026-09-01",
+                "url": "",
+                "sha256": "",
+                "status": "build-required",
+                "valid": True,
+                "ready": False,
+                "age_days": 0,
+                "stale": False,
+                "message": "Recovery-bearing release 0.10.3 requires its ISO to be built, validated, and pinned before publication.",
+            },
+            "warn",
+            "built, validated, and pinned",
+        ),
+        (
+            {
+                "valid": False,
+                "ready": False,
+                "message": "Recovery ISO manifest fields do not match schema 2.0.",
+            },
+            "error",
+            "fields do not match schema 2.0",
+        ),
+    ],
+)
+def test_doctor_explains_unready_or_invalid_recovery_manifest(
+    tmp_path,
+    monkeypatch,
+    iso_manifest,
+    expected_status,
+    message_fragment,
+):
+    monkeypatch.setattr(
+        setup_wizard,
+        "recovery_status",
+        lambda **_kwargs: {
+            "policy": {"enabled": False},
+            "image": {"installed": False, "valid_pe": False, "bootloader": {}},
+            "installation": {"esp_space_ready": True},
+            "tools": {},
+            "profile_installed": True,
+            "refresh_hook_installed": True,
+            "iso_manifest": iso_manifest,
+            "last_recovery": {},
+        },
+    )
+
+    checks = build_doctor_checks(
+        env_path=tmp_path / "missing.env",
+        env={},
+        executable_path=tmp_path / "aurascan",
+        local_hook_path=tmp_path / "local.hook",
+        packaged_hook_path=tmp_path / "packaged.hook",
+        recovery_root=tmp_path / "target",
+        which=lambda _name: None,
+        runner=lambda command, **_kwargs: subprocess.CompletedProcess(command, 1, "", ""),
+    )
+    check = next(item for item in checks if item.name == "recovery_iso")
+
+    assert check.status == expected_status
+    assert message_fragment in check.message
 
 
 def test_doctor_treats_root_only_recovery_status_as_expected(tmp_path, monkeypatch):
@@ -1065,7 +1141,13 @@ def test_doctor_reports_agent_access_root_policy_and_private_audit(tmp_path):
     assert by_name["repair_agent_sessions"].status == "ok"
 
 
-def test_doctor_check_ai_uses_mocked_provider(tmp_path):
+def test_doctor_check_ai_uses_mocked_provider(tmp_path, monkeypatch):
+    monkeypatch.setattr(recovery_cli, "recovery_version", lambda: "0.10.3")
+    monkeypatch.setattr(
+        recovery_cli,
+        "resolve_iso_manifest",
+        lambda: Path(__file__).resolve().parents[1] / "aurascan/assets/aurascan-recovery-iso.json",
+    )
     env_path = tmp_path / ".config" / "aurascan" / ".env"
     env_path.parent.mkdir(parents=True)
     env_path.write_text(
@@ -1128,7 +1210,13 @@ def test_doctor_ai_connectivity_never_exposes_raw_provider_exception(monkeypatch
         ("llamacpp", "http://127.0.0.1:8080/v1/chat/completions"),
     ],
 )
-def test_doctor_check_ai_uses_mocked_keyless_local_provider(tmp_path, provider, endpoint):
+def test_doctor_check_ai_uses_mocked_keyless_local_provider(tmp_path, provider, endpoint, monkeypatch):
+    monkeypatch.setattr(recovery_cli, "recovery_version", lambda: "0.10.3")
+    monkeypatch.setattr(
+        recovery_cli,
+        "resolve_iso_manifest",
+        lambda: Path(__file__).resolve().parents[1] / "aurascan/assets/aurascan-recovery-iso.json",
+    )
     env_path = tmp_path / ".env"
     env_path.write_text(
         "AURASCAN_AI_ENABLED=1\n"

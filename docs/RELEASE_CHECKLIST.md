@@ -3,6 +3,36 @@
 Use this checklist before a first serious release checkpoint or any release
 candidate.
 
+## Release Disposition
+
+- The versioned release note declares exactly one disposition:
+  `recovery-bearing` or `package-only`.
+- A release is recovery-bearing when it changes the recovery runtime or
+  recipes, recovery image dependencies/build tooling, boot integration, or a
+  security boundary used by recovery, including shared provider validation and
+  guarded AI response handling. A periodic refresh may also be designated
+  recovery-bearing.
+- A package-only release names the exact retained recovery image version/tag
+  and SHA-256 and says that ISO and local-UKI gates were not rerun. It must not
+  imply that an application-version-matched image exists.
+- Its packaged manifest advances `application_version`, declares
+  `package-only`, and retains the re-verified prior ISO version, filename,
+  public URL, SHA-256, and `release-ready` state. It uploads no newly relabeled
+  recovery files.
+- The packaged recovery manifest uses the exact
+  `aurascan_recovery_iso/2.0` field set. Legacy `1.0`, unknown, missing,
+  duplicate, or derived display fields on disk fail closed. Runtime age uses
+  UTC, accepts at most one day of clock skew, and rejects a materially future
+  image date.
+- A package-only release is refused when the retained image would be more than
+  90 days old on release day. `released_at` remains the date of the exact ISO
+  bytes and is never advanced to hide staleness.
+- Recovery remains optional for users under either disposition. Package
+  installation does not build an image, write the ESP, or enable a boot entry.
+- A release cannot change disposition merely to bypass a failed required gate.
+  Any unrun or failed gate is reported exactly and blocks publication when it
+  is required by the declared disposition.
+
 ## Validation
 
 - `python -m compileall aurascan tests tools` passes.
@@ -52,17 +82,33 @@ candidate.
 - Tests do not execute package code.
 - Tests do not require root.
 - Secret scan has been reviewed before publishing.
-- Internal recovery UKIs boot under QEMU/OVMF with Limine, systemd-boot, and
-  GRUB fixtures; the release ISO boots with both OVMF and SeaBIOS.
-- `packaging/recovery/qemu-smoke.sh` boots the finalized hybrid ISO in SeaBIOS
-  and ordinary OVMF UEFI modes after verifying its release checksum.
-- `packaging/recovery/qemu-uki-smoke.sh` boots the finalized local UKI under
-  OVMF in ordinary and enrolled-key Secure Boot modes.
-- Secure Boot recovery is tested with disposable OVMF owner keys, and unsigned
-  internal installation is refused when signing cannot be proven.
-- Recovery smoke tests cover Ethernet, saved and manual Wi-Fi, offline fallback,
-  provider failure, LUKS+Btrfs, ext4/LVM, interrupted pacman, broken initramfs,
-  snapshot confirmation, atomic refresh rollback, and removal.
+- For a recovery-bearing release, deterministic Limine, systemd-boot, and GRUB
+  adapter fixtures pass. Separately, the exact local UKI boots directly under
+  QEMU/OVMF, and the finalized release ISO boots with both OVMF and SeaBIOS.
+- For a recovery-bearing release, the root-owned attested smoke launcher
+  starts through the attested minimal bootstrap, which verifies itself, the
+  root supervisor, `packaging/recovery/qemu-smoke.sh`, both guards, the built
+  marker, and finalized ISO set before candidate Bash. It boots that exact
+  hybrid ISO in SeaBIOS and ordinary OVMF UEFI modes, dropping QEMU to an
+  unmapped UID in a fresh network namespace; never invoke the harness directly
+  from a user-writable checkout.
+- For a recovery-bearing release, that launcher verifies and invokes
+  `packaging/recovery/qemu-uki-smoke.sh`, which boots
+  the finalized local UKI under OVMF in ordinary and enrolled-key Secure Boot
+  modes. Secure inputs must match the private preparation receipt, and the
+  signature-stripped control must match the base validation-UKI digest. The
+  unsigned counterpart is rejected where required.
+- For a recovery-bearing release, Secure Boot recovery is tested with
+  disposable OVMF owner keys, and unsigned internal installation is refused
+  when signing cannot be proven.
+- For a recovery-bearing release, deterministic recovery fixtures cover
+  Ethernet/Wi-Fi policy, offline/provider fallback, LUKS+Btrfs, ext4/LVM,
+  interrupted pacman, broken initramfs, snapshot confirmation, atomic refresh
+  rollback, and removal. A booted platform scenario is additionally required
+  when its subsystem changed or the release claims that live outcome;
+  otherwise it remains explicitly `NOT RUN` in the public limitations.
+- For a package-only release, the release record marks all preceding ISO/UKI
+  gates as not rerun and records the retained image identity instead.
 - No generated local artifacts are staged or committed.
 - No virtualenv, cache directory, local DB, generated report, keyring, or
   temporary signature/private-key material is committed.
@@ -329,14 +375,24 @@ candidate.
   query or package transaction harmless.
 - Recovery image installation is explicit, staged, fully validated, and atomic;
   package installation never modifies an ESP or bootloader.
-- The complete UKI and ISO are scanned to ensure no API key, Wi-Fi profile,
-  username, home path, hostname, or incident evidence is embedded.
+- The complete UKI and ISO receive bounded byte scans for credential
+  assignments with bounded values, known provider-token prefixes, explicitly
+  supplied private markers, known user/build paths, and the documented private-
+  state locations. Normalized entry/link metadata, owner/group names, PAX
+  fields, and decoded libarchive xattrs are bounded and scanned; short explicit
+  or host-identity markers fail closed. These gates do not load arbitrary secret
+  stores or prove that unknown material is absent from opaque nested content.
 - Recovery AI uses only separately consented bounded evidence and opaque probe
   or action IDs; session keys are never persisted.
 - Snapshot restore and bootloader reinstall retain exact typed confirmations
   that `--yes` cannot bypass.
 - USB writing rejects non-removable, mounted, partition, and running/root disks,
-  then verifies the written image hash.
+  requires bounded revalidated absolute `findmnt`/`lsblk`, repeats eligibility
+  after confirmation and while the exclusive descriptor is held, rejects
+  malformed or incomplete `lsblk` JSON, requires the same positive `DISK-SEQ`
+  at all three inspections, binds the inspected kernel major/minor number to
+  the no-follow final block-device descriptor before writing and verification,
+  and verifies the written image hash.
 - Filesystem repair, partition changes, Secure Boot key enrollment, firmware,
   authentication policy, user-data deletion, arbitrary AI commands, and
   automatic reboot remain prohibited in recovery.
@@ -390,11 +446,43 @@ candidate.
   CLI/tray review state.
 - User AI and Safe Autopilot units are packaged without enabling either, and
   package scripts never write the system repair policy.
-- Recovery mkosi, systemd, bootloader, tmpfiles, refresh hook, ISO manifest, and
-  Archiso profile assets are installed without enabling a boot entry.
-- The hybrid ISO is built from a clean committed release candidate with an
-  empty self-download digest; the tested ISO digest is then pinned in the final
-  host/AUR package before tagging, avoiding a self-referential image hash.
+- The Arch package installs the recovery mkosi profile, systemd unit,
+  bootloader integration, tmpfiles configuration, refresh hook, ISO manifest,
+  and selected rootfs assets without enabling a boot entry. The Archiso profile
+  and release harness remain source-release tooling; they are not installed as
+  host package files.
+- A recovery-bearing hybrid ISO is built inside a freshly provisioned,
+  disposable, externally CPU/RAM/disk-bounded Arch VM or host with no host disk
+  or home share, from a clean committed release candidate with an empty self-
+  download digest and all AI modes disabled. Work and output directories are
+  fresh and empty; fixed trusted tool paths and a minimal environment prevent
+  stale or PATH-selected build inputs.
+- The recovery-bearing candidate consists of exactly
+  `aurascan-recovery-VERSION-x86_64.iso`, its `.iso.sha256` sidecar, and its
+  sorted `.iso.packages.txt` manifest. The three artifacts come from one build,
+  and the ISO is strictly smaller than 2 GiB (2,147,483,648 bytes).
+- The staged overlay, package build/repository containers, assembled ISO tree,
+  raw ISO, and expanded root filesystem stream pass the documented bounded
+  secret/host-identity/user-data audit. Initramfs and EFI files inside that
+  stream are scanned as opaque bounded bytes; the release record must not claim
+  recursive native inspection of every nested container. The separately built
+  UKI, wheel/source inputs, and Arch package receive their applicable checks
+  without describing those checks as proof that arbitrary nested bytes are
+  harmless.
+- The tested ISO digest is pinned in the packaged recovery manifest in the
+  final pre-tag source candidate, avoiding a self-referential image hash. The
+  annotated tag is immutable and points at the commit containing that pinned
+  manifest; the Arch/AUR source checksum is finalized after the public tag.
+- Local UKIs are boot-test artifacts tied to the builder's kernel, boot setup,
+  and disposable or enrolled keys; they are built from the exact candidate
+  code/package rather than an older installed AuraScan and are not published
+  as universal assets.
+- A recovery-bearing final candidate is rejected while its ISO manifest is
+  `build-required` or any release note/artifact field remains pending.
+- The release record names the exact build-required RC commit. After pinning,
+  the ISO is not rebuilt; the pre-tag delta is limited to the ISO manifest and
+  bounded release metadata, source/package tests are rerun, and the pinned
+  digest still matches the retained RC artifact.
 - Package data or package files include the hook template only when intended.
 - Root-level development hooks are not accidentally packaged.
 
@@ -445,6 +533,19 @@ candidate.
 
 - GitHub release is published for the tag.
 - Release is marked as the latest release when appropriate.
+- The pushed branch candidate's Python 3.8/3.14 GitHub Actions matrix is green
+  before tagging. The exact annotated tag's Python 3.8/3.14 matrix is green
+  before the draft release is published; skipped, cancelled, stale, or
+  unrelated runs do not satisfy either gate.
+- A recovery-bearing release has exactly the ISO, SHA-256 sidecar, and sorted
+  package manifest as its generated public recovery assets. Remote asset names,
+  sizes, and digests are verified on a draft release before publication.
+- A package-only GitHub release names its retained recovery image and states
+  that no ISO/UKI validation was rerun for that version.
+- The public annotated tag is never moved or rewritten. The exact public tag
+  archive is hashed only after publication; the resulting fixed Arch checksum
+  and regenerated `.SRCINFO` are committed to `main` afterward without moving
+  the tag, then copied to the separate AUR repository.
 - Repository topics include Arch-family/AUR/pacman/security discovery terms,
   including Arch Linux, EndeavourOS, Manjaro, and CachyOS where appropriate.
 - AUR packaging source URL points at the public GitHub repo before publication.

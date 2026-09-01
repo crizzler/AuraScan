@@ -4,9 +4,11 @@ import os
 import subprocess
 from pathlib import Path
 
+from aurascan.core import recovery_boot
 from aurascan.core.recovery_boot import (
     RECOVERY_LIMINE_BEGIN,
     RECOVERY_LIMINE_END,
+    UsbDeviceInfo,
     build_uki_command,
     BootloaderInfo,
     bootloader_reinstall_commands,
@@ -21,6 +23,7 @@ from aurascan.core.recovery_boot import (
     sign_recovery_image,
     validate_recovery_image,
     verify_recovery_iso,
+    write_iso_to_usb,
 )
 
 
@@ -95,6 +98,7 @@ def test_uki_command_uses_supported_mkosi_initrd_profile_without_host_config_imp
     kernel_command_line = next(item for item in command if item.startswith("--kernel-command-line="))
     assert "rd.systemd.wants=aurascan-recovery.service" in kernel_command_line
     assert "systemd.wants=aurascan-recovery.service" in kernel_command_line
+    assert "console=tty0 console=ttyS0,115200n8" in kernel_command_line
 
 
 def test_image_validation_scans_entire_file_for_credentials(tmp_path):
@@ -162,12 +166,15 @@ def test_image_validation_requires_recovery_service_boot_request(tmp_path):
 def test_usb_inspection_accepts_only_removable_unmounted_whole_disk():
     payload = {
         "blockdevices": [
-            {"path": "/dev/sda", "type": "disk", "rm": 0, "size": 100000000000, "model": "Root", "serial": "A", "mountpoints": [None], "pkname": None, "children": [{"path": "/dev/sda2", "type": "part", "rm": 0, "size": 90000000000, "model": None, "serial": None, "mountpoints": ["/"], "pkname": "sda"}]},
-            {"path": "/dev/sdb", "type": "disk", "rm": 1, "size": 16000000000, "model": "USB", "serial": "B", "mountpoints": [None], "pkname": None},
+            {"name": "sda", "path": "/dev/sda", "type": "disk", "rm": 0, "size": 100000000000, "model": "Root", "serial": "A", "disk-seq": 1, "maj:min": "8:0", "mountpoints": [None], "pkname": None, "children": [{"name": "sda2", "path": "/dev/sda2", "type": "part", "rm": 0, "size": 90000000000, "model": None, "serial": None, "disk-seq": 1, "maj:min": "8:2", "mountpoints": ["/"], "pkname": "sda"}]},
+            {"name": "sdb", "path": "/dev/sdb", "type": "disk", "rm": 1, "size": 16000000000, "model": "USB", "serial": "B", "disk-seq": 2, "maj:min": "8:16", "mountpoints": [None], "pkname": None},
         ]
     }
 
+    commands = []
+
     def runner(command, **_kwargs):
+        commands.append(command)
         return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
 
     usb = inspect_usb_device("/dev/sdb", runner=runner, root_source="/dev/sda2")
@@ -175,6 +182,9 @@ def test_usb_inspection_accepts_only_removable_unmounted_whole_disk():
 
     assert usb.eligible is True
     assert usb.model == "USB"
+    assert usb.device_major == 8
+    assert usb.device_minor == 16
+    assert commands[0][0] == "/usr/bin/lsblk"
     assert root.eligible is False
     assert "removable" in root.refusal or "root" in root.refusal
 
@@ -182,10 +192,10 @@ def test_usb_inspection_accepts_only_removable_unmounted_whole_disk():
 def test_usb_inspection_rejects_removable_disk_beneath_encrypted_running_root():
     payload = {
         "blockdevices": [{
-            "path": "/dev/sda", "type": "disk", "rm": 1, "size": 64000000000, "model": "Boot USB", "serial": "ROOT", "mountpoints": [None], "pkname": None,
+            "name": "sda", "path": "/dev/sda", "type": "disk", "rm": 1, "size": 64000000000, "model": "Boot USB", "serial": "ROOT", "disk-seq": 1, "maj:min": "8:0", "mountpoints": [None], "pkname": None,
             "children": [{
-                "path": "/dev/sda2", "type": "part", "rm": 1, "size": 63000000000, "mountpoints": [None], "pkname": "sda",
-                "children": [{"path": "/dev/mapper/cryptroot", "type": "crypt", "rm": 0, "size": 62000000000, "mountpoints": ["/"], "pkname": "sda2"}],
+                "name": "sda2", "path": "/dev/sda2", "type": "part", "rm": 1, "size": 63000000000, "model": None, "serial": None, "disk-seq": 1, "maj:min": "8:2", "mountpoints": [None], "pkname": "sda",
+                "children": [{"name": "cryptroot", "path": "/dev/mapper/cryptroot", "type": "crypt", "rm": 0, "size": 62000000000, "model": None, "serial": None, "disk-seq": 1, "maj:min": "253:0", "mountpoints": ["/"], "pkname": "sda2"}],
             }],
         }]
     }
@@ -203,10 +213,10 @@ def test_usb_inspection_rejects_removable_disk_beneath_encrypted_running_root():
 def test_usb_inspection_rejects_nested_mounted_descendant():
     payload = {
         "blockdevices": [{
-            "path": "/dev/sdb", "type": "disk", "rm": 1, "size": 64000000000, "model": "USB", "serial": "NESTED", "mountpoints": [None], "pkname": None,
+            "name": "sdb", "path": "/dev/sdb", "type": "disk", "rm": 1, "size": 64000000000, "model": "USB", "serial": "NESTED", "disk-seq": 2, "maj:min": "8:16", "mountpoints": [None], "pkname": None,
             "children": [{
-                "path": "/dev/sdb1", "type": "part", "rm": 1, "size": 63000000000, "mountpoints": [None], "pkname": "sdb",
-                "children": [{"path": "/dev/mapper/usbdata", "type": "crypt", "rm": 0, "size": 62000000000, "mountpoints": ["/mnt/data"], "pkname": "sdb1"}],
+                "name": "sdb1", "path": "/dev/sdb1", "type": "part", "rm": 1, "size": 63000000000, "model": None, "serial": None, "disk-seq": 2, "maj:min": "8:17", "mountpoints": [None], "pkname": "sdb",
+                "children": [{"name": "usbdata", "path": "/dev/mapper/usbdata", "type": "crypt", "rm": 0, "size": 62000000000, "model": None, "serial": None, "disk-seq": 2, "maj:min": "253:1", "mountpoints": ["/mnt/data"], "pkname": "sdb1"}],
             }],
         }]
     }
@@ -218,6 +228,167 @@ def test_usb_inspection_rejects_nested_mounted_descendant():
 
     assert info.eligible is False
     assert "mounted" in info.refusal
+
+
+def test_usb_inspection_rejects_every_parent_of_a_shared_running_root():
+    shared_root = {
+        "path": "/dev/md0",
+        "type": "raid1",
+        "rm": 0,
+        "size": 62000000000,
+        "name": "md0",
+        "model": None,
+        "serial": None,
+        "disk-seq": 3,
+        "maj:min": "9:0",
+        "mountpoints": ["/"],
+        "pkname": None,
+    }
+    payload = {
+        "blockdevices": [
+            {
+                "name": "sda",
+                "path": "/dev/sda",
+                "type": "disk",
+                "rm": 1,
+                "size": 64000000000,
+                "model": "First member",
+                "serial": "A",
+                "disk-seq": 1,
+                "maj:min": "8:0",
+                "mountpoints": [None],
+                "pkname": None,
+                "children": [dict(shared_root)],
+            },
+            {
+                "name": "sdb",
+                "path": "/dev/sdb",
+                "type": "disk",
+                "rm": 1,
+                "size": 64000000000,
+                "model": "Second member",
+                "serial": "B",
+                "disk-seq": 2,
+                "maj:min": "8:16",
+                "mountpoints": [None],
+                "pkname": None,
+                "children": [dict(shared_root)],
+            },
+        ]
+    }
+    runner = lambda command, **_kwargs: subprocess.CompletedProcess(
+        command, 0, json.dumps(payload), ""
+    )
+
+    first = inspect_usb_device("/dev/sda", runner=runner, root_source="/dev/md0")
+    second = inspect_usb_device("/dev/sdb", runner=runner, root_source="/dev/md0")
+
+    assert first.eligible is False
+    assert second.eligible is False
+    assert "root filesystem" in first.refusal
+    assert "root filesystem" in second.refusal
+
+
+def test_usb_inspection_builds_mount_graph_from_flat_pkname_output():
+    payload = {
+        "blockdevices": [
+            {
+                "name": "sdb",
+                "path": "/dev/sdb",
+                "type": "disk",
+                "rm": 1,
+                "size": 64000000000,
+                "model": "Flat USB",
+                "serial": "FLAT",
+                "disk-seq": 2,
+                "maj:min": "8:16",
+                "mountpoints": [None],
+                "pkname": None,
+            },
+            {
+                "name": "sdb1",
+                "path": "/dev/sdb1",
+                "type": "part",
+                "rm": 1,
+                "size": 63000000000,
+                "model": None,
+                "serial": None,
+                "disk-seq": 2,
+                "maj:min": "8:17",
+                "mountpoints": ["/mnt/data"],
+                "pkname": "sdb",
+            },
+        ]
+    }
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    info = inspect_usb_device("/dev/sdb", runner=runner)
+
+    assert info.eligible is False
+    assert "mounted" in info.refusal
+    assert "--tree" in commands[0]
+    assert "NAME,PATH" in commands[0][-1]
+
+
+def test_usb_inspection_rejects_malformed_mount_and_child_schema():
+    selected = {
+        "name": "sdb",
+        "path": "/dev/sdb",
+        "type": "disk",
+        "rm": 1,
+        "size": 64000000000,
+        "model": "USB",
+        "serial": "FIXTURE",
+        "disk-seq": 2,
+        "maj:min": "8:16",
+        "mountpoints": [],
+        "pkname": None,
+    }
+
+    for field, malformed in (("mountpoints", ""), ("children", {})):
+        row = dict(selected)
+        row[field] = malformed
+        info = inspect_usb_device(
+            "/dev/sdb",
+            runner=lambda command, row=row, **_kwargs: subprocess.CompletedProcess(
+                command, 0, json.dumps({"blockdevices": [row]}), ""
+            ),
+        )
+        assert info.eligible is False
+        assert "malformed or incomplete" in info.refusal
+
+
+def test_usb_inspection_sanitizes_untrusted_device_labels():
+    payload = {
+        "blockdevices": [{
+            "name": "sdb",
+            "path": "/dev/sdb",
+            "type": "disk",
+            "rm": 1,
+            "size": 64000000000,
+            "model": "USB\x1b]8;;bad",
+            "serial": "SER\nIAL",
+            "disk-seq": 2,
+            "maj:min": "8:16",
+            "mountpoints": [],
+            "pkname": None,
+        }]
+    }
+
+    info = inspect_usb_device(
+        "/dev/sdb",
+        runner=lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 0, json.dumps(payload), ""
+        ),
+    )
+
+    assert info.eligible is True
+    assert "\x1b" not in info.model
+    assert "\n" not in info.serial
 
 
 def test_secure_boot_signing_requires_explicit_enrolled_sbctl_key(tmp_path):
@@ -364,3 +535,224 @@ def test_iso_verification_accepts_matching_local_sidecar_and_rejects_change(tmp_
     assert valid is True
     assert expected == digest
     assert changed is False
+
+
+def _eligible_fixture_device(path: Path, size: int) -> UsbDeviceInfo:
+    return UsbDeviceInfo(
+        path=str(path),
+        kind="disk",
+        removable=True,
+        size=size,
+        device_major=8,
+        device_minor=16,
+        disk_sequence=42,
+        eligible=True,
+    )
+
+
+def test_usb_write_uses_a_private_manifest_bound_iso_snapshot(tmp_path, monkeypatch):
+    image = tmp_path / "recovery.iso"
+    payload = b"fixture recovery image" * 128
+    image.write_bytes(payload)
+    expected = hashlib.sha256(payload).hexdigest()
+    target = tmp_path / "fixture-device"
+    target.write_bytes(b"old device bytes")
+    device = _eligible_fixture_device(target, len(payload) * 2)
+    monkeypatch.setattr(recovery_boot.os, "geteuid", lambda: 0)
+
+    def open_fixture_device(candidate, *, write):
+        flags = os.O_RDWR | os.O_TRUNC if write else os.O_RDONLY
+        return os.open(candidate.path, flags)
+
+    monkeypatch.setattr(recovery_boot, "_open_verified_usb_device", open_fixture_device)
+    monkeypatch.setattr(recovery_boot, "_verify_open_usb_descriptor", lambda *_args: None)
+
+    result = write_iso_to_usb(
+        image,
+        device,
+        confirmation=str(target),
+        reinspect_device=lambda: device,
+        expected_sha256=expected,
+        chunk_size=97,
+    )
+
+    assert result.ok is True
+    assert result.status == "written"
+    assert target.read_bytes() == payload
+
+
+def test_usb_write_refuses_a_regular_file_as_the_final_device(tmp_path, monkeypatch):
+    image = tmp_path / "recovery.iso"
+    payload = b"fixture recovery image" * 128
+    image.write_bytes(payload)
+    target = tmp_path / "not-a-block-device"
+    target.write_bytes(b"preserve this file")
+    device = _eligible_fixture_device(target, len(payload) * 2)
+    device.device_major = 8
+    device.device_minor = 16
+    monkeypatch.setattr(recovery_boot.os, "geteuid", lambda: 0)
+
+    result = write_iso_to_usb(
+        image,
+        device,
+        confirmation=str(target),
+        reinspect_device=lambda: device,
+        expected_sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+    assert result.ok is False
+    assert result.status == "refused"
+    assert "block-device identity changed" in result.message
+    assert target.read_bytes() == b"preserve this file"
+
+
+def test_usb_write_refuses_disk_sequence_change_while_descriptor_is_held(tmp_path, monkeypatch):
+    image = tmp_path / "recovery.iso"
+    payload = b"fixture recovery image" * 128
+    image.write_bytes(payload)
+    target = tmp_path / "fixture-device"
+    original = b"preserve this device" * 256
+    target.write_bytes(original)
+    device = _eligible_fixture_device(target, len(original))
+    replacement = _eligible_fixture_device(target, len(original))
+    replacement.disk_sequence += 1
+
+    monkeypatch.setattr(recovery_boot.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        recovery_boot,
+        "_open_verified_usb_device",
+        lambda candidate, *, write: os.open(candidate.path, os.O_RDWR),
+    )
+    monkeypatch.setattr(recovery_boot, "_verify_open_usb_descriptor", lambda *_args: None)
+
+    result = write_iso_to_usb(
+        image,
+        device,
+        confirmation=str(target),
+        reinspect_device=lambda: replacement,
+        expected_sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+    assert result.ok is False
+    assert result.status == "refused"
+    assert "exclusive descriptor" in result.message
+    assert target.read_bytes() == original
+
+
+def test_usb_write_reports_post_write_identity_failure_as_failed(tmp_path, monkeypatch):
+    image = tmp_path / "recovery.iso"
+    payload = b"fixture recovery image" * 128
+    image.write_bytes(payload)
+    target = tmp_path / "fixture-device"
+    target.write_bytes(b"old device bytes")
+    device = _eligible_fixture_device(target, len(payload) * 2)
+    def open_fixture_device(candidate, *, write):
+        return os.open(candidate.path, os.O_RDWR | os.O_TRUNC)
+
+    verification_calls = 0
+
+    def changed_before_verification(*_args):
+        nonlocal verification_calls
+        verification_calls += 1
+        if verification_calls == 2:
+            raise ValueError("USB target block-device identity changed before verification.")
+
+    monkeypatch.setattr(recovery_boot.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(recovery_boot, "_open_verified_usb_device", open_fixture_device)
+    monkeypatch.setattr(recovery_boot, "_verify_open_usb_descriptor", changed_before_verification)
+
+    result = write_iso_to_usb(
+        image,
+        device,
+        confirmation=str(target),
+        reinspect_device=lambda: device,
+        expected_sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+    assert result.ok is False
+    assert result.status == "failed"
+    assert target.read_bytes() == payload
+
+
+def test_usb_write_refuses_wrong_digest_before_touching_target(tmp_path, monkeypatch):
+    image = tmp_path / "recovery.iso"
+    image.write_bytes(b"fixture recovery image")
+    target = tmp_path / "fixture-device"
+    target.write_bytes(b"preserve this device")
+    device = _eligible_fixture_device(target, 1024 * 1024)
+    monkeypatch.setattr(recovery_boot.os, "geteuid", lambda: 0)
+
+    result = write_iso_to_usb(
+        image,
+        device,
+        confirmation=str(target),
+        reinspect_device=lambda: device,
+        expected_sha256="0" * 64,
+    )
+
+    assert result.ok is False
+    assert result.status == "refused"
+    assert "manifest verification" in result.message
+    assert target.read_bytes() == b"preserve this device"
+
+
+def test_usb_write_refuses_symlinked_iso_before_touching_target(tmp_path, monkeypatch):
+    image = tmp_path / "recovery.iso"
+    image.write_bytes(b"fixture recovery image")
+    link = tmp_path / "linked-recovery.iso"
+    link.symlink_to(image)
+    target = tmp_path / "fixture-device"
+    target.write_bytes(b"preserve this device")
+    device = _eligible_fixture_device(target, 1024 * 1024)
+    monkeypatch.setattr(recovery_boot.os, "geteuid", lambda: 0)
+
+    result = write_iso_to_usb(
+        link,
+        device,
+        confirmation=str(target),
+        reinspect_device=lambda: device,
+        expected_sha256=hashlib.sha256(image.read_bytes()).hexdigest(),
+    )
+
+    assert result.ok is False
+    assert result.status == "refused"
+    assert "no-follow regular file" in result.message
+    assert target.read_bytes() == b"preserve this device"
+
+
+def test_usb_write_refuses_path_replacement_during_iso_snapshot(tmp_path, monkeypatch):
+    image = tmp_path / "recovery.iso"
+    original = b"original recovery image" * 128
+    image.write_bytes(original)
+    replacement = tmp_path / "replacement.iso"
+    replacement.write_bytes(b"replacement payload" * 128)
+    target = tmp_path / "fixture-device"
+    target.write_bytes(b"preserve this device")
+    device = _eligible_fixture_device(target, 1024 * 1024)
+    expected = hashlib.sha256(original).hexdigest()
+    real_read = recovery_boot.os.read
+    replaced = False
+
+    def racing_read(descriptor, size):
+        nonlocal replaced
+        if not replaced:
+            replacement.replace(image)
+            replaced = True
+        return real_read(descriptor, size)
+
+    monkeypatch.setattr(recovery_boot.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(recovery_boot.os, "read", racing_read)
+
+    result = write_iso_to_usb(
+        image,
+        device,
+        confirmation=str(target),
+        reinspect_device=lambda: device,
+        expected_sha256=expected,
+    )
+
+    assert replaced is True
+    assert result.ok is False
+    assert result.status == "refused"
+    assert "changed while its private write snapshot" in result.message
+    assert target.read_bytes() == b"preserve this device"

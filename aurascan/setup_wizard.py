@@ -118,6 +118,7 @@ from aurascan.core.recovery import (
     read_recovery_policy,
     resolve_recovery_config,
 )
+from aurascan.core.recovery_boot import RECOVERY_ISO_MAX_AGE_DAYS
 from aurascan.core.recovery_cli import recovery_status
 from aurascan.core.security_audit import bundled_campaign_doctor_status
 from aurascan.core.upgrade_preflight import (
@@ -2136,16 +2137,42 @@ def build_doctor_checks(
             {"installed": refresh_ready, "last_status": recovery_policy.get("last_refresh_status"), "last_error": recovery_policy.get("last_refresh_error")},
         ))
     recovery_iso = recovery_state.get("iso_manifest", {}) if isinstance(recovery_state.get("iso_manifest"), Mapping) else {}
-    iso_digest = str(recovery_iso.get("sha256") or "").lower()
-    iso_ready = bool(
-        re.fullmatch(r"[0-9a-f]{64}", iso_digest)
-        and str(recovery_iso.get("url") or "").startswith("https://github.com/crizzler/AuraScan/releases/download/")
-    )
+    iso_valid = bool(recovery_iso.get("valid"))
+    iso_ready = bool(recovery_iso.get("ready"))
+    iso_disposition = str(recovery_iso.get("release_disposition") or "invalid")
+    iso_application_version = str(recovery_iso.get("application_version") or "unknown")
+    iso_version = str(recovery_iso.get("version") or "unknown")
+    if not iso_valid:
+        iso_status = "error"
+        iso_message = str(recovery_iso.get("message") or "Recovery USB ISO manifest is invalid")
+    elif not iso_ready:
+        iso_status = "warn"
+        iso_message = str(recovery_iso.get("message") or "Recovery USB ISO is not finalized for this release")
+    elif recovery_iso.get("stale"):
+        iso_status = "warn"
+        iso_message = str(recovery_iso.get("message") or "The retained Recovery USB ISO is stale")
+    elif iso_disposition == "package-only":
+        iso_status = "ok"
+        iso_message = f"Package-only release {iso_application_version} retains verified Recovery USB ISO {iso_version}"
+    else:
+        iso_status = "ok"
+        iso_message = f"Recovery-bearing release {iso_application_version} pins verified Recovery USB ISO {iso_version}"
     checks.append(DoctorCheck(
         "recovery_iso",
-        "ok" if iso_ready else "warn",
-        "Recovery USB ISO manifest has a pinned SHA-256 digest" if iso_ready else "Recovery USB ISO digest is not finalized for this release",
-        {"version": recovery_iso.get("version"), "digest_pinned": iso_ready},
+        iso_status,
+        iso_message,
+        {
+            "application_version": recovery_iso.get("application_version"),
+            "release_disposition": recovery_iso.get("release_disposition"),
+            "version": recovery_iso.get("version"),
+            "status": recovery_iso.get("status"),
+            "released_at": recovery_iso.get("released_at"),
+            "age_days": recovery_iso.get("age_days"),
+            "max_age_days": RECOVERY_ISO_MAX_AGE_DAYS,
+            "stale": bool(recovery_iso.get("stale")),
+            "manifest_valid": iso_valid,
+            "digest_pinned": iso_ready,
+        },
     ))
     last_recovery = recovery_state.get("last_recovery", {}) if isinstance(recovery_state.get("last_recovery"), Mapping) else {}
     repair_statuses = last_recovery.get("repair_statuses", []) if isinstance(last_recovery.get("repair_statuses"), list) else []

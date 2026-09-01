@@ -97,6 +97,18 @@ own network behavior and returns official advisory JSON to AuraScan. `--offline`
 skips that request. Campaign and advisory findings remain separate, and neither
 source authorizes automatic package removal or host cleanup.
 
+## Local Package Scan State
+
+Package scan cache and history are stored locally under
+`~/.cache/aurascan/` by default. Makepkg review decisions default to
+`~/.local/share/aurascan/review_decisions.db`. These stores can contain package
+metadata, finding records, local control-file or observed-artifact paths, file
+hashes, review decisions, and the opaque digest/status of the bounded
+package-checkout snapshot. The repository-provenance pass does not persist
+artifact bytes or matched command text in that manifest. Treat these databases
+as private local security data; same-UID malware can read or alter user-owned
+cache or data state, and root malware can defeat the scanner.
+
 ## Package and Advisory AI Boundaries
 
 Optional package AI receives only a bounded head/tail selection of numbered

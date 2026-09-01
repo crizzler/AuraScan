@@ -14,6 +14,7 @@ Use this workflow for changes in the AuraScan repository.
 2. Inspect `git status` and preserve unrelated changes.
 3. Classify the requested evidence surface before editing:
    - default PKGBUILD or declared install-hook text;
+   - bounded filesystem provenance beside a PKGBUILD;
    - opt-in acquired source under deep-static analysis;
    - installed package, bounded pacman history, or helper-cache provenance;
    - injected-root host artifacts; or
@@ -64,7 +65,21 @@ Use this workflow for changes in the AuraScan repository.
    mutation/staging, and outbound push. Treat enumeration, loops, hidden hook
    names, or SSH credential access as supporting evidence, and do not apply a
    blanket rule to ordinary release tooling found only in deep-static source.
-8. Detect remote second-stage execution only when static data flow binds an
+8. Scan the bounded filesystem tree beside each PKGBUILD without following
+   links or invoking Git, native identification tools, the network, or package
+   code. In the normal walk prune VCS internals, named cache/dependency
+   directories, and generated root `src`/`pkg` trees, but capture statically
+   resolved required control paths through otherwise pruned trees and fail
+   closed on ambiguity or unsafe capture. Recognize supported
+   executable/archive magic from stable bytes and exclude exact supported
+   literal `source=()` checkout files from artifact classification. Treat
+   uncorrelated, non-generated presence as MEDIUM/non-hard-blocking but
+   acceptance-eligible for manual review, exact install into `$pkgdir` as
+   HIGH/manual review, exact execution/code loading or SUID/SGID installation
+   as CRITICAL/blocking, and incomplete inspection as fail-closed missing
+   coverage. Never claim filesystem presence proves an artifact was
+   Git-tracked, AUR-distributed, malicious, installed, or executed successfully.
+9. Detect remote second-stage execution only when static data flow binds an
    active fetch/clone to a local artifact and later execution of that artifact
    or a bounded decoded/copied derivative. Keep unexecuted downloads, source
    arrays, documentation, ordinary picture/media assets, and path mismatches
@@ -72,7 +87,7 @@ Use this workflow for changes in the AuraScan repository.
    execution, or direct interpreter/executable invocation of a media-,
    document-, or font-named path, as a separate opaque-carrier correlation;
    never infer hidden content from the filename alone.
-9. Scan built package `.INSTALL` control text through the bounded no-follow
+10. Scan built package `.INSTALL` control text through the bounded no-follow
    archive reader. An unreadable, changing, oversized, binary, or invalid hook
    is an incomplete-inspection blocker, not evidence of compromise.
 
@@ -144,6 +159,19 @@ Use this workflow for changes in the AuraScan repository.
   interception, process monitoring, automatic quarantine, or compromise claims.
 - Bump the engine rule version when changed rules could invalidate cached scan
   decisions.
+- Bind the bounded repository-provenance manifest/status to cache identity,
+  review, history, trust comparison, and makepkg wrapper revalidation. A
+  PKGBUILD-only cache key must never hide a changed adjacent artifact, and an
+  incomplete repository capture must never create or reuse an allow decision.
+- Revalidate the full package snapshot immediately before makepkg handoff.
+  Reject makepkg input/integrity bypass flags and strip direct shell or dynamic-
+  loader code-loading environment variables; review acceptance does not permit
+  either bypass.
+- Keep local repository-provenance review actionable: verbose terminal output
+  may show a sanitized observed/control path, the one-based deterministic
+  control line, and a short artifact SHA-256 prefix. Never copy artifact bytes,
+  matched command text, or secrets into the explanation, and never present a
+  locator as proof of execution or compromise.
 - In deep-static mode, parse only the captured PKGBUILD, refuse all network
   acquisition under `--offline`, snapshot local files with no-follow reads,
   isolate per-source paths, fail closed on uninspected declarations, and avoid

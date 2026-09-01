@@ -226,6 +226,14 @@ def classify_trust_boundary_diff(diff_input: TrustBoundaryDiffInput) -> TrustBou
     _classify_pgp(fields, reason_codes, changed_fields, normal_churn_fields, suspicious_fields, technical_details)
     _classify_dependencies(fields, reason_codes, changed_fields, normal_churn_fields, suspicious_fields, technical_details)
     _classify_install_hook(fields, reason_codes, changed_fields, suspicious_fields, technical_details)
+    _classify_repository_provenance(
+        previous,
+        current,
+        reason_codes,
+        changed_fields,
+        suspicious_fields,
+        technical_details,
+    )
     _classify_functions(fields, reason_codes, changed_fields, suspicious_fields, technical_details)
     _classify_new_risk_patterns(fields, reason_codes, changed_fields, suspicious_fields, technical_details)
 
@@ -579,6 +587,37 @@ def _classify_install_hook(fields: _ResolvedFields, reason_codes: Set[str], chan
         reason_codes.add("install_hook_changed")
 
 
+def _classify_repository_provenance(
+    previous: Mapping[str, Any],
+    current: Mapping[str, Any],
+    reason_codes: Set[str],
+    changed_fields: Set[str],
+    suspicious_fields: Set[str],
+    technical_details: Dict[str, Any],
+) -> None:
+    """Prevent a repository-only change from using the smart update path.
+
+    The values are opaque snapshot identities.  They are deliberately not
+    interpreted here; the deterministic repository analyzer makes the actual
+    content decision from the matching immutable snapshot.
+    """
+
+    old_digest = str(previous.get("repository_input_digest") or "")
+    new_digest = str(current.get("repository_input_digest") or "")
+    old_status = str(previous.get("repository_status") or "legacy")
+    new_status = str(current.get("repository_status") or "legacy")
+    if old_digest == new_digest and old_status == new_status:
+        return
+    reason_codes.add("repository_provenance_changed")
+    changed_fields.add("repository_provenance")
+    suspicious_fields.add("repository_provenance")
+    technical_details["repository_provenance"] = {
+        "previous_status": old_status,
+        "current_status": new_status,
+        "identity_changed": old_digest != new_digest,
+    }
+
+
 def _classify_functions(fields: _ResolvedFields, reason_codes: Set[str], changed_fields: Set[str], suspicious_fields: Set[str], technical_details: Dict[str, Any]) -> None:
     for name in FUNC_NAMES:
         old_hash = fields.previous_function_hashes[name]
@@ -648,6 +687,7 @@ def _blocking_reason_codes(reason_codes: Set[str]) -> Set[str]:
         "checkdepends_changed",
         "install_hook_added",
         "install_hook_changed",
+        "repository_provenance_changed",
         "prepare_function_changed",
         "build_function_changed",
         "check_function_changed",
@@ -671,6 +711,8 @@ def _blocking_classification(reason_codes: Set[str]) -> TrustBoundaryClassificat
         return TrustBoundaryClassification.source_location_changed
     if {"install_hook_added", "install_hook_changed"} & reason_codes:
         return TrustBoundaryClassification.install_behavior_changed
+    if "repository_provenance_changed" in reason_codes:
+        return TrustBoundaryClassification.build_logic_changed
     if {"dependency_added", "dependency_removed", "dependency_replaced", "makedepends_changed", "checkdepends_changed"} & reason_codes:
         return TrustBoundaryClassification.dependency_trust_chain_changed
     if {

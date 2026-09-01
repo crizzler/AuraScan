@@ -7,12 +7,14 @@ from aurascan.analyzers.source_metadata import SourceMetadataAnalyzer
 from aurascan.cli import build_parser
 from aurascan.core.cache import ScanCache
 from aurascan.core.engine import AuraScanEngine
+from aurascan.core.install_hook import capture_package_scan_input
 import aurascan.core.engine as engine_module
 from aurascan.core.models import AnalysisResult, Confidence, EvidenceQuality, Finding, Phase, ScanReport, Severity, Source
 from aurascan.core.package_archive import PackageIdentityCapture, PACKAGE_IDENTITY_RESOLVED
 from aurascan.core.update_policy import UpdateScanPolicy
 from pathlib import Path
 import io
+import os
 import tarfile
 import aurascan.__main__ as module_entrypoint
 import aurascan.cli as cli
@@ -583,7 +585,7 @@ def test_pkgbuild_cache_is_bound_to_exact_pkgbuild_and_install_hook_bytes(tmp_pa
     engine.cache = ScanCache(tmp_path / "cache")
     engine.analyzers = [analyzer]
 
-    assert engine.rule_version == "1.4.0"
+    assert engine.rule_version == "1.5.0"
     assert engine.scan_pkgbuild(str(pkgbuild)) is True
     first_digest = engine.last_scan_input_digest
     assert analyzer.pkgbuild_calls == 1
@@ -636,6 +638,46 @@ def test_cache_write_cannot_bind_old_analysis_to_replaced_pkgbuild(tmp_path):
     assert engine.scan_pkgbuild(str(pkgbuild)) is True
     assert engine.last_scan_input_digest != first_digest
     assert analyzer.calls == 2
+
+
+def test_repository_only_binary_change_invalidates_cached_clear_report(tmp_path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text(
+        "pkgname=demo\npkgver=1\npackage() {\n"
+        '  install -Dm755 "$startdir/payload" "$pkgdir/usr/bin/payload"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    payload = tmp_path / "payload"
+    payload.write_bytes(b"ordinary inert fixture bytes")
+    original_times = payload.stat()
+    engine = AuraScanEngine()
+    engine.cache = ScanCache(tmp_path / "cache")
+    engine.analyzers = []
+
+    assert engine.scan_pkgbuild(str(pkgbuild), "demo", "1") is True
+    clear_digest = engine.last_scan_input_digest
+    assert not any(
+        item["rule_id"].startswith("AUR-REPO-")
+        for item in engine.last_report["findings"]
+    )
+
+    replacement = b"\x7fELF" + b"inert replacement".ljust(len(payload.read_bytes()) - 4, b"X")
+    payload.write_bytes(replacement)
+    os.utime(
+        payload,
+        ns=(original_times.st_atime_ns, original_times.st_mtime_ns),
+    )
+
+    assert engine.scan_pkgbuild(str(pkgbuild), "demo", "1") is True
+    assert engine.last_scan_input_digest != clear_digest
+    finding = next(
+        item
+        for item in engine.last_report["findings"]
+        if item["rule_id"] == "AUR-REPO-OPAQUE-BINARY-001"
+    )
+    assert finding["severity"] == "HIGH"
+    assert finding["blocks_installation"] is False
 
 
 def test_missing_declared_install_hook_is_a_fixed_blocking_finding(tmp_path):
@@ -727,6 +769,38 @@ def test_new_only_update_cannot_skip_uninspected_install_hook_blocker(tmp_path):
     assert history.get_snapshot("demo")["version"] == "1.0"
 
 
+def test_new_only_update_cannot_skip_incomplete_repository_snapshot(tmp_path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text(
+        BASE_UPDATE.replace("pkgver=1.0", "pkgver=1.1"),
+        encoding="utf-8",
+    )
+    history = accepted_history(tmp_path)
+    outside = tmp_path.parent / (tmp_path.name + "-opaque-target")
+    outside.write_bytes(b"\x7fELF" + b"inert target")
+    (tmp_path / "linked-payload").symlink_to(outside)
+    spy_ai = SpyAIAnalyzer()
+    engine = AuraScanEngine(
+        update_scan_policy="new-only",
+        scan_context="update",
+        scan_context_source="test_fixture",
+    )
+    engine.cache = ScanCache(tmp_path / "cache")
+    engine.analyzers = [history, spy_ai]
+
+    assert engine.scan_pkgbuild(str(pkgbuild)) is False
+
+    assert spy_ai.called is False
+    assert engine.last_report["fast_path_decision"]["action"] == "skip_update_scan"
+    finding = next(
+        item
+        for item in engine.last_report["findings"]
+        if item["rule_id"] == "AUR-REPO-INSPECTION-INCOMPLETE-001"
+    )
+    assert finding["blocks_installation"] is True
+    assert "symlink entry" in finding["evidence_snippet"]
+
+
 BASE_UPDATE = """# Maintainer: Alice <alice@example.invalid>
 pkgname=demo
 pkgver=1.0
@@ -741,8 +815,13 @@ build() {
 
 
 def accepted_history(tmp_path):
-    history = HistoryAnalyzer(tmp_path / "history.db")
-    history.analyze_pkgbuild(str(tmp_path / "PKGBUILD"), BASE_UPDATE)
+    history = HistoryAnalyzer(tmp_path / ".cache" / "history.db")
+    scan_input = capture_package_scan_input(tmp_path / "PKGBUILD")
+    history.analyze_pkgbuild(
+        str(tmp_path / "PKGBUILD"),
+        BASE_UPDATE,
+        repository_snapshot=scan_input.repository_snapshot,
+    )
     history.commit_pending_snapshots(scan_level="fast_default", scanner_version="test", rule_version="test")
     return history
 
@@ -753,8 +832,14 @@ def test_engine_reuses_one_hook_resolution_for_update_and_history_analysis(tmp_p
     baseline = BASE_UPDATE + "install=demo.install\n"
     pkgbuild.write_text(baseline, encoding="utf-8")
     hook.write_text("post_install() { :; }\n", encoding="utf-8")
-    history = HistoryAnalyzer(tmp_path / "history.db")
-    history.analyze_pkgbuild(str(pkgbuild), baseline)
+    history = HistoryAnalyzer(tmp_path / ".cache" / "history.db")
+    baseline_input = capture_package_scan_input(pkgbuild)
+    history.analyze_pkgbuild(
+        str(pkgbuild),
+        baseline,
+        install_hook_resolution=baseline_input.install_hook,
+        repository_snapshot=baseline_input.repository_snapshot,
+    )
     history.commit_pending_snapshots(scan_level="fast_default")
 
     current = baseline.replace("pkgver=1.0", "pkgver=1.1")

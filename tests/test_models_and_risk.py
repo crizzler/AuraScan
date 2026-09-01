@@ -140,6 +140,18 @@ def test_multiple_medium_findings_escalate_to_high():
     assert risk.severity == Severity.HIGH
 
 
+def test_repository_artifact_inventory_does_not_self_escalate_to_high():
+    findings = [
+        make_finding(rule_id="AUR-REPO-OPAQUE-ARTIFACT-001")
+        for _index in range(4)
+    ]
+
+    risk = RiskEngine().evaluate(findings)
+
+    assert risk.severity == Severity.MEDIUM
+    assert risk.blocks_installation is False
+
+
 def test_history_anomaly_requires_manual_review():
     finding = make_finding(
         phase=Phase.history_diff,

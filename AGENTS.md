@@ -38,6 +38,31 @@ evidence actually collected.
   declared install-hook control text. Require the correlated AUR target,
   repository mutation/staging, and push behavior; do not blanket-flag ordinary
   Git release tooling found only in deep-static acquired source.
+- Keep filesystem repository-provenance scanning always on, bounded, local,
+  no-follow, and free of Git/native-tool invocation. Observe regular files
+  beside the PKGBUILD without claiming they are Git-tracked or AUR-distributed;
+  prune VCS internals, named cache/dependency directories, and root generated
+  `src`/`pkg` trees during the normal walk. Statically resolved control paths
+  into an otherwise pruned tree are mandatory no-follow capture targets;
+  ambiguity or an unsafe required path fails closed, while generated output
+  without an active correlation does not create a presence notice. Exclude
+  exact supported literal `source=()` checkout files from artifact
+  classification, classify executable/archive carriers by bounded magic, keep
+  presence MEDIUM/non-hard-blocking but acceptance-eligible for manual review,
+  require exact installation into `$pkgdir` for HIGH/manual review, and require
+  exact execution, code loading, or SUID/SGID installation for
+  CRITICAL/blocking. Incomplete traversal is a fail-closed coverage finding,
+  not a malware claim.
+- Keep repository-provenance explanations locally actionable without copying
+  hostile bytes: verbose terminal review may show the sanitized observed or
+  control-file path, the deterministic one-based control line when one exists,
+  and a short artifact SHA-256 prefix. Fixed summaries and evidence labels must
+  remain secret-free, and no output may claim that the static command ran.
+- Before the makepkg wrapper handoff, recapture the exact PKGBUILD, declared
+  hook, and repository snapshot; reject makepkg controls that replace or reuse
+  unscanned inputs or disable integrity checks, and remove direct shell or
+  dynamic-loader code-loading environment variables. A review decision cannot
+  waive this boundary.
 - Block remote second-stage execution only on a complete artifact-bound chain:
   active network acquisition, a concrete local artifact (or bounded derived
   artifact), and later execution. Do not flag a source URL, picture/media
@@ -146,6 +171,10 @@ evidence actually collected.
 - `aurascan/analyzers/deterministic.py`: default static PKGBUILD/install-hook
   rules.
 - `aurascan/analyzers/deep_static.py`: opt-in acquired-source inspection.
+- `aurascan/core/repository_provenance.py`: bounded local repository discovery,
+  executable/archive magic classification, and stable manifest identity.
+- `aurascan/analyzers/repository_provenance.py`: declared-source filtering and
+  exact install, execution, and SUID/SGID correlations for observed artifacts.
 - `aurascan/analyzers/remote_stage.py`: secret-free fetch/artifact/execute
   correlation shared by package control text and acquired source.
 - `aurascan/core/package_archive.py`: bounded no-follow built-package

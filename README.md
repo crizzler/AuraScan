@@ -221,6 +221,62 @@ chain that could attempt to propagate changes using a maintainer's AUR
 credentials; it does not prove that the hook ran, credentials were available,
 a push succeeded, or an account was compromised.
 
+Following the [31 August 2026 aur-general report about packages shipping
+precompiled binaries](https://lists.archlinux.org/archives/list/aur-general%40lists.archlinux.org/thread/HI6AJSU7LMGWOELAI2JUABEMNVHPGBAG/),
+every PKGBUILD scan also performs an always-on, bounded provenance check of
+regular files present alongside the PKGBUILD before source acquisition or an
+allow decision. This is a filesystem observation: AuraScan does not invoke Git
+and does not claim that a file was committed to, downloaded from, or published
+through the AUR. The report explicitly did not allege that the named packages
+were malicious, and AuraScan does not treat their names as indicators. The
+normal traversal does not follow links and prunes VCS
+internals, named cache/dependency directories, and generated root `src/` and
+`pkg/` trees. If supported static package logic explicitly references a path
+inside an otherwise pruned tree, AuraScan captures that required path with the
+same no-follow bounds instead of treating pruning as trust. Ambiguous or unsafe
+required-path inspection blocks as incomplete. Supported ELF, PE, Mach-O, and
+opaque archive formats are recognized from bounded file magic rather than
+filenames. Exact checkout files represented by a supported literal
+`source=()` form are excluded from repository-embedded-artifact classification
+and remain subject to the normal source-provenance workflow. Statically proven
+VCS checkout directory roots are treated as source-owned subtrees during the
+normal walk so an already-populated upstream cache cannot consume the local
+artifact bounds; an exact package-control reference beneath that root overrides
+the exclusion and is captured normally.
+
+Repository artifact findings deliberately form an evidence ladder:
+
+- `AUR-REPO-OPAQUE-ARTIFACT-001` is a non-hard-blocking, acceptance-eligible
+  MEDIUM manual-review finding when a supported executable or opaque archive
+  is present but AuraScan finds no supported exact install or execution
+  correlation. The makepkg wrapper pauses for an explicit review decision.
+- `AUR-REPO-OPAQUE-BINARY-001` is a HIGH manual-review finding when package
+  control text requests copying, moving, or installing the exact undeclared
+  artifact, or an exact recursively transferred directory containing it, into
+  `$pkgdir`. If destination directory semantics are not statically provable,
+  this tier does not claim an exact installed child path.
+- `AUR-REPO-OPAQUE-BINARY-EXEC-001` is a CRITICAL blocker when package control
+  text or a declared install hook can invoke or code-load the exact artifact
+  (or its exact installed destination), or requests SUID or SGID privilege
+  bits.
+- `AUR-REPO-INSPECTION-INCOMPLETE-001` is a HIGH fail-closed blocker when the
+  bounded traversal or stable file capture cannot finish safely.
+
+This local check performs no network request, runs no native inspection tool,
+and never executes or extracts an artifact. A finding does not prove that the
+file is malicious, Git-tracked, installed, executed successfully, or capable
+of compromising the machine. Legitimate vendored executables, firmware,
+archives, and test fixtures can therefore require review; an ordinary binary
+package that declares a checksummed upstream artifact in `source=()` is not
+flagged merely because that acquired artifact contains binary data.
+
+Use verbose terminal output for the review locator. For a correlated finding,
+AuraScan shows the sanitized PKGBUILD or install-hook path and deterministic
+one-based line together with a 12-character artifact SHA-256 prefix; a presence
+finding identifies the observed local path and the same short hash. It does not
+print the artifact bytes or the matched command text. These local technical
+fields identify what to inspect, not what ran.
+
 `SUPPLYCHAIN-REMOTE-STAGE-EXEC-001` separately blocks package control text that
 correlates a command-position network download or Git clone with later
 execution of the same local artifact. The correlation follows simple constant
@@ -320,6 +376,27 @@ makepkg starts remain residual risk. Use a disposable build environment for
 untrusted AUR packages even after a clear scan. Deep-static currently blocks
 rather than silently skipping a nested archive; it does not recursively expand
 that archive in the same run.
+
+The repository provenance check sees a bounded local directory snapshot, not
+the AUR server's Git history. It cannot establish whether an observed artifact
+was committed, generated locally, or left behind by an earlier build, and
+the normal walk prunes VCS, named cache/dependency directories, and generated
+root `src`/`pkg` trees. Statically resolvable package-control references can
+override that pruning for an exact required path, but dynamically constructed
+or otherwise unsupported paths are not equivalent to complete traversal of a
+pruned tree. Root package/source archives and artifacts reached under generated
+trees do not get a presence-only notice, although an exact active correlation
+can still elevate them. Magic and shell recognition are intentionally finite;
+unsupported loaders or decoders, encrypted or nested archive contents,
+polyglots, steganography, malformed/disguised formats, and runtime-only control
+flow may remain opaque. Presence-only findings remain non-blocking to limit
+false positives, while detected incomplete traversal or correlation blocks as
+missing coverage, not as evidence of malware.
+
+AuraScan retains each captured path identity and revalidates it after the
+bounded traversal, which catches a one-time replacement or mutation after an
+early subtree was read. This is still not an atomic filesystem snapshot: a
+same-UID process can race after validation, and root can defeat the boundary.
 
 Bounds, no-follow reads, fixed tool paths, and identity checks limit known
 confused-deputy and replacement paths; they are not a parser sandbox. A defect
@@ -1294,6 +1371,13 @@ path components and final file are root-owned, non-writable, regular,
 executable, and non-symlinked. It revalidates the exact device/inode,
 ownership, group, and mode immediately before invocation. A hostile `PATH`, an
 unexpected makepkg location, or replacement after capture stops the wrapper.
+Immediately before that handoff it also recaptures the PKGBUILD, declared hook,
+and bounded checkout identity. The wrapper rejects makepkg options that replace
+the build file/configuration, reuse an unverified build tree, or skip integrity
+checks, and removes direct shell/dynamic-loader code-loading variables such as
+`BASH_ENV`, `ENV`, `LD_PRELOAD`, and `LD_AUDIT` from makepkg's environment.
+These restrictions are part of the security boundary; run unusual workflows in
+a separately reviewed disposable build environment instead of bypassing them.
 
 The wrapper protects the pre-build phase. It does not sandbox makepkg, install
 packages, or make package code safe after makepkg starts running build steps.

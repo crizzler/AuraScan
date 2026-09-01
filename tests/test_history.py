@@ -1,6 +1,10 @@
 from pathlib import Path
 
 from aurascan.analyzers.history import HistoryAnalyzer
+from aurascan.core.repository_provenance import (
+    REPOSITORY_COMPLETE,
+    RepositorySnapshot,
+)
 
 
 BASE_PKGBUILD = """# Maintainer: Alice <alice@example.invalid>
@@ -30,6 +34,26 @@ def test_first_scan_creates_baseline_without_findings(tmp_path: Path):
     analyzer.commit_pending_snapshots(scan_level="fast_default", scanner_version="test", rule_version="test")
     assert analyzer.get_snapshot("demo")["package_name"] == "demo"
     assert analyzer.get_snapshot("demo")["scan_status"] == "accepted"
+
+
+def test_history_snapshot_persists_repository_identity_and_status(tmp_path: Path):
+    analyzer = HistoryAnalyzer(tmp_path / "history.db")
+    repository = RepositorySnapshot(
+        status=REPOSITORY_COMPLETE,
+        input_digest="a" * 64,
+        artifacts=(),
+    )
+
+    analyzer.analyze_pkgbuild(
+        str(tmp_path / "PKGBUILD"),
+        BASE_PKGBUILD,
+        repository_snapshot=repository,
+    )
+    analyzer.commit_pending_snapshots(scan_level="fast_default")
+
+    saved = analyzer.get_snapshot("demo")
+    assert saved["repository_input_digest"] == "a" * 64
+    assert saved["repository_status"] == REPOSITORY_COMPLETE
 
 
 def test_maintainer_source_and_pgp_change_emit_manual_review_findings(tmp_path: Path):

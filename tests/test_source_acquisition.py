@@ -82,6 +82,263 @@ def test_parse_basic_variable_interpolation():
     refs, _ = parse_pkgbuild('pkgname=demo\npkgver=1.2.3\nsource=("https://example.invalid/$pkgname-${pkgver}.tar.gz")\nsha256sums=(abc)\n')
 
     assert refs[0].resolved == "https://example.invalid/demo-1.2.3.tar.gz"
+    assert refs[0].unexpanded_original == (
+        "https://example.invalid/$pkgname-${pkgver}.tar.gz"
+    )
+    assert refs[0].checkout_name_proven_static is True
+
+
+def test_parse_unquoted_common_variables_as_proven_static_source_name():
+    refs, findings = parse_pkgbuild(
+        "pkgname=demo\n"
+        "pkgbase=demo-suite\n"
+        "pkgver=1.2.3\n"
+        "pkgrel=4\n"
+        "source=($pkgbase-$pkgname-${pkgver}-${pkgrel}.tar.gz)\n"
+        "sha256sums=(abc)\n"
+    )
+
+    assert findings == []
+    assert refs[0].resolved == "demo-suite-demo-1.2.3-4.tar.gz"
+    assert refs[0].checkout_name_proven_static is True
+
+
+@pytest.mark.parametrize(
+    ("source_word", "expected"),
+    (
+        ("'$pkgname-${pkgver}.tar.gz'", "$pkgname-${pkgver}.tar.gz"),
+        (r"\$pkgname-${pkgver}.tar.gz", "$pkgname-1.2.3.tar.gz"),
+        (r'"\$pkgname-${pkgver}.tar.gz"', "$pkgname-1.2.3.tar.gz"),
+    ),
+)
+def test_literal_or_escaped_dollar_is_not_proven_checkout_name(
+    source_word,
+    expected,
+):
+    refs, findings = parse_pkgbuild(
+        "pkgname=demo\n"
+        "pkgver=1.2.3\n"
+        f"source=({source_word})\n"
+        "sha256sums=(abc)\n"
+    )
+
+    assert findings == []
+    assert refs[0].resolved == expected
+    assert refs[0].checkout_name_proven_static is False
+
+
+@pytest.mark.parametrize(
+    ("source_word", "expected"),
+    (
+        ('"$pkgname-$flavor.tar.gz"', "demo-$flavor.tar.gz"),
+        ('"$pkgname-${flavor}.tar.gz"', "demo-${flavor}.tar.gz"),
+        ('"$pkgname_suffix.tar.gz"', "$pkgname_suffix.tar.gz"),
+    ),
+)
+def test_unknown_source_variable_is_retained_but_not_proven(
+    source_word,
+    expected,
+):
+    refs, findings = parse_pkgbuild(
+        "pkgname=demo\n"
+        f"source=({source_word})\n"
+        "sha256sums=(abc)\n"
+    )
+
+    assert findings == []
+    assert refs[0].resolved == expected
+    assert refs[0].checkout_name_proven_static is False
+
+
+def test_dynamic_basic_variable_does_not_prove_source_interpolation():
+    refs, findings = parse_pkgbuild(
+        'pkgname="$(printf demo)"\n'
+        'source=("$pkgname.tar.gz")\n'
+        "sha256sums=(abc)\n"
+    )
+
+    assert findings == []
+    assert refs[0].resolved == "$pkgname.tar.gz"
+    assert refs[0].checkout_name_proven_static is False
+
+
+@pytest.mark.parametrize("operator", ("@", "+", "!", "?", "*"))
+def test_unquoted_extglob_source_word_is_not_proven_checkout_name(operator):
+    source_word = f"prefix-{operator}(payload|alternate).bin"
+    refs, findings = parse_pkgbuild(
+        f"source=({source_word})\n"
+        "sha256sums=(abc)\n"
+    )
+
+    assert findings == []
+    assert refs[0].resolved == source_word
+    assert refs[0].checkout_name_proven_static is False
+
+
+@pytest.mark.parametrize("operator", ("@", "+", "!", "?", "*"))
+def test_quoted_extglob_spelling_remains_a_proven_literal(operator):
+    source_word = f"prefix-{operator}(payload|alternate).bin"
+    refs, findings = parse_pkgbuild(
+        f'source=("{source_word}")\n'
+        "sha256sums=(abc)\n"
+    )
+
+    assert findings == []
+    assert refs[0].resolved == source_word
+    assert refs[0].checkout_name_proven_static is True
+
+
+def test_fully_escaped_extglob_spelling_remains_a_proven_literal():
+    refs, findings = parse_pkgbuild(
+        r"source=(prefix-\@\(payload\|alternate\).bin)" + "\n"
+        "sha256sums=(abc)\n"
+    )
+
+    assert findings == []
+    assert refs[0].resolved == "prefix-@(payload|alternate).bin"
+    assert refs[0].checkout_name_proven_static is True
+
+
+@pytest.mark.parametrize(
+    "content",
+    (
+        'pkgver=payload\npkgver=benign\nsource=("$pkgver")\n',
+        'pkgver=(payload)\nsource=("$pkgver")\n',
+        'source=("$pkgver")\npkgver=payload\n',
+        'pkgver=payload\ndeclare pkgver=benign\nsource=("$pkgver")\n',
+        'pkgver=payload\nprintf -v pkgver "%s" benign\nsource=("$pkgver")\n',
+        'pkgver=payload\nbuiltin printf -v pkgver "%s" benign\nsource=("$pkgver")\n',
+        'pkgver=payload\ncommand printf -v pkgver "%s" benign\nsource=("$pkgver")\n',
+        'pkgver=payload\nwait -p pkgver 123\nsource=("$pkgver")\n',
+        'pkgver=payload\ncoproc pkgver { true; }\nsource=("$pkgver")\n',
+        'pkgver=payload\nexec {pkgver}<>/dev/null\nsource=("$pkgver")\n',
+        'pkgver=payload\n((pkgver=1))\nsource=("$pkgver")\n',
+        'pkgver=payload\nfor pkgver in benign; do :; done\nsource=("$pkgver")\n',
+    ),
+)
+def test_ambiguous_basic_variable_mutation_never_proves_checkout_name(content):
+    refs, findings = parse_pkgbuild(content)
+
+    assert findings == []
+    assert refs[0].checkout_name_proven_static is False
+
+
+def test_indirect_nameref_mutation_withholds_source_mapping_entirely():
+    refs, findings = parse_pkgbuild(
+        'pkgver=payload\ndeclare -n alias=pkgver\nsource=("$pkgver")\n'
+    )
+
+    assert refs == []
+    assert any(
+        finding.rule_id == "SOURCE-PARSER-AMBIGUOUS"
+        for finding in findings
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "trap 'source=(payload)' DEBUG",
+        "builtin printf -v source '%s' payload",
+        "command printf -v source '%s' payload",
+        "wait -p source 123",
+        "coproc source { true; }",
+        "exec {source}<>/dev/null",
+        "for source in payload; do :; done",
+        "select source in payload; do break; done",
+        "getopts a source",
+        "let 'source=1'",
+        "((source=1))",
+        "shopt -s expand_aliases\nalias mutate='source=(payload)'\nmutate",
+    ),
+)
+def test_top_level_shell_mutation_primitives_make_source_collection_ambiguous(
+    mutation,
+):
+    refs, findings = parse_pkgbuild(
+        mutation + '\nsource=("benign")\nsha256sums=("fixture")\n'
+    )
+
+    assert refs == []
+    assert any(
+        finding.rule_id == "SOURCE-PARSER-AMBIGUOUS"
+        and finding.blocks_installation
+        for finding in findings
+    )
+
+
+def test_called_helper_that_mutates_basic_variable_withholds_source_mapping():
+    refs, findings = parse_pkgbuild(
+        "pkgver=1\n"
+        "mutate() { pkgver=2; }\n"
+        "mutate\n"
+        'source=("foo-$pkgver")\n'
+    )
+
+    assert refs == []
+    assert any(
+        finding.rule_id == "SOURCE-PARSER-AMBIGUOUS"
+        for finding in findings
+    )
+
+
+def test_basic_variable_proof_ignores_function_and_heredoc_body_assignments():
+    refs, findings = parse_pkgbuild(
+        "pkgver=1.2.3\n"
+        "helper() { pkgver=other; }\n"
+        "readme=$(cat <<'EOF'\n"
+        "pkgver=also-other\n"
+        "EOF\n"
+        ")\n"
+        'source=("demo-$pkgver.tar.gz")\n'
+    )
+
+    assert findings == []
+    assert refs[0].resolved == "demo-1.2.3.tar.gz"
+    assert refs[0].checkout_name_proven_static is True
+
+
+@pytest.mark.parametrize("quoted", (False, True))
+def test_git_source_fragment_is_retained_inside_source_word(quoted):
+    source = (
+        "git+https://example.invalid/repo.git#"
+        "commit=0123456789abcdef0123456789abcdef01234567"
+    )
+    source_word = '"' + source + '"' if quoted else source
+
+    refs, findings = parse_pkgbuild(
+        f"source=({source_word})\nsha256sums=(SKIP)\n"
+    )
+
+    assert findings == []
+    assert refs[0].resolved == source
+    assert refs[0].fragment_type == "commit"
+
+
+def test_source_array_word_start_hash_remains_a_comment():
+    refs, findings = parse_pkgbuild(
+        "source=(one.tar # ignored fragment-looking text\n two.tar)\n"
+        "sha256sums=(one two)\n"
+    )
+
+    assert findings == []
+    assert [reference.resolved for reference in refs] == ["one.tar", "two.tar"]
+
+
+@pytest.mark.parametrize("source_word", ("payload-*.tar", "payload-{one,two}"))
+def test_unquoted_shell_expansion_never_proves_checkout_name(source_word):
+    refs, findings = parse_pkgbuild(f"source=({source_word})\n")
+
+    assert findings == []
+    assert refs[0].checkout_name_proven_static is False
+
+
+def test_quoted_literal_braces_can_still_prove_checkout_name():
+    refs, findings = parse_pkgbuild('source=("payload-{one,two}")\n')
+
+    assert findings == []
+    assert refs[0].resolved == "payload-{one,two}"
+    assert refs[0].checkout_name_proven_static is True
 
 
 def test_parse_srcinfo_source_metadata():
@@ -95,6 +352,7 @@ pkgbase = demo
     assert findings == []
     assert refs[0].kind == SourceKind.http
     assert refs[0].checksum == "abc"
+    assert refs[0].checkout_name_proven_static is True
 
 
 def test_parse_srcinfo_sha512_source_metadata():
@@ -269,6 +527,26 @@ def test_dynamic_commands_inside_package_function_do_not_hide_static_sources():
 
     assert findings == []
     assert [ref.resolved for ref in refs] == ["https://example.invalid/static.tar"]
+
+
+@pytest.mark.parametrize("package_name", ("foo-bar", "foo+bar", "foo.bar", "foo@bar"))
+def test_dynamic_commands_inside_split_package_function_are_inert_metadata(
+    package_name: str,
+):
+    refs, findings = parse_pkgbuild(
+        f"pkgname=({package_name})\n"
+        'source=("https://example.invalid/static.tar")\n'
+        "sha256sums=(abc)\n"
+        f"package_{package_name}() {{\n"
+        '  eval "$generated_command"\n'
+        '  source helper-used-during-package.sh\n'
+        "}\n"
+    )
+
+    assert findings == []
+    assert [ref.resolved for ref in refs] == [
+        "https://example.invalid/static.tar"
+    ]
 
 
 def test_unterminated_package_function_keeps_source_parser_fail_closed():

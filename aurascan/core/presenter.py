@@ -103,6 +103,38 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
         "not_prove": "This static match does not prove that a push ran, succeeded, or changed any remote repository, but the propagation chain is unsafe enough to block the package.",
         "action": "Do not build or install this revision. Preserve the package metadata and review the full repository-modification logic from a trusted environment.",
     },
+    "AUR-REPO-OPAQUE-ARTIFACT-001": {
+        "title": "Opaque artifact is present beside the PKGBUILD.",
+        "summary": "AuraScan found an executable-format or archive artifact that is not represented by the package's statically resolved source entries.",
+        "why": "Bytes stored beside packaging metadata are harder to attribute to a reviewed upstream source and checksum, even when they are legitimate.",
+        "checked": "AuraScan used a bounded, no-follow snapshot and file magic to compare the local artifact with the PKGBUILD's static source mapping.",
+        "not_prove": "This does not prove the file is Git-committed, installed, executed, malicious, or part of a compromise.",
+        "action": "Verify why the artifact is present and establish its source and expected digest before trusting the package checkout.",
+    },
+    "AUR-REPO-OPAQUE-BINARY-001": {
+        "title": "Package logic can install an undeclared opaque artifact.",
+        "summary": "Package logic requests a copy of an executable-format or archive artifact from beside the PKGBUILD into $pkgdir without a matching static source entry.",
+        "why": "The packaged bytes can reach users without provenance being visible in the declared source and checksum metadata.",
+        "checked": "AuraScan correlated the exact captured artifact path and identity with an active install, copy, or move command targeting $pkgdir.",
+        "not_prove": "Static correlation does not prove the command ran, the artifact is malicious, or an installed program would execute successfully.",
+        "action": "Review the artifact provenance, digest, licensing, and intended installed destination before approving this exact scan.",
+    },
+    "AUR-REPO-OPAQUE-BINARY-EXEC-001": {
+        "title": "Package logic can execute an opaque artifact or request elevated file permissions.",
+        "summary": "Package control logic can invoke the exact opaque artifact, invoke its installed destination from an install hook, or give that destination a set-user-ID or set-group-ID mode.",
+        "why": "This connects hard-to-inspect bytes to active code execution or an elevated permission boundary.",
+        "checked": "AuraScan correlated the exact observed artifact with an active control-text reference; installed destinations and declared hooks are included only when that specific chain is present.",
+        "not_prove": "Static evidence does not prove a build or hook ran, execution succeeded, privileges changed, credentials were accessible, or compromise occurred.",
+        "action": "Do not build or install this revision until the artifact and complete execution or permission chain have been independently reviewed.",
+    },
+    "AUR-REPO-INSPECTION-INCOMPLETE-001": {
+        "title": "Package-repository provenance inspection did not complete.",
+        "summary": "AuraScan could not obtain a bounded, stable, no-follow snapshot of the files beside the PKGBUILD.",
+        "why": "Allowing a build after skipping an unreadable, replaced, oversized, linked, or unsupported entry could leave an opaque payload uninspected.",
+        "checked": "AuraScan validated directory and file types, bounded traversal and reads, and rechecked identities after capture.",
+        "not_prove": "Incomplete inspection is not evidence that the package or an omitted file is malicious.",
+        "action": "Do not build until the package checkout can be captured completely as stable regular files within the documented limits.",
+    },
     "SUPPLYCHAIN-REMOTE-STAGE-EXEC-001": {
         "title": "Package downloads content and then executes it.",
         "summary": "The PKGBUILD or install hook writes remote content to a local artifact and later executes that artifact or content derived from it.",
@@ -793,7 +825,7 @@ class FindingPresenter:
             if verbose:
                 lines.append("Technical details:")
                 for finding in group.findings:
-                    detail = finding.technical_details or finding.evidence_snippet or finding.file_path
+                    detail = self._technical_detail(finding)
                     lines.append(
                         "- "
                         + sanitize_terminal_text(finding.rule_id, max_chars=256)
@@ -807,6 +839,23 @@ class FindingPresenter:
             lines.append(f"{len(hidden)} {note}. Use --verbose to show them.")
 
         return lines, len(hidden)
+
+    def _technical_detail(self, finding: Finding) -> str:
+        detail = finding.technical_details or finding.evidence_snippet or finding.file_path
+        if not finding.rule_id.startswith("AUR-REPO-"):
+            return detail
+
+        location = finding.file_path
+        if finding.line_number is not None:
+            location += ":" + str(finding.line_number)
+        parts = []
+        if location:
+            parts.append("location " + location)
+        if finding.file_hash:
+            parts.append("artifact sha256 " + finding.file_hash[:12])
+        if detail:
+            parts.append(detail)
+        return "; ".join(parts)
 
     def _groups(self, findings: Iterable[Finding]) -> List[PresentedFinding]:
         findings = list(findings)

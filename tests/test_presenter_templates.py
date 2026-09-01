@@ -351,6 +351,25 @@ def test_verbose_output_shows_rule_ids_and_technical_details():
     assert "Technical details:" in output
 
 
+def test_verbose_repository_provenance_detail_identifies_control_line_and_artifact():
+    finding = make_finding(
+        "AUR-REPO-OPAQUE-BINARY-001",
+        Severity.HIGH,
+        Source.deterministic_rule,
+        "correlated static roles",
+    )
+    finding.file_path = "/tmp/package/PKGBUILD"
+    finding.line_number = 7
+    finding.file_hash = "a" * 64
+
+    output = render([finding], verbose=True)
+
+    assert "location /tmp/package/PKGBUILD:7" in output
+    assert "artifact sha256 aaaaaaaaaaaa" in output
+    assert "correlated static roles" in output
+    assert "a" * 64 not in output
+
+
 def test_json_output_still_preserves_rule_ids_and_technical_fields():
     findings = [make_finding("HIST-MAINTAINER-CHANGED", evidence="Alice -> Bob")]
     report = ScanReport(PackageMetadata("pkg", "1"), findings)

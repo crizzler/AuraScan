@@ -71,6 +71,28 @@ _VALUE_FLAGS = {
 _SCAN_CONTEXTS = {"auto", "install", "update", "dependency", "unknown"}
 _UPDATE_POLICIES = {"full", "smart", "new-only"}
 _REVIEW_STATUSES = {status.value for status in ReviewDecisionStatus} | {"used"}
+_UNSAFE_MAKEPKG_LONG_OPTIONS = frozenset({
+    "--config",
+    "--dir",
+    "--noextract",
+    "--noverify",
+    "--repackage",
+    "--skipchecksums",
+    "--skipinteg",
+    "--skippgpcheck",
+})
+_UNSAFE_MAKEPKG_SHORT_OPTIONS = frozenset({"D", "e", "F", "p", "R"})
+_MAKEPKG_CODE_LOADING_ENV_KEYS = frozenset({
+    "BASH_ENV",
+    "BUILDFILE",
+    "ENV",
+    "LD_AUDIT",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "MAKEPKG_CONF",
+    "MAKEPKG_LIBRARY",
+})
+_MAKEPKG_CODE_LOADING_ENV_PREFIXES = ("BASH_FUNC_",)
 
 
 class WrapperArgumentError(ValueError):
@@ -384,9 +406,26 @@ def run(
             stderr,
             scan_warnings,
         )
+    makepkg_environment = _sanitized_makepkg_environment()
+    # Review/history persistence and trusted-tool revalidation may take long
+    # enough for a mutable checkout to change.  Re-capture the complete input
+    # identity as the final package-state operation before the handoff.
+    if _matching_scan_input(engine, pkgbuild_path) is None:
+        return _emit_scan_input_changed(
+            options,
+            report,
+            pkgbuild_path,
+            stdout,
+            scan_warnings,
+        )
     if not options.json_output:
         _print_passed(stdout)
-    result = subprocess_run([makepkg_tool.path] + options.makepkg_args, cwd=str(cwd_path), check=False)
+    result = subprocess_run(
+        [makepkg_tool.path] + options.makepkg_args,
+        cwd=str(cwd_path),
+        check=False,
+        env=makepkg_environment,
+    )
     makepkg_exit_code = int(getattr(result, "returncode", 0))
     if options.json_output:
         if makepkg_exit_code != 0:
@@ -457,7 +496,10 @@ def _emit_scan_input_changed(
     stdout: TextIO,
     scan_warnings,
 ) -> int:
-    error = "PKGBUILD or install-hook input changed after scanning; makepkg was not invoked."
+    error = (
+        "PKGBUILD, install-hook, or package-repository evidence changed after scanning; "
+        "makepkg was not invoked."
+    )
     if options.json_output:
         _emit_json(stdout, _wrapper_envelope(
             options,
@@ -481,7 +523,10 @@ def parse_args(argv: List[str]) -> MakepkgWrapperOptions:
     while i < len(argv):
         arg = argv[i]
         if arg == "--":
-            options.makepkg_args.extend(argv[i + 1:])
+            options.makepkg_args.append(arg)
+            for trailing_arg in argv[i + 1:]:
+                _validate_makepkg_argument(trailing_arg)
+                options.makepkg_args.append(trailing_arg)
             break
 
         key, value = _split_equals(arg)
@@ -503,6 +548,7 @@ def parse_args(argv: List[str]) -> MakepkgWrapperOptions:
             i += 1
             continue
 
+        _validate_makepkg_argument(arg)
         options.makepkg_args.append(arg)
         i += 1
 
@@ -517,6 +563,52 @@ def parse_args(argv: List[str]) -> MakepkgWrapperOptions:
     if options.review_once:
         options.remember_review = False
     return options
+
+
+def _validate_makepkg_argument(argument: str) -> None:
+    """Reject makepkg controls that can bypass or weaken the scanned input."""
+
+    option_name = argument.split("=", 1)[0]
+    if len(option_name) > 2 and option_name.startswith("--") and any(
+        unsafe_option.startswith(option_name)
+        for unsafe_option in _UNSAFE_MAKEPKG_LONG_OPTIONS
+    ):
+        raise WrapperArgumentError(
+            f"{option_name} is not supported by aurascan-makepkg because it can bypass the scanned package input"
+        )
+
+    if argument.startswith("-") and not argument.startswith("--"):
+        short_cluster = argument[1:]
+        if any(option in _UNSAFE_MAKEPKG_SHORT_OPTIONS for option in short_cluster):
+            raise WrapperArgumentError(
+                "makepkg options -D, -e, -F, -p, and -R are not supported by aurascan-makepkg"
+            )
+
+    if "=" not in argument:
+        return
+    assignment_name = argument.split("=", 1)[0]
+    if assignment_name.endswith("+"):
+        assignment_name = assignment_name[:-1]
+    if (
+        assignment_name in _MAKEPKG_CODE_LOADING_ENV_KEYS
+        or assignment_name.startswith(_MAKEPKG_CODE_LOADING_ENV_PREFIXES)
+    ):
+        raise WrapperArgumentError(
+            f"makepkg environment override {assignment_name} is not supported by aurascan-makepkg"
+        )
+
+
+def _sanitized_makepkg_environment():
+    """Copy the user environment without direct pre-PKGBUILD code loaders."""
+
+    environment = dict(os.environ)
+    for key in tuple(environment):
+        if (
+            key in _MAKEPKG_CODE_LOADING_ENV_KEYS
+            or key.startswith(_MAKEPKG_CODE_LOADING_ENV_PREFIXES)
+        ):
+            environment.pop(key, None)
+    return environment
 
 
 def locate_real_makepkg(current_executable: Optional[str] = None, path_env: Optional[str] = None) -> str:
@@ -862,6 +954,7 @@ def _scan_config_hash(options: MakepkgWrapperOptions) -> str:
         "allow_user_asserted_update_context": options.allow_user_asserted_update_context,
         "deep_static": options.deep_static,
         "keyserver": options.keyserver or "",
+        "makepkg_args": list(options.makepkg_args),
         "no_auto_key_fetch": options.no_auto_key_fetch,
         "offline": options.offline,
         "scan_context": options.scan_context,
@@ -918,6 +1011,7 @@ def _record_manual_review_acceptance(
                 str(pkgbuild_path),
                 content,
                 install_hook_resolution=scan_input.install_hook,
+                repository_snapshot=scan_input.repository_snapshot,
                 review_decision_id=review_decision_id,
                 scanner_version=getattr(engine, "scanner_version", ""),
                 rule_version=getattr(engine, "rule_version", ""),

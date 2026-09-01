@@ -83,6 +83,8 @@ class SourceReference:
     fragment_type: Optional[str] = None
     fragment_value: Optional[str] = None
     validpgpkeys: List[str] = field(default_factory=list)
+    unexpanded_original: str = ""
+    checkout_name_proven_static: bool = False
 
     @property
     def is_signature(self) -> bool:
@@ -167,7 +169,13 @@ class SourceParser:
             elif stripped.startswith("validpgpkeys = "):
                 validpgpkeys.append(stripped.split("=", 1)[1].strip())
         checksum_algorithm, checksums = self._choose_checksums(checksum_values)
-        refs = self._references_from_tokens(sources, checksums, validpgpkeys, checksum_algorithm)
+        refs = self._references_from_tokens(
+            sources,
+            checksums,
+            validpgpkeys,
+            checksum_algorithm,
+            checkout_name_proofs=[True] * len(sources),
+        )
         return refs, self._signature_metadata_findings(refs, validpgpkeys, path)
 
     def parse_pkgbuild(self, content: str, path: str = "PKGBUILD") -> Tuple[List[SourceReference], List[Finding]]:
@@ -200,17 +208,39 @@ class SourceParser:
             ))
             return [], findings
 
+        unexpanded_source_tokens: List[str] = []
         source_tokens: List[str] = []
+        checkout_name_proofs: List[bool] = []
         for source_body in source_bodies:
-            source_tokens.extend(self._tokenize_array(source_body))
-        source_tokens = [self._interpolate(token, variables) for token in source_tokens]
+            for token, unexpanded, proven_static in self._tokenize_source_array(
+                source_body,
+                variables,
+            ):
+                source_tokens.append(token)
+                unexpanded_source_tokens.append(unexpanded)
+                checkout_name_proofs.append(proven_static)
         checksum_algorithm, checksums = self._parse_checksum_arrays(content)
         validpgpkeys = self._parse_checksums(content, "validpgpkeys")
-        refs = self._references_from_tokens(source_tokens, checksums, validpgpkeys, checksum_algorithm)
+        refs = self._references_from_tokens(
+            source_tokens,
+            checksums,
+            validpgpkeys,
+            checksum_algorithm,
+            unexpanded_tokens=unexpanded_source_tokens,
+            checkout_name_proofs=checkout_name_proofs,
+        )
         findings.extend(self._signature_metadata_findings(refs, validpgpkeys, path))
         return refs, findings
 
-    def _references_from_tokens(self, tokens: List[str], checksums: List[str], validpgpkeys: Optional[List[str]] = None, checksum_algorithm: Optional[str] = None) -> List[SourceReference]:
+    def _references_from_tokens(
+        self,
+        tokens: List[str],
+        checksums: List[str],
+        validpgpkeys: Optional[List[str]] = None,
+        checksum_algorithm: Optional[str] = None,
+        unexpanded_tokens: Optional[List[str]] = None,
+        checkout_name_proofs: Optional[List[bool]] = None,
+    ) -> List[SourceReference]:
         refs: List[SourceReference] = []
         normalized_keys = [PgpKeyNormalizer.normalize(key) for key in (validpgpkeys or []) if PgpKeyNormalizer.normalize(key)]
         for index, token in enumerate(tokens):
@@ -223,6 +253,17 @@ class SourceParser:
                 index=index,
                 filename=filename or self._filename_from_source(resolved),
                 checksum_index=index,
+                unexpanded_original=(
+                    unexpanded_tokens[index]
+                    if unexpanded_tokens is not None and index < len(unexpanded_tokens)
+                    else original
+                ),
+                checkout_name_proven_static=(
+                    checkout_name_proofs[index]
+                    if checkout_name_proofs is not None
+                    and index < len(checkout_name_proofs)
+                    else False
+                ),
                 checksum=checksum,
                 checksum_algorithm=checksum_algorithm if checksum is not None else None,
                 validpgpkeys=normalized_keys,
@@ -232,15 +273,282 @@ class SourceParser:
         return refs
 
     def _parse_basic_variables(self, content: str) -> Dict[str, str]:
+        """Return only common scalar values proved before ``source=``.
+
+        These values can suppress repository-artifact classification, so a
+        convenient first regex match is not a sufficient proof.  Work only on
+        the top-level, heredoc-masked command stream and withhold a value after
+        any duplicate, array, dynamic, declaration-builtin, arithmetic, or
+        indirect mutation.  This is intentionally narrower than Bash.
+        """
+
         variables: Dict[str, str] = {}
-        for key in ("pkgname", "pkgver", "pkgrel", "pkgbase"):
-            match = re.search(rf"^{key}=([^\n]+)", content, re.M)
-            if match:
-                value = match.group(1).strip().strip("'\"()")
-                if re.search(r"[$`(]", value):
+        prepared = _mask_heredoc_bodies(content).content
+        prepared, parse_error, defined_functions = self._mask_function_bodies(
+            prepared
+        )
+        if parse_error:
+            return variables
+        keys = ("pkgname", "pkgver", "pkgrel", "pkgbase")
+        candidates: Dict[str, List[Tuple[str, bool]]] = {
+            key: [] for key in keys
+        }
+        invalid = {
+            key
+            for key in keys
+            if re.search(
+                rf"\(\([^)]*\b{re.escape(key)}\b[^)]*\)\)",
+                prepared,
+                re.DOTALL,
+            )
+        }
+        source_seen = False
+        for segment, _line_number in _iter_shell_segments(prepared):
+            if self._is_source_assignment_segment(segment):
+                source_seen = True
+            invalidate_all = (
+                self._segment_has_indirect_scalar_mutation(segment)
+                or self._segment_invokes_defined_function(
+                    segment,
+                    defined_functions,
+                )
+            )
+            if invalidate_all:
+                invalid.update(keys)
+            for key in keys:
+                candidate = self._static_scalar_assignment(segment, key)
+                if candidate is not None:
+                    candidates[key].append((candidate, not source_seen))
                     continue
+                if self._segment_may_mutate_scalar(segment, key):
+                    invalid.add(key)
+
+        for key in keys:
+            assignments = candidates[key]
+            if key in invalid or len(assignments) != 1:
+                continue
+            value, before_source = assignments[0]
+            if before_source:
                 variables[key] = value
         return variables
+
+    def _segment_invokes_defined_function(
+        self,
+        segment: str,
+        defined_functions: set,
+    ) -> bool:
+        if not defined_functions:
+            return False
+        try:
+            tokens = shlex.split(segment, comments=False, posix=True)
+        except ValueError:
+            return True
+        index = 0
+        while index < len(tokens) and tokens[index] in {
+            "!", "do", "elif", "else", "if", "then", "time", "until", "while",
+        }:
+            index += 1
+        while index < len(tokens) and re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*=.*",
+            tokens[index],
+            re.DOTALL,
+        ):
+            index += 1
+        if index >= len(tokens):
+            return False
+        command = tokens[index].rsplit("/", 1)[-1]
+        if command in {"builtin", "command"}:
+            # These builtins explicitly bypass a same-named shell function.
+            return False
+        return command in defined_functions
+
+    def _is_source_assignment_segment(self, segment: str) -> bool:
+        return re.match(
+            r"^\s*(?:(?:declare|export|local|readonly|typeset)\s+"
+            r"(?:-[A-Za-z]+\s+)*)?source(?:_[A-Za-z0-9_]+)?"
+            r"(?:\[[^\]]*\])?\s*(?:\+=|=)",
+            segment,
+        ) is not None
+
+    def _static_scalar_assignment(self, segment: str, key: str) -> Optional[str]:
+        match = re.fullmatch(
+            rf"\s*{re.escape(key)}=(?P<value>.*)\s*",
+            segment,
+            re.DOTALL,
+        )
+        if match is None:
+            return None
+        raw_value = match.group("value").strip()
+        if not raw_value or raw_value.startswith("("):
+            return None
+        try:
+            values = shlex.split(raw_value, comments=True, posix=True)
+        except ValueError:
+            return None
+        if len(values) != 1:
+            return None
+        value = values[0]
+        if not value or re.search(r"[$`(){}]", value):
+            return None
+        return value
+
+    def _segment_has_indirect_scalar_mutation(self, segment: str) -> bool:
+        """Return true when a top-level construct can target an unknown name."""
+
+        try:
+            tokens = shlex.split(segment, comments=False, posix=True)
+        except ValueError:
+            return True
+        if not tokens:
+            return False
+        command_index = 0
+        command = tokens[command_index].rsplit("/", 1)[-1]
+        if command in {"builtin", "command"}:
+            command_index += 1
+            while (
+                command_index < len(tokens)
+                and tokens[command_index].startswith("-")
+            ):
+                command_index += 1
+            if command_index >= len(tokens):
+                return False
+            command = tokens[command_index].rsplit("/", 1)[-1]
+        arguments = tokens[command_index + 1 :]
+        if command in {"eval", "source", "."}:
+            return True
+        if command in {"alias", "enable", "shopt", "trap"}:
+            # In particular, a DEBUG trap can rewrite a scalar immediately
+            # before the later source assignment expands it.  AuraScan does
+            # not execute trap/alias bodies, dynamically loaded builtins, or
+            # attempt to prove their activation timing.
+            return True
+        if command in {"declare", "export", "readonly", "typeset", "unset"} and any(
+            "$" in token or "`" in token
+            for token in arguments
+            if not token.startswith("-")
+        ):
+            return True
+        if command in {"declare", "typeset"} and any(
+            token == "--nameref"
+            or bool(re.fullmatch(r"-[A-Za-z]*n[A-Za-z]*", token))
+            for token in arguments
+            if token.startswith("-")
+        ):
+            return True
+        if command == "printf":
+            for index, token in enumerate(arguments[:-1]):
+                if token in {"-v", "--variable"} and (
+                    "$" in arguments[index + 1]
+                    or "`" in arguments[index + 1]
+                ):
+                    return True
+        if command in {"read", "mapfile", "readarray", "unset"} and any(
+            "$" in token or "`" in token
+            for token in arguments
+            if not token.startswith("-")
+        ):
+            return True
+        if command in {"mapfile", "readarray"} and any(
+            token in {"-C", "--callback"} or token.startswith("--callback=")
+            for token in arguments
+        ):
+            return True
+        if command == "wait":
+            return any(
+                token == "-p"
+                or token.startswith("-p$")
+                or token.startswith("-p`")
+                for token in arguments
+            ) or any("$" in token or "`" in token for token in arguments)
+        if command == "coproc":
+            return bool(
+                arguments
+                and ("$" in arguments[0] or "`" in arguments[0])
+            )
+        if command == "exec":
+            return any(
+                token.startswith("{") and ("$" in token or "`" in token)
+                for token in arguments
+            )
+        return False
+
+    def _segment_may_mutate_scalar(self, segment: str, key: str) -> bool:
+        escaped_key = re.escape(key)
+        if re.search(
+            rf"(?:^|[;&|(){{}}\s]){escaped_key}(?:\[[^\]]*\])?\s*(?:\+=|=)",
+            segment,
+        ):
+            return True
+        if re.search(
+            rf"\$\{{\s*{escaped_key}(?:\[[^\]]*\])?\s*(?::?=)",
+            segment,
+        ):
+            return True
+        if re.search(
+            rf"(?:^|\s){escaped_key}(?:\+\+|--|[+\-*/%&|^]=)(?:\s|$)",
+            segment,
+        ):
+            return True
+        try:
+            tokens = shlex.split(segment, comments=False, posix=True)
+        except ValueError:
+            return True
+        if not tokens:
+            return False
+        command_index = 0
+        command = tokens[command_index].rsplit("/", 1)[-1]
+        if command in {"builtin", "command"}:
+            command_index += 1
+            while (
+                command_index < len(tokens)
+                and tokens[command_index].startswith("-")
+            ):
+                command_index += 1
+            if command_index >= len(tokens):
+                return False
+            command = tokens[command_index].rsplit("/", 1)[-1]
+        arguments = tokens[command_index + 1 :]
+        if command in {"declare", "export", "readonly", "typeset", "unset"}:
+            return any(
+                token == key
+                or token.startswith(key + "=")
+                or token.startswith(key + "+=")
+                or token.startswith(key + "[")
+                for token in arguments
+                if not token.startswith("-")
+            )
+        if command == "printf":
+            for index, token in enumerate(arguments[:-1]):
+                if token in {"-v", "--variable"} and arguments[index + 1] == key:
+                    return True
+            return any(token == "-v" + key for token in arguments)
+        if command in {"read", "mapfile", "readarray"}:
+            return any(token == key for token in arguments if not token.startswith("-"))
+        if command in {"for", "select"}:
+            return bool(arguments and arguments[0] == key)
+        if command == "getopts":
+            return len(arguments) > 1 and arguments[1] == key
+        if command == "wait":
+            for index, token in enumerate(arguments):
+                if token == "-p" and index + 1 < len(arguments):
+                    return arguments[index + 1] == key
+                if token == "-p" + key:
+                    return True
+            return False
+        if command == "coproc":
+            return bool(arguments and arguments[0] == key)
+        if command == "exec":
+            return any(
+                token == "{" + key + "}"
+                or token.startswith("{" + key + "[")
+                for token in arguments
+            )
+        if command == "let":
+            return any(
+                re.match(rf"{escaped_key}(?:\+\+|--|[+\-*/%&|^]?=)", token)
+                for token in arguments
+            )
+        return False
 
     def _parse_checksums(self, content: str, key: str) -> List[str]:
         match = re.search(rf"^{key}=\((?P<body>.*?)\)", content, re.M | re.S)
@@ -272,6 +580,8 @@ class SourceParser:
         prepared = _mask_heredoc_bodies(content).content
         prepared, function_parse_error, defined_functions = self._mask_function_bodies(prepared)
         if function_parse_error:
+            return [], True
+        if self._arithmetic_mutates_name(prepared, "source"):
             return [], True
         assignment_pattern = re.compile(
             r"^\s*(?:(?:declare|export|local|readonly|typeset)\s+(?:-[A-Za-z]+\s+)*)?"
@@ -307,6 +617,21 @@ class SourceParser:
             bodies.append(body)
         return bodies, False
 
+    def _arithmetic_mutates_name(self, content: str, name: str) -> bool:
+        escaped_name = re.escape(name)
+        for match in re.finditer(r"\(\((?P<body>.*?)\)\)", content, re.DOTALL):
+            body = match.group("body")
+            if re.search(
+                rf"(?:\+\+|--)\s*{escaped_name}(?:\[[^\]]*\])?\b",
+                body,
+            ) or re.search(
+                rf"\b{escaped_name}(?:\[[^\]]*\])?\s*"
+                rf"(?:\+\+|--|[+\-*/%&|^]?=)",
+                body,
+            ):
+                return True
+        return False
+
     def _mask_function_bodies(self, content: str) -> Tuple[str, bool, set]:
         """Remove inert function definitions from top-level source parsing.
 
@@ -316,10 +641,15 @@ class SourceParser:
         syntactically bounded function bodies while preserving newlines; an
         unterminated body remains ambiguous and fails closed.
         """
+        function_name = (
+            r"(?:package_[A-Za-z0-9@._+\-]+|[A-Za-z_][A-Za-z0-9_]*)"
+        )
         function_start = re.compile(
-            r"(?m)^[ \t]*(?:(?:function[ \t]+(?P<function_name>[A-Za-z_]"
-            r"[A-Za-z0-9_]*)(?:[ \t]*\([ \t]*\))?)|(?:(?P<plain_name>"
-            r"[A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\)))[ \t]*"
+            r"(?m)^[ \t]*(?:(?:function[ \t]+(?P<function_name>"
+            + function_name
+            + r")(?:[ \t]*\([ \t]*\))?)|(?:(?P<plain_name>"
+            + function_name
+            + r")[ \t]*\([ \t]*\)))[ \t]*"
             r"(?:\n[ \t]*)?\{"
         )
         masked = list(content)
@@ -474,11 +804,17 @@ class SourceParser:
             return True
         if command in {"source", ".", "eval"}:
             return True
+        arguments = tokens[command_index + 1 :]
+        if command in {"alias", "enable", "shopt", "trap"}:
+            # Alias expansion and DEBUG/RETURN traps can cause later simple
+            # commands to mutate source metadata without naming it here.
+            # Dynamically loaded builtins are equally outside the static model.
+            return True
         if command in {"declare", "export", "local", "readonly", "typeset", "unset"}:
             if command in {"declare", "local", "typeset"} and any(
                 token == "--nameref"
                 or bool(re.fullmatch(r"-[A-Za-z]*n[A-Za-z]*", token))
-                for token in tokens[1:]
+                for token in arguments
                 if token.startswith("-")
             ):
                 # A nameref can mutate any source array through an unrelated
@@ -493,14 +829,14 @@ class SourceParser:
                 or token.startswith("source_")
                 or "$" in token
                 or "`" in token
-                for token in tokens[1:]
+                for token in arguments
                 if not token.startswith("-")
             )
         if command == "printf":
-            for index in range(1, len(tokens) - 1):
-                if tokens[index] not in {"-v", "--variable"}:
+            for index in range(0, len(arguments) - 1):
+                if arguments[index] not in {"-v", "--variable"}:
                     continue
-                target = tokens[index + 1]
+                target = arguments[index + 1]
                 if (
                     target == "source"
                     or target.startswith("source[")
@@ -508,15 +844,61 @@ class SourceParser:
                     or "`" in target
                 ):
                     return True
+            if any(token == "-vsource" for token in arguments):
+                return True
             return False
         if command in {"read", "mapfile", "readarray"}:
+            if command in {"mapfile", "readarray"} and any(
+                token in {"-C", "--callback"}
+                or token.startswith("--callback=")
+                for token in arguments
+            ):
+                return True
             return any(
                 token == "source"
                 or token.startswith("source[")
                 or "$" in token
                 or "`" in token
-                for token in tokens[1:]
+                for token in arguments
                 if not token.startswith("-")
+            )
+        if command in {"for", "select"}:
+            return bool(arguments and arguments[0] == "source")
+        if command == "getopts":
+            return len(arguments) > 1 and arguments[1] == "source"
+        if command == "wait":
+            for index, token in enumerate(arguments):
+                if token == "-p" and index + 1 < len(arguments):
+                    target = arguments[index + 1]
+                    return target == "source" or "$" in target or "`" in target
+                if token.startswith("-p") and len(token) > 2:
+                    target = token[2:]
+                    return target == "source" or "$" in target or "`" in target
+            return False
+        if command == "coproc":
+            if not arguments:
+                return False
+            target = arguments[0]
+            return target == "source" or "$" in target or "`" in target
+        if command == "exec":
+            return any(
+                token == "{source}"
+                or token.startswith("{source[")
+                or (token.startswith("{") and ("$" in token or "`" in token))
+                for token in arguments
+            )
+        if command == "let":
+            return any(
+                re.search(
+                    r"(?:^|[^A-Za-z0-9_])source(?:\[[^\]]*\])?"
+                    r"(?:\+\+|--|[+\-*/%&|^]?=)",
+                    token,
+                )
+                or re.search(
+                    r"(?:\+\+|--)(?:source)(?:\[[^\]]*\])?",
+                    token,
+                )
+                for token in arguments
             )
         # A source-looking string passed to echo/printf/documentation is inert;
         # an assignment token in command-prefix position is not.
@@ -608,10 +990,210 @@ class SourceParser:
         except ValueError:
             return []
 
-    def _interpolate(self, token: str, variables: Dict[str, str]) -> str:
-        for key, value in variables.items():
-            token = token.replace(f"${key}", value).replace(f"${{{key}}}", value)
-        return token
+    def _tokenize_source_array(
+        self,
+        body: str,
+        variables: Dict[str, str],
+    ) -> List[Tuple[str, str, bool]]:
+        """Tokenize source words while retaining Bash quote provenance.
+
+        ``shlex.split`` deliberately erases the distinction between
+        ``"$pkgver"``, ``'$pkgver'``, and ``\\$pkgver``.  That distinction is
+        security-relevant when another scanner decides whether a checkout
+        filename was proved by static parsing.  This bounded lexer models the
+        quote and escape rules needed by PKGBUILD source words without
+        evaluating Bash.  The caller has already validated balanced quoting
+        with ``shlex`` in ``_parse_source_bodies``.
+        """
+
+        tokens: List[Tuple[str, str, bool]] = []
+        unexpanded: List[str] = []
+        resolved: List[str] = []
+        quote = ""
+        word_started = False
+        proven_static = True
+        index = 0
+
+        def finish_word() -> None:
+            nonlocal word_started, proven_static
+            if not word_started:
+                return
+            tokens.append((
+                "".join(resolved),
+                "".join(unexpanded),
+                proven_static,
+            ))
+            unexpanded.clear()
+            resolved.clear()
+            word_started = False
+            proven_static = True
+
+        while index < len(body):
+            character = body[index]
+            if not quote:
+                if character.isspace():
+                    finish_word()
+                    index += 1
+                    continue
+                if character == "#" and not word_started:
+                    finish_word()
+                    newline = body.find("\n", index)
+                    if newline < 0:
+                        break
+                    index = newline + 1
+                    continue
+                if character in {"'", '"'}:
+                    word_started = True
+                    quote = character
+                    index += 1
+                    continue
+                if character == "\\":
+                    word_started = True
+                    if index + 1 >= len(body):
+                        proven_static = False
+                        index += 1
+                        continue
+                    escaped = body[index + 1]
+                    if escaped == "\n":
+                        index += 2
+                        continue
+                    unexpanded.append(escaped)
+                    resolved.append(escaped)
+                    if escaped == "$":
+                        proven_static = False
+                    index += 2
+                    continue
+                word_started = True
+                if character == "$":
+                    index, expansion_proven = self._append_source_expansion(
+                        body,
+                        index,
+                        variables,
+                        unexpanded,
+                        resolved,
+                    )
+                    proven_static = proven_static and expansion_proven
+                    continue
+                if (
+                    character in {"@", "+", "!", "?", "*"}
+                    and index + 1 < len(body)
+                    and body[index + 1] == "("
+                ):
+                    # With extglob enabled, an unquoted operator can expand
+                    # one syntactic source word to a checkout name selected
+                    # from the package directory.  Keep the spelling for
+                    # existing parser behavior, but never authorize a
+                    # repository-provenance exclusion from it.
+                    proven_static = False
+                unexpanded.append(character)
+                resolved.append(character)
+                if character in {"*", "?", "[", "{"}:
+                    # Unquoted pathname/brace expansion can change the number
+                    # and names of checkout entries.  Preserve the spelling
+                    # for diagnostics, but never authorize a filesystem
+                    # exclusion from it.
+                    proven_static = False
+                index += 1
+                continue
+
+            if quote == "'":
+                if character == "'":
+                    quote = ""
+                    index += 1
+                    continue
+                unexpanded.append(character)
+                resolved.append(character)
+                if character == "$":
+                    proven_static = False
+                index += 1
+                continue
+
+            if character == '"':
+                quote = ""
+                index += 1
+                continue
+            if character == "\\":
+                if index + 1 >= len(body):
+                    proven_static = False
+                    index += 1
+                    continue
+                escaped = body[index + 1]
+                if escaped == "\n":
+                    index += 2
+                    continue
+                if escaped in {'"', "\\", "$", "`"}:
+                    unexpanded.append(escaped)
+                    resolved.append(escaped)
+                    if escaped == "$":
+                        proven_static = False
+                else:
+                    # In a Bash double-quoted word, a backslash before any
+                    # other character remains literal.
+                    unexpanded.extend(("\\", escaped))
+                    resolved.extend(("\\", escaped))
+                index += 2
+                continue
+            if character == "$":
+                index, expansion_proven = self._append_source_expansion(
+                    body,
+                    index,
+                    variables,
+                    unexpanded,
+                    resolved,
+                )
+                proven_static = proven_static and expansion_proven
+                continue
+            unexpanded.append(character)
+            resolved.append(character)
+            index += 1
+
+        finish_word()
+        return tokens
+
+    def _append_source_expansion(
+        self,
+        body: str,
+        index: int,
+        variables: Dict[str, str],
+        unexpanded: List[str],
+        resolved: List[str],
+    ) -> Tuple[int, bool]:
+        """Append one source-word parameter expansion without evaluating it."""
+
+        if index + 1 < len(body) and body[index + 1] == "{":
+            closing = body.find("}", index + 2)
+            if closing < 0:
+                unexpanded.append("$")
+                resolved.append("$")
+                return index + 1, False
+            spelling = body[index:closing + 1]
+            name = body[index + 2:closing]
+            unexpanded.append(spelling)
+            value = variables.get(name) if re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_]*",
+                name,
+            ) else None
+            if value is None:
+                resolved.append(spelling)
+                return closing + 1, False
+            resolved.append(value)
+            return closing + 1, True
+
+        match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", body[index + 1:])
+        if match is not None:
+            name = match.group(0)
+            spelling = "$" + name
+            unexpanded.append(spelling)
+            value = variables.get(name)
+            if value is None:
+                resolved.append(spelling)
+                return index + len(spelling), False
+            resolved.append(value)
+            return index + len(spelling), True
+
+        unexpanded.append("$")
+        resolved.append("$")
+        return index + 1, False
 
     def _split_renamed(self, token: str) -> Tuple[str, str]:
         if "::" not in token:

@@ -450,6 +450,97 @@ inside a temporary copy and uses a fake makepkg runner. Never put working
 credentials, attacker infrastructure, or executable test setup around that
 fixture.
 
+### Filesystem repository provenance
+
+The always-on repository provenance pass is distinct from both source-array
+acquisition and acquired-source deep-static analysis. Starting from the
+captured PKGBUILD's parent, enumerate only bounded, stable, regular-file
+snapshots without following a symlink or invoking Git. Describe the result as
+files observed alongside the PKGBUILD; filesystem presence does not prove that
+Git tracks a file or that the AUR distributed it. The normal walk prunes VCS
+internals, named cache/dependency directories, and root generated `src/` and
+`pkg/` trees. Root package/source archives are captured but treated as
+generated output, so their mere presence is suppressed. Entry, regular-file,
+artifact, per-file, total-byte, depth, required-path, and elapsed-time limits
+must fail closed with
+`AUR-REPO-INSPECTION-INCOMPLETE-001` rather than silently reducing coverage.
+
+Pruning is an enumeration policy, not a path-based trust grant. Before the
+snapshot, collect supported, statically resolved checkout paths used by
+transfer, execution, interpreter/loader, or permission-changing package logic.
+Capture those required paths with the same component-by-component no-follow
+checks even when they cross a normally pruned directory; an exact required
+directory is traversed within the same bounds. A missing path does not invent
+an artifact, but an ambiguous required path, unsafe component, parser limit, or
+replacement during capture is incomplete inspection. Generated artifacts
+reached this way may participate in an exact HIGH/CRITICAL correlation even
+though uncorrelated generated output has no MEDIUM presence finding.
+
+Recognize supported executable and archive carriers from bounded magic bytes,
+including ELF, PE, Mach-O, and the implemented opaque-archive signatures. Do
+not trust extensions, extract archives, invoke a native file-identification
+tool, make a network request, or execute content. Exclude exact literal local
+checkout files covered by a supported `source=()` declaration from artifact
+classification; the repository manifest still binds their observed identity,
+while normal source metadata and explicit deep-static workflows own their
+provenance and content inspection. Treat statically proven VCS checkout roots
+as source-owned directory subtrees during the ordinary walk rather than
+enumerating an already-populated upstream cache. An exact statically required
+child overrides that subtree exclusion and receives the ordinary bounded
+no-follow capture; a symlink or wrong-type checkout root fails closed. An
+ambiguous source declaration must retain the existing fail-closed source-parser
+behavior rather than guessing an exclusion. In particular, a normally declared
+upstream binary archive does not receive this repository-embedded finding
+merely because its local cache file has archive magic; checksum and acquisition
+policy remain separate checks.
+
+Retain the identity of every captured regular file and directory and revalidate
+all of those paths after traversal under the original deadline. This detects a
+one-time mutation after an early subtree was read, but it is revalidation, not
+an atomic filesystem snapshot: a same-UID process can still race after the
+final check and root can replace the scanner or its inputs.
+
+Keep the correlation tiers separate:
+
+- `AUR-REPO-OPAQUE-ARTIFACT-001` is MEDIUM, non-hard-blocking,
+  acceptance-eligible manual-review presence evidence.
+- `AUR-REPO-OPAQUE-BINARY-001` is HIGH and manual-review eligible only when
+  static package control text installs, copies, or moves the exact artifact into
+  `$pkgdir`, including a descendant of an exact recursively transferred
+  repository directory. Recursive inclusion alone does not prove the final
+  child path when the destination may already be a directory.
+- `AUR-REPO-OPAQUE-BINARY-EXEC-001` is a CRITICAL non-reviewable blocker only
+  when PKGBUILD or declared install-hook control text invokes or code-loads the
+  exact artifact, invokes its exact installed destination, or requests
+  SUID/SGID privilege bits for that artifact or destination.
+- `AUR-REPO-INSPECTION-INCOMPLETE-001` is a HIGH non-reviewable coverage
+  blocker, not a malware verdict.
+
+Bind the stable repository manifest/status to cache identity, wrapper
+revalidation, review fingerprints, history, and trust comparison before any
+cache or fast-path allow. Tests must cover binary-only replacement with an
+unchanged PKGBUILD, no-follow traversal, pruning, all bounds, magic variants,
+literal source exclusions, path aliases accepted by the command parser, and
+the full severity truth table. Keep icons, fonts, firmware, generated test
+data, inert archives, and checksummed upstream binary-package sources as
+negative or presence-only cases. Fixed evidence labels must not disclose file
+bytes, command snippets, or secrets. Local verbose terminal review should make
+a correlation actionable by showing the sanitized control-file path and
+one-based line plus a short artifact SHA-256 prefix; presence review may show
+the sanitized observed path and the same short identifier. Never present this
+technical locator as proof that an artifact is malicious, committed, installed,
+successfully executed, or responsible for compromise.
+
+The command and source views are deliberately bounded static approximations,
+not Bash or makepkg evaluators. Only supported exact path chains can establish
+HIGH/CRITICAL correlation; explicitly rooted ambiguity and parser/bound failures
+must block as incomplete where the implementation can identify them. Dynamic
+runtime path construction, unsupported loaders/decoders, nested or encrypted
+archive contents, polyglots, steganography, and unrecognized magic remain
+residual limits. A clear result is therefore not a provenance or safety
+guarantee, and adversarial builds still belong in a disposable,
+resource-limited environment.
+
 ### Remote second-stage execution
 
 `SUPPLYCHAIN-REMOTE-STAGE-EXEC-001` is a deterministic correlation for

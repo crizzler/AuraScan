@@ -13,6 +13,7 @@ from aurascan.core.install_hook import (
     InstallHookResolution,
     resolve_install_hook,
 )
+from aurascan.core.repository_provenance import RepositorySnapshot
 from aurascan.core.models import (
     AnalysisResult,
     Confidence,
@@ -63,6 +64,7 @@ class HistoryAnalyzer(BaseAnalyzer):
         content: str,
         pkgbuild_path: str = "",
         install_hook_resolution: Optional[InstallHookResolution] = None,
+        repository_snapshot: Optional[RepositorySnapshot] = None,
     ) -> Dict[str, Any]:
         snapshot: Dict[str, Any] = {
             "package_name": "",
@@ -80,6 +82,8 @@ class HistoryAnalyzer(BaseAnalyzer):
             "install_file_hash": "",
             "install_hook_input_digest": "",
             "install_hook_status": "none",
+            "repository_input_digest": "",
+            "repository_status": "legacy",
             "pkgbuild_hash": hashlib.sha256(content.encode("utf-8", "replace")).hexdigest(),
             "prepare_hash": "",
             "build_hash": "",
@@ -99,6 +103,9 @@ class HistoryAnalyzer(BaseAnalyzer):
             snapshot["install_hook_status"] = install_hook.status
             if install_hook.status == INSTALL_HOOK_RESOLVED:
                 snapshot["install_file_hash"] = install_hook.content_sha256
+        if repository_snapshot is not None:
+            snapshot["repository_input_digest"] = repository_snapshot.input_digest
+            snapshot["repository_status"] = repository_snapshot.status
 
         for line in content.splitlines():
             stripped = line.strip()
@@ -131,11 +138,13 @@ class HistoryAnalyzer(BaseAnalyzer):
         pkgbuild_path: str,
         content: str,
         install_hook_resolution: Optional[InstallHookResolution] = None,
+        repository_snapshot: Optional[RepositorySnapshot] = None,
     ) -> Dict[str, Any]:
         return self._extract_metadata(
             content,
             pkgbuild_path,
             install_hook_resolution=install_hook_resolution,
+            repository_snapshot=repository_snapshot,
         )
 
     def package_key_for_snapshot(self, snapshot: Dict[str, Any]) -> str:
@@ -146,12 +155,14 @@ class HistoryAnalyzer(BaseAnalyzer):
         pkgbuild_path: str,
         content: str,
         install_hook_resolution: Optional[InstallHookResolution] = None,
+        repository_snapshot: Optional[RepositorySnapshot] = None,
     ) -> AnalysisResult:
         findings: List[Finding] = []
         snapshot = self._extract_metadata(
             content,
             pkgbuild_path,
             install_hook_resolution=install_hook_resolution,
+            repository_snapshot=repository_snapshot,
         )
         package_key = self.package_key_for_snapshot(snapshot)
         if not package_key:
@@ -201,6 +212,7 @@ class HistoryAnalyzer(BaseAnalyzer):
         content: str,
         *,
         install_hook_resolution: Optional[InstallHookResolution] = None,
+        repository_snapshot: Optional[RepositorySnapshot] = None,
         review_decision_id: str = "",
         scanner_version: str = "",
         rule_version: str = "",
@@ -210,6 +222,7 @@ class HistoryAnalyzer(BaseAnalyzer):
             pkgbuild_path,
             content,
             install_hook_resolution=install_hook_resolution,
+            repository_snapshot=repository_snapshot,
         )
         package_key = self.package_key_for_snapshot(snapshot)
         if not package_key:

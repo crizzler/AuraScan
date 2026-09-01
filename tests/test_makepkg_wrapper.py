@@ -146,7 +146,13 @@ def real_engine_factory(tmp_path, *, analyzers, local_db=None, version_compare=N
 
 def accepted_history_from_pkgbuild(tmp_path, pkgbuild_path):
     history = HistoryAnalyzer(tmp_path / f"history-{pkgbuild_path.parent.name}.db")
-    history.analyze_pkgbuild(str(pkgbuild_path), pkgbuild_path.read_text())
+    scan_input = capture_package_scan_input(pkgbuild_path, allow_legacy_install=True)
+    history.analyze_pkgbuild(
+        str(pkgbuild_path),
+        scan_input.pkgbuild_content,
+        install_hook_resolution=scan_input.install_hook,
+        repository_snapshot=scan_input.repository_snapshot,
+    )
     history.commit_pending_snapshots(scan_level="fast_default", scanner_version="test", rule_version="test")
     return history
 
@@ -275,7 +281,77 @@ def test_parse_args_strips_aurascan_flags_and_preserves_makepkg_args():
     assert options.update_scan_policy == "smart"
     assert options.scan_context == "auto"
     assert options.trusted_key_dirs == ["/tmp/keydir"]
-    assert options.makepkg_args == ["--syncdeps", "--aurascan-json"]
+    assert options.makepkg_args == ["--syncdeps", "--", "--aurascan-json"]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["-D", "other"],
+        ["-Dother"],
+        ["-sD", "other"],
+        ["--dir", "other"],
+        ["--dir=other"],
+        ["--di", "other"],
+        ["-p", "Alternate"],
+        ["-pAlternate"],
+        ["-spAlternate"],
+        ["--config", "fixture.conf"],
+        ["--config=fixture.conf"],
+        ["--conf=fixture.conf"],
+        ["-e"],
+        ["-se"],
+        ["--noextract"],
+        ["--noe"],
+        ["--noverify"],
+        ["-F"],
+        ["-sF"],
+        ["-R"],
+        ["-sR"],
+        ["--repackage"],
+        ["--rep"],
+        ["--skipchecksums"],
+        ["--skipc"],
+        ["--skipinteg"],
+        ["--skipi"],
+        ["--skippgpcheck"],
+        ["--skipp"],
+        ["BUILDFILE=Alternate"],
+        ["BUILDFILE+=Alternate"],
+        ["MAKEPKG_CONF=fixture.conf"],
+        ["MAKEPKG_LIBRARY=fixture-lib"],
+        ["BASH_ENV=fixture.sh"],
+        ["ENV=fixture.sh"],
+        ["--", "-p", "Alternate"],
+        ["--", "--config=fixture.conf"],
+        ["--", "BUILDFILE=Alternate"],
+    ],
+)
+def test_parse_args_rejects_makepkg_controls_that_bypass_scanned_input(arguments):
+    with pytest.raises(makepkg_wrapper.WrapperArgumentError):
+        parse_args(arguments)
+
+
+def test_wrapper_rejects_alternate_build_script_before_scanning(tmp_path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n", encoding="utf-8")
+    (tmp_path / "Alternate").write_text("pkgname=unscanned\n", encoding="utf-8")
+    order = []
+    factory, _created = fake_engine_factory(order)
+    makepkg_calls = []
+
+    code = run(
+        ["-p", "Alternate"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == EXIT_USAGE
+    assert order == []
+    assert makepkg_calls == []
 
 
 def test_wrapper_finds_pkgbuild_in_current_directory_and_calls_scan_first(tmp_path):
@@ -352,6 +428,43 @@ def test_wrapper_does_not_pass_aurascan_flags_to_makepkg(tmp_path):
     assert kwargs["keyserver"] == "https://keys.example.invalid"
     assert kwargs["verbose"] is True
     assert makepkg_calls[0][0] == ["/usr/bin/makepkg", "--install", "--noconfirm"]
+
+
+def test_wrapper_scrubs_only_direct_code_loading_environment(monkeypatch, tmp_path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n", encoding="utf-8")
+    blocked_keys = {
+        "BASH_ENV",
+        "BUILDFILE",
+        "ENV",
+        "LD_AUDIT",
+        "LD_LIBRARY_PATH",
+        "LD_PRELOAD",
+        "MAKEPKG_CONF",
+        "MAKEPKG_LIBRARY",
+        "BASH_FUNC_fixture%%",
+    }
+    for key in blocked_keys:
+        monkeypatch.setenv(key, "inert-fixture-value")
+    monkeypatch.setenv("AURASCAN_UNRELATED_FIXTURE_SECRET", "preserved-fixture-value")
+    order = []
+    makepkg_calls = []
+    factory, _created = fake_engine_factory(order)
+
+    code = run(
+        ["--syncdeps"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    handed_environment = makepkg_calls[0][1]["env"]
+    assert code == 0
+    assert blocked_keys.isdisjoint(handed_environment)
+    assert handed_environment["AURASCAN_UNRELATED_FIXTURE_SECRET"] == "preserved-fixture-value"
+    assert all(os.environ[key] == "inert-fixture-value" for key in blocked_keys)
 
 
 def test_wrapper_does_not_call_makepkg_when_scan_blocks(tmp_path):
@@ -700,6 +813,114 @@ def test_wrapper_smart_auto_uses_verified_local_db_context_when_proven(tmp_path)
     assert report["fast_path_decision"]["technical_details"]["trust_boundary_diff"]["classification"] == "likely_normal_version_bump"
 
 
+def _write_repo_binary_wrapper_fixture(root, *, execute=False):
+    root.mkdir()
+    payload = root / "payload"
+    payload.write_bytes(b"\x7fELF" + b"inert repository fixture")
+    action = (
+        '  "$startdir/payload" --fixture\n'
+        if execute
+        else '  install -Dm755 "$startdir/payload" "$pkgdir/usr/bin/payload"\n'
+    )
+    (root / "PKGBUILD").write_text(
+        "pkgname=repo-binary-fixture\npkgver=1\npackage() {\n" + action + "}\n",
+        encoding="utf-8",
+    )
+    return payload
+
+
+def test_wrapper_requires_review_for_installed_repo_local_binary(tmp_path):
+    work = tmp_path / "work"
+    _write_repo_binary_wrapper_fixture(work)
+    factory, created = real_engine_factory(tmp_path, analyzers=[])
+    makepkg_calls = []
+
+    code = run(
+        [],
+        cwd=work,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner([], makepkg_calls),
+        review_store=ReviewDecisionStore(
+            tmp_path.parent / (tmp_path.name + "-state") / "review.db"
+        ),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == EXIT_MANUAL_REVIEW
+    assert makepkg_calls == []
+    assert any(
+        item["rule_id"] == "AUR-REPO-OPAQUE-BINARY-001"
+        for item in created[0].last_report["findings"]
+    )
+
+
+def test_wrapper_hard_blocks_direct_repo_local_binary_execution(tmp_path):
+    work = tmp_path / "work"
+    _write_repo_binary_wrapper_fixture(work, execute=True)
+    factory, created = real_engine_factory(tmp_path, analyzers=[])
+    makepkg_calls = []
+
+    code = run(
+        [],
+        cwd=work,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner([], makepkg_calls),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == EXIT_SCAN_BLOCKED
+    assert makepkg_calls == []
+    assert any(
+        item["rule_id"] == "AUR-REPO-OPAQUE-BINARY-EXEC-001"
+        for item in created[0].last_report["findings"]
+    )
+
+
+def test_wrapper_rechecks_repo_binary_after_review_before_makepkg(tmp_path):
+    work = tmp_path / "work"
+    payload = _write_repo_binary_wrapper_fixture(work)
+    factory, created = real_engine_factory(tmp_path, analyzers=[])
+    store = ReviewDecisionStore(
+        tmp_path.parent / (tmp_path.name + "-state") / "review.db"
+    )
+
+    first_code = run(
+        [],
+        cwd=work,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner([], []),
+        review_store=store,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+    assert first_code == EXIT_MANUAL_REVIEW
+    token = created[0].last_report["review_token"]
+    makepkg_calls = []
+
+    def replace_before_handoff():
+        payload.write_bytes(b"\x7fELF" + b"changed inert fixture")
+        return "/usr/bin/makepkg"
+
+    second_code = run(
+        ["--aurascan-accept-review", token],
+        cwd=work,
+        engine_factory=factory,
+        makepkg_locator=replace_before_handoff,
+        subprocess_run=fake_makepkg_runner([], makepkg_calls),
+        review_store=store,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert second_code == EXIT_SCAN_BLOCKED
+    assert makepkg_calls == []
+
+
 def test_wrapper_suspicious_update_fixture_requires_review_and_skips_makepkg(tmp_path):
     work = copy_fixture(tmp_path, "suspicious-update", "current")
     previous = FIXTURES / "suspicious-update" / "previous" / "PKGBUILD"
@@ -924,14 +1145,42 @@ def test_wrapper_revalidates_input_immediately_before_makepkg(tmp_path):
     assert order == ["scan"]
 
 
+def test_wrapper_rechecks_input_after_makepkg_tool_revalidation(tmp_path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text("pkgname=demo\npkgver=1\n", encoding="utf-8")
+    order = []
+    factory, _created = fake_engine_factory(order)
+    makepkg_calls = []
+
+    def mutating_revalidation(_tool):
+        pkgbuild.write_text("pkgname=changed\npkgver=2\n", encoding="utf-8")
+
+    code = run(
+        [],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        makepkg_tool_revalidate=mutating_revalidation,
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == EXIT_SCAN_BLOCKED
+    assert makepkg_calls == []
+    assert order == ["scan"]
+
+
 def test_valid_review_token_allows_makepkg_and_records_sqlite_decision(tmp_path):
     (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1.0\n")
-    store = ReviewDecisionStore(tmp_path / "review.db")
+    store = ReviewDecisionStore(
+        tmp_path.parent / (tmp_path.name + "-state") / "review.db"
+    )
     order = []
     first_factory, first_created = fake_engine_factory(order, report=manual_review_report())
 
     first_code = run(
-        [],
+        ["--install", "--noconfirm"],
         cwd=tmp_path,
         engine_factory=first_factory,
         makepkg_locator=lambda: "/usr/bin/makepkg",
@@ -974,6 +1223,42 @@ def test_valid_review_token_allows_makepkg_and_records_sqlite_decision(tmp_path)
     assert decisions[0].reason == "reviewed upstream change"
     assert decisions[0].one_time is True
     assert decisions[0].used_at is not None
+
+
+def test_review_token_is_bound_to_safe_makepkg_arguments(tmp_path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1.0\n", encoding="utf-8")
+    store = ReviewDecisionStore(tmp_path / "review.db")
+    order = []
+    first_factory, first_created = fake_engine_factory(order, report=manual_review_report())
+
+    assert run(
+        ["--syncdeps"],
+        cwd=tmp_path,
+        engine_factory=first_factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, []),
+        review_store=store,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    ) == EXIT_MANUAL_REVIEW
+    token = first_created[0][1].last_report["review_token"]
+
+    makepkg_calls = []
+    second_factory, second_created = fake_engine_factory(order, report=manual_review_report())
+    code = run(
+        ["--aurascan-accept-review", token, "--install"],
+        cwd=tmp_path,
+        engine_factory=second_factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        review_store=store,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == EXIT_MANUAL_REVIEW
+    assert makepkg_calls == []
+    assert second_created[0][1].last_report["acceptance_status"] == "token_mismatch"
 
 
 def test_invalid_review_token_blocks_makepkg(tmp_path):
@@ -1203,7 +1488,9 @@ def test_non_acceptance_blockers_include_clamav_checksum_signature_archive_and_b
 
 def test_one_time_acceptance_cannot_be_reused(tmp_path):
     (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1.0\n")
-    store = ReviewDecisionStore(tmp_path / "review.db")
+    store = ReviewDecisionStore(
+        tmp_path.parent / (tmp_path.name + "-state") / "review.db"
+    )
     order = []
     first_factory, first_created = fake_engine_factory(order, report=manual_review_report())
 
@@ -1253,7 +1540,9 @@ def test_one_time_acceptance_cannot_be_reused(tmp_path):
 
 def test_remembered_exact_scan_acceptance_can_be_reused_for_identical_fingerprint(tmp_path):
     (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1.0\n")
-    store = ReviewDecisionStore(tmp_path / "review.db")
+    store = ReviewDecisionStore(
+        tmp_path.parent / (tmp_path.name + "-state") / "review.db"
+    )
     order = []
     first_factory, first_created = fake_engine_factory(order, report=manual_review_report())
 
@@ -1500,7 +1789,9 @@ def test_revoke_unknown_decision_gives_friendly_error(tmp_path):
 
 def test_revoked_review_decision_cannot_be_used(tmp_path):
     (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1.0\n")
-    store = ReviewDecisionStore(tmp_path / "review.db")
+    store = ReviewDecisionStore(
+        tmp_path.parent / (tmp_path.name + "-state") / "review.db"
+    )
     order = []
     first_factory, first_created = fake_engine_factory(order, report=manual_review_report())
 
@@ -1556,7 +1847,9 @@ def test_revoked_review_decision_cannot_be_used(tmp_path):
 
 def test_expired_review_decision_cannot_be_used(tmp_path):
     (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1.0\n")
-    store = ReviewDecisionStore(tmp_path / "review.db")
+    store = ReviewDecisionStore(
+        tmp_path.parent / (tmp_path.name + "-state") / "review.db"
+    )
     order = []
     first_factory, first_created = fake_engine_factory(order, report=manual_review_report())
 
@@ -1635,12 +1928,12 @@ def test_wrapper_json_manual_review_required_includes_token_and_scan_report(tmp_
 
 def test_wrapper_json_accepted_review_includes_decision_and_makepkg_status(tmp_path):
     (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1.0\n")
-    store = ReviewDecisionStore(tmp_path / "review.db")
+    store = ReviewDecisionStore(tmp_path / ".cache" / "review.db")
     order = []
     first_factory, first_created = fake_engine_factory(order, report=manual_review_report())
 
     run(
-        [],
+        ["--install"],
         cwd=tmp_path,
         engine_factory=first_factory,
         makepkg_locator=lambda: "/usr/bin/makepkg",

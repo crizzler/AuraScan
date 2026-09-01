@@ -11,6 +11,7 @@ from aurascan.analyzers.dynamic import DynamicSandboxAnalyzer
 from aurascan.analyzers.deterministic import DeterministicAnalyzer
 from aurascan.analyzers.deep_static import DeepStaticAnalyzer
 from aurascan.analyzers.history import HistoryAnalyzer
+from aurascan.analyzers.repository_provenance import RepositoryProvenanceAnalyzer
 from aurascan.analyzers.source_metadata import SourceMetadataAnalyzer
 from aurascan.core.install_hook import (
     INSTALL_HOOK_RESOLVED,
@@ -69,10 +70,11 @@ class AuraScanEngine:
         self.last_scan_input_digest = ""
         self.last_scan_input = None
         self.scanner_version = "2.5.0"
-        self.rule_version = "1.4.0"
+        self.rule_version = "1.5.0"
         self.cache = ScanCache()
         self.risk_engine = RiskEngine()
         self.trust_diff_adapter = HistoryTrustDiffAdapter()
+        self.repository_provenance_analyzer = RepositoryProvenanceAnalyzer()
         self.analyzers = [
             DeterministicAnalyzer(),
             HistoryAnalyzer(),
@@ -245,10 +247,23 @@ class AuraScanEngine:
             ))
             is_safe = False
 
+        repository_result = self.repository_provenance_analyzer.analyze_scan_input(
+            pkgbuild_path,
+            content,
+            install_hook,
+            scan_input.repository_snapshot,
+            pkg_name=pkg_name,
+            pkg_ver=pkg_ver,
+        )
+        all_findings.extend(repository_result.findings)
+        if not repository_result.is_safe:
+            is_safe = False
+
         update_decision = self._prepare_update_decision(
             pkgbuild_path,
             content,
             install_hook_resolution=install_hook,
+            repository_snapshot=scan_input.repository_snapshot,
         )
         if update_decision and update_decision.action == UpdateFastPathAction.skip_update_scan:
             report = self._build_report(
@@ -293,6 +308,7 @@ class AuraScanEngine:
                     pkgbuild_path,
                     content,
                     install_hook_resolution=install_hook,
+                    repository_snapshot=scan_input.repository_snapshot,
                 )
             else:
                 result = analyzer.analyze_pkgbuild(pkgbuild_path, content)
@@ -439,6 +455,7 @@ class AuraScanEngine:
         pkgbuild_path: str,
         content: str,
         install_hook_resolution: InstallHookResolution = None,
+        repository_snapshot=None,
     ):
         if self.update_scan_policy == UpdateScanPolicy.full and self.scan_context == ScanContext.unknown:
             return None
@@ -452,6 +469,7 @@ class AuraScanEngine:
                 pkgbuild_path,
                 content,
                 install_hook_resolution=install_hook_resolution,
+                repository_snapshot=repository_snapshot,
             )
             package_key = history.package_key_for_snapshot(current_snapshot)
             if package_key:

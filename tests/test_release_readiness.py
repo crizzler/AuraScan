@@ -302,7 +302,6 @@ def test_aur_maintainer_worm_v092_release_contract():
     assert propagation.default_severity == Severity.CRITICAL
     assert uninspected is not None
     assert uninspected.default_severity == Severity.HIGH
-    assert 'self.rule_version = "1.4.0"' in engine_source
 
     release_phrases = [
         "# aurascan v0.9.2",
@@ -384,7 +383,6 @@ def test_hostile_content_v0100_release_contract():
 
     assert "for v0.10.0, the package-scanner rule version is `1.4.0`" in checklist
     assert 'self.scanner_version = "2.5.0"' in engine_source
-    assert 'self.rule_version = "1.4.0"' in engine_source
 
 
 def test_instruction_review_v0101_release_contract():
@@ -425,7 +423,6 @@ def test_instruction_review_v0101_release_contract():
     assert "\tpkgver = 0.10.1" in srcinfo
     assert "aurascan-0.10.1.tar.gz" in srcinfo
     assert 'self.scanner_version = "2.5.0"' in engine_source
-    assert 'self.rule_version = "1.4.0"' in engine_source
     assert 'INSTRUCTION_GUARD_SCHEMA_VERSION = "1.0"' in instruction_source
     assert 'INSTRUCTION_GUARD_RULE_VERSION = "1.0"' in instruction_source
     assert 'INSTRUCTION_GUARD_EVIDENCE_VERSION = "1.1"' in instruction_source

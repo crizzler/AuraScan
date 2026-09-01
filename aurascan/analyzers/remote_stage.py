@@ -47,6 +47,7 @@ class _ShellCommand(NamedTuple):
     arguments: Tuple[str, ...]
     line_number: int
     pipeline_from_previous: bool = False
+    assignments: Tuple[str, ...] = ()
 
 
 class _Artifact(NamedTuple):
@@ -61,6 +62,8 @@ class _Artifact(NamedTuple):
 _MAX_INPUT_CHARS = 5 * 1024 * 1024
 _MAX_COMMANDS = 16384
 _MAX_CONSTANTS = 4096
+_MAX_WRAPPER_SPLIT_TOKENS = 256
+_MAX_WRAPPER_SPLITS = 4
 _ASSIGNMENT = re.compile(
     r"^[ \t]*(?:(?:export|local|readonly)[ \t]+)?"
     r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>[^\n]+?)[ \t]*$"
@@ -411,12 +414,13 @@ def _collect_commands(
         if malformed:
             return False
         if parsed is not None:
-            executable, arguments, relative_offset = parsed
+            executable, arguments, relative_offset, assignments = parsed
             commands.append(_ShellCommand(
                 executable,
                 tuple(arguments),
                 _line_number(line_starts, start + relative_offset),
                 pipeline_from_previous,
+                tuple(assignments),
             ))
             if len(commands) > _MAX_COMMANDS:
                 return False
@@ -434,7 +438,7 @@ def _collect_commands(
 
 def _parse_command(
     segment: str,
-) -> Tuple[Optional[Tuple[str, List[str], int]], bool]:
+) -> Tuple[Optional[Tuple[str, List[str], int, List[str]]], bool]:
     try:
         tokens = shlex.split(segment, comments=False, posix=True)
     except ValueError:
@@ -443,12 +447,90 @@ def _parse_command(
     if not tokens:
         return None, False
     index = 0
+    assignments: List[str] = []
     while index < len(tokens) and tokens[index] in _CONTROL_WORDS:
         index += 1
     while index < len(tokens) and _SHELL_ASSIGNMENT_TOKEN.fullmatch(tokens[index]):
+        assignments.append(tokens[index])
         index += 1
+    wrapper_splits = 0
     while index < len(tokens):
         token = _basename(tokens[index])
+        if token == "exec":
+            index += 1
+            while index < len(tokens):
+                value = tokens[index]
+                if value == "--":
+                    index += 1
+                    break
+                if value == "-a":
+                    if index + 1 >= len(tokens):
+                        return None, False
+                    index += 2
+                    continue
+                if value in {"-c", "-l"} or (
+                    value.startswith("-")
+                    and value != "-"
+                    and set(value[1:]) <= {"c", "l"}
+                ):
+                    index += 1
+                    continue
+                if value.startswith("-"):
+                    # Unknown option arity cannot prove a wrapped executable.
+                    return None, True
+                break
+            continue
+        if token == "command":
+            index += 1
+            query_only = False
+            while index < len(tokens):
+                value = tokens[index]
+                if value == "--":
+                    index += 1
+                    break
+                if re.fullmatch(r"-[pVv]+", value):
+                    query_only = query_only or "v" in value or "V" in value
+                    index += 1
+                    continue
+                if value.startswith("-"):
+                    # Unsupported builtin options cannot establish an
+                    # executable operand.  Bash rejects them before running
+                    # any following path, so this is a complete inert command.
+                    return None, False
+                break
+            if query_only:
+                # ``command -v`` and ``command -V`` query command lookup; the
+                # following token is data, never an executed command.
+                return None, False
+            continue
+        if token == "time":
+            index += 1
+            while index < len(tokens):
+                value = tokens[index]
+                if value == "--":
+                    index += 1
+                    break
+                if value in {"-o", "--output", "-f", "--format"}:
+                    if index + 1 >= len(tokens):
+                        return None, False
+                    index += 2
+                    continue
+                if value.startswith(("--output=", "--format=")) or (
+                    value.startswith(("-o", "-f"))
+                    and value not in {"-o", "-f"}
+                ):
+                    index += 1
+                    continue
+                if value in {
+                    "-a", "--append", "-p", "--portability", "-q", "--quiet",
+                    "-v", "--verbose", "-V", "--version", "--help",
+                }:
+                    index += 1
+                    continue
+                if value.startswith("-"):
+                    return None, True
+                break
+            continue
         if token in _WRAPPERS:
             index += 1
             while index < len(tokens) and tokens[index].startswith("-"):
@@ -459,10 +541,34 @@ def _parse_command(
             while index < len(tokens):
                 value = tokens[index]
                 if _SHELL_ASSIGNMENT_TOKEN.fullmatch(value):
+                    assignments.append(value)
                     index += 1
                     continue
-                if value in {"-C", "--chdir", "-u", "--unset", "-S", "--split-string"}:
+                if value in {"-S", "--split-string"}:
+                    if index + 1 >= len(tokens):
+                        return None, True
+                    split_tokens = _bounded_env_split_tokens(tokens[index + 1])
+                    if split_tokens is None or wrapper_splits >= _MAX_WRAPPER_SPLITS:
+                        return None, True
+                    tokens[index : index + 2] = split_tokens
+                    wrapper_splits += 1
+                    continue
+                if value.startswith("--split-string="):
+                    split_tokens = _bounded_env_split_tokens(value.split("=", 1)[1])
+                    if split_tokens is None or wrapper_splits >= _MAX_WRAPPER_SPLITS:
+                        return None, True
+                    tokens[index : index + 1] = split_tokens
+                    wrapper_splits += 1
+                    continue
+                if value in {
+                    "-C", "--chdir", "-u", "--unset", "-a", "--argv0",
+                }:
+                    if index + 1 >= len(tokens):
+                        return None, True
                     index += 2
+                    continue
+                if value.startswith(("--chdir=", "--unset=", "--argv0=")):
+                    index += 1
                     continue
                 if value.startswith("-"):
                     index += 1
@@ -474,7 +580,34 @@ def _parse_command(
         return None, False
     executable = tokens[index]
     relative = segment.find(executable)
-    return (executable, tokens[index + 1 :], max(0, relative)), False
+    return (
+        executable,
+        tokens[index + 1 :],
+        max(0, relative),
+        assignments,
+    ), False
+
+
+def _bounded_env_split_tokens(value: str) -> Optional[List[str]]:
+    """Parse one literal GNU ``env -S`` value without shell expansion."""
+
+    if not value or len(value) > _MAX_INPUT_CHARS or "`" in value or "$(" in value:
+        return None
+    scrubbed = _VARIABLE_REFERENCE.sub(
+        lambda match: "" if (match.group("braced") or match.group("plain")) in {
+            "PWD", "pkgbuilddir", "pkgdir", "srcdir", "startdir",
+        } else "$",
+        value,
+    )
+    if "$" in scrubbed:
+        return None
+    try:
+        split_tokens = shlex.split(value, comments=False, posix=True)
+    except ValueError:
+        return None
+    if not split_tokens or len(split_tokens) > _MAX_WRAPPER_SPLIT_TOKENS:
+        return None
+    return split_tokens
 
 
 def _split_attached_input_redirections(tokens: Sequence[str]) -> List[str]:

@@ -4,14 +4,20 @@ import os
 import re
 import shlex
 import stat
+import urllib.parse
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable, List, NamedTuple, Optional, Sequence, Tuple
 
 from aurascan.core.config import MAX_SCRIPT_SIZE
+from aurascan.core.repository_provenance import (
+    RepositorySnapshot,
+    capture_repository_snapshot,
+)
 
 
 INSTALL_HOOK_RESOLVER_VERSION = "1.0"
+PACKAGE_SCAN_INPUT_VERSION = "2.0"
 INSTALL_HOOK_NONE = "none"
 INSTALL_HOOK_RESOLVED = "resolved"
 INSTALL_HOOK_UNINSPECTED = "uninspected"
@@ -26,6 +32,7 @@ _DECLARATION_BUILTINS = {"declare", "export", "local", "readonly", "typeset"}
 _LEADING_RESERVED_WORDS = {"!", "do", "elif", "else", "if", "then", "until", "while"}
 _MAX_RELATIVE_PATH_BYTES = 4096
 _MAX_PATH_COMPONENTS = 64
+_SIMPLE_STDOUT_REDIRECTION_MARKER = "\x00AURASCAN_STDOUT_REDIRECTION\x00"
 
 
 @dataclass(frozen=True)
@@ -47,11 +54,12 @@ class InstallHookResolution:
 
 @dataclass(frozen=True)
 class PackageScanInput:
-    """One immutable PKGBUILD/install-hook snapshot used by a scan decision."""
+    """One immutable package-repository snapshot used by a scan decision."""
 
     pkgbuild_bytes: bytes
     pkgbuild_content: str
     install_hook: InstallHookResolution
+    repository_snapshot: RepositorySnapshot
     input_digest: str
 
 
@@ -81,6 +89,11 @@ class _PreparedShellText(NamedTuple):
     dynamic_install_lines: Tuple[int, ...] = ()
 
 
+class _DeclaredSourceCheckoutPaths(NamedTuple):
+    files: Tuple[str, ...]
+    vcs_directories: Tuple[str, ...]
+
+
 def capture_package_scan_input(
     pkgbuild_path: Path,
     *,
@@ -98,12 +111,175 @@ def capture_package_scan_input(
         allow_legacy_install=allow_legacy_install,
         max_bytes=max_bytes,
     )
+    excluded_paths = {pkgbuild_path.name}
+    if resolution.inspectable and resolution.path is not None:
+        try:
+            excluded_paths.add(str(resolution.path.relative_to(pkgbuild_path.parent)))
+        except ValueError:
+            # The resolver already constrains literal hooks beneath the package
+            # directory.  Preserve a fail-closed repository capture if that
+            # invariant is ever violated rather than broadening an exclusion.
+            pass
+    declared_source_paths = _declared_source_checkout_paths(
+        pkgbuild_path,
+        content,
+    )
+    from aurascan.analyzers.repository_provenance import (
+        collect_required_repository_paths,
+    )
+
+    required_repository_paths = collect_required_repository_paths(
+        (
+            content,
+            resolution.content if resolution.inspectable else "",
+        ),
+        pkgbuild_path.parent,
+    )
+    repository_snapshot = capture_repository_snapshot(
+        pkgbuild_path.parent,
+        excluded_relative_paths=declared_source_paths.files,
+        excluded_subtree_relative_paths=declared_source_paths.vcs_directories,
+        independently_bound_relative_paths=excluded_paths,
+        required_relative_paths=required_repository_paths.paths,
+        required_paths_complete=required_repository_paths.complete,
+    )
+    try:
+        verified_pkgbuild_bytes = _read_pkgbuild_snapshot(
+            pkgbuild_path,
+            max_bytes=max_bytes,
+        )
+    except PackageScanInputError as exc:
+        raise PackageScanInputError("replaced_during_capture") from exc
+    if verified_pkgbuild_bytes != pkgbuild_bytes:
+        raise PackageScanInputError("replaced_during_capture")
+    verified_resolution = resolve_install_hook(
+        pkgbuild_path,
+        content,
+        allow_legacy_install=allow_legacy_install,
+        max_bytes=max_bytes,
+    )
+    if verified_resolution.input_digest != resolution.input_digest:
+        raise PackageScanInputError("replaced_during_capture")
     return PackageScanInput(
         pkgbuild_bytes=pkgbuild_bytes,
         pkgbuild_content=content,
         install_hook=resolution,
-        input_digest=build_scan_input_digest(pkgbuild_bytes, resolution),
+        repository_snapshot=repository_snapshot,
+        input_digest=build_scan_input_digest(
+            pkgbuild_bytes,
+            resolution,
+            repository_snapshot,
+        ),
     )
+
+
+def _declared_source_checkout_paths(
+    pkgbuild_path: Path,
+    content: str,
+) -> _DeclaredSourceCheckoutPaths:
+    """Return only makepkg checkout-root filenames proven by static parsing.
+
+    ``source_acquisition`` imports shell-token helpers from this module, so the
+    parser import must remain local to avoid a module-import cycle.  An
+    ambiguous declaration deliberately yields no exclusions: repository
+    artifacts then remain visible to the provenance analyzer while the source
+    parser's own blocker reports the incomplete metadata inspection.
+    """
+
+    from aurascan.core.source_acquisition import SourceParser
+
+    references, findings = SourceParser().parse(str(pkgbuild_path), content)
+    if any(finding.rule_id == "SOURCE-PARSER-AMBIGUOUS" for finding in findings):
+        return _DeclaredSourceCheckoutPaths((), ())
+
+    filenames = set()
+    vcs_directories = set()
+    for reference in references:
+        filename = _makepkg_checkout_relative_path(reference)
+        if filename:
+            if _reference_uses_vcs_directory(reference):
+                vcs_directories.add(filename)
+            else:
+                filenames.add(filename)
+    return _DeclaredSourceCheckoutPaths(
+        tuple(sorted(filenames)),
+        tuple(sorted(vcs_directories)),
+    )
+
+
+def _declared_source_filenames(pkgbuild_path: Path, content: str) -> Tuple[str, ...]:
+    """Compatibility helper returning source-owned regular checkout files."""
+
+    return _declared_source_checkout_paths(pkgbuild_path, content).files
+
+
+def _reference_uses_vcs_directory(reference: object) -> bool:
+    resolved = str(getattr(reference, "resolved", "") or "")
+    kind_value = str(getattr(getattr(reference, "kind", ""), "value", ""))
+    if kind_value.startswith("git"):
+        return True
+    parsed = urllib.parse.urlparse(resolved)
+    protocol = parsed.scheme.lower().split("+", 1)[0]
+    return protocol in {"bzr", "git", "hg", "svn"}
+
+
+def _makepkg_checkout_relative_path(reference: object) -> str:
+    """Model makepkg get_filename/get_filepath without sanitizing aliases."""
+
+    original = str(getattr(reference, "original", "") or "")
+    resolved = str(getattr(reference, "resolved", "") or "")
+    unexpanded = str(
+        getattr(reference, "unexpanded_original", original) or original
+    )
+    proven_static = getattr(reference, "checkout_name_proven_static", None)
+    if proven_static is False:
+        return ""
+    if proven_static is None and any(
+        marker in original or marker in resolved or marker in unexpanded
+        for marker in ("$", "`")
+    ):
+        return ""
+    if "::" in original:
+        candidate = original.split("::", 1)[0]
+    else:
+        kind_value = str(getattr(getattr(reference, "kind", ""), "value", ""))
+        parsed = urllib.parse.urlparse(resolved)
+        vcs_protocol = (
+            kind_value.startswith("git")
+            or parsed.scheme.split("+", 1)[0]
+            in {"bzr", "fossil", "git", "hg", "svn"}
+        )
+        if vcs_protocol:
+            protocol = parsed.scheme.split("+", 1)[0]
+            candidate = resolved.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+            candidate = candidate.rsplit("/", 1)[-1]
+            if protocol == "bzr" and "lp:" in candidate:
+                candidate = candidate.split("lp:", 1)[-1]
+            if protocol == "fossil":
+                candidate += ".fossil"
+            if (kind_value.startswith("git") or protocol == "git") and ".git" in candidate:
+                candidate = candidate.split(".git", 1)[0]
+        else:
+            # Match makepkg's literal ${netfile##*/}; ordinary URLs retain a
+            # query/fragment and a trailing slash produces no filename.
+            candidate = resolved.rsplit("/", 1)[-1]
+    if not candidate or candidate.startswith("/") or "\\" in candidate:
+        return ""
+    path = PurePosixPath(candidate)
+    if (
+        not path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or any(
+            ord(character) < 32 or ord(character) == 127
+            for character in candidate
+        )
+    ):
+        return ""
+    try:
+        encoded = os.fsencode(candidate)
+    except UnicodeError:
+        return ""
+    return candidate if len(encoded) <= _MAX_RELATIVE_PATH_BYTES else ""
 
 
 def resolve_install_hook(
@@ -184,11 +360,22 @@ def resolve_install_hook(
     )
 
 
-def build_scan_input_digest(pkgbuild_bytes: bytes, resolution: InstallHookResolution) -> str:
+def build_scan_input_digest(
+    pkgbuild_bytes: bytes,
+    resolution: InstallHookResolution,
+    repository_snapshot: Optional[RepositorySnapshot] = None,
+) -> str:
     """Bind a cache/review input identity to the exact bytes that were scanned."""
     material = {
         "install_hook_input_digest": resolution.input_digest,
+        "package_scan_input_version": PACKAGE_SCAN_INPUT_VERSION,
         "pkgbuild_sha256": hashlib.sha256(pkgbuild_bytes).hexdigest(),
+        "repository_input_digest": (
+            repository_snapshot.input_digest if repository_snapshot is not None else ""
+        ),
+        "repository_status": (
+            repository_snapshot.status if repository_snapshot is not None else "legacy"
+        ),
         "resolver_version": INSTALL_HOOK_RESOLVER_VERSION,
     }
     encoded = json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -393,7 +580,20 @@ def _segment_may_assign_install(segment: str) -> bool:
     ) is not None
 
 
-def _iter_shell_segments(content: str) -> Iterable[Tuple[str, int]]:
+def _iter_shell_segments(
+    content: str,
+    *,
+    preserve_simple_stdout_redirections: bool = False,
+) -> Iterable[Tuple[str, int]]:
+    """Yield bounded shell segments without evaluating their contents.
+
+    Most callers deliberately discard redirections because they are not part
+    of assignment discovery.  The repository-provenance analyzer has one
+    narrower need: recognizing an exact ``cat SOURCE > DESTINATION`` copy.  A
+    caller may therefore retain only a plain stdout ``>`` and its single
+    operand.  Descriptor redirects, append/clobber forms, heredocs, and every
+    input redirect keep the historical stripping behavior.
+    """
     buffer: List[str] = []
     quote = ""
     escaped = False
@@ -497,15 +697,53 @@ def _iter_shell_segments(content: str) -> Iterable[Tuple[str, int]]:
         if (
             char in "<>" or (char == "&" and content.startswith("&>", index))
         ) and array_depth == 0:
+            redirection_end = _skip_redirection(content, index)
+            adjacent_descriptor = (
+                char == ">"
+                and index > 0
+                and content[index - 1].isdigit()
+                and re.search(r"(?:^|\s)[0-9]+$", "".join(buffer)) is not None
+            )
+            plain_stdout = (
+                preserve_simple_stdout_redirections
+                and char == ">"
+                and not adjacent_descriptor
+                and not content.startswith((">>", ">&", ">|"), index)
+            )
+            if plain_stdout:
+                buffer.append(" ")
+                buffer.extend(_SIMPLE_STDOUT_REDIRECTION_MARKER)
+                buffer.append(" ")
+                buffer.extend(content[index + 1:redirection_end])
+                buffer.append(" ")
+                at_word_start = True
+                index = redirection_end
+                continue
             if buffer:
                 joined = "".join(buffer)
                 trimmed = re.sub(r"(?:^|\s)[0-9]+$", " ", joined)
                 buffer = list(trimmed)
             buffer.append(" ")
             at_word_start = True
-            index = _skip_redirection(content, index)
+            index = redirection_end
             continue
-        if char in ";|&(){}":
+        brace_operator = (
+            char in "{}"
+            and at_word_start
+            and (
+                index + 1 >= len(content)
+                or content[index + 1].isspace()
+                or content[index + 1] in ";|&(){}"
+            )
+        )
+        if char == "{" and content.startswith("{}", index):
+            if not buffer:
+                segment_line = line_number
+            buffer.extend(("{", "}"))
+            at_word_start = False
+            index += 2
+            continue
+        if char in ";|&()" or brace_operator:
             item = flush()
             if item is not None:
                 yield item
@@ -878,51 +1116,14 @@ class _InstallHookReadError(Exception):
 
 
 def _read_pkgbuild_snapshot(path: Path, *, max_bytes: int) -> bytes:
-    file_fd = None
     try:
-        try:
-            file_fd = os.open(
-                str(path),
-                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0),
-            )
-            opened = os.fstat(file_fd)
-        except OSError:
-            raise PackageScanInputError("missing_or_unreadable")
-        if not stat.S_ISREG(opened.st_mode):
-            raise PackageScanInputError("not_regular")
-        if opened.st_size < 0 or opened.st_size > max_bytes:
-            raise PackageScanInputError("oversized")
-
-        chunks: List[bytes] = []
-        total = 0
-        while True:
-            try:
-                chunk = os.read(file_fd, min(65536, max_bytes + 1 - total))
-            except InterruptedError:
-                continue
-            except OSError:
-                raise PackageScanInputError("read_failed")
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > max_bytes:
-                raise PackageScanInputError("oversized")
-
-        try:
-            after_fd = os.fstat(file_fd)
-            after_path = os.stat(str(path))
-        except OSError:
-            raise PackageScanInputError("replaced_during_read")
-        if _file_state(opened) != _file_state(after_fd) or _file_state(after_fd) != _file_state(after_path):
-            raise PackageScanInputError("replaced_during_read")
-        return b"".join(chunks)
-    finally:
-        if file_fd is not None:
-            try:
-                os.close(file_fd)
-            except OSError:
-                pass
+        return _read_regular_file_no_follow(
+            path.parent,
+            (path.name,),
+            max_bytes=max_bytes,
+        )
+    except _InstallHookReadError as exc:
+        raise PackageScanInputError(exc.code) from exc
 
 
 def _read_regular_file_no_follow(root: Path, parts: Sequence[str], *, max_bytes: int) -> bytes:

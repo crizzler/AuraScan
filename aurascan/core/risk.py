@@ -55,6 +55,10 @@ class RiskEngine:
         medium_non_ai = [
             f for f in normalized
             if f.severity == Severity.MEDIUM and f.source != FindingSource.ai_review
+            # Multiple entries from one repository artifact inventory are not
+            # independent behavior signals and must not self-promote a
+            # presence-only notice to HIGH.
+            and f.rule_id != "AUR-REPO-OPAQUE-ARTIFACT-001"
         ]
         if len(medium_non_ai) >= 3 and severity in (Severity.LOW, Severity.MEDIUM):
             severity = Severity.HIGH

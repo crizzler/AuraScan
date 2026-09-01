@@ -240,6 +240,30 @@ def test_exact_install_hook_identity_detects_target_change_with_same_content_has
     assert "install_hook_changed" in result.reason_codes
 
 
+def test_repository_only_identity_change_forces_full_scan_without_malware_claim():
+    previous = snapshot(
+        repository_input_digest="repository-a",
+        repository_status="complete",
+    )
+    current = snapshot(
+        repository_input_digest="repository-b",
+        repository_status="complete",
+    )
+
+    result = classify(previous, current)
+
+    assert result.classification == TrustBoundaryClassification.build_logic_changed
+    assert result.require_full_scan is True
+    assert result.allow_smart_fast_path is False
+    assert result.requires_manual_review is False
+    assert "repository_provenance_changed" in result.reason_codes
+    assert result.technical_details["repository_provenance"] == {
+        "previous_status": "complete",
+        "current_status": "complete",
+        "identity_changed": True,
+    }
+
+
 def test_legacy_install_hash_snapshot_is_compatible_with_new_exact_snapshot():
     previous = snapshot(install_file_hash="same-content")
     current = snapshot(

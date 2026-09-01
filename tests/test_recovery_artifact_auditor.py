@@ -191,6 +191,77 @@ def test_artifact_auditor_checks_host_identity_beyond_preview_window(tmp_path):
     assert b"defanged-host-identity" not in result.stderr
 
 
+def test_artifact_auditor_accepts_only_fixed_distribution_hostname_in_tree_and_tar(
+    tmp_path,
+):
+    iso = _release_files(tmp_path)
+    scan_root = tmp_path / "scan-root"
+    hostname = scan_root / "etc/hostname"
+    hostname.parent.mkdir(parents=True)
+    hostname.write_bytes(b"aurascan-recovery\n")
+
+    tree_result = _audit(iso, scan_root)
+    fixed_member = tarfile.TarInfo("etc/hostname")
+    tar_result = _audit_tar(
+        iso,
+        _tar_bytes((fixed_member, b"aurascan-recovery\n")),
+    )
+
+    assert tree_result.returncode == 0, tree_result.stderr.decode(
+        "utf-8", errors="replace"
+    )
+    assert tar_result.returncode == 0, tar_result.stderr.decode(
+        "utf-8", errors="replace"
+    )
+
+    auditor = _load_auditor()
+    empty_machine_id = tmp_path / "machine-id"
+    empty_machine_id.write_bytes(b"")
+    assert auditor._marker_values(
+        (), identity_paths=(hostname, empty_machine_id)
+    ) == ()
+
+    for invalid in (
+        b"",
+        b"\n",
+        b"archiso\n",
+        b"builder-host\n",
+        b"aurascan-recovery",
+    ):
+        hostname.write_bytes(invalid)
+        rejected_tree = _audit(iso, scan_root)
+        rejected_member = tarfile.TarInfo("etc/hostname")
+        rejected_tar = _audit_tar(
+            iso,
+            _tar_bytes((rejected_member, invalid)),
+        )
+        assert rejected_tree.returncode == 1
+        assert rejected_tar.returncode == 1
+        assert b"persistent host identity" in rejected_tree.stderr
+        assert b"persistent host identity" in rejected_tar.stderr
+        if invalid.strip():
+            assert invalid.strip() not in rejected_tree.stderr + rejected_tar.stderr
+
+
+def test_artifact_auditor_rejects_nonempty_machine_id_in_tree_and_tar(tmp_path):
+    iso = _release_files(tmp_path)
+    scan_root = tmp_path / "scan-root"
+    machine_id = scan_root / "etc/machine-id"
+    machine_id.parent.mkdir(parents=True)
+    identity = b"a" * 32 + b"\n"
+    machine_id.write_bytes(identity)
+
+    tree_result = _audit(iso, scan_root)
+    member = tarfile.TarInfo("etc/machine-id")
+    tar_result = _audit_tar(iso, _tar_bytes((member, identity)))
+
+    assert tree_result.returncode == 1
+    assert tar_result.returncode == 1
+    assert b"persistent host identity" in tree_result.stderr
+    assert b"persistent host identity" in tar_result.stderr
+    assert identity.strip() not in tree_result.stderr + tar_result.stderr
+
+
 def test_artifact_auditor_scans_tree_and_tar_member_names(tmp_path):
     iso = _release_files(tmp_path)
     marker = "fixture-private-marker"

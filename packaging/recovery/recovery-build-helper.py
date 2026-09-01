@@ -484,24 +484,51 @@ def validate_candidate(root: Path, version: str, released_at: str) -> None:
             raise BuildRefusal(".SRCINFO is not synchronized to the release candidate")
 
 
-def _ensure_root_owned_tree(root: Path, *, reject_symlinks: bool = False) -> None:
+def _ensure_root_owned_tree(
+    root: Path, *, label: str, reject_symlinks: bool = False
+) -> None:
     try:
         root_stat = root.lstat()
     except OSError as exc:
-        raise BuildRefusal("validation UKI work directory is unavailable") from exc
+        raise BuildRefusal("{} is unavailable".format(label)) from exc
     if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
-        raise BuildRefusal("validation UKI work path is not a no-follow directory")
-    for directory, directory_names, filenames in os.walk(str(root), followlinks=False):
+        raise BuildRefusal("{} is not a no-follow directory".format(label))
+    if root_stat.st_uid != 0:
+        raise BuildRefusal("{} is not root-owned".format(label))
+    if root_stat.st_mode & 0o022:
+        raise BuildRefusal("{} is group/world writable".format(label))
+
+    def fail_traversal(exc):
+        raise BuildRefusal(
+            "{} could not be traversed completely".format(label)
+        ) from exc
+
+    for directory, directory_names, filenames in os.walk(
+        str(root), followlinks=False, onerror=fail_traversal
+    ):
         current = Path(directory)
         entries = [current] + [current / item for item in directory_names + filenames]
         for entry in entries:
             metadata = entry.lstat()
             if reject_symlinks and stat.S_ISLNK(metadata.st_mode):
-                raise BuildRefusal("exact candidate snapshot contains a symlink")
+                raise BuildRefusal("{} contains a symlink".format(label))
             if metadata.st_uid != 0:
-                raise BuildRefusal("validation UKI input is not root-owned")
+                raise BuildRefusal("{} is not root-owned".format(label))
             if not stat.S_ISLNK(metadata.st_mode) and metadata.st_mode & 0o022:
-                raise BuildRefusal("validation UKI input is group/world writable")
+                raise BuildRefusal("{} is group/world writable".format(label))
+
+
+def _ensure_root_owned_directory(root: Path) -> None:
+    """Validate one canonical private root directory without walking siblings."""
+
+    root = Path(root)
+    _root_safe_components(root, include_final=True)
+    try:
+        metadata = root.lstat()
+    except OSError as exc:
+        raise BuildRefusal("validation UKI work directory is unavailable") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise BuildRefusal("validation UKI work path is not a no-follow directory")
 
 
 def _identity_markers(snapshot: Path, work: Path):
@@ -574,8 +601,14 @@ def build_validation_uki(
         raise BuildRefusal("validation UKI source commit is invalid")
     if not source_date_epoch.isdigit() or int(source_date_epoch) < 1:
         raise BuildRefusal("validation UKI source date is invalid")
-    _ensure_root_owned_tree(snapshot, reject_symlinks=True)
-    _ensure_root_owned_tree(work)
+    _ensure_root_owned_tree(
+        snapshot, label="exact candidate snapshot", reject_symlinks=True
+    )
+    # Archiso legitimately leaves package-owned modes throughout sibling work
+    # trees.  The UKI helper needs authority only over this canonical private
+    # parent and its newly created validation-uki child; do not reinterpret
+    # unrelated expanded-image permissions as a UKI input.
+    _ensure_root_owned_directory(work)
     for tool in (mkosi, ukify):
         metadata = tool.stat()
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0:
@@ -595,6 +628,17 @@ def build_validation_uki(
         raise BuildRefusal("recovery image code did not load from the exact candidate")
     recovery_cli.recovery_version = lambda: version
 
+    kernel_version, _pkgbase = recovery_boot.choose_recovery_kernel()
+    if not kernel_version:
+        raise BuildRefusal("no supported host kernel is available for validation UKI construction")
+    _ensure_root_owned_tree(
+        Path("/usr/lib/modules") / kernel_version,
+        label="selected kernel module tree",
+    )
+    _ensure_root_owned_tree(
+        Path("/usr/lib/firmware"), label="host firmware tree"
+    )
+
     uki_root = work / "validation-uki"
     if uki_root.exists() or uki_root.is_symlink():
         raise BuildRefusal("validation UKI output must not pre-exist")
@@ -604,12 +648,6 @@ def build_validation_uki(
     issue = _read_regular(overlay / "etc/issue", limit=4096).decode("utf-8", "strict")
     if "AuraScan Recovery {}\n".format(version) not in issue:
         raise BuildRefusal("validation UKI overlay does not identify the exact candidate version")
-
-    kernel_version, _pkgbase = recovery_boot.choose_recovery_kernel()
-    if not kernel_version:
-        raise BuildRefusal("no supported host kernel is available for validation UKI construction")
-    _ensure_root_owned_tree(Path("/usr/lib/modules") / kernel_version)
-    _ensure_root_owned_tree(Path("/usr/lib/firmware"))
     output = uki_root / "aurascan-recovery-{}-{}-validation-unsigned.efi".format(
         version, source_commit
     )
@@ -687,7 +725,7 @@ def build_validation_uki(
     sidecar.write_text("{}  {}\n".format(digest, output.name), encoding="ascii")
     os.chmod(output, 0o644)
     os.chmod(sidecar, 0o644)
-    _ensure_root_owned_tree(uki_root)
+    _ensure_root_owned_tree(uki_root, label="validation UKI output tree")
     return output
 
 

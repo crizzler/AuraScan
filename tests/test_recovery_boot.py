@@ -69,6 +69,15 @@ def test_uki_command_rejects_untrusted_kernel_version(tmp_path):
         raise AssertionError("unsafe kernel version was accepted")
 
 
+def test_uki_command_requires_caller_facing_efi_path(tmp_path):
+    try:
+        build_uki_command(tmp_path / "recovery.img", "6.12.1-arch1-1")
+    except ValueError as exc:
+        assert ".efi suffix" in str(exc)
+    else:
+        raise AssertionError("non-EFI recovery output was accepted")
+
+
 def test_recovery_kernel_prefers_newest_valid_lts_image(tmp_path):
     older = tmp_path / "6.12.1-lts"
     newer = tmp_path / "6.18.1-lts"
@@ -93,6 +102,10 @@ def test_uki_command_uses_supported_mkosi_initrd_profile_without_host_config_imp
     assert command[0] == "/usr/bin/mkosi"
     assert "--include=mkosi-initrd" in command
     assert "--directory=" in command
+    # mkosi's Output= setting is a prefix; Format=uki appends the .efi suffix.
+    assert "--output=recovery" in command
+    assert "--output=recovery.efi" not in command
+    assert f"--output-directory={tmp_path}" in command
     assert not any(item.startswith("--kernel-version=") for item in command)
     assert f"--extra-tree={overlay}:/" in command
     kernel_command_line = next(item for item in command if item.startswith("--kernel-command-line="))

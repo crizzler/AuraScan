@@ -463,6 +463,12 @@ fi
 
 /usr/bin/cp -a -- "$archiso_base"/. "$profile"/
 /usr/bin/cp -a -- "$profile_source"/airootfs/. "$profile/airootfs"/
+recovery_hostname="$profile/airootfs/etc/hostname"
+[[ -f "$recovery_hostname" && ! -L "$recovery_hostname" ]] || {
+  printf 'Archiso hostname input is not a no-follow regular file\n' >&2
+  exit 1
+}
+printf 'aurascan-recovery\n' > "$recovery_hostname"
 /usr/bin/install -d -o root -g root -m 0755 -- \
   "$profile/airootfs/etc/systemd/system/multi-user.target.wants"
 /usr/bin/ln -sfn /usr/lib/systemd/system/aurascan-recovery.service \

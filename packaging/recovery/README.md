@@ -17,6 +17,12 @@ symlinks, ignored files, and untracked files are refused. Do not elevate this
 script from a normal user's checkout—the shell would already have read
 user-mutable code before an in-script ownership check could help.
 
+Provision the build host itself with a supported kernel and the complete
+`linux-firmware` package set before starting. In particular,
+`/usr/lib/firmware` must exist as root-owned host input for the exact-candidate
+validation UKI; firmware packages installed later inside the Archiso image do
+not satisfy that host prerequisite.
+
 ```bash
 sudo -i
 REVIEWED_RC_COMMIT=replace-with-the-reviewed-40-lowercase-hex-commit

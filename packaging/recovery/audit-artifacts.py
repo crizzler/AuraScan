@@ -34,6 +34,7 @@ MAX_MARKERS = 64
 MIN_MARKER_BYTES = 8
 MAX_METADATA_FIELD_BYTES = 256 * 1024
 MAX_PAX_HEADERS_PER_ENTRY = 256
+RECOVERY_HOSTNAME = b"aurascan-recovery\n"
 
 _VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _SIDECAR_RE = re.compile(
@@ -366,7 +367,9 @@ def _normalized_link_destination(member_name: str, linkname: str, *, hardlink: b
 
 
 def _check_private_path(
-    relative: str, has_non_whitespace: Optional[bool] = None
+    relative: str,
+    has_non_whitespace: Optional[bool] = None,
+    content: Optional[bytes] = None,
 ) -> None:
     lower = relative.lower()
     private_exact = {
@@ -385,7 +388,11 @@ def _check_private_path(
         raise AuditFailure("expanded recovery root contains a saved network profile")
     if lower.startswith("var/lib/iwd/") and lower.endswith((".psk", ".8021x")):
         raise AuditFailure("expanded recovery root contains a saved wireless profile")
-    if lower in {"etc/hostname", "etc/machine-id"} and has_non_whitespace is not False:
+    if lower == "etc/hostname":
+        if content != RECOVERY_HOSTNAME:
+            raise AuditFailure("expanded recovery root contains persistent host identity")
+        return
+    if lower == "etc/machine-id" and has_non_whitespace is not False:
         raise AuditFailure("expanded recovery root contains persistent host identity")
 
 
@@ -458,7 +465,7 @@ def _audit_tree(root: Path, markers: Sequence[bytes], bounds: Bounds) -> None:
                         ):
                             raise AuditFailure("artifact file was replaced while opening")
                         with os.fdopen(descriptor, "rb", closefd=False) as handle:
-                            _, _captured, has_non_whitespace = _scan_stream(
+                            _, captured, has_non_whitespace = _scan_stream(
                                 handle, item_stat.st_size, markers
                             )
                         opened_after = os.fstat(descriptor)
@@ -491,7 +498,7 @@ def _audit_tree(root: Path, markers: Sequence[bytes], bounds: Bounds) -> None:
                         path_after.st_ctime_ns,
                     ):
                         raise AuditFailure("artifact file changed while reading")
-                    _check_private_path(relative, has_non_whitespace)
+                    _check_private_path(relative, has_non_whitespace, captured)
                 elif stat.S_ISLNK(item_stat.st_mode):
                     _check_private_path(relative)
                     if item_stat.st_size > MAX_SYMLINK_TARGET_BYTES:
@@ -580,10 +587,10 @@ def _audit_tar_stream(stream: BinaryIO, markers: Sequence[bytes], bounds: Bounds
                 extracted = archive.extractfile(member)
                 if extracted is None:
                     raise AuditFailure("expanded-root member could not be read")
-                _, _captured, has_non_whitespace = _scan_stream(
+                _, captured, has_non_whitespace = _scan_stream(
                     extracted, member.size, markers
                 )
-                _check_private_path(relative, has_non_whitespace)
+                _check_private_path(relative, has_non_whitespace, captured)
     except (tarfile.TarError, OSError, EOFError) as exc:
         raise AuditFailure("expanded-root archive stream is invalid or incomplete") from exc
 
@@ -613,6 +620,10 @@ def _marker_values(
             ).decode("utf-8", errors="strict").strip()
         except UnicodeError as exc:
             raise AuditFailure("host identity marker is not bounded UTF-8 text") from exc
+        if identity_path.name == "hostname" and identity == RECOVERY_HOSTNAME.decode(
+            "ascii"
+        ).strip():
+            continue
         candidates.append(("host identity", identity))
     seen = set()
     for source, candidate in candidates:

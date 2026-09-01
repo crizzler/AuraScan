@@ -236,6 +236,24 @@ def test_unsigned_log_requires_no_ready_and_narrow_firmware_rejection(tmp_path):
     )
     guard.evaluate_log(rejection, "firmware-rejection")
 
+    current_ovmf_rejection = tmp_path / "current-ovmf-rejection.log"
+    current_ovmf_rejection.write_bytes(
+        b'BdsDxe: failed to load Boot0002 "UEFI Misc Device" from '
+        b"PciRoot(0x0)/Pci(0x2,0x0): Access Denied -- rejected probably by Secure Boot\r\n"
+    )
+    guard.evaluate_log(current_ovmf_rejection, "firmware-rejection")
+
+    broad.write_bytes(b"guest reported Access Denied -- rejected probably by Secure Boot\n")
+    with pytest.raises(guard.GuardFailure, match="firmware-attributable"):
+        guard.evaluate_log(broad, "firmware-rejection")
+
+    broad.write_bytes(
+        b'BdsDxe: failed to load Boot0002 "UEFI Misc Device" from '
+        b"PciRoot(0x0)/Pci(0x2,0x0): Access Denied\n"
+    )
+    with pytest.raises(guard.GuardFailure, match="firmware-attributable"):
+        guard.evaluate_log(broad, "firmware-rejection")
+
     rejection.write_bytes(
         rejection.read_bytes() + b"AURASCAN_RECOVERY_READY\n"
     )

@@ -324,6 +324,73 @@ def test_launcher_exit_zero_without_exact_outcome_text_cannot_pass(tmp_path):
         )
 
 
+def test_launcher_independently_accepts_only_exact_current_ovmf_rejection(
+    tmp_path, monkeypatch
+):
+    launcher = _load("recovery_attestation_launcher_current_ovmf", LAUNCHER_PATH)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    monkeypatch.setattr(launcher, "DROP_UID", os.getuid())
+    monkeypatch.setattr(launcher, "DROP_GID", os.getgid())
+    ready = b"firmware output\nAURASCAN_RECOVERY_READY\n"
+    rejection = (
+        b'BdsDxe: failed to load Boot0002 "UEFI Misc Device" from '
+        b"PciRoot(0x0)/Pci(0x2,0x0): Access Denied -- rejected probably by Secure Boot\r\n"
+    )
+
+    def write_result(rejection_content):
+        evidence = []
+        for role, expectation, name, content in (
+            ("readiness", "ready", "recovery-smoke-readiness.log", ready),
+            (
+                "unsigned-rejection",
+                "firmware-rejection",
+                "recovery-smoke-unsigned-rejection.log",
+                rejection_content,
+            ),
+        ):
+            path = runtime / name
+            if path.exists():
+                path.chmod(0o600)
+            path.write_bytes(content)
+            path.chmod(0o400)
+            evidence.append(
+                {
+                    "role": role,
+                    "expect": expectation,
+                    "file": name,
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "size": len(content),
+                }
+            )
+        result = {
+            "schema": launcher.SMOKE_RESULT_SCHEMA,
+            "kind": "uki",
+            "mode": "secure-boot",
+            "outcome": "unsigned-rejection-and-signed-readiness",
+            "ready_marker": True,
+            "unsigned_rejection": True,
+            "serial_evidence": evidence,
+        }
+        result_path = runtime / launcher.SMOKE_RESULT_NAME
+        if result_path.exists():
+            result_path.chmod(0o600)
+        result_path.write_text(
+            json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        result_path.chmod(0o400)
+
+    write_result(rejection)
+    outcome = launcher._read_smoke_result(runtime, "uki", "secure-boot")
+    assert outcome["unsigned_rejection"] is True
+
+    broad = b"guest reported Access Denied -- rejected probably by Secure Boot\n"
+    write_result(broad)
+    with pytest.raises(launcher.LaunchRefusal, match="unsigned-rejection"):
+        launcher._read_smoke_result(runtime, "uki", "secure-boot")
+
+
 def test_minimal_bootstrap_verifies_candidate_code_before_exec():
     bootstrap = BOOTSTRAP_PATH.read_text(encoding="utf-8")
     assert "O_NOFOLLOW" in bootstrap

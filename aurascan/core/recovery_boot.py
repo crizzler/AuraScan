@@ -273,13 +273,18 @@ def build_uki_command(
 ) -> List[str]:
     if not SAFE_KERNEL_VERSION_RE.fullmatch(kernel_version):
         raise ValueError("invalid kernel version for recovery image")
+    if output_path.suffix != ".efi":
+        raise ValueError("recovery image output must use the .efi suffix")
+    output_prefix = output_path.name[: -len(output_path.suffix)]
+    if not output_prefix:
+        raise ValueError("recovery image output prefix is empty")
     modules = Path("/usr/lib/modules") / kernel_version
     command = [
         mkosi,
         "--force",
         "--directory=",
         "--format=uki",
-        f"--output={output_path.name}",
+        f"--output={output_prefix}",
         f"--output-directory={output_path.parent}",
         "--include=mkosi-initrd",
         f"--include={profile_path}",

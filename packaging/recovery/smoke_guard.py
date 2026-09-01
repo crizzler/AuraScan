@@ -74,7 +74,8 @@ _UKI_NAME = re.compile(r"[A-Za-z0-9._+-]+\.efi")
 _SIDECAR = re.compile(r"(?P<digest>[0-9a-f]{64})  (?P<name>[^\r\n]+)\n")
 _SIGNED_INVENTORY = re.compile(r"signature [1-9][0-9]*")
 _FIRMWARE_REJECTION = re.compile(
-    rb"(?m)^BdsDxe: failed to load Boot[0-9A-Fa-f]{4} [^\r\n]*: Security Violation\r?$"
+    rb"(?m)^BdsDxe: failed to load Boot[0-9A-Fa-f]{4} [^\r\n]*: "
+    rb"(?:Security Violation|Access Denied -- rejected probably by Secure Boot)\r?$"
 )
 _READY_LINE = re.compile(rb"(?m)^AURASCAN_RECOVERY_READY\r?$")
 

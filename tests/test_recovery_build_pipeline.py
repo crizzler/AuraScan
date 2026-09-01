@@ -195,6 +195,8 @@ def test_builder_refuses_stale_selection_and_sanitizes_release_processes():
         'assert_root_tree_safe "$snapshot_root" "Exact recovery candidate snapshot"'
     )
     assert snapshot_link_gate < snapshot_mode_normalization < snapshot_tree_gate
+    assert "Archiso hostname input is not a no-follow regular file" in builder
+    assert "printf 'aurascan-recovery\\n' > \"$recovery_hostname\"" in builder
     assert "Recovery ISO builds require a checkout without symlinks" in builder
     assert "--net --fork --kill-child=KILL --forward-signals" in builder
     assert "--reuid=\"$isolated_build_uid\"" in builder
@@ -212,8 +214,46 @@ def test_builder_refuses_stale_selection_and_sanitizes_release_processes():
     assert "MAX_UKI_BYTES = 512 * 1024 * 1024" in BUILD_HELPER.read_text(
         encoding="utf-8"
     )
+    helper_source = BUILD_HELPER.read_text(encoding="utf-8")
+    assert "_ensure_root_owned_tree(work)" not in helper_source
+    assert "_ensure_root_owned_directory(work)" in helper_source
     assert 'iso_version="$AURASCAN_RECOVERY_VERSION"' in profile
     assert "0.6.0" not in profile
+
+
+def test_validation_uki_private_parent_check_does_not_walk_unrelated_siblings():
+    # /usr is a canonical root-owned non-writable directory whose descendants
+    # include package-specific modes.  Only the selected parent is relevant.
+    BUILD_HELPER_MODULE._ensure_root_owned_directory(Path("/usr"))
+
+
+def test_validation_uki_tree_prerequisite_errors_name_the_missing_input(tmp_path):
+    for label in ("selected kernel module tree", "host firmware tree"):
+        try:
+            BUILD_HELPER_MODULE._ensure_root_owned_tree(
+                tmp_path / "missing", label=label
+            )
+        except BUILD_HELPER_MODULE.BuildRefusal as exc:
+            assert str(exc) == "{} is unavailable".format(label)
+        else:
+            raise AssertionError("missing validation UKI input was accepted")
+
+
+def test_validation_uki_tree_check_fails_closed_on_incomplete_walk(monkeypatch):
+    def refused_walk(_root, *, followlinks, onerror):
+        assert followlinks is False
+        onerror(PermissionError("defanged traversal refusal"))
+        return iter(())
+
+    monkeypatch.setattr(BUILD_HELPER_MODULE.os, "walk", refused_walk)
+    try:
+        BUILD_HELPER_MODULE._ensure_root_owned_tree(
+            Path("/usr"), label="host firmware tree"
+        )
+    except BUILD_HELPER_MODULE.BuildRefusal as exc:
+        assert str(exc) == "host firmware tree could not be traversed completely"
+    else:
+        raise AssertionError("incomplete validation UKI input traversal was accepted")
 
 
 def _mount_snapshot(*targets: str) -> bytes:
@@ -418,6 +458,7 @@ def test_secure_boot_harness_derives_and_payload_binds_its_unsigned_control():
     assert "firmware-rejection" in harness
     assert "complete bounded run" in harness
     assert "AURASCAN_RECOVERY_READY" in harness
+    assert 'if=virtio,format=raw,readonly=on,file=fat:ro:$run_dir/esp' in harness
     assert 'ulimit -f "$((16 * 1024))"' in harness
     assert "ulimit -f 64" in harness
 

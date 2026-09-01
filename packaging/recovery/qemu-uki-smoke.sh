@@ -265,7 +265,7 @@ build_qemu() {
     -smp 2
     -drive "if=pflash,format=raw,unit=0,readonly=on,file=$code"
     -drive "if=pflash,format=raw,unit=1,file=$run_dir/vars.fd"
-    -drive "format=raw,readonly=on,file=fat:ro:$run_dir/esp"
+    -drive "if=virtio,format=raw,readonly=on,file=fat:ro:$run_dir/esp"
     -boot order=c
     -display none
     -serial stdio

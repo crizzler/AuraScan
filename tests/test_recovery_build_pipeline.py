@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +22,18 @@ _DONT_WRITE_BYTECODE = sys.dont_write_bytecode
 sys.dont_write_bytecode = True
 try:
     _HELPER_SPEC.loader.exec_module(BUILD_HELPER_MODULE)
+finally:
+    sys.dont_write_bytecode = _DONT_WRITE_BYTECODE
+
+_AUDITOR_SPEC = importlib.util.spec_from_file_location(
+    "recovery_artifact_auditor_for_pipeline", AUDITOR
+)
+assert _AUDITOR_SPEC is not None and _AUDITOR_SPEC.loader is not None
+AUDITOR_MODULE = importlib.util.module_from_spec(_AUDITOR_SPEC)
+_DONT_WRITE_BYTECODE = sys.dont_write_bytecode
+sys.dont_write_bytecode = True
+try:
+    _AUDITOR_SPEC.loader.exec_module(AUDITOR_MODULE)
 finally:
     sys.dont_write_bytecode = _DONT_WRITE_BYTECODE
 
@@ -480,15 +493,26 @@ def test_artifact_auditor_rejects_unsorted_or_duplicate_package_manifest(tmp_pat
     assert b"sorted and unique" in result.stderr
 
 
-def test_artifact_auditor_rejects_iso_at_github_two_gib_boundary_without_reading_it(tmp_path):
-    iso = tmp_path / "aurascan-recovery-0.10.3-x86_64.iso"
-    with iso.open("wb") as handle:
-        handle.truncate(ASSET_LIMIT)
-
-    result = _audit(iso)
-
-    assert result.returncode == 1
-    assert b"strictly smaller than the 2 GiB" in result.stderr
+def test_artifact_auditor_rejects_iso_at_github_two_gib_boundary_without_reading_it():
+    args = SimpleNamespace(
+        iso="/nonexistent/aurascan-recovery-0.10.3-x86_64.iso",
+        version="0.10.3",
+        forbid=[],
+        scan_root=[],
+        tar_stream=False,
+    )
+    original_regular_file = AUDITOR_MODULE._regular_file
+    AUDITOR_MODULE._regular_file = lambda _path, _label: SimpleNamespace(
+        st_size=ASSET_LIMIT
+    )
+    try:
+        AUDITOR_MODULE.audit(args)
+    except AUDITOR_MODULE.AuditFailure as exc:
+        assert "strictly smaller than the 2 GiB" in str(exc)
+    else:
+        raise AssertionError("ISO at the GitHub release boundary was accepted")
+    finally:
+        AUDITOR_MODULE._regular_file = original_regular_file
 
 
 def test_artifact_auditor_fails_closed_on_private_marker_without_echoing_value(tmp_path):

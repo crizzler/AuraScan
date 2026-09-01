@@ -20,7 +20,7 @@ def test_pyproject_console_scripts_are_registered():
     data = tomllib.loads(read_text("pyproject.toml"))
 
     scripts = data["project"]["scripts"]
-    assert data["project"]["version"] == "0.10.1"
+    assert data["project"]["version"] == "0.10.2"
     assert scripts["aurascan"] == "aurascan.cli:main"
     assert scripts["aurascan-makepkg"] == "aurascan.makepkg_wrapper:main"
     assert data["project"]["requires-python"] == ">=3.8"
@@ -390,14 +390,10 @@ def test_instruction_review_v0101_release_contract():
         return " ".join(read_text(relative).lower().split())
 
     release = normalized("docs/releases/v0.10.1.md")
-    unreleased = normalized("docs/releases/unreleased.md")
     checklist = normalized("docs/RELEASE_CHECKLIST.md")
     announcement = normalized("docs/ANNOUNCEMENT.md")
-    pkgbuild = read_text("packaging/arch/PKGBUILD")
-    srcinfo = read_text("packaging/arch/.SRCINFO")
     engine_source = read_text("aurascan/core/engine.py")
     instruction_source = read_text("aurascan/core/instruction_guard.py")
-    recovery_source = read_text("aurascan/core/recovery_cli.py")
 
     required_release_phrases = [
         "# aurascan v0.10.1",
@@ -414,20 +410,71 @@ def test_instruction_review_v0101_release_contract():
     for phrase in required_release_phrases:
         assert phrase in release
 
-    assert "changes after v0.10.1 will be recorded here" in unreleased
     assert "for v0.10.1, instruction guard terminal reviews keep suspicious content" in checklist
     assert "instruction guard report schema and rule version remain `1.0` for v0.10.1" in checklist
     assert "v0.10.1 release redesigns agent instruction guard reviews" in announcement
-    assert "pkgver=0.10.1" in pkgbuild
-    assert "pkgrel=1" in pkgbuild
-    assert "\tpkgver = 0.10.1" in srcinfo
-    assert "aurascan-0.10.1.tar.gz" in srcinfo
     assert 'self.scanner_version = "2.5.0"' in engine_source
     assert 'INSTRUCTION_GUARD_SCHEMA_VERSION = "1.0"' in instruction_source
     assert 'INSTRUCTION_GUARD_RULE_VERSION = "1.0"' in instruction_source
     assert 'INSTRUCTION_GUARD_EVIDENCE_VERSION = "1.1"' in instruction_source
     assert 'INSTRUCTION_GUARD_ANALYSIS_EVIDENCE_VERSION = "1.2"' in instruction_source
-    assert 'return "0.10.1-dev"' in recovery_source
+
+
+def test_repository_provenance_v0102_release_contract():
+    def normalized(relative: str) -> str:
+        return " ".join(read_text(relative).lower().split())
+
+    release = normalized("docs/releases/v0.10.2.md")
+    unreleased = normalized("docs/releases/unreleased.md")
+    checklist = normalized("docs/RELEASE_CHECKLIST.md")
+    announcement = normalized("docs/ANNOUNCEMENT.md")
+    pkgbuild = read_text("packaging/arch/PKGBUILD")
+    srcinfo = read_text("packaging/arch/.SRCINFO")
+    engine_source = read_text("aurascan/core/engine.py")
+    scan_input_source = read_text("aurascan/core/install_hook.py")
+    repository_source = read_text("aurascan/core/repository_provenance.py")
+    instruction_source = read_text("aurascan/core/instruction_guard.py")
+    recovery_source = read_text("aurascan/core/recovery_cli.py")
+
+    required_release_phrases = [
+        "# aurascan v0.10.2",
+        "released on 2026-09-01",
+        "aur repository artifact provenance",
+        "always-on, bounded, no-follow snapshot",
+        "`aur-repo-opaque-artifact-001` requests medium, non-hard-blocking",
+        "`aur-repo-opaque-binary-001` requests high manual review",
+        "`aur-repo-opaque-binary-exec-001` is critical and blocking",
+        "declares its upstream https archive with a fixed checksum",
+        "`aur-repo-inspection-incomplete-001` is a high, non-reviewable blocker",
+        "does not invoke git and cannot prove that a file was committed",
+        "package-scanner rule version advances from `1.4.0` to `1.5.0`",
+        "scanner version remains `2.5.0`",
+        "repository snapshot version starts at `1.0`",
+        "package scan-input version advances to `2.0`",
+        "instruction guard report schema and rule version remain `1.0`",
+        "application and arch/aur package advance to v0.10.2",
+    ]
+    for phrase in required_release_phrases:
+        assert phrase in release
+
+    assert "changes after v0.10.2 will be recorded here" in unreleased
+    assert "for v0.10.2, the package-scanner rule version is `1.5.0`" in checklist
+    assert "v0.10.2 release adds an always-on static provenance check" in announcement
+    assert "pkgver=0.10.2" in pkgbuild
+    assert "pkgrel=1" in pkgbuild
+    assert "\tpkgver = 0.10.2" in srcinfo
+    assert "aurascan-0.10.2.tar.gz" in srcinfo
+    assert 'self.scanner_version = "2.5.0"' in engine_source
+    assert 'self.rule_version = "1.5.0"' in engine_source
+    assert 'PACKAGE_SCAN_INPUT_VERSION = "2.0"' in scan_input_source
+    assert 'REPOSITORY_SNAPSHOT_VERSION = "1.0"' in repository_source
+    assert 'INSTRUCTION_GUARD_SCHEMA_VERSION = "1.0"' in instruction_source
+    assert 'INSTRUCTION_GUARD_RULE_VERSION = "1.0"' in instruction_source
+    assert 'return "0.10.2-dev"' in recovery_source
+    assert get_rule_metadata("AUR-REPO-OPAQUE-ARTIFACT-001").default_severity == Severity.MEDIUM
+    assert get_rule_metadata("AUR-REPO-OPAQUE-BINARY-001").default_severity == Severity.HIGH
+    assert get_rule_metadata("AUR-REPO-OPAQUE-BINARY-EXEC-001").default_severity == Severity.CRITICAL
+    assert get_rule_metadata("AUR-REPO-INSPECTION-INCOMPLETE-001").default_severity == Severity.HIGH
 
 
 def test_release_checklist_references_required_validation_and_safety_items():
@@ -459,6 +506,9 @@ def test_release_checklist_references_required_validation_and_safety_items():
         "INSTALL-HOOK-UNINSPECTED-001",
         "For v0.10.0, the package-scanner rule version is `1.4.0`",
         "For v0.10.1, Instruction Guard terminal reviews keep suspicious content",
+        "For v0.10.2, the package-scanner rule version is `1.5.0`",
+        "AUR-REPO-OPAQUE-BINARY-EXEC-001",
+        "AUR-REPO-INSPECTION-INCOMPLETE-001",
     ]
     for phrase in required_phrases:
         assert phrase in checklist

@@ -9,6 +9,22 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
+The v0.10.2 release adds an always-on static provenance check for opaque
+binaries and archives observed in the local package directory beside a
+PKGBUILD. Presence alone is a MEDIUM, non-hard-blocking,
+acceptance-eligible review signal. AuraScan raises that to HIGH when package
+text requests copying or installing the exact artifact into the package, and
+blocks as CRITICAL only when package text requests invoking or code-loading
+the proven artifact, or assigning it SUID/SGID permissions.
+
+The scanner uses bounded no-follow reads and does not invoke Git, extract the
+artifact, contact a network, or execute package content. Declared local sources
+stay in the normal source-provenance workflow, while ordinary upstream `-bin`
+packages with a declared HTTPS archive and fixed checksum are not flagged just
+because their acquired payload is binary. The report that motivated this work
+explicitly did not accuse the named packages of being malicious; AuraScan also
+reports provenance and static use, not a confirmed compromise.
+
 The v0.10.1 release redesigns Agent Instruction Guard reviews around the
 question users actually need answered: what was found, on which exact lines,
 and why the behavior matters. Suspicious instructions, incomplete scan
@@ -126,6 +142,16 @@ looks for risky PKGBUILD patterns, install hooks, unsafe source/archive
 behavior, checksum/signature drift, local history changes, and optional ClamAV
 or AI signals. It can also be used through `aurascan-makepkg` so the review
 happens before makepkg runs package functions.
+
+The v0.10.2 package scanner snapshots opaque ELF, PE, Mach-O, and archive files
+present beside a PKGBUILD before cache reuse or source acquisition. It
+correlates exact artifact identity with static requests for package staging,
+execution, code loading, and SUID/SGID permission changes, and fails closed
+when bounded inspection cannot complete. Snapshot identity is also bound into
+history, trust, review, and the final makepkg-wrapper revalidation, so changing
+only the opaque file cannot reuse an earlier clear result. This is a filesystem
+observation, not proof that an artifact was committed to the AUR, installed,
+executed, or malicious.
 
 The v0.10.1 review update separates suspicious instructions, incomplete scan
 coverage, and integrity approval; adds exact per-line behavior roles and fixed

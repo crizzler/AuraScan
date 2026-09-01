@@ -16,6 +16,17 @@ candidate.
   configured-remote AUR push binding, incomplete correlations, comments and
   quoted documentation, dry-run pushes, explicitly non-AUR pushes, and the
   arbitrary acquired-source release-tooling negative.
+- Repository-embedded artifact tests cover bounded no-follow snapshots, ELF,
+  PE, Mach-O, opaque archives, declared-source exclusions, generated/pruned
+  trees, stable-read races, exact staging, proven execution/code loading,
+  SUID/SGID changes, overwritten destinations, lifecycle/helper reachability,
+  cache/history/trust/review identity, and final wrapper recapture.
+- The repository-provenance truth table keeps presence-only evidence MEDIUM,
+  non-hard-blocking, and acceptance-eligible; an exact static package-staging
+  request is HIGH and manual-reviewable; and an exact static execution/code-
+  loading or SUID/SGID-permission request is CRITICAL and non-reviewable. An
+  upstream binary declared in `source=()` with a fixed checksum remains a
+  negative for the repository-embedded rule.
 - Remote-stage and opaque-carrier tests cover complete artifact-bound chains,
   local decode/execute and carrier-named invocation, every incomplete
   correlation, overwritten/moved artifacts, parser truncation, comments,
@@ -90,6 +101,26 @@ candidate.
 - For v0.10.0, the package-scanner rule version is `1.4.0`; cached
   results from earlier rule versions cannot authorize the new remote-stage,
   built-package hook, source-acquisition, or bounded deep-static semantics.
+- For v0.10.2, the package-scanner rule version is `1.5.0`; repository snapshot
+  version is `1.0` and package scan-input version is `2.0`. Cached results from
+  earlier rule or input versions cannot authorize a checkout under the new
+  repository-provenance semantics.
+- `AUR-REPO-OPAQUE-ARTIFACT-001` remains a MEDIUM, non-hard-blocking,
+  acceptance-eligible provenance review for undeclared opaque presence alone.
+  `AUR-REPO-OPAQUE-BINARY-001` requires an exact static package-staging request
+  and remains HIGH manual review. `AUR-REPO-OPAQUE-BINARY-EXEC-001` is CRITICAL
+  only for an exact static request for execution/code loading or SUID/SGID
+  permissions. Binary or archive magic, a filename, an icon, firmware, font,
+  fixture, or inert file alone is never a CRITICAL finding.
+- `AUR-REPO-INSPECTION-INCOMPLETE-001` is a HIGH non-reviewable coverage
+  blocker. Repository scanning does not invoke Git, extract archives, contact a
+  network, or execute a PKGBUILD, hook, source, artifact, or fixture. Findings
+  do not claim that an observed file was committed, distributed, installed,
+  successfully executed, or malicious.
+- Repository snapshot identity is bound into cache, history, trust, review,
+  and makepkg-wrapper revalidation. The wrapper rejects input/integrity bypass
+  flags and clears shell or dynamic-loader code-loading variables before the
+  final makepkg handoff; that handoff remains build execution, not a sandbox.
 - `SUPPLYCHAIN-REMOTE-STAGE-EXEC-001` and
   `DEEPSTATIC-REMOTE-STAGE-EXEC-001` remain CRITICAL blockers only for a
   complete static fetch/artifact/execute chain. An unexecuted download, source

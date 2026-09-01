@@ -172,6 +172,16 @@ def test_builder_refuses_stale_selection_and_sanitizes_release_processes():
     assert "PYTHONDONTWRITEBYTECODE=1" in builder
     assert "sys.dont_write_bytecode = True" in BUILD_HELPER.read_text(encoding="utf-8")
     assert "Exact recovery candidate snapshot must not contain symlinks" in builder
+    snapshot_link_gate = builder.index(
+        "Exact recovery candidate snapshot must not contain symlinks"
+    )
+    snapshot_mode_normalization = builder.index(
+        '/usr/bin/chmod -R go-w -- "$snapshot_root"'
+    )
+    snapshot_tree_gate = builder.index(
+        'assert_root_tree_safe "$snapshot_root" "Exact recovery candidate snapshot"'
+    )
+    assert snapshot_link_gate < snapshot_mode_normalization < snapshot_tree_gate
     assert "Recovery ISO builds require a checkout without symlinks" in builder
     assert "--net --fork --kill-child=KILL --forward-signals" in builder
     assert "--reuid=\"$isolated_build_uid\"" in builder

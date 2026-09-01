@@ -440,6 +440,11 @@ fi
   printf 'Exact recovery candidate snapshot must not contain symlinks\n' >&2
   exit 1
 }
+# Git archives intentionally restore ordinary tracked files and directories
+# with group-write bits.  The snapshot is root-created from the exact commit
+# and contains no links at this point, so remove only group/world write access
+# while preserving every recorded executable bit before root consumes it.
+/usr/bin/chmod -R go-w -- "$snapshot_root"
 assert_root_tree_safe "$snapshot_root" "Exact recovery candidate snapshot"
 "${clean_root_env[@]}" "$python_bin" -I -S \
   "$snapshot_root/packaging/recovery/recovery-build-helper.py" validate-candidate \

@@ -272,3 +272,7 @@ def test_iso_builder_layers_aurascan_onto_the_maintained_archiso_profile():
     assert "https://geo.mirror.pkgbuild.com/$repo/os/$arch" in build_pacman
     assert "https://fastly.mirror.pkgbuild.com/$repo/os/$arch" in build_pacman
     assert "https://geo.mirror.pkgbuild.com/$repo/os/$arch" in live_pacman
+    for pacman_config in (build_pacman, live_pacman):
+        assert pacman_config.index("https://fastly.mirror.pkgbuild.com") < pacman_config.index(
+            "https://geo.mirror.pkgbuild.com"
+        )

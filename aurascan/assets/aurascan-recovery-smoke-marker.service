@@ -8,8 +8,9 @@ ConditionVirtualization=vm
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/echo AURASCAN_RECOVERY_READY
-StandardOutput=journal+console
-StandardError=journal+console
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/ttyS0
 DynamicUser=yes
 CapabilityBoundingSet=
 AmbientCapabilities=

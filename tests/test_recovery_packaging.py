@@ -63,6 +63,10 @@ def test_iso_and_local_uki_use_the_same_bounded_boot_readiness_marker():
     assert "ConditionVirtualization=vm" in packaged
     assert "ConditionVirtualization=qemu" not in packaged
     assert "ExecStart=/usr/bin/echo AURASCAN_RECOVERY_READY" in packaged
+    assert "StandardOutput=tty" in packaged
+    assert "StandardError=tty" in packaged
+    assert "TTYPath=/dev/ttyS0" in packaged
+    assert "journal+console" not in packaged
     assert "DynamicUser=yes" in packaged
     assert "CapabilityBoundingSet=\n" in packaged
     assert "PrivateNetwork=yes" in packaged

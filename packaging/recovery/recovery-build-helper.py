@@ -544,7 +544,7 @@ def _identity_markers(snapshot: Path, work: Path):
         machine_id = _read_regular(Path("/etc/machine-id"), limit=4096).strip()
     except BuildRefusal:
         machine_id = b""
-    if len(machine_id) >= 8:
+    if len(machine_id) >= 8 and machine_id != b"uninitialized":
         values.add(machine_id)
     return tuple(sorted(value for value in values if len(value) >= 4))
 

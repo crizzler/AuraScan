@@ -220,6 +220,10 @@ def test_artifact_auditor_accepts_only_fixed_distribution_hostname_in_tree_and_t
     assert auditor._marker_values(
         (), identity_paths=(hostname, empty_machine_id)
     ) == ()
+    empty_machine_id.write_bytes(b"uninitialized\n")
+    assert auditor._marker_values(
+        (), identity_paths=(hostname, empty_machine_id)
+    ) == ()
 
     for invalid in (
         b"",
@@ -260,6 +264,28 @@ def test_artifact_auditor_rejects_nonempty_machine_id_in_tree_and_tar(tmp_path):
     assert b"persistent host identity" in tree_result.stderr
     assert b"persistent host identity" in tar_result.stderr
     assert identity.strip() not in tree_result.stderr + tar_result.stderr
+
+
+def test_artifact_auditor_accepts_systemd_first_boot_machine_id_in_tree_and_tar(
+    tmp_path,
+):
+    iso = _release_files(tmp_path)
+    scan_root = tmp_path / "scan-root"
+    machine_id = scan_root / "etc/machine-id"
+    machine_id.parent.mkdir(parents=True)
+    sentinel = b"uninitialized\n"
+    machine_id.write_bytes(sentinel)
+
+    tree_result = _audit(iso, scan_root)
+    member = tarfile.TarInfo("etc/machine-id")
+    tar_result = _audit_tar(iso, _tar_bytes((member, sentinel)))
+
+    assert tree_result.returncode == 0, tree_result.stderr.decode(
+        "utf-8", errors="replace"
+    )
+    assert tar_result.returncode == 0, tar_result.stderr.decode(
+        "utf-8", errors="replace"
+    )
 
 
 def test_artifact_auditor_scans_tree_and_tar_member_names(tmp_path):

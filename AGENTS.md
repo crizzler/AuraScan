@@ -62,7 +62,14 @@ evidence actually collected.
   owner/group names, PAX keys/values, and decoded libarchive xattrs. Metadata
   bytes count toward global bounds. Empty or shorter-than-eight-byte explicit
   markers and short nonempty host identities are audit failures, not silently
-  dropped exclusions.
+  dropped exclusions. Apply recovery-root path policy to the profile and exact
+  expanded root, while scanning only the release-relevant package build
+  inputs/outputs rather than the sanitized, non-shipped package-test home.
+  A symlink that merely targets `/etc/machine-id` or `/etc/hostname` does not
+  carry identity bytes; validate the actual target entry independently and
+  continue applying home, SSH, and saved-network path controls to link targets.
+  Accept only an empty/whitespace machine ID or systemd's exact `uninitialized`
+  first-boot sentinel; never treat that sentinel as private builder identity.
 - Keep recovery USB writes fail closed: identify the running root through a
   bounded, revalidated absolute `findmnt`; inspect the candidate twice through
   a bounded, revalidated absolute `lsblk`, then inspect it a third time while

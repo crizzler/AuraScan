@@ -865,7 +865,7 @@ audit_script="$snapshot_root/packaging/recovery/audit-artifacts.py"
     --iso "$expected_iso" \
     --version "$pkgver" \
     --scan-root "$profile/airootfs" \
-    --scan-root "$package_stage" \
+    --scan-root "$package_build" \
     --scan-root "$package_repo" \
     --scan-root "$work/iso" \
     --scan-root "$work/validation-uki" \

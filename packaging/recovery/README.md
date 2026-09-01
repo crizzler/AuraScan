@@ -153,6 +153,16 @@ The completed build is rejected unless:
   recursively extract or interpret nested executables, filesystems, initramfs
   images, or compressed containers.
 
+The exact package build input/output directory is included in that audit. Its
+sanitized test HOME is retained only as private builder state and is not a
+release artifact, so it is excluded; the complete expanded-root stream still
+rejects every populated `/home` path. Standard links such as
+`/var/lib/dbus/machine-id -> /etc/machine-id` are path references, not identity
+bytes. Their destinations remain subject to path policy, while the actual
+`/etc/machine-id` and `/etc/hostname` entries are independently checked. The
+machine ID must be empty/whitespace-only or the systemd `uninitialized`
+first-boot sentinel; the hostname must be exactly recovery-specific.
+
 The release assets are an indivisible three-file set:
 
 ```text

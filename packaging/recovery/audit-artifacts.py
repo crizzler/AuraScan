@@ -35,6 +35,7 @@ MIN_MARKER_BYTES = 8
 MAX_METADATA_FIELD_BYTES = 256 * 1024
 MAX_PAX_HEADERS_PER_ENTRY = 256
 RECOVERY_HOSTNAME = b"aurascan-recovery\n"
+MACHINE_ID_FIRST_BOOT = b"uninitialized\n"
 
 _VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _SIDECAR_RE = re.compile(
@@ -370,6 +371,8 @@ def _check_private_path(
     relative: str,
     has_non_whitespace: Optional[bool] = None,
     content: Optional[bytes] = None,
+    *,
+    validate_identity_value: bool = True,
 ) -> None:
     lower = relative.lower()
     private_exact = {
@@ -388,11 +391,16 @@ def _check_private_path(
         raise AuditFailure("expanded recovery root contains a saved network profile")
     if lower.startswith("var/lib/iwd/") and lower.endswith((".psk", ".8021x")):
         raise AuditFailure("expanded recovery root contains a saved wireless profile")
-    if lower == "etc/hostname":
+    if lower == "etc/hostname" and validate_identity_value:
         if content != RECOVERY_HOSTNAME:
             raise AuditFailure("expanded recovery root contains persistent host identity")
         return
-    if lower == "etc/machine-id" and has_non_whitespace is not False:
+    if (
+        lower == "etc/machine-id"
+        and validate_identity_value
+        and has_non_whitespace is not False
+        and content != MACHINE_ID_FIRST_BOOT
+    ):
         raise AuditFailure("expanded recovery root contains persistent host identity")
 
 
@@ -545,7 +553,14 @@ def _audit_tree(root: Path, markers: Sequence[bytes], bounds: Bounds) -> None:
                     resolved_target = _normalized_link_destination(
                         relative, target_text, hardlink=False
                     )
-                    _check_private_path(resolved_target)
+                    # A link destination names a path but does not carry that
+                    # target's bytes.  The target entry is audited separately;
+                    # do not mistake the standard dbus -> /etc/machine-id link
+                    # for a populated machine identity.  Path-only privacy
+                    # controls (home, SSH, and saved network state) still apply.
+                    _check_private_path(
+                        resolved_target, validate_identity_value=False
+                    )
                 else:
                     raise AuditFailure(
                         "artifact scan root contains an unsupported special file type"
@@ -575,7 +590,9 @@ def _audit_tar_stream(stream: BinaryIO, markers: Sequence[bytes], bounds: Bounds
                     target_relative = _normalized_link_destination(
                         relative, member.linkname, hardlink=member.islnk()
                     )
-                    _check_private_path(target_relative)
+                    _check_private_path(
+                        target_relative, validate_identity_value=False
+                    )
                     continue
                 if member.isdir():
                     _check_private_path(relative)
@@ -621,6 +638,10 @@ def _marker_values(
         except UnicodeError as exc:
             raise AuditFailure("host identity marker is not bounded UTF-8 text") from exc
         if identity_path.name == "hostname" and identity == RECOVERY_HOSTNAME.decode(
+            "ascii"
+        ).strip():
+            continue
+        if identity_path.name == "machine-id" and identity == MACHINE_ID_FIRST_BOOT.decode(
             "ascii"
         ).strip():
             continue

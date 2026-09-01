@@ -153,6 +153,8 @@ def test_builder_refuses_stale_selection_and_sanitizes_release_processes():
     ):
         assert flag in builder
     assert '--tar-stream' in builder
+    assert '--scan-root "$package_build"' in builder
+    assert '--scan-root "$package_stage"' not in builder
     assert "Recovery ISO construction must run entirely as root" in builder
     assert builder.startswith("#!/usr/bin/bash\n")
     assert "compgen -e" in builder
@@ -446,6 +448,23 @@ def test_builder_identity_markers_do_not_blanket_reject_root_literals(tmp_path):
     assert b"AURASCAN_RECOVERY_BUILDER_IDENTITY_V1" in markers
 
 
+def test_builder_identity_markers_ignore_systemd_first_boot_sentinel(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(BUILD_HELPER_MODULE.socket, "gethostname", lambda: "localhost")
+    monkeypatch.setattr(
+        BUILD_HELPER_MODULE,
+        "_read_regular",
+        lambda _path, *, limit: b"uninitialized\n",
+    )
+
+    markers = BUILD_HELPER_MODULE._identity_markers(
+        tmp_path / "candidate", tmp_path / "work"
+    )
+
+    assert b"uninitialized" not in markers
+
+
 def test_secure_boot_harness_derives_and_payload_binds_its_unsigned_control():
     harness = (ROOT / "packaging/recovery/qemu-uki-smoke.sh").read_text(
         encoding="utf-8"
@@ -703,6 +722,61 @@ def test_artifact_auditor_scans_tar_symlink_target_without_rejecting_normal_link
     assert blocked.returncode == 1
     assert b"artifact metadata" in combined
     assert marker.encode("ascii") not in combined
+
+
+def test_artifact_auditor_allows_standard_machine_id_link_but_checks_target(tmp_path):
+    iso = _release_files(tmp_path)
+    link = _tar_link_stream("./var/lib/dbus/machine-id", "/etc/machine-id")
+
+    clear = _audit(iso, "--tar-stream", input_bytes=link)
+
+    assert clear.returncode == 0, clear.stderr.decode("utf-8", errors="replace")
+
+    scan_root = tmp_path / "scan-root"
+    filesystem_link = scan_root / "var/lib/dbus/machine-id"
+    filesystem_link.parent.mkdir(parents=True)
+    filesystem_link.symlink_to("/etc/machine-id")
+    filesystem_clear = _audit(iso, "--scan-root", str(scan_root))
+
+    assert filesystem_clear.returncode == 0, filesystem_clear.stderr.decode(
+        "utf-8", errors="replace"
+    )
+
+    populated = _tar_stream([("./etc/machine-id", b"fixture-machine-id\n")])
+    blocked = _audit(iso, "--tar-stream", input_bytes=populated)
+
+    assert blocked.returncode == 1
+    assert b"persistent host identity" in blocked.stderr
+
+
+def test_artifact_auditor_rejects_populated_home_in_tree_and_tar(tmp_path):
+    iso = _release_files(tmp_path)
+    scan_root = tmp_path / "scan-root"
+    (scan_root / "home").mkdir(parents=True)
+
+    empty_home = _audit(iso, "--scan-root", str(scan_root))
+
+    assert empty_home.returncode == 0, empty_home.stderr.decode(
+        "utf-8", errors="replace"
+    )
+
+    private_file = scan_root / "home/aurascan/private.txt"
+    private_file.parent.mkdir(parents=True)
+    private_file.write_text("fixture private state\n", encoding="utf-8")
+
+    filesystem_result = _audit(iso, "--scan-root", str(scan_root))
+    tar_result = _audit(
+        iso,
+        "--tar-stream",
+        input_bytes=_tar_stream(
+            [("./home/aurascan/private.txt", b"fixture private state\n")]
+        ),
+    )
+
+    assert filesystem_result.returncode == 1
+    assert b"populated home directory" in filesystem_result.stderr
+    assert tar_result.returncode == 1
+    assert b"populated home directory" in tar_result.stderr
 
 
 def test_artifact_auditor_rejects_special_filesystem_and_tar_members(tmp_path):

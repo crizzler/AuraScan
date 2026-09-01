@@ -252,6 +252,12 @@ Use this path only when the user explicitly authorizes external publication:
    before Bash, then drops the run to an unmapped UID in a fresh network
    namespace. Internal harness checks cannot retroactively make a
    user-writable launch script trustworthy.
+   Audit the exact package build inputs/outputs, package repository, assembled
+   image, validation UKI, profile overlay, and expanded root. Do not classify
+   the sanitized package-test HOME as shipped recovery state, but do not relax
+   the expanded-root prohibition on populated user homes. Treat a link to an
+   identity path as a path reference and validate the target entry's bytes
+   separately.
 5. Treat these exact files as one recovery candidate:
    `aurascan-recovery-VERSION-x86_64.iso`, its `.iso.sha256` sidecar, and its
    sorted `.iso.packages.txt` manifest. Require the ISO to be strictly smaller

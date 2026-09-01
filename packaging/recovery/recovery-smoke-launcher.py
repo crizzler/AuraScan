@@ -33,6 +33,7 @@ from typing import Dict, Mapping, Optional, Sequence, Tuple
 SCHEMA = "aurascan_recovery_validation_attestation/1.0"
 RECEIPT_LIMIT = 256 * 1024
 FILE_LIMIT = 2 * 1024 * 1024 * 1024
+UKI_FILE_LIMIT = 512 * 1024 * 1024
 DROP_UID = 60998
 DROP_GID = 60998
 BASE_ROLES = {
@@ -110,6 +111,16 @@ _FIRMWARE_REJECTION = re.compile(
 
 class LaunchRefusal(RuntimeError):
     """A release-validation trust boundary could not be established."""
+
+
+def _smoke_file_limit(kind: str) -> int:
+    """Return the same exclusive artifact ceiling enforced by the guard."""
+
+    if kind == "iso":
+        return FILE_LIMIT
+    if kind == "uki":
+        return UKI_FILE_LIMIT
+    raise LaunchRefusal("smoke artifact kind is unsupported")
 
 
 def _unique_object(pairs):
@@ -1161,6 +1172,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ]
         )
         outer_timeout = int(timeout_value) * (2 if args.mode == "secure-boot" else 1) + 240
+        child_file_limit = _smoke_file_limit(args.kind)
         parent_pid = os.getpid()
         libc = ctypes.CDLL(None, use_errno=True)
         command = [
@@ -1192,7 +1204,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             resource.setrlimit(
                 resource.RLIMIT_CPU, (outer_timeout + 120, outer_timeout + 120)
             )
-            resource.setrlimit(resource.RLIMIT_FSIZE, (32 * 1024 * 1024, 32 * 1024 * 1024))
+            # The unprivileged harness must make one private byte-for-byte
+            # snapshot of the selected artifact before QEMU starts.  Keep the
+            # operating-system ceiling aligned with the stricter per-kind
+            # guard instead of making every valid ISO/UKI impossible to test.
+            resource.setrlimit(
+                resource.RLIMIT_FSIZE, (child_file_limit, child_file_limit)
+            )
             resource.setrlimit(resource.RLIMIT_NOFILE, (1024, 1024))
             resource.setrlimit(resource.RLIMIT_NPROC, (2048, 2048))
 

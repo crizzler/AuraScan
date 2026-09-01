@@ -363,7 +363,12 @@ def create_recovery_overlay(destination: Path) -> Path:
     os.chmod(marker_target, 0o644)
     preset = destination / "usr/lib/systemd/system-preset/90-aurascan-recovery.preset"
     preset.parent.mkdir(parents=True, mode=0o755, exist_ok=True)
-    preset.write_text("enable aurascan-recovery.service\nenable NetworkManager.service\n", encoding="utf-8")
+    preset.write_text(
+        "enable aurascan-recovery.service\n"
+        "enable aurascan-recovery-smoke-marker.service\n"
+        "enable NetworkManager.service\n",
+        encoding="utf-8",
+    )
     os.chmod(preset, 0o644)
     wants = destination / "etc/systemd/system/multi-user.target.wants"
     wants.mkdir(parents=True, mode=0o755, exist_ok=True)

@@ -191,6 +191,7 @@ def test_internal_overlay_explicitly_enables_recovery_service(tmp_path):
     link = overlay / "etc/systemd/system/multi-user.target.wants/aurascan-recovery.service"
     marker_link = overlay / "etc/systemd/system/multi-user.target.wants/aurascan-recovery-smoke-marker.service"
     marker_unit = overlay / "usr/lib/systemd/system/aurascan-recovery-smoke-marker.service"
+    preset = overlay / "usr/lib/systemd/system-preset/90-aurascan-recovery.preset"
     getty_mask = overlay / "etc/systemd/system/getty@tty1.service"
 
     assert link.is_symlink()
@@ -198,6 +199,9 @@ def test_internal_overlay_explicitly_enables_recovery_service(tmp_path):
     assert marker_link.is_symlink()
     assert os.readlink(marker_link) == "/usr/lib/systemd/system/aurascan-recovery-smoke-marker.service"
     assert "AURASCAN_RECOVERY_READY" in marker_unit.read_text(encoding="utf-8")
+    assert "enable aurascan-recovery-smoke-marker.service" in preset.read_text(
+        encoding="utf-8"
+    )
     assert getty_mask.is_symlink()
     assert os.readlink(getty_mask) == "/dev/null"
     assert not (overlay / "etc/hostname").exists()

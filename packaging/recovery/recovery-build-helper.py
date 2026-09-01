@@ -719,6 +719,8 @@ def build_validation_uki(
         raise BuildRefusal("ukify did not report the selected validation kernel")
     if "systemd.wants=aurascan-recovery.service" not in inspection:
         raise BuildRefusal("ukify did not report the recovery service boot request")
+    if "systemd.wants=aurascan-recovery-smoke-marker.service" not in inspection:
+        raise BuildRefusal("ukify did not report the VM readiness-marker boot request")
 
     digest = _hash_regular(output, limit=4 * 1024 * 1024 * 1024)
     sidecar = Path(str(output) + ".sha256")

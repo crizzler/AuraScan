@@ -298,6 +298,8 @@ def build_uki_command(
             "systemd.unit=multi-user.target "
             "rd.systemd.wants=aurascan-recovery.service "
             "systemd.wants=aurascan-recovery.service "
+            "rd.systemd.wants=aurascan-recovery-smoke-marker.service "
+            "systemd.wants=aurascan-recovery-smoke-marker.service "
             "console=tty0 console=ttyS0,115200n8"
         ),
         "--output-mode=600",
@@ -353,6 +355,13 @@ def validate_recovery_image(
                 errors.append("ukify did not prove the selected recovery kernel version is present.")
             if "systemd.wants=aurascan-recovery.service" not in inspection:
                 errors.append("The recovery UKI does not request the AuraScan recovery service at boot.")
+            if (
+                "systemd.wants=aurascan-recovery-smoke-marker.service"
+                not in inspection
+            ):
+                errors.append(
+                    "The recovery UKI does not request its VM readiness marker at boot."
+                )
     return not errors, errors
 
 

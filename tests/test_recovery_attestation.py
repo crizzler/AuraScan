@@ -324,6 +324,15 @@ def test_launcher_exit_zero_without_exact_outcome_text_cannot_pass(tmp_path):
         )
 
 
+def test_launcher_child_file_limit_matches_guarded_artifact_ceiling():
+    launcher = _load("recovery_attestation_launcher_file_limit", LAUNCHER_PATH)
+
+    assert launcher._smoke_file_limit("iso") == 2 * 1024 * 1024 * 1024
+    assert launcher._smoke_file_limit("uki") == 512 * 1024 * 1024
+    with pytest.raises(launcher.LaunchRefusal, match="unsupported"):
+        launcher._smoke_file_limit("archive")
+
+
 def test_launcher_independently_accepts_only_exact_current_ovmf_rejection(
     tmp_path, monkeypatch
 ):

@@ -337,6 +337,23 @@ def test_launcher_child_file_limit_matches_guarded_artifact_ceiling():
         launcher._smoke_file_limit("archive")
 
 
+def test_launcher_ready_marker_requires_journal_identity():
+    launcher = _load("recovery_attestation_launcher_marker", LAUNCHER_PATH)
+
+    for line in (
+        b"[   18.501600] aurascan-recovery-marker[217]: "
+        b"AURASCAN_RECOVERY_READY\r\n",
+        b"aurascan-recovery-marker[217]: AURASCAN_RECOVERY_READY\n",
+    ):
+        assert launcher._READY_LINE.search(line) is not None
+    for line in (
+        b"AURASCAN_RECOVERY_READY\n",
+        b"echo[217]: AURASCAN_RECOVERY_READY\n",
+        b"aurascan-recovery-marker[0]: AURASCAN_RECOVERY_READY\n",
+    ):
+        assert launcher._READY_LINE.search(line) is None
+
+
 def test_launcher_independently_accepts_only_exact_current_ovmf_rejection(
     tmp_path, monkeypatch
 ):
@@ -345,7 +362,10 @@ def test_launcher_independently_accepts_only_exact_current_ovmf_rejection(
     runtime.mkdir()
     monkeypatch.setattr(launcher, "DROP_UID", os.getuid())
     monkeypatch.setattr(launcher, "DROP_GID", os.getgid())
-    ready = b"firmware output\nAURASCAN_RECOVERY_READY\n"
+    ready = (
+        b"firmware output\n"
+        b"aurascan-recovery-marker[217]: AURASCAN_RECOVERY_READY\n"
+    )
     rejection = (
         b'BdsDxe: failed to load Boot0002 "UEFI Misc Device" from '
         b"PciRoot(0x0)/Pci(0x2,0x0): Access Denied -- rejected probably by Secure Boot\r\n"

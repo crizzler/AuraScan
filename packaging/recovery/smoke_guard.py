@@ -78,9 +78,9 @@ _FIRMWARE_REJECTION = re.compile(
     rb"(?:Security Violation|Access Denied -- rejected probably by Secure Boot)\r?$"
 )
 _READY_LINE = re.compile(
-    rb"(?m)^(?:AURASCAN_RECOVERY_READY|"
-    rb"\[ *[0-9]+\.[0-9]{6}\] aurascan-recovery-marker\[[1-9][0-9]*\]: "
-    rb"AURASCAN_RECOVERY_READY)\r?$"
+    rb"(?m)^(?:\[ *[0-9]+\.[0-9]{6}\] )?"
+    rb"aurascan-recovery-marker\[[1-9][0-9]*\]: "
+    rb"AURASCAN_RECOVERY_READY\r?$"
 )
 
 

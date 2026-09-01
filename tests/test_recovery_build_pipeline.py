@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -462,6 +463,45 @@ def test_secure_boot_harness_derives_and_payload_binds_its_unsigned_control():
     assert 'if=virtio,format=raw,readonly=on,file=fat:ro:$run_dir/esp' in harness
     assert 'ulimit -f "$((16 * 1024))"' in harness
     assert "ulimit -f 64" in harness
+
+
+def test_qemu_harness_poll_accepts_only_journal_bound_ready_lines(tmp_path):
+    for name in ("qemu-smoke.sh", "qemu-uki-smoke.sh"):
+        harness = (ROOT / "packaging/recovery" / name).read_text(encoding="utf-8")
+        match = re.search(
+            r"/usr/bin/grep -Eq \$'([^'\n]+)' \"\$log\" && break",
+            harness,
+        )
+        assert match is not None
+        encoded_pattern = match.group(1)
+        assert r"\r?$" in encoded_pattern
+        pattern = encoded_pattern.replace(r"\r", "\r").replace(r"\\", "\\")
+        log = tmp_path / (name + ".log")
+        for line in (
+            b"[   17.061324] aurascan-recovery-marker[220]: "
+            b"AURASCAN_RECOVERY_READY\n",
+            b"[   17.061324] aurascan-recovery-marker[220]: "
+            b"AURASCAN_RECOVERY_READY\r\n",
+            b"aurascan-recovery-marker[220]: AURASCAN_RECOVERY_READY\n",
+            b"aurascan-recovery-marker[220]: AURASCAN_RECOVERY_READY\r\n",
+        ):
+            log.write_bytes(line)
+            assert subprocess.run(
+                ["/usr/bin/grep", "-Eq", pattern, str(log)],
+                check=False,
+            ).returncode == 0
+        for line in (
+            b"AURASCAN_RECOVERY_READY\n",
+            b"echo[220]: AURASCAN_RECOVERY_READY\n",
+            b"aurascan-recovery-marker[0]: AURASCAN_RECOVERY_READY\n",
+            b"[ 17.0613] aurascan-recovery-marker[220]: "
+            b"AURASCAN_RECOVERY_READY\n",
+        ):
+            log.write_bytes(line)
+            assert subprocess.run(
+                ["/usr/bin/grep", "-Eq", pattern, str(log)],
+                check=False,
+            ).returncode == 1
 
 
 def test_builder_exports_the_exact_retained_validation_harness_root():

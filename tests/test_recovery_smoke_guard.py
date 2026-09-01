@@ -212,17 +212,15 @@ def test_signature_inventory_requires_positive_exact_states(tmp_path):
 
 def test_boot_log_requires_an_exact_ready_line(tmp_path):
     guard = _load_guard()
-    exact = tmp_path / "ready.log"
-    exact.write_bytes(b"firmware output\nAURASCAN_RECOVERY_READY\n")
-    guard.evaluate_log(exact, "ready")
-
     journal = tmp_path / "journal-ready.log"
-    journal.write_bytes(
-        b"firmware output\n"
+    for marker in (
         b"[   18.501600] aurascan-recovery-marker[217]: "
-        b"AURASCAN_RECOVERY_READY\r\n"
-    )
-    guard.evaluate_log(journal, "ready")
+        b"AURASCAN_RECOVERY_READY\r\n",
+        b"aurascan-recovery-marker[217]: AURASCAN_RECOVERY_READY\n",
+        b"aurascan-recovery-marker[217]: AURASCAN_RECOVERY_READY\r\n",
+    ):
+        journal.write_bytes(b"firmware output\n" + marker)
+        guard.evaluate_log(journal, "ready")
 
     broad = tmp_path / "broad.log"
     broad.write_bytes(b"guest quoted AURASCAN_RECOVERY_READY but did not reach it\n")
@@ -230,6 +228,7 @@ def test_boot_log_requires_an_exact_ready_line(tmp_path):
         guard.evaluate_log(broad, "ready")
 
     for near_miss in (
+        b"AURASCAN_RECOVERY_READY\n",
         b"[   18.501600] echo[217]: AURASCAN_RECOVERY_READY\n",
         b"[   18.501600] aurascan-recovery-marker[0]: AURASCAN_RECOVERY_READY\n",
         b"[ 18.5016] aurascan-recovery-marker[217]: AURASCAN_RECOVERY_READY\n",
@@ -272,7 +271,8 @@ def test_unsigned_log_requires_no_ready_and_narrow_firmware_rejection(tmp_path):
         guard.evaluate_log(broad, "firmware-rejection")
 
     rejection.write_bytes(
-        rejection.read_bytes() + b"AURASCAN_RECOVERY_READY\n"
+        rejection.read_bytes()
+        + b"aurascan-recovery-marker[217]: AURASCAN_RECOVERY_READY\n"
     )
     with pytest.raises(guard.GuardFailure, match="reached"):
         guard.evaluate_log(rejection, "firmware-rejection")
@@ -287,7 +287,10 @@ def test_smoke_result_binds_private_serial_snapshots_and_both_secure_controls(
     work.mkdir(parents=True)
     monkeypatch.setenv("TMPDIR", str(runtime))
     ready = work / "ready.log"
-    ready.write_bytes(b"firmware output\nAURASCAN_RECOVERY_READY\n")
+    ready.write_bytes(
+        b"firmware output\n"
+        b"aurascan-recovery-marker[217]: AURASCAN_RECOVERY_READY\n"
+    )
     rejection = work / "rejection.log"
     rejection.write_bytes(
         b'BdsDxe: failed to load Boot0001 "UEFI QEMU HARDDISK" from '
@@ -329,7 +332,9 @@ def test_smoke_result_refuses_missing_secure_control_and_replacement(
     runtime.mkdir()
     monkeypatch.setenv("TMPDIR", str(runtime))
     ready = runtime / "ready.log"
-    ready.write_bytes(b"AURASCAN_RECOVERY_READY\n")
+    ready.write_bytes(
+        b"aurascan-recovery-marker[217]: AURASCAN_RECOVERY_READY\n"
+    )
     destination = runtime / guard.SMOKE_RESULT_NAME
 
     with pytest.raises(guard.GuardFailure, match="exactly two controls"):

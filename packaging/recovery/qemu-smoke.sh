@@ -267,7 +267,7 @@ active_runner_pid="$runner_pid"
 while /usr/bin/kill -0 "$runner_pid" 2>/dev/null; do
   log_size="$(/usr/bin/stat -c '%s' -- "$log")"
   (( log_size < 16 * 1024 * 1024 )) || break
-    /usr/bin/grep -Eq '^AURASCAN_RECOVERY_READY$|^\[ *[0-9]+\.[0-9]{6}\] aurascan-recovery-marker\[[1-9][0-9]*\]: AURASCAN_RECOVERY_READY$' "$log" && break
+  /usr/bin/grep -Eq $'^(\\[ *[0-9]+\\.[0-9]{6}\\] )?aurascan-recovery-marker\\[[1-9][0-9]*\\]: AURASCAN_RECOVERY_READY\r?$' "$log" && break
   /usr/bin/sleep 1
 done
 /usr/bin/kill -TERM -- "-$runner_pid" 2>/dev/null || true

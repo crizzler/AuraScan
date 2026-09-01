@@ -277,8 +277,14 @@ schema and bind the same base build receipt and unsigned validation UKI. The
 launcher rejects arbitrary replacements, requires root-reclaimed signed UKI,
 sidecar, secure-code, and enrolled-vars outputs, and independently checks that
 the prepared secure-code bytes equal the clean packaged OVMF input. After
-signature removal the harness requires the unsigned digest to equal the base
-builder attestation's validation-UKI digest before either VM can run.
+signature removal, a strict bounded PE/COFF parser validates the DOS and PE
+header layout, Optional Header extent and magic, and the location of its
+four-byte `CheckSum`. Signing or signature removal may recompute only that
+field: the derived unsigned control must have the same size and match every
+other byte of the base builder-attested validation UKI. Any other difference
+or malformed or ambiguous header fails closed. Reattaching the detached
+signature must still recreate the exact signed input bytes before either VM
+can run.
 
 These markers prove the stated boot/service boundary, not storage recovery.
 Complete the encrypted Btrfs, ext4/LVM, network/offline, interrupted-package,

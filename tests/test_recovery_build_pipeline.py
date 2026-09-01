@@ -474,6 +474,7 @@ def test_secure_boot_harness_derives_and_payload_binds_its_unsigned_control():
     assert "--detach" in harness
     assert "--remove" in harness
     assert "--attach" in harness
+    assert "verify-stripped-uki" in harness
     assert "verify-payload-binding" in harness
     assert "firmware-rejection" in harness
     assert "complete bounded run" in harness

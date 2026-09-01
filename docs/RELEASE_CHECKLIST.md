@@ -96,8 +96,12 @@ candidate.
   `packaging/recovery/qemu-uki-smoke.sh`, which boots
   the finalized local UKI under OVMF in ordinary and enrolled-key Secure Boot
   modes. Secure inputs must match the private preparation receipt, and the
-  signature-stripped control must match the base validation-UKI digest. The
-  unsigned counterpart is rejected where required.
+  signature-stripped control must pass strict bounded PE/COFF binding against
+  the base validation UKI: equal size, a difference permitted only in the
+  Optional Header's four-byte `CheckSum`, and exact equality at every other
+  byte. Malformed or ambiguous headers fail closed, reattaching the detached
+  signature recreates the exact signed UKI, and the unsigned counterpart is
+  rejected where required.
 - For a recovery-bearing release, Secure Boot recovery is tested with
   disposable OVMF owner keys, and unsigned internal installation is refused
   when signing cannot be proven.

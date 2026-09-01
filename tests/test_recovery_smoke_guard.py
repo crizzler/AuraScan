@@ -65,6 +65,64 @@ def _write_release_input(path: Path, content: bytes) -> str:
     return digest
 
 
+def _pe32_plus_image(
+    *,
+    checksum: bytes = b"\x00\x00\x00\x00",
+    payload: bytes = b"defanged-uki-payload",
+    pe_offset: int = 0x80,
+    optional_size: int = 0xF0,
+    machine: int = 0x8664,
+    section_count: int = 1,
+    magic: int = 0x20B,
+    directory_count: int = 16,
+    certificate_entry: bytes = b"\x00" * 8,
+    total_size: int = 0,
+) -> bytes:
+    assert len(checksum) == 4
+    assert len(certificate_entry) == 8
+    optional_offset = pe_offset + 24
+    payload_offset = optional_offset + optional_size + section_count * 40
+    minimum_size = payload_offset + len(payload)
+    image = bytearray(max(total_size, minimum_size))
+    image[:2] = b"MZ"
+    image[0x3C:0x40] = pe_offset.to_bytes(4, "little")
+    image[pe_offset : pe_offset + 4] = b"PE\x00\x00"
+    image[pe_offset + 4 : pe_offset + 6] = machine.to_bytes(2, "little")
+    image[pe_offset + 6 : pe_offset + 8] = section_count.to_bytes(2, "little")
+    image[pe_offset + 20 : pe_offset + 22] = optional_size.to_bytes(2, "little")
+    image[optional_offset : optional_offset + 2] = magic.to_bytes(2, "little")
+    image[optional_offset + 64 : optional_offset + 68] = checksum
+    image[optional_offset + 108 : optional_offset + 112] = directory_count.to_bytes(
+        4, "little"
+    )
+    image[optional_offset + 144 : optional_offset + 152] = certificate_entry
+    image[payload_offset : payload_offset + len(payload)] = payload
+    return bytes(image)
+
+
+def _attested_record(path: Path):
+    metadata = path.lstat()
+    return {
+        "path": str(path),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "size": metadata.st_size,
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "mode": stat.S_IMODE(metadata.st_mode),
+        "uid": metadata.st_uid,
+        "gid": metadata.st_gid,
+        "mtime_ns": metadata.st_mtime_ns,
+        "ctime_ns": metadata.st_ctime_ns,
+    }
+
+
+def _write_private_uki(path: Path, content: bytes) -> None:
+    if path.exists():
+        path.chmod(0o600)
+    path.write_bytes(content)
+    path.chmod(0o400)
+
+
 def test_iso_release_input_is_snapshotted_from_an_exact_stable_sidecar(tmp_path):
     source = tmp_path / "aurascan-recovery-0.10.3-x86_64.iso"
     expected = _write_release_input(source, b"defanged iso image")
@@ -185,6 +243,314 @@ def test_uki_size_ceiling_is_realistic_and_enforced_before_native_tools(
 
     with pytest.raises(guard.GuardFailure, match="bounded size"):
         guard.snapshot_digest(oversized, "uki")
+
+
+def test_stripped_uki_allows_only_the_exact_pe32_plus_checksum_field(
+    tmp_path, monkeypatch
+):
+    guard = _load_guard()
+    base = tmp_path / "attested-validation.efi"
+    stripped = tmp_path / "runtime" / "unsigned-control.efi"
+    stripped.parent.mkdir()
+    base_bytes = _pe32_plus_image(checksum=b"\x10\x20\x30\x40")
+    stripped_bytes = _pe32_plus_image(checksum=b"\x50\x60\x70\x80")
+    _write_private_uki(base, base_bytes)
+    _write_private_uki(stripped, stripped_bytes)
+    record = _attested_record(base)
+
+    # Split the four-byte CheckSum field across two streaming chunks. The
+    # comparison still normalizes exactly that field and hashes the raw copy.
+    checksum_offset = 0x80 + 24 + 64
+    monkeypatch.setattr(guard, "CHUNK_SIZE", checksum_offset + 2)
+    digest = guard._compare_stripped_uki_to_attested_base(base, stripped, record)
+
+    assert digest == hashlib.sha256(stripped_bytes).hexdigest()
+    assert digest != record["sha256"]
+
+    for changed_offset in (checksum_offset - 1, checksum_offset + 4):
+        changed = bytearray(stripped_bytes)
+        changed[changed_offset] ^= 0x01
+        _write_private_uki(stripped, bytes(changed))
+        with pytest.raises(guard.GuardFailure, match="payload differs"):
+            guard._compare_stripped_uki_to_attested_base(base, stripped, record)
+
+
+def test_stripped_uki_requires_equal_size_checksum_offset_and_recorded_path(tmp_path):
+    guard = _load_guard()
+    base = tmp_path / "attested-validation.efi"
+    stripped = tmp_path / "unsigned-control.efi"
+    base_bytes = _pe32_plus_image(checksum=b"\x01\x02\x03\x04", total_size=512)
+    _write_private_uki(base, base_bytes)
+    record = _attested_record(base)
+
+    _write_private_uki(stripped, base_bytes + b"x")
+    with pytest.raises(guard.GuardFailure, match="size differs"):
+        guard._compare_stripped_uki_to_attested_base(base, stripped, record)
+
+    moved_header = _pe32_plus_image(
+        checksum=b"\x05\x06\x07\x08", pe_offset=0x88, total_size=512
+    )
+    _write_private_uki(stripped, moved_header)
+    with pytest.raises(guard.GuardFailure, match="checksum offset differs"):
+        guard._compare_stripped_uki_to_attested_base(base, stripped, record)
+
+    other = tmp_path / "other-validation.efi"
+    _write_private_uki(other, base_bytes)
+    with pytest.raises(guard.GuardFailure, match="path differs"):
+        guard._compare_stripped_uki_to_attested_base(other, stripped, record)
+
+    _write_private_uki(
+        stripped, _pe32_plus_image(checksum=b"\x05\x06\x07\x08", total_size=512)
+    )
+    wrong_metadata = dict(record)
+    wrong_metadata["size"] += 1
+    with pytest.raises(guard.GuardFailure, match="identity changed"):
+        guard._compare_stripped_uki_to_attested_base(
+            base, stripped, wrong_metadata
+        )
+
+    wrong_digest = dict(record)
+    wrong_digest["sha256"] = "f" * 64
+    with pytest.raises(guard.GuardFailure, match="digest changed"):
+        guard._compare_stripped_uki_to_attested_base(base, stripped, wrong_digest)
+
+
+@pytest.mark.parametrize(
+    "mutation, message",
+    (
+        (lambda image: image.__setitem__(slice(0, 2), b"NO"), "not an MZ"),
+        (
+            lambda image: image.__setitem__(slice(0x3C, 0x40), (63).to_bytes(4, "little")),
+            "offset is outside",
+        ),
+        (
+            lambda image: image.__setitem__(
+                slice(0x3C, 0x40), (1024 * 1024).to_bytes(4, "little")
+            ),
+            "offset is outside",
+        ),
+        (lambda image: image.__setitem__(slice(0x80, 0x84), b"PX\x00\x00"), "signature"),
+        (
+            lambda image: image.__setitem__(
+                slice(0x84, 0x86), (0x14C).to_bytes(2, "little")
+            ),
+            "not an x86-64",
+        ),
+        (
+            lambda image: image.__setitem__(
+                slice(0x94, 0x96), (151).to_bytes(2, "little")
+            ),
+            "invalid size",
+        ),
+        (
+            lambda image: image.__setitem__(
+                slice(0x98, 0x9A), (0x10B).to_bytes(2, "little")
+            ),
+            r"does not use the PE32\+",
+        ),
+        (
+            lambda image: image.__setitem__(
+                slice(0x104, 0x108), (4).to_bytes(4, "little")
+            ),
+            "omits the certificate",
+        ),
+        (
+            lambda image: image.__setitem__(
+                slice(0x104, 0x108), (17).to_bytes(4, "little")
+            ),
+            "count exceeds",
+        ),
+        (
+            lambda image: image.__setitem__(slice(0x128, 0x130), b"\x01" + b"\x00" * 7),
+            "retains a certificate",
+        ),
+        (
+            lambda image: image.__setitem__(slice(0x86, 0x88), b"\x00\x00"),
+            "section count",
+        ),
+        (
+            lambda image: image.__setitem__(
+                slice(0x86, 0x88), (97).to_bytes(2, "little")
+            ),
+            "section count",
+        ),
+        (
+            lambda image: image.__setitem__(
+                slice(0x86, 0x88), (2).to_bytes(2, "little")
+            ),
+            "section table is truncated",
+        ),
+    ),
+)
+def test_pe32_plus_checksum_parser_rejects_malformed_headers(
+    tmp_path, mutation, message
+):
+    guard = _load_guard()
+    image = bytearray(_pe32_plus_image())
+    mutation(image)
+    path = tmp_path / "malformed.efi"
+    _write_private_uki(path, bytes(image))
+    descriptor, metadata = guard._open_stable_regular(path, guard.UKI_LIMIT)
+    try:
+        with pytest.raises(guard.GuardFailure, match=message):
+            guard._pe32_plus_checksum_offset(descriptor, metadata)
+    finally:
+        os.close(descriptor)
+
+
+def test_pe32_plus_checksum_parser_rejects_truncated_optional_header(tmp_path):
+    guard = _load_guard()
+    image = _pe32_plus_image()
+    path = tmp_path / "truncated.efi"
+    _write_private_uki(path, image[: 0x80 + 24 + 151])
+    descriptor, metadata = guard._open_stable_regular(path, guard.UKI_LIMIT)
+    try:
+        with pytest.raises(guard.GuardFailure, match="truncated"):
+            guard._pe32_plus_checksum_offset(descriptor, metadata)
+    finally:
+        os.close(descriptor)
+
+    short_dos = tmp_path / "short-dos.efi"
+    _write_private_uki(short_dos, b"MZ" + b"\x00" * 31)
+    descriptor, metadata = guard._open_stable_regular(short_dos, guard.UKI_LIMIT)
+    try:
+        with pytest.raises(guard.GuardFailure, match="truncated"):
+            guard._pe32_plus_checksum_offset(descriptor, metadata)
+    finally:
+        os.close(descriptor)
+
+    header_past_end = bytearray(_pe32_plus_image())
+    header_past_end[0x3C:0x40] = (0x800).to_bytes(4, "little")
+    past_end = tmp_path / "header-past-end.efi"
+    _write_private_uki(past_end, bytes(header_past_end))
+    descriptor, metadata = guard._open_stable_regular(past_end, guard.UKI_LIMIT)
+    try:
+        with pytest.raises(guard.GuardFailure, match="truncated"):
+            guard._pe32_plus_checksum_offset(descriptor, metadata)
+    finally:
+        os.close(descriptor)
+
+    huge_optional = bytearray(_pe32_plus_image())
+    huge_optional[0x94:0x96] = (4097).to_bytes(2, "little")
+    huge = tmp_path / "huge-optional.efi"
+    _write_private_uki(huge, bytes(huge_optional))
+    descriptor, metadata = guard._open_stable_regular(huge, guard.UKI_LIMIT)
+    try:
+        with pytest.raises(guard.GuardFailure, match="invalid size"):
+            guard._pe32_plus_checksum_offset(descriptor, metadata)
+    finally:
+        os.close(descriptor)
+
+
+def test_stripped_uki_rejects_symlinks_replacement_and_size_bound(
+    tmp_path, monkeypatch
+):
+    guard = _load_guard()
+    base = tmp_path / "attested-validation.efi"
+    stripped = tmp_path / "unsigned-control.efi"
+    replacement = tmp_path / "replacement.efi"
+    content = _pe32_plus_image(checksum=b"\x01\x02\x03\x04")
+    _write_private_uki(base, content)
+    _write_private_uki(stripped, content)
+    record = _attested_record(base)
+
+    linked = tmp_path / "linked-control.efi"
+    linked.symlink_to(stripped)
+    with pytest.raises(guard.GuardFailure, match="no-follow regular file"):
+        guard._compare_stripped_uki_to_attested_base(base, linked, record)
+
+    hardlink = tmp_path / "hardlinked-control.efi"
+    os.link(base, hardlink)
+    record = _attested_record(base)
+    with pytest.raises(guard.GuardFailure, match="aliases the attested base"):
+        guard._compare_stripped_uki_to_attested_base(base, hardlink, record)
+
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    parent_control = real_parent / "control.efi"
+    _write_private_uki(parent_control, content)
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    with pytest.raises(guard.GuardFailure, match="symlinked path component"):
+        guard._compare_stripped_uki_to_attested_base(
+            base, linked_parent / "control.efi", record
+        )
+
+    stripped.chmod(0o600)
+    with pytest.raises(guard.GuardFailure, match="unsafe private identity"):
+        guard._compare_stripped_uki_to_attested_base(base, stripped, record)
+    stripped.chmod(0o400)
+
+    original_pread = guard.os.pread
+    replaced = False
+
+    def replacing_pread(descriptor, count, offset):
+        nonlocal replaced
+        result = original_pread(descriptor, count, offset)
+        if not replaced and offset == 0 and count == len(content):
+            replaced = True
+            _write_private_uki(replacement, content)
+            os.replace(str(replacement), str(stripped))
+        return result
+
+    monkeypatch.setattr(guard.os, "pread", replacing_pread)
+    with pytest.raises(guard.GuardFailure, match="changed while reading"):
+        guard._compare_stripped_uki_to_attested_base(base, stripped, record)
+    assert replaced
+
+    monkeypatch.setattr(guard.os, "pread", original_pread)
+    _write_private_uki(stripped, content)
+    monkeypatch.setattr(guard, "UKI_LIMIT", len(content))
+    with pytest.raises(guard.GuardFailure, match="bounded size"):
+        guard._compare_stripped_uki_to_attested_base(base, stripped, record)
+
+
+def test_stripped_uki_operation_is_bound_to_secure_attested_runtime(
+    tmp_path, monkeypatch
+):
+    guard = _load_guard()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    base = tmp_path / "attested-validation.efi"
+    stripped = runtime / "work" / "unsigned-control.efi"
+    stripped.parent.mkdir()
+    base_bytes = _pe32_plus_image(checksum=b"\x11\x22\x33\x44")
+    stripped_bytes = _pe32_plus_image(checksum=b"\xaa\xbb\xcc\xdd")
+    _write_private_uki(base, base_bytes)
+    _write_private_uki(stripped, stripped_bytes)
+    value = {
+        "run": {
+            "kind": "uki",
+            "mode": "secure-boot",
+            "runtime_root": str(runtime),
+            "secure_preparation": {"bound": True},
+        },
+        "files": {"validation_uki": _attested_record(base)},
+    }
+    monkeypatch.setattr(guard, "_read_attestation", lambda path, descriptor: value)
+    monkeypatch.setattr(guard, "_verify_attested_record", lambda record: None)
+
+    assert guard.verify_stripped_uki(tmp_path / "attestation", 9, stripped) == (
+        hashlib.sha256(stripped_bytes).hexdigest()
+    )
+
+    outside = tmp_path / "outside.efi"
+    _write_private_uki(outside, stripped_bytes)
+    with pytest.raises(guard.GuardFailure, match="escaped the private runtime"):
+        guard.verify_stripped_uki(tmp_path / "attestation", 9, outside)
+
+    noncanonical = stripped.parent / ".." / "work" / stripped.name
+    with pytest.raises(guard.GuardFailure, match="not canonical"):
+        guard.verify_stripped_uki(tmp_path / "attestation", 9, noncanonical)
+
+    value["run"]["mode"] = "uefi"
+    with pytest.raises(guard.GuardFailure, match="does not bind"):
+        guard.verify_stripped_uki(tmp_path / "attestation", 9, stripped)
+
+    value["run"]["mode"] = "secure-boot"
+    value["run"]["secure_preparation"] = None
+    with pytest.raises(guard.GuardFailure, match="does not bind"):
+        guard.verify_stripped_uki(tmp_path / "attestation", 9, stripped)
 
 
 def test_signature_inventory_requires_positive_exact_states(tmp_path):

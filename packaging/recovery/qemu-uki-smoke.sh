@@ -430,13 +430,12 @@ invoke_smoke_guard verify-snapshot --kind uki \
 }
 run_sbattach detach --detach "$work/detached.raw" --remove "$unsigned"
 /usr/bin/chmod 0400 -- "$unsigned"
-unsigned_digest="$(invoke_smoke_guard snapshot-digest --kind uki --path "$unsigned")"
-base_unsigned_digest="$(invoke_smoke_guard attested-digest \
+unsigned_digest="$(invoke_smoke_guard verify-stripped-uki \
   --attestation "$AURASCAN_RECOVERY_ATTESTATION_PATH" \
   --fd "$AURASCAN_RECOVERY_ATTESTATION_FD" \
-  --mapping files --role validation_uki)"
-[[ "$unsigned_digest" == "$base_unsigned_digest" ]] || {
-  printf 'Signature-stripped UKI differs from the attested exact-candidate validation UKI\n' >&2
+  --stripped "$unsigned")" || exit 1
+[[ "$unsigned_digest" =~ ^[0-9a-f]{64}$ ]] || {
+  printf 'Signature-stripped UKI verification digest is invalid\n' >&2
   exit 1
 }
 detached="$work/detached-signature.p7"

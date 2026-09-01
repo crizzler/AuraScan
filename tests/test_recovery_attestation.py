@@ -206,15 +206,22 @@ def test_smoke_guard_binds_private_copy_and_firmware_digests(monkeypatch, tmp_pa
         )
 
 
-def test_secure_harness_requires_stripped_digest_to_match_base_attestation():
+def test_secure_harness_uses_attestation_bound_stripped_uki_comparison():
     harness = (ROOT / "packaging/recovery/qemu-uki-smoke.sh").read_text(
         encoding="utf-8"
     )
     launcher = LAUNCHER_PATH.read_text(encoding="utf-8")
 
-    assert "base_unsigned_digest=" in harness
-    assert "--mapping files --role validation_uki" in harness
-    assert '[[ "$unsigned_digest" == "$base_unsigned_digest" ]]' in harness
+    stripped_block = harness.split('unsigned_digest="', 1)[1].split(
+        'detached="$work/detached-signature.p7"', 1
+    )[0]
+    assert "verify-stripped-uki" in stripped_block
+    assert '--attestation "$AURASCAN_RECOVERY_ATTESTATION_PATH"' in stripped_block
+    assert '--fd "$AURASCAN_RECOVERY_ATTESTATION_FD"' in stripped_block
+    assert '--stripped "$unsigned"' in stripped_block
+    assert 'snapshot-digest --kind uki --path "$unsigned"' not in stripped_block
+    assert "base_unsigned_digest=" not in harness
+    assert '[[ "$unsigned_digest" == "$base_unsigned_digest" ]]' not in harness
     assert "--reuid={}" in launcher
     assert '"--net"' in launcher
     assert '"--no-new-privs"' in launcher

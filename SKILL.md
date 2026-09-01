@@ -285,6 +285,12 @@ Use this path only when the user explicitly authorizes external publication:
    already size-validated UKI; never reuse the smaller diagnostic-output cap
    as that artifact ceiling. Revalidate the resulting file before a boot gate
    consumes it.
+   Bind the signature-stripped control to the attested unsigned base through a
+   strict, bounded PE/COFF parser. Permit a difference only in the Optional
+   Header's four-byte `CheckSum`, which signing or signature removal may
+   recompute; require equal size and exact equality everywhere else. Keep the
+   separate requirement that reattaching the detached signature reproduces
+   the exact signed UKI bytes.
    Keep removable-media writing separately fail closed: require trusted bounded
    absolute `findmnt`/`lsblk` probes, identify the running root, repeat device
    eligibility after confirmation and again while the exclusive descriptor is

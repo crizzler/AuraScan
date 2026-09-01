@@ -69,6 +69,12 @@ evidence actually collected.
   independently size-validated UKI. Never derive an artifact file-size limit
   from the much smaller output-capture budget, and revalidate the resulting
   file before using it as gate input.
+  Bind a signature-stripped UKI to the attested unsigned base with a strict,
+  bounded PE/COFF parser. Signing and signature removal may leave only the
+  Optional Header's four-byte `CheckSum` recomputed: require equal file size
+  and exact equality at every other byte, and fail closed on malformed or
+  ambiguous headers. The reattached result must still be byte-for-byte
+  identical to the signed UKI input.
   Local UKIs remain machine/kernel/key-specific test artifacts, not universal
   downloads. Never describe an unrun recovery gate as passing.
 - Keep the recovery privacy audit fail closed across regular bytes and bounded

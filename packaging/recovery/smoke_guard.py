@@ -27,6 +27,13 @@ SMOKE_RESULT_LIMIT = 64 * 1024
 SMOKE_RESULT_SCHEMA = "aurascan_recovery_smoke_result/1.0"
 SMOKE_RESULT_NAME = "recovery-smoke-result.json"
 CHUNK_SIZE = 1024 * 1024
+PE_HEADER_OFFSET_LIMIT = 1024 * 1024
+PE32_PLUS_OPTIONAL_HEADER_MINIMUM = 152
+PE32_PLUS_CHECKSUM_OFFSET = 64
+PE32_PLUS_DATA_DIRECTORY_OFFSET = 112
+PE_CERTIFICATE_DIRECTORY_INDEX = 4
+PE_SECTION_HEADER_SIZE = 40
+PE_SECTION_LIMIT = 96
 ATTESTATION_LIMIT = 256 * 1024
 ATTESTATION_SCHEMA = "aurascan_recovery_validation_attestation/1.0"
 ATTESTATION_FIELDS = {
@@ -235,6 +242,154 @@ def _read_stable(path: Path, max_bytes: int) -> bytes:
     if total != before.st_size:
         raise GuardFailure("smoke-test metadata changed while reading")
     return b"".join(chunks)
+
+
+def _pread_exact(descriptor: int, offset: int, length: int, file_size: int) -> bytes:
+    if (
+        offset < 0
+        or length < 0
+        or offset > file_size
+        or length > file_size - offset
+    ):
+        raise GuardFailure("PE/COFF header is truncated")
+    chunks = []
+    consumed = 0
+    while consumed < length:
+        try:
+            chunk = os.pread(descriptor, length - consumed, offset + consumed)
+        except OSError as exc:
+            raise GuardFailure("PE/COFF header could not be read") from exc
+        if not chunk:
+            raise GuardFailure("PE/COFF header is truncated")
+        chunks.append(chunk)
+        consumed += len(chunk)
+    return b"".join(chunks)
+
+
+def _pe32_plus_checksum_offset(descriptor: int, metadata: os.stat_result) -> int:
+    dos_header = _pread_exact(descriptor, 0, 64, metadata.st_size)
+    if dos_header[:2] != b"MZ":
+        raise GuardFailure("UKI is not an MZ executable")
+    pe_offset = int.from_bytes(dos_header[0x3C:0x40], "little")
+    if pe_offset < 64 or pe_offset >= PE_HEADER_OFFSET_LIMIT:
+        raise GuardFailure("PE/COFF header offset is outside its bound")
+    pe_header = _pread_exact(descriptor, pe_offset, 24, metadata.st_size)
+    if pe_header[:4] != b"PE\x00\x00":
+        raise GuardFailure("UKI has an invalid PE/COFF signature")
+    if int.from_bytes(pe_header[4:6], "little") != 0x8664:
+        raise GuardFailure("UKI is not an x86-64 PE/COFF image")
+    section_count = int.from_bytes(pe_header[6:8], "little")
+    if not 1 <= section_count <= PE_SECTION_LIMIT:
+        raise GuardFailure("PE/COFF section count is outside its bound")
+    optional_size = int.from_bytes(pe_header[20:22], "little")
+    if not PE32_PLUS_OPTIONAL_HEADER_MINIMUM <= optional_size <= 4096:
+        raise GuardFailure("PE32+ optional header has an invalid size")
+    optional_offset = pe_offset + len(pe_header)
+    optional_header = _pread_exact(
+        descriptor, optional_offset, optional_size, metadata.st_size
+    )
+    if optional_header[:2] != b"\x0b\x02":
+        raise GuardFailure("UKI does not use the PE32+ optional header")
+    directory_count = int.from_bytes(optional_header[108:112], "little")
+    if directory_count <= PE_CERTIFICATE_DIRECTORY_INDEX:
+        raise GuardFailure("PE32+ optional header omits the certificate directory")
+    if directory_count > (optional_size - PE32_PLUS_DATA_DIRECTORY_OFFSET) // 8:
+        raise GuardFailure("PE32+ data-directory count exceeds the optional header")
+    certificate_offset = (
+        PE32_PLUS_DATA_DIRECTORY_OFFSET + PE_CERTIFICATE_DIRECTORY_INDEX * 8
+    )
+    if certificate_offset + 8 > optional_size:
+        raise GuardFailure("PE32+ certificate directory is truncated")
+    if optional_header[certificate_offset : certificate_offset + 8] != b"\x00" * 8:
+        raise GuardFailure("signature-stripped UKI retains a certificate table")
+    section_table_end = (
+        optional_offset + optional_size + section_count * PE_SECTION_HEADER_SIZE
+    )
+    if section_table_end > metadata.st_size:
+        raise GuardFailure("PE/COFF section table is truncated")
+    checksum_offset = optional_offset + PE32_PLUS_CHECKSUM_OFFSET
+    if checksum_offset + 4 > optional_offset + optional_size:
+        raise GuardFailure("PE32+ checksum field is truncated")
+    return checksum_offset
+
+
+def _compare_stripped_uki_to_attested_base(
+    base: Path, stripped: Path, base_record
+) -> str:
+    base_record = _validate_attested_record(base_record)
+    base = _safe_drive_path(base)
+    stripped = _safe_drive_path(stripped)
+    recorded_base = _safe_drive_path(Path(base_record["path"]))
+    if os.fspath(recorded_base) != base_record["path"] or base != recorded_base:
+        raise GuardFailure("attested validation UKI path differs from its record")
+    base_descriptor, base_before = _open_stable_regular(base, UKI_LIMIT)
+    stripped_descriptor = -1
+    try:
+        stripped_descriptor, stripped_before = _open_stable_regular(
+            stripped, UKI_LIMIT
+        )
+        if (
+            stripped_before.st_uid != os.geteuid()
+            or stripped_before.st_gid != os.getegid()
+            or stat.S_IMODE(stripped_before.st_mode) != 0o400
+        ):
+            raise GuardFailure("signature-stripped UKI has an unsafe private identity")
+        if (
+            base_before.st_dev == stripped_before.st_dev
+            and base_before.st_ino == stripped_before.st_ino
+        ):
+            raise GuardFailure("signature-stripped UKI aliases the attested base")
+        expected_metadata = {
+            key: base_record[key] for key in _record_metadata(base_before)
+        }
+        if _record_metadata(base_before) != expected_metadata:
+            raise GuardFailure("attested validation UKI identity changed")
+        if base_before.st_size != stripped_before.st_size:
+            raise GuardFailure("signature-stripped UKI size differs from the attested base")
+        base_checksum = _pe32_plus_checksum_offset(base_descriptor, base_before)
+        stripped_checksum = _pe32_plus_checksum_offset(
+            stripped_descriptor, stripped_before
+        )
+        if base_checksum != stripped_checksum:
+            raise GuardFailure("signature-stripped UKI checksum offset differs from the base")
+
+        base_digest = hashlib.sha256()
+        stripped_digest = hashlib.sha256()
+        offset = 0
+        while offset < base_before.st_size:
+            length = min(CHUNK_SIZE, base_before.st_size - offset)
+            base_chunk = bytearray(
+                _pread_exact(base_descriptor, offset, length, base_before.st_size)
+            )
+            stripped_chunk = bytearray(
+                _pread_exact(
+                    stripped_descriptor, offset, length, stripped_before.st_size
+                )
+            )
+            base_digest.update(base_chunk)
+            stripped_digest.update(stripped_chunk)
+            checksum_start = max(base_checksum, offset)
+            checksum_end = min(base_checksum + 4, offset + length)
+            if checksum_start < checksum_end:
+                start = checksum_start - offset
+                end = checksum_end - offset
+                base_chunk[start:end] = b"\x00" * (end - start)
+                stripped_chunk[start:end] = b"\x00" * (end - start)
+            if base_chunk != stripped_chunk:
+                raise GuardFailure(
+                    "signature-stripped UKI payload differs from the attested base"
+                )
+            offset += length
+
+        _revalidate_path(base, base_before, base_descriptor)
+        _revalidate_path(stripped, stripped_before, stripped_descriptor)
+        if base_digest.hexdigest() != base_record["sha256"]:
+            raise GuardFailure("attested validation UKI digest changed")
+        return stripped_digest.hexdigest()
+    finally:
+        if stripped_descriptor >= 0:
+            os.close(stripped_descriptor)
+        os.close(base_descriptor)
 
 
 def _read_attestation(path: Path, descriptor: int):
@@ -504,6 +659,35 @@ def attested_digest(path: Path, descriptor: int, mapping: str, role: str) -> str
         raise GuardFailure("validation attestation does not contain the selected role")
     _verify_attested_record(selected[role])
     return selected[role]["sha256"]
+
+
+def verify_stripped_uki(path: Path, descriptor: int, stripped: Path) -> str:
+    value = _read_attestation(path, descriptor)
+    run = value["run"]
+    if (
+        run["kind"] != "uki"
+        or run["mode"] != "secure-boot"
+        or run["secure_preparation"] is None
+    ):
+        raise GuardFailure("validation attestation does not bind a Secure Boot UKI run")
+
+    supplied_stripped = Path(stripped)
+    stripped = _safe_drive_path(supplied_stripped)
+    if os.fspath(stripped) != os.fspath(supplied_stripped):
+        raise GuardFailure("signature-stripped UKI path is not canonical")
+    runtime = _safe_drive_path(Path(run["runtime_root"]))
+    try:
+        relative = stripped.relative_to(runtime)
+    except ValueError as exc:
+        raise GuardFailure("signature-stripped UKI escaped the private runtime") from exc
+    if not relative.parts or ".." in relative.parts:
+        raise GuardFailure("signature-stripped UKI path is invalid")
+
+    base_record = value["files"]["validation_uki"]
+    _verify_attested_record(base_record)
+    return _compare_stripped_uki_to_attested_base(
+        Path(base_record["path"]), stripped, base_record
+    )
 
 
 def _snapshot(source: Path, destination: Path, max_bytes: int) -> Tuple[str, int, bytes]:
@@ -801,6 +985,11 @@ def build_parser() -> argparse.ArgumentParser:
     attested.add_argument("--fd", type=int, required=True)
     attested.add_argument("--mapping", choices=("files", "firmware", "run_inputs"), required=True)
     attested.add_argument("--role", required=True)
+
+    stripped = subparsers.add_parser("verify-stripped-uki")
+    stripped.add_argument("--attestation", required=True)
+    stripped.add_argument("--fd", type=int, required=True)
+    stripped.add_argument("--stripped", required=True)
     return parser
 
 
@@ -845,6 +1034,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         elif args.command == "attested-digest":
             print(attested_digest(Path(args.attestation), args.fd, args.mapping, args.role))
+        elif args.command == "verify-stripped-uki":
+            print(
+                verify_stripped_uki(
+                    Path(args.attestation), args.fd, Path(args.stripped)
+                )
+            )
         else:  # pragma: no cover - argparse owns this boundary.
             raise GuardFailure("unknown smoke-guard action")
     except (GuardFailure, KeyError, TypeError, ValueError) as exc:

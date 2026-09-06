@@ -14,6 +14,10 @@ from pathlib import Path, PurePosixPath
 from typing import Dict, Iterable, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 from aurascan.analyzers.aur_propagation import _active_shell_text
+from aurascan.analyzers.python_bytecode import (
+    PYTHON_PRECOMPILED_KINDS,
+    python_precompiled_findings,
+)
 from aurascan.analyzers.remote_access import mask_shell_quoted_text
 from aurascan.analyzers.remote_stage import (
     _basename,
@@ -2214,8 +2218,19 @@ class RepositoryProvenanceAnalyzer:
                     critical = hook_setid
 
             correlation = critical or high
+            python_carrier = artifact.kind in PYTHON_PRECOMPILED_KINDS
+            if python_carrier and (correlation is not None or not artifact.generated_output):
+                findings.extend(python_precompiled_findings(
+                    artifact.kind,
+                    str(checkout_dir / relative_path),
+                    Phase.pkgbuild_static,
+                    pkg_name=pkg_name,
+                    pkg_ver=pkg_ver,
+                    file_hash=artifact.sha256,
+                    include_presence=correlation is None,
+                ))
             if correlation is None:
-                if not artifact.generated_output:
+                if not artifact.generated_output and not python_carrier:
                     findings.append(
                         self._presence_finding(
                             artifact,

@@ -585,7 +585,7 @@ def test_pkgbuild_cache_is_bound_to_exact_pkgbuild_and_install_hook_bytes(tmp_pa
     engine.cache = ScanCache(tmp_path / "cache")
     engine.analyzers = [analyzer]
 
-    assert engine.rule_version == "1.5.0"
+    assert engine.rule_version == "1.6.0"
     assert engine.scan_pkgbuild(str(pkgbuild)) is True
     first_digest = engine.last_scan_input_digest
     assert analyzer.pkgbuild_calls == 1

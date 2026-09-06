@@ -148,9 +148,9 @@ def test_first_seen_review_explains_integrity_only_and_ai_not_needed(tmp_path):
 
     assert report.ai_status == "not-needed"
     assert "Suspicious instruction patterns: NONE FOUND" in rendered
-    assert "This is an integrity review, not a malware-content alert." in rendered
-    assert "NEW FILES AWAITING APPROVAL (1)" in rendered
-    assert "These files are not flagged as malicious" in rendered
+    assert "This is neutral baseline enrollment, not a malware-content alert." in rendered
+    assert "NEW CLEAN FILES TO ENROLL (1)" in rendered
+    assert "NO THREAT MATCH" in rendered
     assert "AI analysis: NOT NEEDED" in rendered
     assert "there is no suspicious content finding to explain" in rendered
     assert "Why flagged:" not in rendered
@@ -1112,7 +1112,7 @@ def test_incomplete_review_says_discovered_so_far_and_lists_suspicious_first(tmp
         item.relative_path for item in report.candidates if item.content_risk == "LOW"
     )
     assert rendered.index("SUSPICIOUS INSTRUCTIONS") < rendered.index(
-        "NEW FILES AWAITING APPROVAL"
+        "NEW CLEAN FILES TO ENROLL"
     )
     assert rendered.index("AGENTS.md") < rendered.index(clean_path)
 
@@ -1263,7 +1263,9 @@ def test_uncommitted_advanced_cursor_restarts_without_missing_threat(
     assert "IG-BEHAVIOR-FETCH-EXECUTE" in {
         finding.rule_id for finding in threat.findings
     }
-    assert instruction_guard_status(state_root=state)["state"] == "review_required"
+    assert instruction_guard_status(state_root=state)["state"] == (
+        "security_attention_required"
+    )
     assert not list((state / "cursors").glob("cursor-*.json"))
     assert not list((state / "cycles").glob("cycle-*.json"))
 
@@ -1503,7 +1505,7 @@ def test_cycle_inventory_overflow_stays_bounded_readable_and_review_required(
         assert payload["candidate_count"] <= 3
         guard._validate_report_structure(payload)
     status = instruction_guard_status(state_root=state)
-    assert status["state"] == "review_required"
+    assert status["state"] == "security_attention_required"
 
 
 def test_same_filesystem_and_depth_limits_prune_without_opening_files(monkeypatch, tmp_path):
@@ -3137,7 +3139,9 @@ def test_report_and_alert_histories_remain_bounded_under_repeated_findings(
     assert len(pending_instruction_guard_alerts(state_root=state)) <= 2
     persisted_latest = review_report(state_root=state)
     assert persisted_latest.report_id == latest.report_id
-    assert instruction_guard_status(state_root=state)["state"] == "review_required"
+    assert instruction_guard_status(state_root=state)["state"] == (
+        "security_attention_required"
+    )
 
 
 def test_ai_is_zero_call_when_disabled_and_raise_only_when_enabled(tmp_path):
@@ -4106,7 +4110,7 @@ def test_manifest_root_bound_rejects_new_root_without_mutating_known_state(
         for path in (state / "reports").glob("report-*.json")
     }
 
-    assert status_before["state"] == "review_required"
+    assert status_before["state"] == "baseline_enrollment_required"
     assert status_before["latest_report_id"] == second.report_id
     with pytest.raises(ValueError, match="scan-root bound"):
         scan(roots[2], state)
@@ -4136,6 +4140,10 @@ def test_status_is_secret_free_and_fails_closed_for_unsafe_state(tmp_path):
     assert set(empty) == {
         "schema", "state", "highest_severity", "pending_alert_count",
         "review_candidate_count", "latest_report_id",
+        "security_attention_required", "coverage_action_required",
+        "baseline_enrollment_required", "suspicious_candidate_count",
+        "changed_or_unsafe_candidate_count", "coverage_issue_count",
+        "clean_first_seen_count", "continuation_pending",
     }
 
     unsafe = tmp_path / "unsafe"
@@ -4164,6 +4172,14 @@ def test_status_is_unavailable_for_semantically_malformed_latest_report(tmp_path
         "pending_alert_count": 0,
         "review_candidate_count": 0,
         "latest_report_id": "",
+        "security_attention_required": False,
+        "coverage_action_required": True,
+        "baseline_enrollment_required": False,
+        "suspicious_candidate_count": 0,
+        "changed_or_unsafe_candidate_count": 0,
+        "coverage_issue_count": 1,
+        "clean_first_seen_count": 0,
+        "continuation_pending": False,
     }
 
 

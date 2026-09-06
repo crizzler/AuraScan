@@ -1,4 +1,3 @@
-import json
 import os
 import re
 import shutil
@@ -8,6 +7,17 @@ from typing import Iterable, List, Optional
 
 from aurascan.analyzers.base import BaseAnalyzer
 from aurascan.analyzers.clamav import ClamAVAnalyzer
+from aurascan.analyzers.npm_metadata import (
+    MetadataIncomplete, inspect_npm_metadata, strict_json_object,
+)
+from aurascan.analyzers.python_bytecode import (
+    PYTHON_PRECOMPILED_CANDIDATE,
+    classify_python_precompiled, is_python_precompiled_path,
+    python_precompiled_findings,
+)
+from aurascan.analyzers.python_bytecode_execution import (
+    analyze_precompiled_execution, is_precompiled_control_script,
+)
 from aurascan.analyzers.remote_access import find_remote_access_backdoor_signals
 from aurascan.analyzers.remote_stage import (
     analyze_carrier_execution,
@@ -114,6 +124,9 @@ class DeepStaticAnalyzer(BaseAnalyzer):
     def inspect_source_tree(self, root: Path) -> List[Finding]:
         findings: List[Finding] = []
         self._tree_scan_incomplete = False
+        precompiled_carriers = []
+        precompiled_controls = []
+        control_bytes = 0
         for path in self._iter_interesting_files(root):
             rel = str(path.relative_to(root))
             if path.name.lower().endswith(NESTED_ARCHIVE_SUFFIXES):
@@ -143,6 +156,25 @@ class DeepStaticAnalyzer(BaseAnalyzer):
             if payload is None:
                 self._tree_scan_incomplete = True
                 continue
+            precompiled_kind = classify_python_precompiled(str(path), payload)
+            if precompiled_kind:
+                precompiled_carriers.append((str(path), precompiled_kind))
+                findings.extend(python_precompiled_findings(
+                    precompiled_kind, str(path), Phase.unpacked_source_scan,
+                ))
+                # A suffix only selects review candidates.  Plain text renamed
+                # .pyc/.pyo/.pyd must retain the existing text-rule inspection.
+                if precompiled_kind != PYTHON_PRECOMPILED_CANDIDATE or self._is_binary(payload):
+                    continue
+            if path.name in {"package.json", "pnpm-lock.yaml"}:
+                try:
+                    metadata_text = payload.decode("utf-8")
+                except UnicodeError:
+                    self._tree_scan_incomplete = True
+                    continue
+                findings.extend(inspect_npm_metadata(
+                    str(path), metadata_text, lockfile=path.name == "pnpm-lock.yaml",
+                ))
             if self._is_binary(payload):
                 findings.append(self._finding(
                     "DEEPSTATIC-BINARY-BLOB",
@@ -156,7 +188,16 @@ class DeepStaticAnalyzer(BaseAnalyzer):
                 ))
                 continue
             text = payload.decode("utf-8", errors="replace")
+            if is_precompiled_control_script(str(path)):
+                control_bytes += len(payload)
+                if control_bytes <= 5 * 1024 * 1024:
+                    precompiled_controls.append((str(path), text))
             findings.extend(self._inspect_text_file(path, text))
+        if precompiled_carriers:
+            execution = analyze_precompiled_execution(root, precompiled_carriers, precompiled_controls)
+            findings.extend(execution.findings)
+            if not execution.complete or control_bytes > 5 * 1024 * 1024:
+                self._tree_scan_incomplete = True
         if self._tree_scan_incomplete:
             findings.append(self._finding(
                 "DEEPSTATIC-INSPECTION-INCOMPLETE-001",
@@ -338,8 +379,9 @@ class DeepStaticAnalyzer(BaseAnalyzer):
     def _inspect_package_json(self, path: Path, text: str) -> List[Finding]:
         findings: List[Finding] = []
         try:
-            data = json.loads(text)
-        except (json.JSONDecodeError, RecursionError):
+            data = strict_json_object(text)
+        except MetadataIncomplete:
+            self._tree_scan_incomplete = True
             return findings
         if not isinstance(data, dict):
             self._tree_scan_incomplete = True
@@ -434,6 +476,8 @@ class DeepStaticAnalyzer(BaseAnalyzer):
                                 path.name in INTERESTING_NAMES
                                 or path.name.startswith(".")
                                 or path.suffix in TEXT_SUFFIXES
+                                or is_python_precompiled_path(str(path))
+                                or "__pycache__" in rel_parts
                                 or path.name.lower().endswith(NESTED_ARCHIVE_SUFFIXES)
                                 or ".min." in path.name
                                 or bool(metadata.st_mode & stat.S_IXUSR)
@@ -453,6 +497,8 @@ class DeepStaticAnalyzer(BaseAnalyzer):
 
     def _has_text_shebang(self, path: Path) -> bool:
         payload = self._read_regular_file(path, 4096, allow_larger=True)
+        if payload is None:
+            self._tree_scan_incomplete = True
         return bool(payload is not None and payload.startswith(b"#!") and b"\x00" not in payload)
 
     def _read_candidate(self, path: Path) -> Optional[bytes]:
@@ -466,16 +512,81 @@ class DeepStaticAnalyzer(BaseAnalyzer):
         allow_larger: bool,
     ) -> Optional[bytes]:
         file_descriptor = -1
+        directory_descriptors = []
+        directory_records = []
+        if (
+            limit < 0
+            or not getattr(os, "O_NOFOLLOW", 0)
+            or not getattr(os, "O_DIRECTORY", 0)
+        ):
+            return None
+
+        def directory_identity(item):
+            return (
+                item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+            )
+
+        def file_identity(item):
+            return (
+                item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns,
+                item.st_ctime_ns, item.st_mode, item.st_uid, item.st_gid,
+                item.st_nlink,
+            )
+
+        def parents_unchanged():
+            for parent_fd, component, child_fd, expected in directory_records:
+                current = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+                if (
+                    directory_identity(current) != expected
+                    or directory_identity(os.fstat(child_fd)) != expected
+                ):
+                    return False
+            return True
+
         try:
+            # O_NOFOLLOW on the leaf alone does not protect an ancestor that
+            # was replaced by a link after discovery.  Walk from the absolute
+            # root through held directory descriptors, then revalidate every
+            # component and the final pathname before accepting captured bytes.
+            if ".." in Path(path).parts:
+                return None
+            absolute = Path(os.path.abspath(str(path)))
+            parts = absolute.parts[1:]
+            if not parts or len(parts) > 128 or len(os.fsencode(str(absolute))) > 4096:
+                return None
+            directory_flags = (
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            directory_fd = os.open(absolute.anchor, directory_flags)
+            directory_descriptors.append(directory_fd)
+            for component in parts[:-1]:
+                expected = os.stat(component, dir_fd=directory_fd, follow_symlinks=False)
+                if not stat.S_ISDIR(expected.st_mode):
+                    return None
+                child_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+                directory_descriptors.append(child_fd)
+                identity = directory_identity(expected)
+                if directory_identity(os.fstat(child_fd)) != identity:
+                    return None
+                directory_records.append((directory_fd, component, child_fd, identity))
+                directory_fd = child_fd
+            before_path = os.stat(parts[-1], dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISREG(before_path.st_mode) or not parents_unchanged():
+                return None
             file_descriptor = os.open(
-                str(path),
+                parts[-1],
                 os.O_RDONLY
-                | getattr(os, "O_NOFOLLOW", 0)
+                | os.O_NOFOLLOW
                 | getattr(os, "O_NONBLOCK", 0)
                 | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=directory_fd,
             )
             before = os.fstat(file_descriptor)
-            if not stat.S_ISREG(before.st_mode):
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or file_identity(before_path) != file_identity(before)
+            ):
                 return None
             if not allow_larger and before.st_size > limit:
                 return None
@@ -486,16 +597,12 @@ class DeepStaticAnalyzer(BaseAnalyzer):
                     break
                 payload.extend(chunk)
             after = os.fstat(file_descriptor)
-            identity = lambda item: (
-                item.st_dev,
-                item.st_ino,
-                item.st_size,
-                item.st_mtime_ns,
-                item.st_ctime_ns,
-                stat.S_IMODE(item.st_mode),
-                item.st_uid,
-            )
-            if identity(before) != identity(after):
+            current_path = os.stat(parts[-1], dir_fd=directory_fd, follow_symlinks=False)
+            if (
+                file_identity(before) != file_identity(after)
+                or file_identity(after) != file_identity(current_path)
+                or not parents_unchanged()
+            ):
                 return None
             if not allow_larger and (len(payload) > limit or len(payload) != after.st_size):
                 return None
@@ -505,6 +612,8 @@ class DeepStaticAnalyzer(BaseAnalyzer):
         finally:
             if file_descriptor >= 0:
                 os.close(file_descriptor)
+            for directory_fd in reversed(directory_descriptors):
+                os.close(directory_fd)
 
     def _is_binary(self, payload: bytes) -> bool:
         chunk = payload[:4096]

@@ -36,6 +36,14 @@ class RuleMetadata:
 
 
 RULE_METADATA: Dict[str, RuleMetadata] = {
+    "PNPM-VULNERABLE-BUILDCHAIN-001": RuleMetadata("PNPM-VULNERABLE-BUILDCHAIN-001", RuleCategory.deterministic_static, Severity.HIGH, "pnpm-buildchain-exposure", 95, True, "deterministic", "Correlates a pnpm dependency operation with an affected installed package record."),
+    "PNPM-BUILDCHAIN-CONTEXT-INCOMPLETE-001": RuleMetadata("PNPM-BUILDCHAIN-CONTEXT-INCOMPLETE-001", RuleCategory.deterministic_static, Severity.HIGH, "pnpm-buildchain-coverage", 95, True, "deterministic", "Cannot establish the installed pnpm context for a relevant dependency operation."),
+    "PNPM-LOCKFILE-PATH-ESCAPE-001": RuleMetadata("PNPM-LOCKFILE-PATH-ESCAPE-001", RuleCategory.deterministic_static, Severity.CRITICAL, "pnpm-lockfile-path", 95, True, "deterministic", "Finds traversal or absolute-path components in decoded pnpm package-name fields."),
+    "NPM-MANIFEST-NAME-PATH-ESCAPE-001": RuleMetadata("NPM-MANIFEST-NAME-PATH-ESCAPE-001", RuleCategory.deterministic_static, Severity.CRITICAL, "npm-manifest-path", 95, True, "deterministic", "Finds traversal or absolute-path components in a decoded package.json name."),
+    "NPM-METADATA-INSPECTION-INCOMPLETE-001": RuleMetadata("NPM-METADATA-INSPECTION-INCOMPLETE-001", RuleCategory.deterministic_static, Severity.HIGH, "npm-metadata-coverage", 95, True, "deterministic", "Bounded JSON or supported literal pnpm YAML inspection did not complete."),
+    "PYTHON-BYTECODE-PRESENT-001": RuleMetadata("PYTHON-BYTECODE-PRESENT-001", RuleCategory.deterministic_static, Severity.MEDIUM, "python-precompiled-presence", 95, True, "deterministic", "Finds a precompiled Python carrier candidate in inspected package inputs."),
+    "PYTHON-BYTECODE-UNCHECKED-HASH-001": RuleMetadata("PYTHON-BYTECODE-UNCHECKED-HASH-001", RuleCategory.deterministic_static, Severity.HIGH, "python-precompiled-unchecked", 95, True, "deterministic", "A recognized CPython PEP 552 header declares unchecked hash invalidation."),
+    "PYTHON-BYTECODE-EXEC-001": RuleMetadata("PYTHON-BYTECODE-EXEC-001", RuleCategory.deterministic_static, Severity.CRITICAL, "python-precompiled-execution", 95, True, "deterministic", "Acquired shell text references the exact captured precompiled carrier for execution."),
     "SOURCE-META-CHECKSUM-COUNT-MISMATCH": RuleMetadata(
         "SOURCE-META-CHECKSUM-COUNT-MISMATCH",
         RuleCategory.source_metadata,
@@ -441,10 +449,14 @@ _INSTRUCTION_GUARD_RULES = {
     "IG-INTEGRITY-IMPORT-OUTSIDE-ROOT": (Severity.HIGH, "instruction-import-integrity", 100, "An explicit agent import leaves the selected root."),
     "IG-INTEGRITY-IMPORT-TYPE": (Severity.HIGH, "instruction-import-integrity", 95, "An imported agent resource is not a regular file."),
     "IG-INTEGRITY-MACHINE-BINDING": (Severity.MEDIUM, "instruction-baseline-binding", 90, "A restored baseline is not trusted on this machine and UID."),
+    "IG-INTEGRITY-MULTIPLY-LINKED-CONTROL": (Severity.MEDIUM, "instruction-file-integrity", 85, "An agent control file has multiple filesystem names, so changes through another hard link could bypass path-based review."),
     "IG-INTEGRITY-NONREGULAR-CONTROL": (Severity.HIGH, "instruction-file-integrity", 100, "An agent control path is a FIFO, device, socket, or other non-regular object."),
+    "IG-INTEGRITY-SYMLINK-MANUAL-TRUST": (Severity.MEDIUM, "instruction-link-integrity", 85, "An inside-root agent control file symlink was inspected, but its path is not eligible for machine-bound trust."),
     "IG-INTEGRITY-SYMLINK-ESCAPE": (Severity.HIGH, "instruction-link-integrity", 100, "An agent control file symlink leaves the selected root."),
     "IG-INTEGRITY-SYMLINK-TYPE": (Severity.HIGH, "instruction-link-integrity", 95, "An agent control link does not resolve to a regular file."),
     "IG-INTEGRITY-UNREADABLE-CONTROL": (Severity.HIGH, "instruction-file-integrity", 95, "An agent control file failed bounded type, ownership, size, or replacement validation."),
+    "IG-INTEGRITY-WEAK-CONTROL-PERMISSIONS": (Severity.MEDIUM, "instruction-file-integrity", 90, "An agent control file is writable by a group or other account class and cannot be safely enrolled."),
+    "IG-INTEGRITY-WEAK-PARENT-PERMISSIONS": (Severity.MEDIUM, "instruction-directory-integrity", 90, "An agent control file has a foreign-owned, broadly writable, or unstable parent directory chain."),
 }
 
 RULE_METADATA.update({

@@ -299,23 +299,27 @@ integrity, read, parser, and legacy-report findings must explicitly omit a
 precise location when one cannot be established safely. Never reconstruct,
 print, or persist the source text to make the explanation more vivid.
 
-Keep suspicious-content risk, integrity approval, and coverage limitations as
-three separate presentation concepts. `review_required` may be true because of
-any one of them and must not be rendered as if it always means malware was
-detected. The terminal renderer should lead with their separate counts, avoid
-presenting the report's fallback LOW value as a suspicious-content severity
-when there is no content finding, and group suspicious instructions ahead of
-changed/unsafe files, clean first-seen inventory, and coverage limitations.
+Keep suspicious-content risk, integrity changes, neutral baseline enrollment,
+and coverage limitations as four separate presentation concepts.
+`review_required` remains their compatibility aggregate and must not be
+rendered as if it always means malware was detected. Derived status should
+identify security attention, coverage action, baseline enrollment, or clear
+state explicitly. The terminal renderer should lead with their separate
+counts, avoid presenting the report's fallback LOW value as a
+suspicious-content severity when there is no content finding, and group
+suspicious instructions ahead of changed/unsafe files, clean first-seen
+enrollment, and coverage limitations.
 Wrap prose and long paths predictably for narrow terminals without corrupting
 IDs, line ranges, or JSON output. A truncated page must be labeled as incomplete
 and explain that its committed continuation remains pending.
 
-Suspicious first-seen files alert immediately; otherwise clean first-seen
-recognized files form one unreviewed inventory. Render that state as an
-integrity-only approval request and explicitly say that first-seen means no
-machine-bound approval exists, not that suspicious content or malware was
-found. AI remains `not-needed` when a clean first-seen file has no eligible
-deterministic content finding. For eligible findings, place a fixed
+Suspicious first-seen files alert immediately; otherwise safely read clean
+first-seen recognized files form one neutral enrollment inventory. Do not let
+that inventory alone create a danger tooltip or urgent notification. Render it
+as baseline setup and explicitly say that first-seen means no machine-bound
+approval exists, not that suspicious content or malware was found. AI remains
+`not-needed` when a clean first-seen file has no eligible deterministic content
+finding and can never authorize enrollment. For eligible findings, place a fixed
 deterministic explanation beside its exact evidence roles and show only an
 evidence-mapped AI rationale labeled as advisory. AI prose cannot replace the
 deterministic explanation, create or move a location, establish trust, or enter
@@ -323,7 +327,17 @@ the integrity-only inventory. Disclose how many displayed findings received a
 bounded AI explanation, and label malformed or incompletely parsed
 configuration as scan coverage rather than suspicious content. Give safely
 approvable new or changed files a concrete next step; unsafe identities must
-remain manual-only. Store SHA-256 plus
+remain manual-only. A batch clean-enrollment action requires explicit
+confirmation and a complete coverage-clear report. It must revalidate every
+selected regular file's parent chain, owner, inode, metadata, and hash before
+one serialized private-state transaction, aborting the entire action for any
+stale, changed, suspicious, restored, or unsafe baseline candidate. Clean
+content-only Markdown is analyzed but excluded from enrollment; a content or
+coverage finding in it still blocks the transaction. Bind interactive actions
+to the exact displayed report and hash, and fail closed on an interrupted
+transaction marker. Recovery must use a complete deterministic scan of the
+marker-bound root, revalidate every recorded target without cache reuse, and
+retain the marker across unrelated roots and partial continuation pages. Store SHA-256 plus
 device/inode, size, timestamps, mode, owner, and symlink state. An approval is
 valid only for the exact content and a binding derived from machine identity
 plus UID. Corrupt, symlinked, wrongly owned, or permission-weakened state must
@@ -363,6 +377,14 @@ state. Disable or defer the tray's own Quit action while a mutating control is
 running so parent teardown cannot interrupt a rollback. Provider readiness and
 transaction rollback remain owned by the CLI.
 
+The tray's agent-file action opens foreground guided triage. Suspicious and
+changed/unsafe states use attention or critical presentation; incomplete
+coverage is an explicit scan action; clean first-seen enrollment is a neutral
+setup/due state. Triage may offer only fixed core actions such as exact-hash
+approval, confirmed eligible disable, rescan, leave, and quit. It must not
+execute instruction content, launch an editor, or turn AI prose into an action.
+Background services and JSON workflows remain noninteractive.
+
 Desktop notifications and tray/public alert state are secret-free: retain only
 generic severity/count/review wording, never paths, snippets, usernames,
 credentials, or AI output. Deduplicate by candidate identity, content hash, and
@@ -370,7 +392,9 @@ rule set. Acknowledgment suppresses duplicate notification only and never
 approves content. Resolve notifications through the shared trusted-tool
 boundary: only captured and revalidated `/usr/bin/notify-send` may run. Its
 absence is a notification-delivery limitation, not a reason to discard private
-CLI/tray review state.
+CLI/tray review state. Clean baseline enrollment never creates an alert;
+coverage notifications must use neutral scan-attention language rather than
+claiming that a file is risky or malicious.
 
 Confirmed disable is intentionally narrow. Only an unchanged, user-owned,
 standalone regular instruction Markdown file may be atomically renamed beside
@@ -388,18 +412,22 @@ negated commands, ordinary hooks, and fenced examples. Also cover imports,
 Unicode and invalid encodings, BOMs, binary/oversized files, inaccessible and
 deep trees, truncation/cursors, symlinks, FIFOs, atomic replacement and
 mid-read races, same-mtime changes, incremental hashing, machine-bound
-approval invalidation, corrupt state, alert deduplication, and exact
-disable/restore refusal and round trips. Mock AI, systemd, tray, and
+approval invalidation, transactional clean batch enrollment and race refusal,
+corrupt state, alert deduplication, and exact disable/restore refusal and round
+trips. Mock AI, systemd, tray, and
 notifications; tests must not scan a real home, start a model, contact a
 provider, require root, or invoke live systemd.
 
-Presentation tests must cover inventory-only, suspicious-only, mixed, changed,
+Presentation tests must cover enrollment-only, suspicious-only, mixed, changed,
 coverage-limited, continuation, and legacy reports. Assert that clean first-seen
 files are never labeled as suspicious; contributing ranges retain their exact
 one-based locations and per-range roles; deterministic and advisory AI reasons
 remain distinct; narrow-terminal wrapping preserves IDs and meaning; `--json`
 remains schema-stable and unwrapped; and source snippets, credentials, URLs,
 terminal controls, and rejected or unmapped AI prose never enter review output.
+CLI and tray tests must also cover guided prompt cancellation/EOF, batch
+all-or-none behavior, neutral setup routing, conservative legacy status, and
+noninteractive/background refusal to prompt.
 
 Document the residual boundary in user-facing changes: this is periodic
 detection, not pasted-command/link preflight, privileged fanotify or process
@@ -626,6 +654,64 @@ archive contents, polyglots, steganography, and unrecognized magic remain
 residual limits. A clear result is therefore not a provenance or safety
 guarantee, and adversarial builds still belong in a disposable,
 resource-limited environment.
+
+### pnpm metadata and installed build-tool evidence
+
+The local build-tool guard lives in `aurascan/core/pnpm_buildchain.py`; it
+consumes captured PKGBUILD/declared-hook shell text and inspects only the local
+pacman database for relevant dependency operations. Use bounded component-wise
+no-follow reads, detect replacement, and compare validated upstream `pkgver`
+with trusted bounded `/usr/bin/vercmp`. Arch epochs and package revisions do
+not change upstream advisory ranges. Unknown/custom/pre-release versions,
+ambiguous tool selection, or unavailable comparison fail closed as coverage.
+Never execute pnpm or infer the selected future binary from a pacman record.
+Relevant scans bypass cache and update-only skips cannot waive a blocker;
+wrapper revalidation precedes the final package snapshot capture.
+
+`aurascan/analyzers/npm_metadata.py` inspects only acquired decoded name fields.
+Keep npm scope/name syntax and independent filesystem containment checks
+separate. A valid archive layout or absent lifecycle script cannot clear
+traversal in the internal manifest. The bounded standard-library YAML subset
+supports literal block/flow mappings, scalar sequences, and quoted scalars for
+lockfile versions 5.3, 5.4, 6.0, and 9.0. Reject duplicate fields, aliases,
+anchors, tags, merge keys, multiline construction, unsupported dependency
+identities (including unimplemented registry/file/Git keys), and resource
+limits as `NPM-METADATA-INSPECTION-INCOMPLETE-001`. Unsupported metadata must
+not be silently accepted or labeled malware. Ordinary scoped names,
+supported peer suffixes, comments, and unrelated fields are negative cases.
+
+The two upstream pnpm advisories were verified on 2026-09-06:
+[lockfile name traversal](https://github.com/pnpm/pnpm/security/advisories/GHSA-c59q-g84q-2gj5)
+and [dependency manifest traversal](https://github.com/pnpm/pnpm/security/advisories/GHSA-vq4v-j7r6-jq4m).
+This rule does not rely on Arch's tracker currently listing an issue and does
+not claim an AUR exploitation campaign. Tests inject database roots/version
+comparison and use inert local tarballs; neither pnpm nor package code runs.
+
+### Precompiled Python source carriers
+
+`aurascan/analyzers/python_bytecode.py` classifies bounded header bytes and
+`.pyc`/`.pyo`/`.pyd` candidates. Repository discovery now includes `__pycache__`
+under its existing traversal/byte limits; VCS, other named cache/dependency,
+declared-source, and generated-root exclusions still apply. Names select
+candidates, while recognized magic and complete headers determine bytecode
+classification. Only a recognized PEP 552 header with flags exactly `1`
+establishes unchecked-hash mode; do not interpret legacy timestamp words or
+unknown/truncated headers as those flags. `.pyd` names alone indicate native
+extension candidates, not PEP 552 metadata.
+
+Presence is MEDIUM/manual and unchecked-hash mode HIGH/manual, both without a
+hard block. Existing exact repository install/execution tiers remain in force.
+Acquired shell-script execution uses a bounded correlation helper and requires
+an exact captured path; script location alone never proves runtime cwd, and a
+matching unresolved reference produces incomplete coverage. This helper is
+limited to supported `.sh`, `.bash`, and `.zsh` streams, not Make recipes or
+Python import resolution. No header authenticates the code body or proves a
+source mismatch. Tests use header-plus-inert-sentinel bytes, never marshaled
+code objects or imports, and cover source/header coexistence, modes, bounds,
+path mismatch, comments/messages, and secret-free output.
+
+Package rules advance to `1.6.0` and repository snapshot identity to `1.1` so
+old allow results cannot conceal these changed inspection semantics.
 
 ### Remote second-stage execution
 

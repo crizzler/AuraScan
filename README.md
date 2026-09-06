@@ -332,6 +332,39 @@ integrity checks on recognized AI-agent control files. It never imports,
 renders, sources, or executes a discovered file. It is disabled until the user
 opts in.
 
+Package control text that invokes pnpm dependency resolution receives a local
+build-tool check. AuraScan reads bounded pacman database evidence and compares
+the installed upstream version using trusted `/usr/bin/vercmp`; it never runs
+pnpm. Versions below 10.34.5 and 11.x versions below 11.11.0 block the build
+because of [CVE-2026-82392](https://github.com/pnpm/pnpm/security/advisories/GHSA-c59q-g84q-2gj5)
+and [CVE-2026-82393](https://github.com/pnpm/pnpm/security/advisories/GHSA-vq4v-j7r6-jq4m).
+`--ignore-scripts` does not waive the manifest-name file-write risk. Missing or
+ambiguous tool/version evidence blocks as incomplete coverage. Relevant scans
+are uncached, and the wrapper rechecks the local evidence before handoff.
+Installed package evidence does not prove what a later PATH, Corepack, project
+pin, or dependency update selects, nor does it establish exploitation.
+
+Deep-static inspection additionally checks decoded `package.json` names and
+pnpm lockfile package-name fields for traversal and absolute paths. Scoped
+names such as `@scope/package` remain valid. The standard-library reader
+supports bounded literal YAML mappings/sequences for lockfile versions 5.3,
+5.4, 6.0, and 9.0; unsupported syntax, dependency identity forms, malformed
+metadata, or duplicate fields produce a coverage blocker. These checks apply
+to acquired source and extracted dependency archives, even without lifecycle
+scripts. They do not inspect dependencies that were never acquired.
+
+Repository and acquired-source inspection also select `.pyc`, `.pyo`, `.pyd`,
+and `__pycache__` contents regardless of executable permissions. Presence
+requests manual review without a hard block. Recognized unchecked-hash
+[PEP 552](https://peps.python.org/pep-0552/) headers receive HIGH review;
+nearby source does not authenticate their bodies. Exact repository execution
+or code-loading correlations remain CRITICAL blockers. Acquired shell-script
+references require an exact captured path and proven working directory;
+matching references with unresolved working directories block as incomplete
+coverage. AuraScan never imports, unmarshals, disassembles, or executes the
+carrier. Native `.pyd` candidates are distinct from CPython bytecode, and
+ordinary installed Python caches are not blanket-flagged by these source checks.
+
 Deep static source inspection is opt-in: --deep-static is explicit. It safely acquires and inspects declared source
 archives without executing package code. In this mode AuraScan may verify
 detached signatures in an isolated temporary GPG home. Automatic key lookup is
@@ -627,8 +660,11 @@ aurascan instruction-audit --all-markdown --no-ai
 aurascan instruction-audit --ai --json
 aurascan instruction-audit --review
 aurascan instruction-audit --review REPORT_ID
+aurascan instruction-audit --triage
+aurascan instruction-audit --triage REPORT_ID
+aurascan instruction-audit --enroll-clean REPORT_ID
 aurascan instruction-audit --approve FILE_ID
-aurascan instruction-audit -A FILE_ID  # compact approval form shown in terminal reviews
+aurascan instruction-audit -A FILE_ID  # compact latest-report approval form
 aurascan instruction-audit --disable FILE_ID
 aurascan instruction-audit --restore ACTION_ID
 aurascan instruction-audit --status
@@ -668,15 +704,17 @@ configuration where possible. A match reports suspicious static instructions;
 it does not prove that an assistant obeyed them or that credentials left the
 machine.
 
-Terminal review starts with a short outcome summary and keeps three different
-reasons for attention visibly separate:
+Terminal review starts with a short outcome summary and keeps four different
+states visibly separate:
 
 - **Suspicious instructions** are deterministic content findings such as a
   fetch-and-execute chain. These findings have a severity and an explanation.
-- **Integrity approval** covers recognized files that are new, changed, or no
-  longer covered by the approval for this machine and UID. A clean first-seen
-  file is listed here because AuraScan has no prior trusted hash for it, not
-  because AuraScan detected malware in it.
+- **Integrity changes** cover files whose content or safe identity changed, or
+  whose prior approval is not valid on this machine and UID. These need
+  attention even if no known content pattern matched.
+- **Baseline enrollment** is neutral setup work for safely read, clean
+  first-seen files. It is never presented as a threat or LOW-severity malware
+  finding.
 - **Coverage limitations** identify content or parts of discovery that AuraScan
   could not safely or completely inspect. They prevent a clear result without
   being presented as proof of malicious content.
@@ -697,19 +735,43 @@ AuraScan does not print or persist the source lines, snippets, or potential
 secrets. File-level integrity, read, parser, and legacy-report findings say when
 no precise line is available rather than inventing one.
 
-Suspicious first-seen files alert immediately; otherwise clean first-seen files
-enter one unreviewed inventory for integrity approval. Their review state is an
-approval request, not a malware verdict, and AI analysis remains `not-needed`
-when there is no eligible
-deterministic suspicious-content finding to explain. Approval records the exact
-hash and is bound to the local machine identity and UID, so restoring an old
-manifest onto a rebuilt machine does not silently establish trust. When bounded
-discovery is incomplete, the review identifies the displayed files as the
-current page and keeps the saved continuation visible as a coverage limitation.
-For an unchanged, safely readable regular file, the inventory shows the compact
-approval command beside the next step. Changed files receive the same concrete
-next step after their integrity reason; unsafe or symlinked states instead say
-that manual review is required because AuraScan cannot safely offer approval.
+Suspicious first-seen files alert immediately. Clean first-seen files enter one
+unreviewed inventory: safely read files wait in a neutral enrollment queue and
+do not create a danger tooltip or urgent notification. `--triage` opens a
+foreground guided workflow:
+it keeps suspicious line/reason/AI evidence visible, offers confirmed
+reversible disable only where eligible, and provides fixed rescan, leave, or
+quit choices without executing the file or launching an editor. Changed safe
+files may be approved by exact hash; unsafe identities and settings, hook,
+plugin, script, or symlink surfaces remain manual-only.
+Every guided mutation is bound inside the core action to the exact report and
+SHA-256 shown before confirmation. A selected historical report is read-only
+and directs the user to current triage, so a monitor run cannot silently swap
+newer evidence underneath an old prompt.
+
+For a complete, coverage-clear report, `--enroll-clean REPORT_ID` replaces a
+list of per-file commands with one explicit batch confirmation. AuraScan first
+revalidates every selected file's safe parent chain, ownership, regular-file
+identity, metadata, and exact hash. Any stale, changed, suspicious, restored,
+or unsafe baseline candidate aborts the entire serialized private-state
+transaction. Clean content-only Markdown from `--all-markdown` is analyzed but
+excluded from trust; a suspicious or incomplete result in it still blocks
+enrollment. AI analysis remains `not-needed` for this inventory and cannot
+authorize enrollment. Approval records each exact hash and is bound to the
+local machine identity and UID, so restoring an old manifest onto a rebuilt
+machine does not silently establish trust.
+
+If enrollment is interrupted, review and status fail closed until a complete
+deterministic scan of that transaction's exact root revalidates every recorded
+file. An unrelated-root scan or partial continuation cannot clear the recovery
+marker, and recovery never reuses a cached file hash.
+
+When bounded discovery is incomplete, review identifies the displayed files as
+the current page and keeps the saved continuation visible as a coverage action.
+It does not offer batch enrollment until the inventory is complete. Individual
+`-A FILE_ID` approval remains available for an unchanged safely readable file.
+Unsafe or symlinked states say that manual review is required because AuraScan
+cannot safely offer approval.
 Reports, manifests, queued AI jobs, alert state, and disable receipts use
 private permissions under
 `$XDG_STATE_HOME/aurascan/instruction-guard/`. Version 0.9.0 introduces the
@@ -1027,7 +1089,7 @@ Instruction Guard controls:
 
 - Run AuraScan Upgrade: `aurascan upgrade`
 - Resolve System Findings: `aurascan incidents --resolve`
-- Review Agent Files: `aurascan instruction-audit --review`
+- Review Agent Files: `aurascan instruction-audit --triage`
 - Run System Maintenance Scan: `aurascan incidents --run-maintenance`
 - Instruction Guard Background Scan: enable or disable the login and
   five-minute deterministic monitor
@@ -1070,13 +1132,19 @@ for the tray applet, not for normal AuraScan scans.
 
 The tray refreshes incident and Instruction Guard state every five seconds. Its
 normal icon changes to maintenance-due, attention, or critical variants when
-the weekly scan is overdue or unreviewed findings need attention. Instruction
-Guard severity takes priority when it is higher, and its menu action routes to
-the agent-file review rather than the incident flow. Clean scans are silent.
-Desktop notifications are reserved for HIGH/CRITICAL findings and repeated
-crashes unless separately opted-in background AI completes an analysis, in
-which case the tray shows one bounded completion summary. Instruction Guard
-notifications are generic and contain no paths or evidence. The icon remains
+the weekly scan is overdue or agent-file evidence needs attention. Suspicious
+or changed/unsafe agent files use attention or critical states; incomplete
+coverage is labeled as a scan action instead of malware. Clean first-seen files
+use a neutral setup/due state and a `Finish Instruction Guard setup` action,
+not a danger tooltip. Instruction Guard severity takes priority when it is
+higher, and its menu action routes to guided triage rather than the incident
+flow. Clean completed scans are silent.
+System-incident desktop notifications are reserved for HIGH/CRITICAL findings
+and repeated crashes unless separately opted-in background AI completes an
+analysis, in which case the tray shows one bounded completion summary.
+Instruction Guard may notify for a newly recorded MEDIUM-or-higher suspicious,
+integrity, or scan-coverage alert, but uses neutral generic wording with no
+paths or evidence; clean baseline enrollment does not notify. The icon remains
 changed until the applicable guided review completes or report retention
 expires; a verified Safe Autopilot repair may clear only the incident category
 it actually resolved.

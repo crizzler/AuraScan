@@ -45,8 +45,9 @@ UPDATER_INCIDENT_REFRESH_MS = 5_000
 INSTRUCTION_CONTROL_TIMEOUT_MS = 120_000
 INSTRUCTION_CONTROL_OUTPUT_LIMIT = 65_536
 INCIDENT_REVIEW_COMMAND = ("aurascan", "incidents", "--resolve")
-INSTRUCTION_REVIEW_COMMAND = ("aurascan", "instruction-audit", "--review")
+INSTRUCTION_REVIEW_COMMAND = ("aurascan", "instruction-audit", "--triage")
 INSTRUCTION_STATUS_COMMAND = ("aurascan", "instruction-audit", "--status")
+INSTRUCTION_REVIEW_ACTION_LABEL = "Review Agent Files"
 INSTRUCTION_MONITOR_ACTION_LABEL = "Instruction Guard Background Scan"
 INSTRUCTION_AI_ACTION_LABEL = "Instruction Guard AI Analysis"
 UPDATER_STATE_ICONS = {
@@ -62,7 +63,7 @@ UPDATER_MENU_GROUPS = (
     ),
     (
         ("Resolve System Findings", INCIDENT_REVIEW_COMMAND),
-        ("Review Agent Files", INSTRUCTION_REVIEW_COMMAND),
+        (INSTRUCTION_REVIEW_ACTION_LABEL, INSTRUCTION_REVIEW_COMMAND),
         ("Run System Maintenance Scan", ("aurascan", "incidents", "--run-maintenance")),
     ),
     (
@@ -110,6 +111,14 @@ class TrayInstructionState:
     highest_severity: str
     pending_alert_count: int
     review_candidate_count: int
+    status_state: str = "unavailable"
+    suspicious_candidate_count: int = 0
+    changed_or_unsafe_candidate_count: int = 0
+    coverage_issue_count: int = 0
+    clean_first_seen_count: int = 0
+    continuation_pending: bool = False
+    action_label: str = INSTRUCTION_REVIEW_ACTION_LABEL
+    legacy_status: bool = False
     unavailable: bool = False
 
 
@@ -482,14 +491,52 @@ def resolve_tray_instruction_state(
     highest_severity = str(status.get("highest_severity") or "LOW").strip().upper()
     pending_alert_count = _bounded_nonnegative_int(status.get("pending_alert_count"))
     review_candidate_count = _bounded_nonnegative_int(status.get("review_candidate_count"))
+    suspicious_candidate_count = _bounded_nonnegative_int(
+        status.get("suspicious_candidate_count")
+    )
+    changed_or_unsafe_candidate_count = _bounded_nonnegative_int(
+        status.get("changed_or_unsafe_candidate_count")
+    )
+    coverage_issue_count = _bounded_nonnegative_int(status.get("coverage_issue_count"))
+    clean_first_seen_count = _bounded_nonnegative_int(status.get("clean_first_seen_count"))
+    continuation_pending = status.get("continuation_pending") is True
+    modern_states = {
+        "security_attention_required",
+        "coverage_action_required",
+        "baseline_enrollment_required",
+        "clear",
+    }
+    legacy_status = raw_state not in modern_states and not unavailable
+    action_label = INSTRUCTION_REVIEW_ACTION_LABEL
 
     if unavailable:
         state = "attention"
         tooltip = "AuraScan Updater - Agent Instruction Guard state needs review"
-    elif highest_severity in {"HIGH", "CRITICAL"}:
+    elif raw_state == "security_attention_required":
+        if highest_severity in {"HIGH", "CRITICAL"}:
+            state = "critical"
+            tooltip = "AuraScan Updater - urgent agent file risks need review"
+        else:
+            state = "attention"
+            tooltip = "AuraScan Updater - agent file risks need review"
+        action_label = "Review changed or suspicious agent files…"
+    elif raw_state == "coverage_action_required":
+        state = "attention"
+        tooltip = "AuraScan Updater - Instruction Guard scan is incomplete"
+        action_label = "Finish Instruction Guard scan…"
+    elif raw_state == "baseline_enrollment_required":
+        state = "due"
+        setup_count = clean_first_seen_count or review_candidate_count
+        file_word = "file" if setup_count == 1 else "files"
+        action_label = (
+            "Finish Instruction Guard setup "
+            f"({setup_count} {file_word})…"
+        )
+        tooltip = f"AuraScan Updater - {action_label}"
+    elif legacy_status and highest_severity in {"HIGH", "CRITICAL"}:
         state = "critical"
         tooltip = "AuraScan Updater - urgent agent file findings need review"
-    elif highest_severity == "MEDIUM" or pending_alert_count or review_candidate_count:
+    elif legacy_status:
         state = "attention"
         tooltip = "AuraScan Updater - agent files are ready to review"
     else:
@@ -502,6 +549,14 @@ def resolve_tray_instruction_state(
         highest_severity=highest_severity,
         pending_alert_count=pending_alert_count,
         review_candidate_count=review_candidate_count,
+        status_state=raw_state,
+        suspicious_candidate_count=suspicious_candidate_count,
+        changed_or_unsafe_candidate_count=changed_or_unsafe_candidate_count,
+        coverage_issue_count=coverage_issue_count,
+        clean_first_seen_count=clean_first_seen_count,
+        continuation_pending=continuation_pending,
+        action_label=action_label,
+        legacy_status=legacy_status,
         unavailable=unavailable,
     )
 
@@ -515,7 +570,27 @@ def merge_tray_states(
     instruction_rank = rank.get(instruction.state, 0)
     if incident_rank == instruction_rank and incident_rank >= rank["attention"]:
         state = incident.state
-        tooltip = "AuraScan Updater - system and agent file findings need review"
+        if instruction.status_state == "coverage_action_required":
+            tooltip = (
+                "AuraScan Updater - system findings need review and the "
+                "Instruction Guard scan is incomplete"
+            )
+        elif instruction.unavailable:
+            tooltip = (
+                "AuraScan Updater - system findings and Instruction Guard state "
+                "need review"
+            )
+        else:
+            tooltip = "AuraScan Updater - system and agent file findings need review"
+    elif (
+        incident_rank == instruction_rank == rank["due"]
+        and instruction.status_state == "baseline_enrollment_required"
+    ):
+        state = "due"
+        tooltip = (
+            "AuraScan Updater - system maintenance and Instruction Guard setup "
+            "are due"
+        )
     elif instruction_rank > incident_rank:
         state = instruction.state
         tooltip = instruction.tooltip
@@ -587,9 +662,35 @@ def build_instruction_guard_notification(alerts: Sequence[Mapping[str, object]])
     count = max(1, len(alerts))
     noun = "alert" if count == 1 else "alerts"
     return (
-        "AuraScan found agent file risks",
-        f"AuraScan recorded {count} Agent Instruction Guard {noun}. Click to review the affected agent files.",
+        "AuraScan Agent Instruction Guard needs attention",
+        f"AuraScan recorded {count} Agent Instruction Guard {noun}. Click to open guided triage.",
     )
+
+
+def handle_pending_instruction_guard_alerts(
+    alerts: Sequence[Mapping[str, object]],
+    instruction_state: TrayInstructionState,
+    *,
+    notify: Callable[[str, str], object],
+    route_notification: Callable[[Sequence[str]], object],
+    acknowledge: Callable[[Sequence[Mapping[str, object]]], object],
+) -> bool:
+    """Notify before acknowledging each batch of pending alert envelopes.
+
+    The separately captured latest status may describe another root or predate
+    a monitor update. Envelopes lack the report/root evidence needed to prove
+    obsolescence, so even a clear or neutral status cannot suppress them.
+    Clean baseline scans create no alerts of their own. Acknowledgement here
+    records notification delivery only; it never establishes file trust.
+    """
+
+    if not alerts:
+        return False
+    title, message = build_instruction_guard_notification(alerts)
+    route_notification(INSTRUCTION_REVIEW_COMMAND)
+    notify(title, message)
+    acknowledge(alerts)
+    return True
 
 
 def resolve_tray_instruction_controls(
@@ -1118,6 +1219,7 @@ def start_tray_app(
         return action
 
     instruction_controls = None
+    instruction_review_action = None
     for group_index, group in enumerate(UPDATER_MENU_GROUPS):
         if group_index:
             menu.addSeparator()
@@ -1138,7 +1240,9 @@ def start_tray_app(
             )
             menu.addSeparator()
         for label, command in group:
-            add_action(label, command)
+            action = add_action(label, command)
+            if label == INSTRUCTION_REVIEW_ACTION_LABEL:
+                instruction_review_action = action
     menu.addSeparator()
     quit_action = menu.addAction("Quit")
     instruction_controls.bind_quit_action(quit_action)
@@ -1164,6 +1268,9 @@ def start_tray_app(
             maintenance_status_path=maintenance_status_path,
         )
         instruction_state = resolve_tray_instruction_state(env=env, state_root=instruction_state_root)
+        if instruction_review_action is not None:
+            instruction_review_action.setText(instruction_state.action_label)
+            instruction_review_action.setToolTip(instruction_state.tooltip)
         state = merge_tray_states(incident_state, instruction_state)
         tray.setIcon(load_state_icon(QtGui, state.state))
         tray.setToolTip(state.tooltip)
@@ -1174,15 +1281,17 @@ def start_tray_app(
                 popen=popen,
             )
         instruction_alerts = pending_instruction_guard_alerts(env=env, state_root=instruction_state_root)
-        if instruction_alerts:
-            title, message = build_instruction_guard_notification(instruction_alerts)
-            notification_router.route(INSTRUCTION_REVIEW_COMMAND)
-            tray.showMessage(title, message)
-            acknowledge_instruction_guard_alerts(
-                instruction_alerts,
+        if handle_pending_instruction_guard_alerts(
+            instruction_alerts,
+            instruction_state,
+            notify=tray.showMessage,
+            route_notification=notification_router.route,
+            acknowledge=lambda alerts: acknowledge_instruction_guard_alerts(
+                alerts,
                 env=env,
                 state_root=instruction_state_root,
-            )
+            ),
+        ):
             return
         result = unseen_background_result(report_root) if background_enabled else {}
         if result:

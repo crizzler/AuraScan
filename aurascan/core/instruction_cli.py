@@ -7,7 +7,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from aurascan.core.ai_provider import (
     AIProviderError,
@@ -35,6 +35,7 @@ INSTRUCTION_USER_UNIT_ROOT = Path("/usr/lib/systemd/user")
 EXIT_CLEAR = 0
 EXIT_REVIEW = 1
 EXIT_ERROR = 2
+_DEFAULT_INPUT = input
 
 
 def _output_terminal_width(stream) -> int:
@@ -503,10 +504,219 @@ def _default_root(env: Optional[Mapping[str, str]] = None) -> Path:
 
 def _confirm(prompt: str, *, input_func: Callable[[str], str]) -> bool:
     try:
-        answer = input_func(f"{prompt} [y/N]: ").strip().lower()
+        raw_answer = input_func(f"{prompt} [y/N]: ")
     except (EOFError, KeyboardInterrupt):
         return False
+    if not isinstance(raw_answer, str):
+        return False
+    answer = raw_answer.strip().lower()
     return answer in {"y", "yes"}
+
+
+def _interactive_input_available(input_func: Callable[[str], str], stdout) -> bool:
+    """Permit injected test/front-end input, otherwise require a foreground TTY."""
+
+    if input_func is not _DEFAULT_INPUT:
+        return True
+    try:
+        return bool(sys.stdin.isatty() and stdout.isatty())
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
+def _report_value(item: object, name: str, default: object = None) -> object:
+    if isinstance(item, Mapping):
+        return item.get(name, default)
+    return getattr(item, name, default)
+
+
+def _report_candidates(report: object) -> List[object]:
+    candidates = _report_value(report, "candidates", [])
+    if not isinstance(candidates, Sequence) or isinstance(candidates, (str, bytes)):
+        return []
+    return list(candidates)
+
+
+def _candidate_findings(candidate: object) -> List[object]:
+    findings = _report_value(candidate, "findings", [])
+    if not isinstance(findings, Sequence) or isinstance(findings, (str, bytes)):
+        return []
+    return list(findings)
+
+
+def _finding_kind(finding: object) -> str:
+    """Mirror the report's stable content/integrity/coverage presentation split."""
+
+    rule_id = str(_report_value(finding, "rule_id", "") or "")
+    if rule_id.startswith("IG-CONFIG-INVALID-") or rule_id == "IG-CONFIG-UNTERMINATED-FENCE":
+        return "coverage"
+    if rule_id.startswith("IG-INTEGRITY-"):
+        if rule_id in {
+            "IG-INTEGRITY-CONTENT-CHANGED",
+            "IG-INTEGRITY-CONTROL-MISSING",
+            "IG-INTEGRITY-MACHINE-BINDING",
+            "IG-INTEGRITY-MULTIPLY-LINKED-CONTROL",
+            "IG-INTEGRITY-SYMLINK-MANUAL-TRUST",
+            "IG-INTEGRITY-WEAK-CONTROL-PERMISSIONS",
+            "IG-INTEGRITY-WEAK-PARENT-PERMISSIONS",
+        }:
+            return "integrity"
+        return "coverage"
+    return "content"
+
+
+def _candidate_has_content_finding(candidate: object) -> bool:
+    return any(_finding_kind(finding) == "content" for finding in _candidate_findings(candidate))
+
+
+def _candidate_has_integrity_finding(candidate: object) -> bool:
+    return any(
+        _finding_kind(finding) == "integrity"
+        for finding in _candidate_findings(candidate)
+    )
+
+
+def _candidate_can_approve(candidate: object) -> bool:
+    safe_integrity_rules = {
+        "IG-INTEGRITY-CONTENT-CHANGED",
+    }
+    return bool(
+        _report_value(candidate, "baseline", False)
+        and _report_value(candidate, "symlink_state", "") == "regular"
+        and not _report_value(candidate, "read_error", "")
+        and _report_value(candidate, "integrity_state", "")
+        in {"first-seen", "unreviewed", "changed"}
+        and all(
+            _finding_kind(finding) != "integrity"
+            or str(_report_value(finding, "rule_id", "") or "")
+            in safe_integrity_rules
+            for finding in _candidate_findings(candidate)
+        )
+    )
+
+
+def _read_triage_choice(
+    prompt: str,
+    *,
+    allowed: Sequence[str],
+    input_func: Callable[[str], str],
+    stdout,
+) -> Optional[str]:
+    allowed_values = {value.lower() for value in allowed}
+    for _attempt in range(3):
+        try:
+            raw_answer = input_func(prompt)
+        except (EOFError, KeyboardInterrupt):
+            print("Input ended; no change was made.", file=stdout)
+            return None
+        if not isinstance(raw_answer, str):
+            print("The input source returned no text; no change was made.", file=stdout)
+            return None
+        answer = raw_answer.strip().lower()
+        if answer in allowed_values:
+            return answer
+        print(f"Choose one of: {', '.join(allowed)}.", file=stdout)
+    print("No valid choice was received; no change was made.", file=stdout)
+    return None
+
+
+def _attention_exit(attention: Mapping[str, object]) -> int:
+    return EXIT_CLEAR if str(attention.get("state") or "") == "clear" else EXIT_REVIEW
+
+
+def _render_loaded_report(guard, report: object, *, stdout) -> None:
+    print(
+        guard.render_instruction_report(
+            report,
+            terminal_width=_output_terminal_width(stdout),
+        ),
+        file=stdout,
+    )
+
+
+def _print_noninteractive_triage(
+    report: object,
+    attention: Mapping[str, object],
+    *,
+    stdout,
+) -> int:
+    report_id = str(_report_value(report, "report_id", "") or "")
+    print("", file=stdout)
+    print("GUIDED NEXT STEPS", file=stdout)
+    print(
+        "AuraScan did not prompt or change files because this is not an interactive terminal.",
+        file=stdout,
+    )
+    if attention.get("security_attention_required"):
+        print(
+            "Direct file-action commands are intentionally omitted because this report may become "
+            "historical before a later command runs. Use the report-bound guided workflow below.",
+            file=stdout,
+        )
+    if attention.get("coverage_action_required"):
+        print(
+            "Scan coverage is incomplete or unsafe; use guided triage in a terminal to resume the exact report root.",
+            file=stdout,
+        )
+    if (
+        attention.get("baseline_enrollment_required")
+        and not attention.get("security_attention_required")
+        and not attention.get("coverage_action_required")
+    ):
+        print(
+            "To machine-bind all safely read, clean first-seen hashes after explicit confirmation: "
+            f"aurascan instruction-audit --enroll-clean {report_id}",
+            file=stdout,
+        )
+    if report_id:
+        print(
+            "For prompts and an exact-root deterministic rescan choice, run in a terminal: "
+            f"aurascan instruction-audit --triage {report_id}",
+            file=stdout,
+        )
+    return _attention_exit(attention)
+
+
+def _rescan_triage_report(
+    guard,
+    report: object,
+    *,
+    state_root: Path,
+    source_env: Mapping[str, str],
+    env_path: Path,
+    stdout,
+    stderr,
+) -> int:
+    preferences = read_instruction_guard_preferences(env_path)
+    if preferences.error:
+        print(f"Instruction Guard configuration error: {preferences.error}", file=stderr)
+        return EXIT_ERROR
+    root_value = str(_report_value(report, "root", "") or "")
+    if not root_value or not Path(root_value).is_absolute():
+        print("Triage rescan failed: the report does not contain a valid absolute root.", file=stderr)
+        return EXIT_ERROR
+    print(
+        "Rescanning the exact report root with the configured "
+        f"{preferences.scan_mode} mode. This guided rescan is deterministic and makes no AI provider call.",
+        file=stdout,
+    )
+    try:
+        rescanned = guard.scan_instruction_files(
+            Path(root_value),
+            state_root=state_root,
+            all_markdown=preferences.scan_mode == "all-markdown",
+            ai_enabled=False,
+            ai_reviewer=None,
+            background=False,
+            env=source_env,
+        )
+    except (OSError, ValueError) as exc:
+        print(f"Instruction Guard rescan failed: {exc}", file=stderr)
+        return EXIT_ERROR
+    print("", file=stdout)
+    _render_loaded_report(guard, rescanned, stdout=stdout)
+    attention = guard.instruction_report_attention(rescanned)
+    return _attention_exit(attention)
 
 
 def build_instruction_audit_parser() -> argparse.ArgumentParser:
@@ -522,6 +732,20 @@ def build_instruction_audit_parser() -> argparse.ArgumentParser:
     ai.add_argument("--ai", action="store_true", help="perform one explicitly requested raise-only AI review")
     parser.add_argument("--review", nargs="?", const="", metavar="REPORT_ID", help="review the latest or selected report")
     parser.add_argument(
+        "--triage",
+        nargs="?",
+        const="",
+        metavar="REPORT_ID",
+        help="guide review of the latest or selected report in a foreground terminal",
+    )
+    parser.add_argument(
+        "--enroll-clean",
+        nargs="?",
+        const="",
+        metavar="REPORT_ID",
+        help="approve all safely read, clean first-seen hashes in one confirmed action",
+    )
+    parser.add_argument(
         "-A",
         "--approve",
         metavar="FILE_ID",
@@ -529,7 +753,11 @@ def build_instruction_audit_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--disable", metavar="FILE_ID", help="disable an eligible unchanged standalone instruction file")
     parser.add_argument("--restore", metavar="ACTION_ID", help="restore an unchanged file disabled by AuraScan")
-    parser.add_argument("--yes", action="store_true", help="confirm an eligible disable or restore action non-interactively")
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="confirm an eligible enrollment, disable, or restore action non-interactively",
+    )
     parser.add_argument("--status", action="store_true", help="show monitor, AI consent, service, and review status")
     monitor = parser.add_mutually_exclusive_group()
     monitor.add_argument("--enable-monitor", action="store_true", help="opt in to login and five-minute deterministic scans")
@@ -582,7 +810,7 @@ def _notify_generic(*, which: Callable, runner: Callable) -> bool:
             [
                 executable.path,
                 "AuraScan Agent Instruction Guard",
-                "Agent file findings need review in AuraScan.",
+                "Instruction Guard has an item that needs attention in AuraScan.",
             ],
             check=False,
             timeout=10,
@@ -628,6 +856,384 @@ def _acknowledge_delivered_alerts(
     return acknowledged
 
 
+def _run_enroll_clean(
+    guard,
+    report_id: Optional[str],
+    *,
+    state_root: Path,
+    source_env: Mapping[str, str],
+    json_mode: bool,
+    yes: bool,
+    input_func: Callable[[str], str],
+    stdout,
+    stderr,
+) -> int:
+    if json_mode and not yes:
+        print(
+            "--enroll-clean with --json cannot prompt; review the report, then add --yes for explicit confirmation.",
+            file=stderr,
+        )
+        return EXIT_ERROR
+    try:
+        report = guard.review_report(report_id, state_root=state_root, env=source_env)
+        attention = guard.instruction_report_attention(report)
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"Clean baseline enrollment failed: {exc}", file=stderr)
+        return EXIT_ERROR
+    exact_report_id = str(_report_value(report, "report_id", "") or "")
+    try:
+        latest_report = guard.review_report(None, state_root=state_root, env=source_env)
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"Clean baseline enrollment failed while checking the latest report: {exc}", file=stderr)
+        return EXIT_ERROR
+    latest_report_id = str(_report_value(latest_report, "report_id", "") or "")
+    if latest_report_id != exact_report_id:
+        print(
+            "Clean baseline enrollment refused before prompting because the selected report is historical. "
+            f"Review the latest report with: aurascan instruction-audit --triage {latest_report_id}",
+            file=stderr,
+        )
+        return EXIT_REVIEW
+    if attention.get("security_attention_required"):
+        print(
+            "Clean baseline enrollment refused: this report has suspicious, changed, or unsafe files. "
+            f"Run aurascan instruction-audit --triage {exact_report_id}.",
+            file=stderr,
+        )
+        return EXIT_REVIEW
+    if attention.get("coverage_action_required"):
+        print(
+            "Clean baseline enrollment refused: scan coverage is incomplete or unsafe. "
+            f"Run aurascan instruction-audit --triage {exact_report_id} to resume or rescan.",
+            file=stderr,
+        )
+        return EXIT_REVIEW
+    clean_count = int(attention.get("clean_first_seen_count") or 0)
+    if not attention.get("baseline_enrollment_required") or clean_count <= 0:
+        _print_json_or_text(
+            {
+                "status": "not-needed",
+                "report_id": exact_report_id,
+                "enrolled_count": 0,
+                "machine_bound": False,
+            },
+            json_mode=json_mode,
+            stdout=stdout,
+        )
+        return _attention_exit(attention)
+    if not yes:
+        if not _interactive_input_available(input_func, stdout):
+            print(
+                "Enrollment needs an explicit confirmation in a terminal. After reviewing the report, run: "
+                f"aurascan instruction-audit --enroll-clean {exact_report_id} --yes",
+                file=stderr,
+            )
+            return EXIT_REVIEW
+        if not _confirm(
+            f"Machine-bind the exact current hashes of {clean_count} safely read, clean first-seen file(s)? "
+            "Suspicious, changed, unsafe, and incompletely scanned files are excluded.",
+            input_func=input_func,
+        ):
+            print("Clean baseline enrollment cancelled; no trust state changed.", file=stderr)
+            return EXIT_REVIEW
+    try:
+        result = guard.enroll_clean_candidates(
+            exact_report_id,
+            state_root=state_root,
+            env=source_env,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"Clean baseline enrollment failed: {exc}", file=stderr)
+        return EXIT_ERROR
+    _print_json_or_text(result, json_mode=json_mode, stdout=stdout)
+    return EXIT_CLEAR
+
+
+def _run_triage(
+    guard,
+    report_id: Optional[str],
+    *,
+    state_root: Path,
+    source_env: Mapping[str, str],
+    env_path: Path,
+    input_func: Callable[[str], str],
+    stdout,
+    stderr,
+) -> int:
+    try:
+        report = guard.review_report(report_id, state_root=state_root, env=source_env)
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"Could not load Instruction Guard report for triage: {exc}", file=stderr)
+        return EXIT_ERROR
+    _render_loaded_report(guard, report, stdout=stdout)
+    try:
+        attention = guard.instruction_report_attention(report)
+    except (TypeError, ValueError) as exc:
+        print(f"Could not classify Instruction Guard review actions: {exc}", file=stderr)
+        return EXIT_ERROR
+    try:
+        latest_report = guard.review_report(None, state_root=state_root, env=source_env)
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"Could not check the latest Instruction Guard report: {exc}", file=stderr)
+        return EXIT_ERROR
+    displayed_report_id = str(_report_value(report, "report_id", "") or "")
+    latest_report_id = str(_report_value(latest_report, "report_id", "") or "")
+    if displayed_report_id != latest_report_id:
+        print("", file=stdout)
+        print("HISTORICAL REPORT — READ ONLY", file=stdout)
+        print(
+            "AuraScan will not approve, enroll, or disable a file from evidence that is no longer latest.",
+            file=stdout,
+        )
+        print(
+            f"Open the latest guided report with: aurascan instruction-audit --triage {latest_report_id}",
+            file=stdout,
+        )
+        if not _interactive_input_available(input_func, stdout):
+            return EXIT_REVIEW
+        print("  r  Rescan the exact historical report root using current configured scan settings", file=stdout)
+        print("  l  Leave this historical report without changing anything", file=stdout)
+        print("  q  Quit without changing anything", file=stdout)
+        choice = _read_triage_choice(
+            "Choose an action: ",
+            allowed=["r", "l", "q"],
+            input_func=input_func,
+            stdout=stdout,
+        )
+        if choice == "r":
+            return _rescan_triage_report(
+                guard,
+                report,
+                state_root=state_root,
+                source_env=source_env,
+                env_path=env_path,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        return EXIT_REVIEW
+    if str(attention.get("state") or "") == "clear":
+        print("", file=stdout)
+        print("No guided action is needed; this report is clear.", file=stdout)
+        return EXIT_CLEAR
+    if not _interactive_input_available(input_func, stdout):
+        return _print_noninteractive_triage(report, attention, stdout=stdout)
+
+    candidates = _report_candidates(report)
+    suspicious = [candidate for candidate in candidates if _candidate_has_content_finding(candidate)]
+    changed_or_unsafe = [
+        candidate
+        for candidate in candidates
+        if not _candidate_has_content_finding(candidate)
+        and (
+            _report_value(candidate, "integrity_state", "")
+            in {"changed", "machine-binding-invalidated", "unreviewed", "unsafe"}
+            or _candidate_has_integrity_finding(candidate)
+        )
+    ]
+
+    if attention.get("security_attention_required"):
+        for candidate in suspicious:
+            file_id = str(_report_value(candidate, "file_id", "") or "")
+            expected_sha256 = str(_report_value(candidate, "sha256", "") or "")
+            print("", file=stdout)
+            print(f"SUSPICIOUS FILE ACTION — {file_id}", file=stdout)
+            disable_eligible = bool(_report_value(candidate, "disable_eligible", False))
+            if disable_eligible:
+                print("  d  Disable this unchanged standalone file reversibly", file=stdout)
+            else:
+                print(
+                    "  This settings, hook, script, shared config, or symlink state is manual-only; "
+                    "AuraScan will not rename it.",
+                    file=stdout,
+                )
+            print("  r  Rescan the exact root after you edit or remove the file yourself", file=stdout)
+            print("  l  Leave it for review or a later reminder", file=stdout)
+            print("  q  Quit without changing anything", file=stdout)
+            allowed = ["r", "l", "q"] + (["d"] if disable_eligible else [])
+            choice = _read_triage_choice(
+                "Choose an action: ",
+                allowed=allowed,
+                input_func=input_func,
+                stdout=stdout,
+            )
+            if choice in {None, "q"}:
+                return EXIT_REVIEW
+            if choice == "l":
+                continue
+            if choice == "r":
+                return _rescan_triage_report(
+                    guard,
+                    report,
+                    state_root=state_root,
+                    source_env=source_env,
+                    env_path=env_path,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            if not _confirm(
+                "Disable this exact unchanged file now? AuraScan will keep a private restore receipt.",
+                input_func=input_func,
+            ):
+                print("Disable cancelled; no file was changed.", file=stdout)
+                return EXIT_REVIEW
+            try:
+                result = guard.disable_candidate(
+                    file_id,
+                    state_root=state_root,
+                    env=source_env,
+                    expected_report_id=displayed_report_id,
+                    expected_sha256=expected_sha256,
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                print(f"Disable failed: {exc}", file=stderr)
+                return EXIT_ERROR
+            _print_json_or_text(result, json_mode=False, stdout=stdout)
+            action_id = str(result.get("action_id") or "") if isinstance(result, Mapping) else ""
+            if action_id:
+                print(
+                    "If later verified safe, restore it with: "
+                    f"aurascan instruction-audit --restore {action_id}",
+                    file=stdout,
+                )
+            print("Run guided triage again to refresh the remaining review state.", file=stdout)
+            return EXIT_REVIEW
+
+        for candidate in changed_or_unsafe:
+            file_id = str(_report_value(candidate, "file_id", "") or "")
+            expected_sha256 = str(_report_value(candidate, "sha256", "") or "")
+            print("", file=stdout)
+            print(f"CHANGED OR UNSAFE FILE ACTION — {file_id}", file=stdout)
+            can_approve = _candidate_can_approve(candidate)
+            if can_approve:
+                print("  a  Approve only this exact current hash for this machine and UID", file=stdout)
+            else:
+                print(
+                    "  This identity cannot be safely hash-approved; inspect and correct it manually.",
+                    file=stdout,
+                )
+            print("  r  Rescan the exact root after you edit or correct the file", file=stdout)
+            print("  l  Leave it for review or a later reminder", file=stdout)
+            print("  q  Quit without changing anything", file=stdout)
+            allowed = ["r", "l", "q"] + (["a"] if can_approve else [])
+            choice = _read_triage_choice(
+                "Choose an action: ",
+                allowed=allowed,
+                input_func=input_func,
+                stdout=stdout,
+            )
+            if choice in {None, "q"}:
+                return EXIT_REVIEW
+            if choice == "l":
+                continue
+            if choice == "r":
+                return _rescan_triage_report(
+                    guard,
+                    report,
+                    state_root=state_root,
+                    source_env=source_env,
+                    env_path=env_path,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            if not _confirm(
+                "Approve only this exact unchanged hash on this machine?",
+                input_func=input_func,
+            ):
+                print("Approval cancelled; no trust state changed.", file=stdout)
+                return EXIT_REVIEW
+            try:
+                result = guard.approve_candidate(
+                    file_id,
+                    state_root=state_root,
+                    env=source_env,
+                    expected_report_id=displayed_report_id,
+                    expected_sha256=expected_sha256,
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                print(f"Approval failed: {exc}", file=stderr)
+                return EXIT_ERROR
+            _print_json_or_text(result, json_mode=False, stdout=stdout)
+            try:
+                refreshed = guard.review_report(None, state_root=state_root, env=source_env)
+                refreshed_attention = guard.instruction_report_attention(refreshed)
+            except (OSError, TypeError, ValueError) as exc:
+                print(f"Approval succeeded, but review-state refresh failed: {exc}", file=stderr)
+                return EXIT_ERROR
+            if str(refreshed_attention.get("state") or "") == "clear":
+                print("Instruction Guard review state is now clear.", file=stdout)
+            else:
+                refreshed_id = str(_report_value(refreshed, "report_id", "") or "")
+                print(
+                    "Additional attention remains. Continue with: "
+                    f"aurascan instruction-audit --triage {refreshed_id}",
+                    file=stdout,
+                )
+            return _attention_exit(refreshed_attention)
+
+        if not suspicious and not changed_or_unsafe:
+            print(
+                "Security attention is report-wide or cannot be tied to a safely actionable file. "
+                "Review the explanation above and correct it manually before rescanning.",
+                file=stdout,
+            )
+        return EXIT_REVIEW
+
+    if attention.get("coverage_action_required"):
+        print("", file=stdout)
+        print("SCAN COVERAGE ACTION", file=stdout)
+        print("  r  Resume or repeat the bounded deterministic scan of the exact report root", file=stdout)
+        print("  l  Leave the coverage issue for later", file=stdout)
+        print("  q  Quit without changing anything", file=stdout)
+        choice = _read_triage_choice(
+            "Choose an action: ",
+            allowed=["r", "l", "q"],
+            input_func=input_func,
+            stdout=stdout,
+        )
+        if choice == "r":
+            return _rescan_triage_report(
+                guard,
+                report,
+                state_root=state_root,
+                source_env=source_env,
+                env_path=env_path,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        return EXIT_REVIEW
+
+    if attention.get("baseline_enrollment_required"):
+        clean_count = int(attention.get("clean_first_seen_count") or 0)
+        print("", file=stdout)
+        print("CLEAN FIRST-SEEN BASELINE", file=stdout)
+        print(
+            f"AuraScan found no suspicious content or coverage blocker in {clean_count} safely read "
+            "first-seen file(s). Enrollment binds only their exact hashes to this machine and UID; "
+            "it is not an AI verdict and does not approve future changes.",
+            file=stdout,
+        )
+        if not _confirm(
+            "Enroll all of these clean first-seen hashes now?",
+            input_func=input_func,
+        ):
+            print("Clean baseline enrollment cancelled; no trust state changed.", file=stdout)
+            return EXIT_REVIEW
+        exact_report_id = str(_report_value(report, "report_id", "") or "")
+        try:
+            result = guard.enroll_clean_candidates(
+                exact_report_id,
+                state_root=state_root,
+                env=source_env,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            print(f"Clean baseline enrollment failed: {exc}", file=stderr)
+            return EXIT_ERROR
+        _print_json_or_text(result, json_mode=False, stdout=stdout)
+        return EXIT_CLEAR
+
+    return _attention_exit(attention)
+
+
 def run_instruction_audit(
     argv=None,
     *,
@@ -635,7 +1241,7 @@ def run_instruction_audit(
     stderr=None,
     env: Optional[Mapping[str, str]] = None,
     env_path: Optional[Path] = None,
-    input_func: Callable[[str], str] = input,
+    input_func: Callable[[str], str] = _DEFAULT_INPUT,
     runner: Callable = subprocess.run,
     which: Callable[[str], Optional[str]] = shutil.which,
     urlopen: Optional[Callable] = None,
@@ -650,6 +1256,8 @@ def run_instruction_audit(
 
     control_count = sum(bool(value) for value in (
         args.review is not None,
+        args.triage is not None,
+        args.enroll_clean is not None,
         args.approve,
         args.disable,
         args.restore,
@@ -705,9 +1313,46 @@ def run_instruction_audit(
         _print_json_or_text(payload, json_mode=args.json_mode, stdout=stdout)
         if preferences.error or status.get("state") == "unavailable":
             return EXIT_ERROR
-        if status.get("state") == "review_required":
+        if status.get("state") in {
+            "review_required",
+            "security_attention_required",
+            "coverage_action_required",
+            "baseline_enrollment_required",
+        }:
             return EXIT_REVIEW
         return EXIT_CLEAR
+
+    if args.triage is not None:
+        if args.json_mode:
+            print(
+                "--triage is a foreground guided workflow and cannot be combined with --json. "
+                "Use --review --json for structured report output.",
+                file=stderr,
+            )
+            return EXIT_ERROR
+        return _run_triage(
+            guard,
+            args.triage or None,
+            state_root=state_root,
+            source_env=source_env,
+            env_path=target_env,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    if args.enroll_clean is not None:
+        return _run_enroll_clean(
+            guard,
+            args.enroll_clean or None,
+            state_root=state_root,
+            source_env=source_env,
+            json_mode=args.json_mode,
+            yes=args.yes,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+        )
 
     if args.review is not None:
         try:

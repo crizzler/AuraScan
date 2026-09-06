@@ -35,6 +35,7 @@ from aurascan.core.risk import RiskEngine
 from aurascan.core.cache import ScanCache
 from aurascan.core.context_provider import build_scan_context_proof
 from aurascan.core.local_package_db import LocalPackageDbContextProvider
+from aurascan.core.pnpm_buildchain import analyze_pnpm_buildchain
 from aurascan.core.package_archive import (
     PACKAGE_IDENTITY_RESOLVED,
     capture_package_identity,
@@ -69,8 +70,10 @@ class AuraScanEngine:
         self.last_report = None
         self.last_scan_input_digest = ""
         self.last_scan_input = None
+        self.last_pnpm_buildchain = None
+        self._pnpm_controls = []
         self.scanner_version = "2.5.0"
-        self.rule_version = "1.5.0"
+        self.rule_version = "1.6.0"
         self.cache = ScanCache()
         self.risk_engine = RiskEngine()
         self.trust_diff_adapter = HistoryTrustDiffAdapter()
@@ -180,6 +183,8 @@ class AuraScanEngine:
     def scan_pkgbuild(self, pkgbuild_path: str, pkg_name: str = "unknown", pkg_ver: str = "unknown") -> bool:
         self.last_scan_input_digest = ""
         self.last_scan_input = None
+        self.last_pnpm_buildchain = None
+        self._pnpm_controls = []
         cache_flags = self._cache_flags()
         try:
             scan_input = capture_package_scan_input(
@@ -202,6 +207,17 @@ class AuraScanEngine:
         scan_input_digest = scan_input.input_digest
         self.last_scan_input = scan_input
         self.last_scan_input_digest = scan_input_digest
+        self._pnpm_controls = [(pkgbuild_path, content, Phase.pkgbuild_static)]
+        if install_hook.declared and install_hook.inspectable:
+            self._pnpm_controls.append((str(install_hook.path), install_hook.content, Phase.install_hook_static))
+        self.last_pnpm_buildchain = analyze_pnpm_buildchain(
+            self._pnpm_controls,
+            local_db_root=self.local_package_db_root,
+            version_compare=self.version_compare,
+        )
+        # The installed toolchain can change independently of package bytes.
+        # Relevant checks stay fresh even across cached or new-only scans.
+        cacheable = not self.deep_static and not self.last_pnpm_buildchain.relevant
         cache_key_parts = {
             "config_flags": cache_flags,
             "input_digest": scan_input_digest,
@@ -212,7 +228,7 @@ class AuraScanEngine:
         # so a moving or replaced remote source must never reuse an older clear
         # report.  Keep deep-static uncached until an immutable acquisition
         # manifest is part of the key.
-        if not self.deep_static and self.scan_context != ScanContext.auto:
+        if cacheable and self.scan_context != ScanContext.auto:
             cached_res = self.cache.get_cached_result(
                 pkgbuild_path,
                 self.scanner_version,
@@ -235,7 +251,7 @@ class AuraScanEngine:
             return True
 
         self._print(f"\n[AuraScan] --- Auditing PKGBUILD: {pkgbuild_path} ---", True)
-        all_findings = []
+        all_findings = list(self.last_pnpm_buildchain.findings)
         source_acquisition = []
         is_safe = True
         if install_hook.declared and install_hook.status != INSTALL_HOOK_RESOLVED:
@@ -283,7 +299,7 @@ class AuraScanEngine:
                 print(json.dumps(out_dict, indent=2))
             else:
                 print(report.render_terminal(verbose=self.verbose))
-            if not self.deep_static:
+            if cacheable:
                 self.cache.set_cached_result(
                     pkgbuild_path,
                     self.scanner_version,
@@ -343,7 +359,7 @@ class AuraScanEngine:
         else:
             print(report.render_terminal(verbose=self.verbose))
 
-        if not self.deep_static:
+        if cacheable:
             self.cache.set_cached_result(
                 pkgbuild_path,
                 self.scanner_version,
@@ -356,6 +372,20 @@ class AuraScanEngine:
             log_audit(pkgbuild_path, [f.explanation for f in all_findings if f.blocks_installation])
             return False
         return True
+
+    def revalidate_pnpm_buildchain(self):
+        """Bind the wrapper handoff to fresh local build-tool evidence."""
+        previous = self.last_pnpm_buildchain
+        if previous is None:
+            return False
+        if not previous.relevant:
+            return True
+        current = analyze_pnpm_buildchain(
+            self._pnpm_controls,
+            local_db_root=self.local_package_db_root,
+            version_compare=self.version_compare,
+        )
+        return not current.findings and current.identity == previous.identity
 
     def _build_report(self, pkg_name, pkg_ver, findings, messages, source_acquisition=None, fast_path_decision=None):
         report = ScanReport(

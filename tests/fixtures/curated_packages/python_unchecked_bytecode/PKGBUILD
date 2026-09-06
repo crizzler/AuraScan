@@ -1,0 +1,12 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-python-unchecked-bytecode
+pkgver=1.0
+pkgrel=1
+pkgdesc="Inert CPython header requiring precompiled carrier provenance review"
+arch=("any")
+url="https://example.invalid/curated-python-unchecked-bytecode"
+license=("MIT")
+
+package() {
+  :
+}

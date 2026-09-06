@@ -35,6 +35,12 @@ candidate.
 
 ## Validation
 
+- For v0.10.4, verify pnpm local-version/metadata coverage and precompiled
+  Python carrier regressions with package rules `1.6.0` and repository
+  snapshot `1.1`. A patched pacman record does not establish future tool
+  selection, and a bytecode header does not authenticate its body.
+- Instruction Guard pending alerts must survive unrelated-root scans and
+  monitor/status races; delivery acknowledgement follows notification.
 - `python -m compileall aurascan tests tools` passes.
 - `.venv/bin/python -m pytest -q` passes.
 - `.venv/bin/python tools/audit_presenter_coverage.py` passes.

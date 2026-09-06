@@ -17,10 +17,12 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Dict, Iterable, List, Sequence, Set, Tuple
 
+from aurascan.analyzers.python_bytecode import classify_python_precompiled
+
 
 REPOSITORY_COMPLETE = "complete"
 REPOSITORY_UNINSPECTED = "uninspected"
-REPOSITORY_SNAPSHOT_VERSION = "1.0"
+REPOSITORY_SNAPSHOT_VERSION = "1.1"
 
 MAX_REPOSITORY_ENTRIES = 20_000
 MAX_REPOSITORY_REGULAR_FILES = 4_096
@@ -47,7 +49,6 @@ _GENERATED_OR_CACHE_DIRECTORIES = frozenset({
     ".tox",
     ".venv",
     ".yarn",
-    "__pycache__",
     "cache",
     "node_modules",
     "venv",
@@ -423,7 +424,7 @@ def _walk_directory(
                     require_full_capture=relative_path in state.required_paths,
                 )
             )
-            kind = _classify_artifact(prefix, pe_valid=pe_valid) if prefix else ""
+            kind = _classify_artifact(prefix, pe_valid=pe_valid, relative_path=relative_path)
             _record_manifest_entry(
                 state,
                 _manifest_entry(
@@ -684,7 +685,7 @@ def _capture_required_path(
                 require_full_capture=True,
             )
         )
-        kind = _classify_artifact(prefix, pe_valid=pe_valid) if prefix else ""
+        kind = _classify_artifact(prefix, pe_valid=pe_valid, relative_path=relative_path)
         _record_manifest_entry(
             state,
             _manifest_entry(
@@ -1058,7 +1059,10 @@ def _check_deadline(state: _CaptureState) -> None:
         raise _CaptureFailure("elapsed_time_limit")
 
 
-def _classify_artifact(prefix: bytes, *, pe_valid: bool) -> str:
+def _classify_artifact(prefix: bytes, *, pe_valid: bool, relative_path: str = "") -> str:
+    python_kind = classify_python_precompiled(relative_path, prefix)
+    if python_kind:
+        return python_kind
     if prefix.startswith(b"\x7fELF"):
         return "elf"
     if pe_valid:

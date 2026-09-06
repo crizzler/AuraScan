@@ -51,7 +51,23 @@ credentials, provider output, or other file content. Acknowledging an alert
 deduplicates the same notification; it does not approve a file. AuraScan calls
 desktop notification only through a captured and revalidated
 `/usr/bin/notify-send`; if it is unavailable, private CLI/tray state remains
-available without spawning another executable from `PATH`.
+available without spawning another executable from `PATH`. Scan-coverage
+notifications use neutral attention wording, and clean baseline enrollment
+does not generate a desktop alert.
+
+Clean first-seen files appear as neutral baseline enrollment rather than a
+security alert. A confirmed batch enrollment remains a local deterministic
+action: it revalidates every selected file and writes the same exact-hash,
+machine-and-UID-bound approvals used by individual enrollment. No path, source
+text, hash, or enrollment decision is sent to an AI provider. Suspicious,
+changed/unsafe, and incompletely scanned states remain separate attention
+categories. Foreground guided triage may show private paths in its terminal,
+but tray state and notifications remain generic.
+
+An interrupted batch enrollment leaves a private, bounded transaction marker.
+Review remains unavailable until a complete deterministic scan of the marker's
+exact root revalidates its recorded targets without cache reuse; other roots
+and partial continuation pages cannot clear that marker.
 
 Instruction Guard AI is a second, independent opt-in. Its user timer processes
 at most one queued job per run through the already configured local or cloud

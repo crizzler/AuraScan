@@ -477,6 +477,16 @@ def _matching_scan_input(engine, pkgbuild_path: Path) -> Optional[PackageScanInp
     expected_digest = str(getattr(engine, "last_scan_input_digest", "") or "")
     if not expected_digest:
         return None
+    # Version comparison may invoke the bounded trusted vercmp helper. Keep
+    # that work before the final package-byte recapture so it cannot reopen a
+    # long mutation window for the PKGBUILD or repository snapshot afterward.
+    revalidate_buildchain = getattr(engine, "revalidate_pnpm_buildchain", None)
+    if revalidate_buildchain is not None:
+        try:
+            if not revalidate_buildchain():
+                return None
+        except Exception:
+            return None
     try:
         current = capture_package_scan_input(
             pkgbuild_path,
@@ -497,7 +507,7 @@ def _emit_scan_input_changed(
     scan_warnings,
 ) -> int:
     error = (
-        "PKGBUILD, install-hook, or package-repository evidence changed after scanning; "
+        "PKGBUILD, install-hook, package-repository, or pnpm build-tool evidence changed or became unavailable after scanning; "
         "makepkg was not invoked."
     )
     if options.json_output:

@@ -55,6 +55,23 @@ def write_deep_static_archive(path: Path, scenario: str) -> Path:
 
 
 def _scenario_entries(scenario: str) -> Iterable[TarEntry]:
+    if scenario == "source_pnpm_lockfile_path_escape":
+        return [TarEntry("pkg/pnpm-lock.yaml", (
+            b"lockfileVersion: '9.0'\n"
+            b"packages:\n  '@fixture/../../inert-escape@1.0.0': {}\n"
+        ))]
+    if scenario == "source_npm_manifest_path_escape":
+        return [TarEntry("package/package.json", (
+            b'{"name":"@fixture/../../inert-escape","version":"1.0.0"}\n'
+        ))]
+    if scenario == "source_python_unchecked_bytecode":
+        return [
+            TarEntry("pkg/payload.py", b"# Inert source does not authenticate a bytecode body.\n"),
+            TarEntry("pkg/__pycache__/payload.cpython-311.pyc", (
+                b"\xa7\x0d\r\n\x01\x00\x00\x00FAKEHASH"
+                b"AURASCAN_INERT_BYTECODE_SENTINEL"
+            )),
+        ]
     if scenario == "archive_path_traversal":
         return [
             TarEntry("safe/readme.txt", b"safe fixture content\n"),

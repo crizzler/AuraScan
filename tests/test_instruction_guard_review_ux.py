@@ -65,10 +65,10 @@ def test_inventory_only_review_is_explicitly_not_a_content_alert(tmp_path):
     rendered = guard.render_instruction_report(report, terminal_width=80)
     narrow = guard.render_instruction_report(report, terminal_width=60)
     assert "Suspicious instruction patterns: NONE FOUND" in rendered
-    assert "This is an integrity review, not a malware-content alert." in rendered
+    assert "This is neutral baseline enrollment, not a malware-content alert." in rendered
     assert "AI analysis: NOT NEEDED" in rendered
-    assert "NEW FILES AWAITING APPROVAL (1)" in rendered
-    assert "These files are not flagged as malicious" in rendered
+    assert "NEW CLEAN FILES TO ENROLL (1)" in rendered
+    assert "NO THREAT MATCH" in rendered
     assert "Static content scan: no suspicious pattern found" in rendered
     assert "[review; LOW]" not in rendered
     assert "[LOW]" not in rendered
@@ -102,7 +102,7 @@ def test_mixed_review_keeps_lines_reason_and_ai_explanation_together(tmp_path):
     normalized = " ".join(rendered.split())
 
     suspicious_heading = rendered.index("SUSPICIOUS INSTRUCTIONS (1)")
-    new_files_heading = rendered.index("NEW FILES AWAITING APPROVAL")
+    new_files_heading = rendered.index("NEW CLEAN FILES TO ENROLL")
     rule = rendered.index("IG-BEHAVIOR-FETCH-EXECUTE", suspicious_heading)
     lines = rendered.index("Lines:", rule)
     fetch_line = rendered.index("line 2", lines)
@@ -153,7 +153,7 @@ def test_coverage_only_review_is_not_presented_as_malware_or_source_text(tmp_pat
     narrow = guard.render_instruction_report(report, terminal_width=60)
 
     assert "Suspicious instruction patterns: NONE FOUND" in rendered
-    assert "This is an integrity/coverage review, not a malware-content alert." in rendered
+    assert "This is a scan-coverage action, not a malware-content alert." in rendered
     assert "SCAN COVERAGE (1)" in rendered
     assert "Coverage severity: MEDIUM" in rendered
     assert "Lines: not applicable" in rendered
@@ -370,7 +370,8 @@ def test_changed_clean_file_is_shown_once_with_an_approval_next_step(tmp_path):
     assert "CHANGED OR UNTRUSTED FILES (1)" in rendered
     assert "No suspicious content pattern was detected" in rendered
     assert "Why review is required:" in rendered
-    assert f"aurascan instruction-audit -A {file_id}" in rendered
+    assert "report-bound guided triage" in rendered
+    assert f"aurascan instruction-audit -A {file_id}" not in rendered
 
 
 def test_changed_file_integrity_details_are_bounded(tmp_path):

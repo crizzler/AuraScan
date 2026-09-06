@@ -1,0 +1,17 @@
+{
+  "scenario": "python_unchecked_bytecode",
+  "category": "suspicious_defanged",
+  "scan_modes": ["fast", "wrapper"],
+  "package_name": "curated-python-unchecked-bytecode",
+  "package_version": "1.0",
+  "expected_rule_ids": ["PYTHON-BYTECODE-PRESENT-001", "PYTHON-BYTECODE-UNCHECKED-HASH-001"],
+  "expected_absent_rule_ids": ["AUR-REPO-OPAQUE-BINARY-EXEC-001", "PYTHON-BYTECODE-EXEC-001"],
+  "expected_phases": ["pkgbuild_static"],
+  "expected_min_severity": "HIGH",
+  "expected_not_critical": true,
+  "expected_action": "manual_review",
+  "expected_manual_review": true,
+  "expected_manual_review_eligible": true,
+  "expected_makepkg_invoked": false,
+  "expected_wrapper_action": "manual_review_required"
+}

@@ -1,0 +1,27 @@
+{
+  "scenario": "source_npm_manifest_path_escape",
+  "category": "deep_static_source_content",
+  "scan_modes": [
+    "deep_static"
+  ],
+  "package_name": "curated-source-npm-manifest-path-escape",
+  "package_version": "1.0",
+  "archive_scenario": "source_npm_manifest_path_escape",
+  "expected_rule_ids": [
+    "SOURCE-CHECKSUM-MATCH",
+    "NPM-MANIFEST-NAME-PATH-ESCAPE-001"
+  ],
+  "expected_phases": [
+    "unpacked_source_scan"
+  ],
+  "expected_min_severity": "CRITICAL",
+  "expected_action": "block",
+  "expected_hard_blocker": true,
+  "expected_manual_review": false,
+  "expected_deep_static_required": true,
+  "expected_no_network": true,
+  "expected_terminal_contains": [
+    "Risk Score",
+    "Recommended Action"
+  ]
+}

@@ -398,7 +398,7 @@ def test_updater_menu_exposes_one_guided_incident_resolution_workflow():
     commands = {label: list(command) for group in UPDATER_MENU_GROUPS for label, command in group}
 
     assert commands["Resolve System Findings"] == ["aurascan", "incidents", "--resolve"]
-    assert commands["Review Agent Files"] == ["aurascan", "instruction-audit", "--review"]
+    assert commands["Review Agent Files"] == ["aurascan", "instruction-audit", "--triage"]
     assert commands["Run System Maintenance Scan"] == ["aurascan", "incidents", "--run-maintenance"]
     assert not {
         "AuraScan Doctor",
@@ -410,7 +410,7 @@ def test_updater_menu_exposes_one_guided_incident_resolution_workflow():
         "Recent Incidents",
     } & commands.keys()
     assert list(INCIDENT_REVIEW_COMMAND) == ["aurascan", "incidents", "--resolve"]
-    assert list(INSTRUCTION_REVIEW_COMMAND) == ["aurascan", "instruction-audit", "--review"]
+    assert list(INSTRUCTION_REVIEW_COMMAND) == ["aurascan", "instruction-audit", "--triage"]
     assert list(INSTRUCTION_STATUS_COMMAND) == ["aurascan", "instruction-audit", "--status"]
     assert UPDATER_INCIDENT_REFRESH_MS == 5_000
 
@@ -850,7 +850,7 @@ def test_instruction_guard_notifications_are_generic_and_acknowledged_by_id_only
 
     assert [alert["alert_id"] for alert in alerts] == ["alert-one", "alert-two"]
     assert all(set(alert) == {"alert_id", "severity"} for alert in alerts)
-    assert title == "AuraScan found agent file risks"
+    assert title == "AuraScan Agent Instruction Guard needs attention"
     assert "2 Agent Instruction Guard alerts" in message
     assert "/home/alice" not in message
     assert "credential-exfiltration" not in message
@@ -873,7 +873,7 @@ def test_notification_action_router_is_not_hardwired_to_incidents():
     router.activate()
 
     assert calls[0][-3:] == ["aurascan", "incidents", "--resolve"]
-    assert calls[1][-3:] == ["aurascan", "instruction-audit", "--review"]
+    assert calls[1][-3:] == ["aurascan", "instruction-audit", "--triage"]
 
 
 def test_incident_notification_groups_markers_by_boot():

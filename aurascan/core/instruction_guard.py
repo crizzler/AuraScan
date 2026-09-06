@@ -1,12 +1,16 @@
 import base64
+import contextlib
 import ctypes
 import errno
+import fcntl
+import functools
 import hashlib
 import json
 import os
 import re
 import stat
 import textwrap
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -25,6 +29,7 @@ MANIFEST_SCHEMA = "instruction_guard_manifest/1.0"
 AI_JOB_SCHEMA = "instruction_guard_ai_job/1.0"
 ALERT_SCHEMA = "instruction_guard_alert/1.0"
 RECEIPT_SCHEMA = "instruction_guard_disable_receipt/1.0"
+ENROLLMENT_TRANSACTION_SCHEMA = "instruction_guard_enrollment_transaction/1.0"
 CURSOR_SCHEMA = "instruction_guard_cursor/1.0"
 LATEST_SCHEMA = "instruction_guard_latest/1.0"
 # A complete bounded inventory can legitimately contain 5,000 control files.
@@ -50,6 +55,7 @@ MAX_REPORT_HISTORY_BYTES = 256 * 1024 * 1024
 MAX_REPORT_FILES = 10_000
 MAX_ALERT_FILES = 2_048
 MAX_ACKNOWLEDGED_ALERTS = 256
+STATE_LOCK_TIMEOUT_SECONDS = 45.0
 AI_RETRY_SECONDS = (300, 1800, 7200, 21600)
 SEVERITY_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
 AI_ALLOWED_FAMILIES = {
@@ -65,6 +71,9 @@ INTEGRITY_STATE_VALUES = {
 }
 SYMLINK_STATE_VALUES = {
     "regular", "inside-root", "outside-root", "broken", "unsafe-target",
+}
+ENROLLMENT_ORIGIN_VALUES = {
+    "clean-first-seen", "first-seen-review", "manual-review", "approved",
 }
 AI_STATUS_VALUES = {
     "disabled", "pending", "not-needed", "queued", "retry", "reused",
@@ -955,6 +964,127 @@ def _ensure_state_tree(state_root: Path) -> None:
         _ensure_private_dir(state_root / name)
 
 
+_STATE_THREAD_LOCK = threading.RLock()
+_STATE_LOCK_LOCAL = threading.local()
+
+
+@contextlib.contextmanager
+def _instruction_state_lock(state_root: Path):
+    """Bounded, reentrant process/thread and cross-process state lock."""
+
+    selected_state = _state_path(state_root)
+    if not _STATE_THREAD_LOCK.acquire(timeout=STATE_LOCK_TIMEOUT_SECONDS):
+        raise ValueError("timed out waiting for the Instruction Guard state lock")
+    local_locks = getattr(_STATE_LOCK_LOCAL, "locks", None)
+    if local_locks is None:
+        local_locks = {}
+        _STATE_LOCK_LOCAL.locks = local_locks
+    key = str(selected_state)
+    existing = local_locks.get(key)
+    if existing is not None:
+        existing["depth"] += 1
+        try:
+            yield
+        finally:
+            existing["depth"] -= 1
+            _STATE_THREAD_LOCK.release()
+        return
+
+    fd = -1
+    locked = False
+    try:
+        _ensure_private_dir(selected_state)
+        lock_path = selected_state / ".state.lock"
+        flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        fd = os.open(str(lock_path), flags, 0o600)
+        opened = os.fstat(fd)
+        try:
+            current = lock_path.lstat()
+        except OSError as exc:
+            raise ValueError("Instruction Guard state lock disappeared") from exc
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) & 0o077
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            or stat.S_ISLNK(current.st_mode)
+        ):
+            raise ValueError("unsafe Instruction Guard state lock identity")
+        deadline = time.monotonic() + STATE_LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise ValueError(
+                        "timed out waiting for the Instruction Guard state lock"
+                    )
+                time.sleep(0.05)
+        after = os.fstat(fd)
+        current = lock_path.lstat()
+        if (
+            (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino)
+            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+            or not stat.S_ISREG(after.st_mode)
+            or after.st_uid != os.getuid()
+            or stat.S_IMODE(after.st_mode) & 0o077
+            or after.st_nlink != 1
+        ):
+            raise ValueError("Instruction Guard state lock changed during acquisition")
+        local_locks[key] = {"depth": 1, "fd": fd}
+        try:
+            yield
+        finally:
+            local_locks.pop(key, None)
+    finally:
+        if locked and fd >= 0:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        if fd >= 0:
+            os.close(fd)
+        _STATE_THREAD_LOCK.release()
+
+
+def _serialized_state_mutation(function):
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        env = kwargs.get("env")
+        state_root = kwargs.get("state_root")
+        selected_state = _state_path(
+            state_root or default_instruction_guard_state_root(env)
+        )
+        with _instruction_state_lock(selected_state):
+            return function(*args, **kwargs)
+
+    return wrapped
+
+
+def _serialized_scan_state_mutation(function):
+    """Reject an invalid root/state relationship before creating the lock."""
+
+    @functools.wraps(function)
+    def wrapped(root, *args, **kwargs):
+        env = kwargs.get("env")
+        state_root = kwargs.get("state_root")
+        selected_state = _state_path(
+            state_root or default_instruction_guard_state_root(env)
+        )
+        selected_root, _metadata = _validate_root(Path(root))
+        if _path_inside(selected_root, selected_state):
+            raise ValueError("private state root must not contain the scan root")
+        with _instruction_state_lock(selected_state):
+            return function(root, *args, **kwargs)
+
+    return wrapped
+
+
 def _validate_private_file(path: Path) -> os.stat_result:
     metadata = path.lstat()
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
@@ -1088,7 +1218,94 @@ def _safe_remove_private(path: Path) -> None:
         os.close(parent_fd)
 
 
-def _prune_report_history(state_root: Path, latest_report_id: str = "") -> None:
+def _enrollment_transaction_path(state_root: Path) -> Path:
+    return state_root / "enrollment-transaction.json"
+
+
+def _validate_enrollment_transaction(data: Mapping[str, object]) -> None:
+    file_ids = data.get("file_ids")
+    if (
+        data.get("schema") != ENROLLMENT_TRANSACTION_SCHEMA
+        or not isinstance(data.get("transaction_id"), str)
+        or not str(data.get("transaction_id")).startswith("enrollment-")
+        or not SAFE_ID_RE.fullmatch(
+            str(data.get("transaction_id")).split("-", 1)[1]
+        )
+        or not isinstance(data.get("report_id"), str)
+        or not str(data.get("report_id")).startswith("report-")
+        or not SAFE_ID_RE.fullmatch(str(data.get("report_id")).split("-", 1)[1])
+        or not isinstance(data.get("root_id"), str)
+        or not re.fullmatch(r"[a-f0-9]{24}", str(data.get("root_id")))
+        or not isinstance(file_ids, list)
+        or not 1 <= len(file_ids) <= MAX_REPORT_CANDIDATES
+        or any(
+            not isinstance(file_id, str)
+            or not re.fullmatch(r"[a-f0-9]{24}", file_id)
+            for file_id in file_ids
+        )
+        or sorted(set(file_ids)) != file_ids
+        or data.get("status") != "prepared"
+        or not isinstance(data.get("created_at"), str)
+        or not str(data.get("created_at"))
+    ):
+        raise ValueError("corrupt Instruction Guard enrollment transaction")
+
+
+def _load_enrollment_transaction(state_root: Path) -> Optional[Dict[str, object]]:
+    transaction = _load_private_json(
+        _enrollment_transaction_path(state_root),
+        required_schema=ENROLLMENT_TRANSACTION_SCHEMA,
+    )
+    if transaction is not None:
+        _validate_enrollment_transaction(transaction)
+    return transaction
+
+
+def _require_no_enrollment_transaction(state_root: Path) -> None:
+    if _load_enrollment_transaction(state_root) is not None:
+        raise ValueError(
+            "an interrupted clean enrollment requires a deterministic rescan"
+        )
+
+
+def _enrollment_recovery_reconciled(
+    report: "InstructionReport",
+    transaction: Mapping[str, object],
+) -> bool:
+    """Return true only after a complete matching scan revalidated each target."""
+
+    if report.truncated or report.continuation_pending:
+        return False
+    expected = set(transaction.get("file_ids") or [])
+    if not expected:
+        return False
+    candidates = {candidate.file_id: candidate for candidate in report.candidates}
+    missing = {
+        finding.file_id
+        for finding in report.findings
+        if finding.rule_id == "IG-INTEGRITY-CONTROL-MISSING"
+    }
+    for file_id in expected:
+        if file_id in missing:
+            continue
+        candidate = candidates.get(file_id)
+        if (
+            candidate is None
+            or not candidate.baseline
+            or candidate.hash_reused
+            or candidate.read_error
+            or not re.fullmatch(r"[a-f0-9]{64}", candidate.sha256)
+        ):
+            return False
+    return True
+
+
+def _prune_report_history(
+    state_root: Path,
+    latest_report_id: str = "",
+    *,
+    protected_report_ids: Iterable[str] = (),
+) -> None:
     reports_root = state_root / "reports"
     _ensure_private_dir(reports_root)
     paths = sorted(reports_root.glob("report-*.json"))
@@ -1100,16 +1317,26 @@ def _prune_report_history(state_root: Path, latest_report_id: str = "") -> None:
         _validate_record_id(report_id, "report")
         metadata = _validate_private_file(path)
         records.append((metadata.st_mtime_ns, report_id, path, metadata.st_size))
+    protected = set(protected_report_ids)
     if latest_report_id:
-        _validate_record_id(latest_report_id, "report")
-        if latest_report_id not in {item[1] for item in records}:
-            raise ValueError("latest Instruction Guard report is missing from retained history")
+        protected.add(latest_report_id)
+    record_ids = {item[1] for item in records}
+    for report_id in protected:
+        _validate_record_id(report_id, "report")
+        if report_id not in record_ids:
+            raise ValueError(
+                "protected Instruction Guard report is missing from retained history"
+            )
+    if len(protected) > MAX_RETAINED_REPORTS:
+        raise ValueError("too many protected Instruction Guard reports")
     newest = sorted(records, key=lambda item: (item[0], item[1]), reverse=True)
     retained: Set[str] = set()
     retained_bytes = 0
-    if latest_report_id:
-        retained.add(latest_report_id)
-        retained_bytes += next(item[3] for item in records if item[1] == latest_report_id)
+    for report_id in sorted(protected):
+        retained.add(report_id)
+        retained_bytes += next(item[3] for item in records if item[1] == report_id)
+    if retained_bytes > MAX_REPORT_HISTORY_BYTES:
+        raise ValueError("protected Instruction Guard reports exceed retention bounds")
     for _mtime, report_id, _path, size in newest:
         if report_id in retained:
             continue
@@ -1249,6 +1476,10 @@ def _validate_manifest_structure(data: Mapping[str, object]) -> None:
                 or not isinstance(entry.get("sha256"), str)
                 or len(str(entry.get("sha256") or "")) > 64
                 or not isinstance(entry.get("locator"), str)
+                or (
+                    "enrollment_origin" in entry
+                    and entry.get("enrollment_origin") not in ENROLLMENT_ORIGIN_VALUES
+                )
                 or entry.get("last_seen_cycle") not in {None, ""}
                 and (
                     not isinstance(entry.get("last_seen_cycle"), str)
@@ -3595,6 +3826,115 @@ def _candidate_from_read_error(
     )
 
 
+def _candidate_trust_safety_findings(
+    discovered: _Discovered,
+    metadata: Mapping[str, int],
+    root: Path,
+) -> List[InstructionFinding]:
+    if not discovered.baseline:
+        return []
+    findings: List[InstructionFinding] = []
+    if _safe_int(metadata.get("mode")) & 0o022:
+        findings.append(_finding(
+            "IG-INTEGRITY-WEAK-CONTROL-PERMISSIONS",
+            "MEDIUM",
+            "An agent control file is writable by another account class.",
+            "AuraScan analyzed the bytes but will not establish machine-bound trust while group or other write access remains.",
+            ["integrity"],
+            confidence="high",
+        ))
+    if _safe_int(metadata.get("nlink"), 0) != 1:
+        findings.append(_finding(
+            "IG-INTEGRITY-MULTIPLY-LINKED-CONTROL",
+            "MEDIUM",
+            "An agent control file has more than one filesystem name.",
+            "AuraScan analyzed the bytes but will not establish trust while another hard-link path can modify the same inode.",
+            ["integrity"],
+            confidence="high",
+        ))
+    identity_path = Path(os.path.abspath(str(
+        root / (discovered.identity_path or discovered.relative_path)
+    )))
+    parents = {identity_path.parent, discovered.path.parent}
+    try:
+        for parent in parents:
+            _validate_safe_parent(parent / ".aurascan-parent-probe", root)
+    except (OSError, ValueError):
+        findings.append(_finding(
+            "IG-INTEGRITY-WEAK-PARENT-PERMISSIONS",
+            "MEDIUM",
+            "An agent control file has an unsafe parent directory chain.",
+            "AuraScan analyzed the bytes but will not establish trust through a parent that is foreign-owned, writable by another account class, or unstable.",
+            ["integrity"],
+            confidence="high",
+        ))
+    if discovered.symlink_state != "regular":
+        findings.append(_finding(
+            "IG-INTEGRITY-SYMLINK-MANUAL-TRUST",
+            "MEDIUM",
+            "An agent control path resolves through a file symlink.",
+            "AuraScan analyzed the inside-root regular target but requires manual correction instead of hash-enrolling a symlink path.",
+            ["integrity"],
+            confidence="high",
+        ))
+    return findings
+
+
+def _legacy_clean_first_seen_matches(
+    prior_report: Optional[InstructionReport],
+    *,
+    root: Path,
+    root_id: str,
+    file_id: str,
+    sha256: str,
+    metadata: Mapping[str, int],
+) -> bool:
+    """Conservatively migrate a coherent pre-provenance clean inventory."""
+
+    if (
+        prior_report is None
+        or prior_report.root != str(root)
+        or prior_report.root_id != root_id
+        or prior_report.truncated
+        or prior_report.continuation_pending
+        or prior_report.findings
+        or instruction_report_attention(prior_report)["state"]
+        != "baseline_enrollment_required"
+    ):
+        return False
+    matches = [
+        candidate
+        for candidate in prior_report.candidates
+        if candidate.file_id == file_id
+    ]
+    if len(matches) != 1:
+        return False
+    candidate = matches[0]
+    return bool(
+        candidate.baseline
+        and candidate.integrity_state == "first-seen"
+        and candidate.symlink_state == "regular"
+        and not candidate.read_error
+        and not candidate.findings
+        and candidate.content_risk == "LOW"
+        and candidate.sha256 == sha256
+        and candidate.owner == os.getuid()
+        and not candidate.mode & 0o022
+        and all(
+            _safe_int(metadata.get(name), -1) == expected
+            for name, expected in {
+                "device": candidate.device,
+                "inode": candidate.inode,
+                "size": candidate.size,
+                "mtime_ns": candidate.mtime_ns,
+                "ctime_ns": candidate.ctime_ns,
+                "mode": candidate.mode,
+                "owner": candidate.owner,
+            }.items()
+        )
+    )
+
+
 def _manifest_root(manifest: Dict[str, object], root_id: str, root: Path) -> Dict[str, object]:
     roots = manifest.setdefault("roots", {})
     if not isinstance(roots, dict):
@@ -3621,9 +3961,26 @@ def _manifest_entry(
 ) -> Dict[str, object]:
     approved_hash = ""
     approval_binding = ""
+    enrollment_origin = "manual-review"
     if old and str(old.get("sha256") or "") == candidate.sha256:
         approved_hash = str(old.get("approved_hash") or "")
         approval_binding = str(old.get("approval_binding") or "")
+        old_origin = str(old.get("enrollment_origin") or "")
+        if old_origin in ENROLLMENT_ORIGIN_VALUES:
+            enrollment_origin = old_origin
+    if approved_hash == candidate.sha256 and approval_binding:
+        enrollment_origin = "approved"
+    elif (
+        candidate.baseline
+        and candidate.integrity_state == "first-seen"
+        and candidate.symlink_state == "regular"
+        and not candidate.read_error
+        and not candidate.findings
+        and candidate.content_risk == "LOW"
+    ):
+        enrollment_origin = "clean-first-seen"
+    elif candidate.baseline and candidate.integrity_state == "first-seen":
+        enrollment_origin = "first-seen-review"
     return {
         "file_id": candidate.file_id,
         "relative_path": candidate.relative_path,
@@ -3633,6 +3990,7 @@ def _manifest_entry(
         "sha256": candidate.sha256,
         "approved_hash": approved_hash,
         "approval_binding": approval_binding,
+        "enrollment_origin": enrollment_origin,
         "device": candidate.device,
         "inode": candidate.inode,
         "size": candidate.size,
@@ -4705,6 +5063,7 @@ def _bound_report_inventory(report: InstructionReport) -> None:
     report.notes = list(dict.fromkeys(report.notes))[:100]
 
 
+@_serialized_scan_state_mutation
 def scan_instruction_files(
     root: Path,
     *,
@@ -4722,9 +5081,13 @@ def scan_instruction_files(
     selected_state = _state_path(state_root or default_instruction_guard_state_root(env))
     if _path_inside(selected_root, selected_state):
         raise ValueError("private state root must not contain the scan root")
+    root_id = hashlib.sha256(str(selected_root).encode("utf-8")).hexdigest()[:24]
     selected_limits = _coerce_limits(limits)
     deadline = scan_started + selected_limits.max_elapsed_seconds
     _ensure_state_tree(selected_state)
+    enrollment_recovery = _load_enrollment_transaction(selected_state)
+    existing_report_model: Optional[InstructionReport] = None
+    existing_report: Optional[Dict[str, object]] = None
     existing_latest = _load_private_json(
         selected_state / "latest.json",
         required_schema=LATEST_SCHEMA,
@@ -4744,11 +5107,70 @@ def scan_instruction_files(
         _validate_report_structure(existing_report)
         if existing_report.get("report_id") != existing_report_id:
             raise ValueError("Instruction Guard latest report identity is invalid")
-    _prune_report_history(selected_state, existing_report_id)
+        existing_report_model = InstructionReport.from_dict(existing_report)
+    recovery_report_id = ""
+    if enrollment_recovery is not None:
+        recovery_report_id = _validate_record_id(
+            str(enrollment_recovery.get("report_id") or ""), "report"
+        )
+        if str(enrollment_recovery.get("root_id") or "") != root_id:
+            raise ValueError(
+                "interrupted clean enrollment belongs to a different scan root"
+            )
+        if (
+            existing_report_model is None
+            or existing_report_model.root_id != root_id
+            or existing_report_model.root != str(selected_root)
+        ):
+            raise ValueError(
+                "interrupted clean enrollment has no coherent latest root report"
+            )
+        if recovery_report_id == existing_report_id:
+            recovery_report = existing_report
+        else:
+            recovery_report = _load_private_json(
+                selected_state / "reports" / f"{recovery_report_id}.json",
+                required_schema=REPORT_SCHEMA,
+            )
+        if recovery_report is None:
+            raise ValueError(
+                "interrupted clean enrollment origin report is unavailable"
+            )
+        _validate_report_structure(recovery_report)
+        recovery_model = InstructionReport.from_dict(recovery_report)
+        if (
+            recovery_model.report_id != recovery_report_id
+            or recovery_model.root_id != root_id
+            or recovery_model.root != str(selected_root)
+        ):
+            raise ValueError(
+                "interrupted clean enrollment origin report does not match its root"
+            )
+        recovery_candidates = {
+            candidate.file_id: candidate for candidate in recovery_model.candidates
+        }
+        for file_id in enrollment_recovery.get("file_ids") or []:
+            candidate = recovery_candidates.get(str(file_id))
+            if (
+                candidate is None
+                or not candidate.baseline
+                or candidate.read_error
+                or candidate.symlink_state != "regular"
+                or candidate.content_risk != "LOW"
+                or candidate.findings
+                or not re.fullmatch(r"[a-f0-9]{64}", candidate.sha256)
+            ):
+                raise ValueError(
+                    "interrupted clean enrollment target evidence is inconsistent"
+                )
+    _prune_report_history(
+        selected_state,
+        existing_report_id,
+        protected_report_ids=([recovery_report_id] if recovery_report_id else ()),
+    )
     binding = _machine_binding(machine_binding)
     manifest, binding_changed = _load_manifest(selected_state, binding)
     manifest_rule_current = manifest.get("rule_version") == INSTRUCTION_GUARD_RULE_VERSION
-    root_id = hashlib.sha256(str(selected_root).encode("utf-8")).hexdigest()[:24]
     root_manifest = _manifest_root(manifest, root_id, selected_root)
     old_files = root_manifest.get("files")
     if not isinstance(old_files, dict):
@@ -4878,9 +5300,23 @@ def scan_instruction_files(
         old = old_files.get(file_id) if isinstance(old_files.get(file_id), dict) else None
         stored_analysis = _manifest_analysis_findings(old, file_id)
         metadata = _metadata_from_path(item.path)
+        trust_safety_findings = (
+            _candidate_trust_safety_findings(
+                item,
+                _metadata_dict(metadata),
+                selected_root,
+            )
+            if metadata is not None
+            else []
+        )
         can_reuse = bool(
             old
             and metadata
+            # A durable enrollment marker means private trust state may be
+            # only partly committed.  Recovery must re-read and rehash every
+            # candidate before publishing a coherent report and removing the
+            # marker; cached analysis is not sufficient revalidation.
+            and enrollment_recovery is None
             and not selected_limits.force_rehash
             and not binding_changed
             and manifest_rule_current
@@ -4891,6 +5327,7 @@ def scan_instruction_files(
             and old.get("analysis_evidence_version") == INSTRUCTION_GUARD_ANALYSIS_EVIDENCE_VERSION
             and stored_analysis is not None
             and _metadata_matches(old, metadata)
+            and not trust_safety_findings
         )
         imports: List[str] = []
         if can_reuse:
@@ -4953,7 +5390,11 @@ def scan_instruction_files(
                         cycle_id=report.cycle_id,
                     )
                 continue
-            findings = list(item.discovery_findings) + _analyze_text(text, item.surface)
+            findings = (
+                list(item.discovery_findings)
+                + _analyze_text(text, item.surface)
+                + trust_safety_findings
+            )
             for finding in findings:
                 finding.file_id = file_id
             metadata_dict = read.metadata
@@ -4983,6 +5424,31 @@ def scan_instruction_files(
                 findings[-1].file_id = file_id
             elif str(old.get("approved_hash") or "") == sha256 and str(old.get("approval_binding") or "") == binding:
                 integrity_state = "approved"
+            elif old.get("enrollment_origin") in {
+                "clean-first-seen", "first-seen-review",
+            }:
+                # Keep an explicitly recorded clean first-seen inventory item in
+                # its first-seen state across scans.  The manifest provenance
+                # distinguishes clean enrollment from content/coverage review;
+                # restored files and legacy unreviewed entries carry neither
+                # marker and remain manual-review integrity changes.
+                integrity_state = "first-seen"
+            elif (
+                not old.get("enrollment_origin")
+                and not findings
+                and _legacy_clean_first_seen_matches(
+                    existing_report_model,
+                    root=selected_root,
+                    root_id=root_id,
+                    file_id=file_id,
+                    sha256=sha256,
+                    metadata=metadata_dict,
+                )
+            ):
+                # v0.10.3 and earlier did not persist enrollment provenance.
+                # Migrate only an exact, complete, clean first-seen latest
+                # report; restored/unreviewed legacy entries remain manual.
+                integrity_state = "first-seen"
             else:
                 integrity_state = "unreviewed"
             candidate = InstructionCandidate(
@@ -5229,6 +5695,10 @@ def scan_instruction_files(
             "The bounded alert-envelope history is full; persistent report and manifest review state remains authoritative."
         )
     _bound_report_inventory(report)
+    enrollment_reconciled = bool(
+        enrollment_recovery is not None
+        and _enrollment_recovery_reconciled(report, enrollment_recovery)
+    )
 
     _atomic_private_json(
         selected_state / "reports" / f"{report.report_id}.json",
@@ -5243,8 +5713,14 @@ def scan_instruction_files(
         "report_id": report.report_id,
         "updated_at": _timestamp(),
     })
-    _prune_report_history(selected_state, report.report_id)
+    _prune_report_history(
+        selected_state,
+        report.report_id,
+        protected_report_ids=([recovery_report_id] if recovery_report_id else ()),
+    )
     _prune_alert_history(selected_state)
+    if enrollment_reconciled:
+        _safe_remove_private(_enrollment_transaction_path(selected_state))
     return report
 
 
@@ -5262,19 +5738,34 @@ def review_report(
     env: Optional[Mapping[str, str]] = None,
 ) -> InstructionReport:
     selected_state = _state_path(state_root or default_instruction_guard_state_root(env))
-    if report_id is None:
-        latest = _load_private_json(selected_state / "latest.json", required_schema=LATEST_SCHEMA)
-        if latest is None:
-            raise ValueError("no Instruction Guard report is available")
-        report_id = str(latest.get("report_id") or "")
-    validated = _validate_record_id(report_id, "report")
-    data = _load_private_json(
-        selected_state / "reports" / f"{validated}.json",
-        required_schema=REPORT_SCHEMA,
-    )
-    if data is None:
-        raise ValueError("Instruction Guard report was not found")
-    return InstructionReport.from_dict(data)
+    # A read before the first scan must not create a partial state tree that a
+    # later status call correctly (but confusingly) treats as interrupted.
+    if not selected_state.exists() and not selected_state.is_symlink():
+        raise ValueError("no Instruction Guard report is available")
+    with _instruction_state_lock(selected_state):
+        _require_no_enrollment_transaction(selected_state)
+        reports_root = selected_state / "reports"
+        if not reports_root.exists() and not reports_root.is_symlink():
+            raise ValueError("Instruction Guard report storage is unavailable")
+        _ensure_private_dir(reports_root)
+        if report_id is None:
+            latest = _load_private_json(
+                selected_state / "latest.json", required_schema=LATEST_SCHEMA
+            )
+            if latest is None:
+                raise ValueError("no Instruction Guard report is available")
+            report_id = str(latest.get("report_id") or "")
+        validated = _validate_record_id(report_id, "report")
+        data = _load_private_json(
+            selected_state / "reports" / f"{validated}.json",
+            required_schema=REPORT_SCHEMA,
+        )
+        if data is None:
+            raise ValueError("Instruction Guard report was not found")
+        _validate_report_structure(data)
+        if data.get("report_id") != validated:
+            raise ValueError("Instruction Guard report identity is invalid")
+        return InstructionReport.from_dict(data)
 
 
 def _integrity_review_text(candidate: InstructionCandidate) -> str:
@@ -5307,7 +5798,12 @@ def _is_coverage_finding(finding: InstructionFinding) -> bool:
             _is_integrity_finding(finding)
             and finding.rule_id not in {
                 "IG-INTEGRITY-CONTENT-CHANGED",
+                "IG-INTEGRITY-CONTROL-MISSING",
                 "IG-INTEGRITY-MACHINE-BINDING",
+                "IG-INTEGRITY-MULTIPLY-LINKED-CONTROL",
+                "IG-INTEGRITY-SYMLINK-MANUAL-TRUST",
+                "IG-INTEGRITY-WEAK-CONTROL-PERMISSIONS",
+                "IG-INTEGRITY-WEAK-PARENT-PERMISSIONS",
             }
         )
     )
@@ -5315,6 +5811,110 @@ def _is_coverage_finding(finding: InstructionFinding) -> bool:
 
 def _is_content_finding(finding: InstructionFinding) -> bool:
     return not _is_integrity_finding(finding) and not _is_coverage_finding(finding)
+
+
+def _is_clean_first_seen_candidate(candidate: InstructionCandidate) -> bool:
+    return bool(
+        candidate.baseline
+        and candidate.integrity_state == "first-seen"
+        and candidate.symlink_state == "regular"
+        and not candidate.read_error
+        and not candidate.findings
+        and candidate.content_risk == "LOW"
+        and candidate.owner == os.getuid()
+        and not candidate.mode & 0o022
+        and re.fullmatch(r"[a-f0-9]{64}", candidate.sha256)
+    )
+
+
+def _is_changed_or_unsafe_candidate(candidate: InstructionCandidate) -> bool:
+    return bool(
+        candidate.integrity_state in {
+            "changed", "machine-binding-invalidated", "unreviewed", "unsafe",
+        }
+        or any(
+            _is_integrity_finding(finding)
+            and not _is_coverage_finding(finding)
+            for finding in candidate.findings
+        )
+        or (
+            candidate.review_required
+            and not _is_clean_first_seen_candidate(candidate)
+            and not any(
+                _is_content_finding(finding)
+                or _is_coverage_finding(finding)
+                for finding in candidate.findings
+            )
+        )
+    )
+
+
+def instruction_report_attention(report: InstructionReport) -> Dict[str, object]:
+    """Return a deterministic, presentation-neutral attention decomposition.
+
+    The legacy ``report.review_required`` property intentionally remains
+    broader: a clean first-seen hash still needs explicit machine-bound
+    enrollment and therefore continues to produce the historical review exit
+    code.  This helper lets newer clients render that neutral baseline work
+    separately from security and scan-coverage attention.
+    """
+
+    suspicious_file_ids = {
+        candidate.file_id
+        for candidate in report.candidates
+        if any(_is_content_finding(finding) for finding in candidate.findings)
+    }
+    report_content_attention = any(
+        _is_content_finding(finding) for finding in report.findings
+    )
+    changed_or_unsafe = [
+        candidate
+        for candidate in report.candidates
+        if _is_changed_or_unsafe_candidate(candidate)
+    ]
+    report_integrity_attention = any(
+        _is_integrity_finding(finding) and not _is_coverage_finding(finding)
+        for finding in report.findings
+    )
+    coverage_issue_count = sum(
+        _is_coverage_finding(finding) for finding in report.findings
+    ) + sum(
+        _is_coverage_finding(finding)
+        for candidate in report.candidates
+        for finding in candidate.findings
+    )
+    clean_first_seen_count = sum(
+        _is_clean_first_seen_candidate(candidate)
+        for candidate in report.candidates
+    )
+    continuation_pending = bool(report.truncated or report.continuation_pending)
+    security_attention_required = bool(
+        suspicious_file_ids
+        or report_content_attention
+        or changed_or_unsafe
+        or report_integrity_attention
+    )
+    coverage_action_required = bool(coverage_issue_count or continuation_pending)
+    baseline_enrollment_required = clean_first_seen_count > 0
+    if security_attention_required:
+        state = "security_attention_required"
+    elif coverage_action_required:
+        state = "coverage_action_required"
+    elif baseline_enrollment_required:
+        state = "baseline_enrollment_required"
+    else:
+        state = "clear"
+    return {
+        "state": state,
+        "security_attention_required": security_attention_required,
+        "coverage_action_required": coverage_action_required,
+        "baseline_enrollment_required": baseline_enrollment_required,
+        "suspicious_candidate_count": len(suspicious_file_ids),
+        "changed_or_unsafe_candidate_count": len(changed_or_unsafe),
+        "coverage_issue_count": coverage_issue_count,
+        "clean_first_seen_count": clean_first_seen_count,
+        "continuation_pending": continuation_pending,
+    }
 
 
 BEHAVIOR_DISPLAY_NAMES = {
@@ -5391,11 +5991,11 @@ def _render_candidate_next_step(
     width: int,
 ) -> None:
     if _candidate_can_offer_approval(candidate):
-        lines.append("     Next: read the file, then approve this exact hash with:")
         _append_wrapped(
             lines,
-            "       ",
-            f"aurascan instruction-audit -A {candidate.file_id}",
+            "     Next: ",
+            "read the file, then use the report-bound guided triage command under "
+            "WHAT TO DO NEXT to approve only the displayed exact hash.",
             width=width,
         )
     else:
@@ -5566,15 +6166,12 @@ def render_instruction_report(
     new_candidates = [
         candidate
         for candidate in report.candidates
-        if candidate.integrity_state == "first-seen"
-        and not candidate_content[candidate.file_id]
+        if _is_clean_first_seen_candidate(candidate)
     ]
     changed_candidates = [
         candidate
         for candidate in report.candidates
-        if candidate.integrity_state in {
-            "changed", "machine-binding-invalidated", "unreviewed", "unsafe",
-        }
+        if _is_changed_or_unsafe_candidate(candidate)
         and not candidate_content[candidate.file_id]
     ]
     changed_file_ids = {candidate.file_id for candidate in changed_candidates}
@@ -5594,13 +6191,16 @@ def render_instruction_report(
         default="",
         key=lambda severity: SEVERITY_RANK.get(severity, -1),
     )
+    attention = instruction_report_attention(report)
 
     if content_findings:
         status = "SUSPICIOUS INSTRUCTIONS FOUND — REVIEW REQUIRED"
+    elif changed_candidates or integrity_entries:
+        status = "FILE INTEGRITY CHANGE — ACTION REQUIRED"
     elif incomplete or coverage_entries:
-        status = "SCAN COVERAGE REVIEW REQUIRED"
-    elif report.review_required:
-        status = "INTEGRITY APPROVAL REQUIRED"
+        status = "SCAN INCOMPLETE — ACTION REQUIRED"
+    elif attention["baseline_enrollment_required"]:
+        status = "BASELINE SETUP NEEDED"
     else:
         status = "CLEAR"
     lines: List[str] = []
@@ -5635,13 +6235,19 @@ def render_instruction_report(
             "could safely analyze on this page.",
             width=width,
         )
-        review_label = "integrity/coverage" if incomplete or coverage_entries else "integrity"
-        _append_wrapped(
-            lines,
-            "  ",
-            f"This is an {review_label} review, not a malware-content alert.",
-            width=width,
-        )
+        if incomplete or coverage_entries:
+            review_explanation = (
+                "This is a scan-coverage action, not a malware-content alert."
+            )
+        elif changed_candidates or integrity_entries:
+            review_explanation = (
+                "This is a file-integrity action, not a malware-content alert."
+            )
+        else:
+            review_explanation = (
+                "This is neutral baseline enrollment, not a malware-content alert."
+            )
+        _append_wrapped(lines, "  ", review_explanation, width=width)
     files_label = "Agent files scanned on this page" if incomplete else "Agent files scanned"
     lines.append(f"  {files_label}: {len(report.candidates)}")
     if incomplete:
@@ -5720,8 +6326,52 @@ def render_instruction_report(
             width=width,
         )
 
+    lines.extend(["", "WHAT TO DO NEXT"])
+    if attention["state"] == "baseline_enrollment_required":
+        _append_wrapped(
+            lines,
+            "  ",
+            "AuraScan found no suspicious instruction pattern or scan-coverage issue. "
+            "Explicitly enroll all listed clean exact hashes for this machine with:",
+            width=width,
+        )
+        _append_wrapped(
+            lines,
+            "    ",
+            f"aurascan instruction-audit --enroll-clean {report.report_id}",
+            width=width,
+        )
+        _append_wrapped(
+            lines,
+            "  ",
+            "This is a user trust decision; AI analysis does not establish approval.",
+            width=width,
+        )
+    elif attention["state"] in {
+        "security_attention_required", "coverage_action_required",
+    }:
+        _append_wrapped(
+            lines,
+            "  ",
+            "Open the guided review for explanations and safe next actions with:",
+            width=width,
+        )
+        _append_wrapped(
+            lines,
+            "    ",
+            f"aurascan instruction-audit --triage {report.report_id}",
+            width=width,
+        )
+    else:
+        lines.append("  No action is required for this report.")
+
     if report.review_required:
-        lines.extend(["", "WHY REVIEW IS REQUIRED"])
+        reason_heading = (
+            "WHY BASELINE SETUP IS NEEDED"
+            if attention["state"] == "baseline_enrollment_required"
+            else "WHY ACTION IS REQUIRED"
+        )
+        lines.extend(["", reason_heading])
         if content_findings:
             finding_text = _counted(
                 len(content_findings),
@@ -5736,8 +6386,8 @@ def render_instruction_report(
             _append_wrapped(
                 lines,
                 "  - ",
-                f"{file_text} {'has' if len(new_candidates) == 1 else 'have'} never been "
-                "approved on this machine.",
+                f"{file_text} {'needs' if len(new_candidates) == 1 else 'need'} one "
+                "explicit machine-bound baseline enrollment.",
                 width=width,
             )
         if changed_candidates:
@@ -5919,12 +6569,12 @@ def render_instruction_report(
             )
 
     if new_candidates:
-        lines.extend(["", f"NEW FILES AWAITING APPROVAL ({len(new_candidates)})"])
+        lines.extend(["", f"NEW CLEAN FILES TO ENROLL ({len(new_candidates)})"])
         _append_wrapped(
             lines,
             "  ",
-            "These files are not flagged as malicious; their exact content hashes are "
-            "simply new on this machine.",
+            "NO THREAT MATCH: these files have no suspicious content, coverage, or "
+            "integrity finding. Their exact hashes are simply new on this machine.",
             width=width,
         )
         lines.append("  Static content scan: no suspicious pattern found.")
@@ -5939,11 +6589,17 @@ def render_instruction_report(
             _append_wrapped(lines, "     File ID: ", candidate.file_id, width=width)
             _append_wrapped(
                 lines,
-                "     Why approval is needed: ",
+                "     Why enrollment is needed: ",
                 _integrity_review_text(candidate),
                 width=width,
             )
-            _render_candidate_next_step(lines, candidate, width=width)
+            _append_wrapped(
+                lines,
+                "     Next: ",
+                "use the single --enroll-clean command shown under WHAT TO DO NEXT "
+                "to bind this exact hash to this machine and UID.",
+                width=width,
+            )
         if len(new_candidates) > 200:
             _append_wrapped(
                 lines,
@@ -6088,19 +6744,55 @@ def _verify_candidate_unchanged(
     return root, path, read
 
 
+def _validate_candidate_trust_permissions(
+    root: Path,
+    path: Path,
+    read: _ReadResult,
+) -> None:
+    if (
+        _safe_int(read.metadata.get("owner"), -1) != os.getuid()
+        or _safe_int(read.metadata.get("mode")) & 0o022
+        or _safe_int(read.metadata.get("nlink"), 0) != 1
+    ):
+        raise ValueError(
+            "candidate permissions or link count do not permit machine-bound trust"
+        )
+    _validate_safe_parent(path, root)
+
+
+@_serialized_state_mutation
 def approve_candidate(
     file_id: str,
     *,
     state_root: Optional[Path] = None,
     env: Optional[Mapping[str, str]] = None,
     machine_binding: Optional[str] = None,
+    expected_report_id: Optional[str] = None,
+    expected_sha256: Optional[str] = None,
 ) -> Dict[str, object]:
     selected_state = _state_path(state_root or default_instruction_guard_state_root(env))
+    _require_no_enrollment_transaction(selected_state)
     report = review_report(state_root=selected_state, env=env)
+    if (
+        expected_report_id is not None
+        and report.report_id != _validate_record_id(expected_report_id, "report")
+    ):
+        raise ValueError("latest report changed before candidate approval")
     candidate = _candidate_for_action(report, file_id)
+    if expected_sha256 is not None:
+        expected_digest = str(expected_sha256 or "")
+        if not re.fullmatch(r"[a-f0-9]{64}", expected_digest):
+            raise ValueError("invalid expected candidate SHA-256")
+        if candidate.sha256 != expected_digest:
+            raise ValueError("candidate hash changed before approval")
     if not candidate.baseline:
         raise ValueError("content-only Markdown cannot be added to the integrity baseline")
-    _root, _path, _read = _verify_candidate_unchanged(report, candidate)
+    verified_root, verified_path, verified_read = _verify_candidate_unchanged(
+        report, candidate
+    )
+    _validate_candidate_trust_permissions(
+        verified_root, verified_path, verified_read
+    )
     binding = _machine_binding(machine_binding)
     manifest, binding_changed = _load_manifest(selected_state, binding)
     if binding_changed:
@@ -6113,6 +6805,7 @@ def approve_candidate(
     entry["approved_hash"] = candidate.sha256
     entry["approval_binding"] = binding
     entry["approved_at"] = _timestamp()
+    entry["enrollment_origin"] = "approved"
     manifest["updated_at"] = _timestamp()
     _atomic_private_json(selected_state / "manifest.json", manifest)
     candidate.integrity_state = "approved"
@@ -6154,6 +6847,338 @@ def approve_candidate(
         "sha256": candidate.sha256,
         "machine_bound": True,
         "content_findings_remain": bool(candidate.findings),
+    }
+
+
+def _mark_enrolled_candidates(
+    report: InstructionReport,
+    file_ids: Set[str],
+) -> Set[str]:
+    marked: Set[str] = set()
+    for candidate in report.candidates:
+        if candidate.file_id not in file_ids:
+            continue
+        if candidate.file_id in marked:
+            raise ValueError("clean enrollment report contains a duplicate file ID")
+        candidate.integrity_state = "approved"
+        candidate.hash_reused = False
+        marked.add(candidate.file_id)
+    return marked
+
+
+def _enrollment_metadata_matches(
+    candidate: InstructionCandidate,
+    metadata: Mapping[str, int],
+) -> bool:
+    return all(
+        _safe_int(metadata.get(name), -1) == expected
+        for name, expected in {
+            "device": candidate.device,
+            "inode": candidate.inode,
+            "size": candidate.size,
+            "mtime_ns": candidate.mtime_ns,
+            "ctime_ns": candidate.ctime_ns,
+            "mode": candidate.mode,
+            "owner": candidate.owner,
+        }.items()
+    ) and _safe_int(metadata.get("nlink"), 0) == 1
+
+
+@_serialized_state_mutation
+def enroll_clean_candidates(
+    report_id: Optional[str] = None,
+    *,
+    state_root: Optional[Path] = None,
+    env: Optional[Mapping[str, str]] = None,
+    machine_binding: Optional[str] = None,
+) -> Dict[str, object]:
+    """Machine-bind every clean first-seen candidate in the latest report.
+
+    This is an explicit user enrollment action, never an AI decision.  The
+    selected baseline set and private state are validated twice before one
+    serialized transaction. Mixed suspicious, changed, unsafe, or incomplete
+    reports fail closed. Clean content-only Markdown remains outside the trust
+    manifest without blocking an otherwise safe baseline subset.
+    """
+
+    selected_state = _state_path(
+        state_root or default_instruction_guard_state_root(env)
+    )
+    _ensure_state_tree(selected_state)
+    _require_no_enrollment_transaction(selected_state)
+    latest_path = selected_state / "latest.json"
+    latest = _load_private_json(latest_path, required_schema=LATEST_SCHEMA)
+    if latest is None:
+        raise ValueError("no Instruction Guard report is available")
+    latest_report_id = _validate_record_id(
+        str(latest.get("report_id") or ""), "report"
+    )
+    if report_id is not None:
+        requested = _validate_record_id(report_id, "report")
+        if requested != latest_report_id:
+            raise ValueError("clean enrollment is allowed only for the latest report")
+    report_path = selected_state / "reports" / f"{latest_report_id}.json"
+    original_report_data = _load_private_json(
+        report_path, required_schema=REPORT_SCHEMA
+    )
+    if original_report_data is None:
+        raise ValueError("Instruction Guard latest report is unavailable")
+    _validate_report_structure(original_report_data)
+    if original_report_data.get("report_id") != latest_report_id:
+        raise ValueError("Instruction Guard latest report identity is invalid")
+    report = InstructionReport.from_dict(original_report_data)
+    attention = instruction_report_attention(report)
+    if attention["state"] != "baseline_enrollment_required":
+        raise ValueError(
+            "clean enrollment requires a complete latest report containing only "
+            "safe clean first-seen baseline files"
+        )
+    if report.truncated or report.continuation_pending or report.findings:
+        raise ValueError("incomplete or report-level findings prevent clean enrollment")
+
+    candidates_by_id: Dict[str, InstructionCandidate] = {}
+    validation_candidates: List[InstructionCandidate] = []
+    selected_candidates: List[InstructionCandidate] = []
+    for candidate in report.candidates:
+        if candidate.file_id in candidates_by_id:
+            raise ValueError("clean enrollment report contains a duplicate file ID")
+        candidates_by_id[candidate.file_id] = candidate
+        if not candidate.baseline:
+            if (
+                candidate.integrity_state != "content-only"
+                or candidate.read_error
+                or candidate.findings
+            ):
+                raise ValueError(
+                    "unsafe or incompletely analyzed content-only files prevent "
+                    "clean enrollment"
+                )
+            # All-Markdown candidates are analyzed content only.  Their hashes
+            # are deliberately neither trusted nor enrolled.
+            continue
+        if (
+            candidate.symlink_state != "regular"
+            or candidate.read_error
+            or candidate.findings
+            or candidate.content_risk != "LOW"
+            or candidate.owner != os.getuid()
+            or candidate.mode & 0o022
+        ):
+            raise ValueError(
+                "suspicious, unsafe, or incompletely analyzed baseline files "
+                "prevent clean enrollment"
+            )
+        if not re.fullmatch(r"[a-f0-9]{64}", candidate.sha256):
+            raise ValueError("clean enrollment candidate has no stable content hash")
+        validation_candidates.append(candidate)
+        if candidate.integrity_state == "approved":
+            continue
+        if candidate.integrity_state not in {"first-seen", "unreviewed"}:
+            raise ValueError("changed or untrusted files prevent clean enrollment")
+        selected_candidates.append(candidate)
+    if not selected_candidates:
+        raise ValueError("the latest report has no clean first-seen files to enroll")
+    selected_candidates.sort(key=lambda item: (item.relative_path, item.file_id))
+    selected_ids = {candidate.file_id for candidate in selected_candidates}
+
+    binding = _machine_binding(machine_binding)
+    original_manifest = _load_private_json(
+        selected_state / "manifest.json", required_schema=MANIFEST_SCHEMA
+    )
+    if original_manifest is None:
+        raise ValueError("Instruction Guard manifest is unavailable")
+    _validate_manifest_structure(original_manifest)
+    if original_manifest.get("binding") != binding:
+        raise ValueError("manifest belongs to a different machine identity or UID")
+    manifest = json.loads(json.dumps(original_manifest))
+    root_item = _manifest_root(manifest, report.root_id, Path(report.root))
+    files = root_item.get("files")
+    if not isinstance(files, dict):
+        raise ValueError("corrupt Instruction Guard file manifest")
+    for candidate in validation_candidates:
+        entry = files.get(candidate.file_id)
+        if not isinstance(entry, dict):
+            raise ValueError("manifest no longer contains an enrollment candidate")
+        if (
+            str(entry.get("sha256") or "") != candidate.sha256
+            or entry.get("last_seen_cycle") != report.cycle_id
+            or any(
+                _safe_int(entry.get(name), -1) != expected
+                for name, expected in {
+                    "device": candidate.device,
+                    "inode": candidate.inode,
+                    "size": candidate.size,
+                    "mtime_ns": candidate.mtime_ns,
+                    "ctime_ns": candidate.ctime_ns,
+                    "mode": candidate.mode,
+                    "owner": candidate.owner,
+                }.items()
+            )
+            or entry.get("symlink_state") != "regular"
+        ):
+            raise ValueError(
+                "manifest provenance or metadata no longer matches a clean "
+                "first-seen candidate"
+            )
+        if candidate.file_id in selected_ids:
+            if (
+                entry.get("enrollment_origin") != "clean-first-seen"
+                or str(entry.get("approved_hash") or "")
+                or str(entry.get("approval_binding") or "")
+            ):
+                raise ValueError(
+                    "manifest provenance no longer identifies a clean first-seen "
+                    "candidate"
+                )
+        elif (
+            candidate.integrity_state != "approved"
+            or str(entry.get("approved_hash") or "") != candidate.sha256
+            or str(entry.get("approval_binding") or "") != binding
+        ):
+            raise ValueError("an existing approved candidate is no longer trusted")
+
+    # First validation pass catches ordinary stale reports and verifies every
+    # candidate before any private state write.
+    for candidate in validation_candidates:
+        verified_root, verified_path, read = _verify_candidate_unchanged(
+            report, candidate
+        )
+        _validate_candidate_trust_permissions(
+            verified_root, verified_path, read
+        )
+        if not _enrollment_metadata_matches(candidate, read.metadata):
+            raise ValueError("candidate metadata changed after the clean report")
+
+    cycle_records: List[Tuple[Path, Dict[str, object], InstructionReport]] = []
+    cycle_paths = sorted(
+        (selected_state / "cycles").glob(f"cycle-{report.root_id}-*.json")
+    )
+    if len(cycle_paths) > 2:
+        raise ValueError("Instruction Guard has an unexpected clean-enrollment cycle set")
+    for cycle_path in cycle_paths:
+        cycle_data = _load_private_json(cycle_path, required_schema=REPORT_SCHEMA)
+        if cycle_data is None:
+            raise ValueError("Instruction Guard continuation report disappeared")
+        _validate_report_structure(cycle_data)
+        cycle_report = InstructionReport.from_dict(cycle_data)
+        if cycle_report.cycle_id == report.cycle_id:
+            cycle_records.append((cycle_path, cycle_data, cycle_report))
+
+    approval_time = _timestamp()
+    for candidate in selected_candidates:
+        entry = files[candidate.file_id]
+        entry["approved_hash"] = candidate.sha256
+        entry["approval_binding"] = binding
+        entry["approved_at"] = approval_time
+        entry["enrollment_origin"] = "approved"
+    manifest["updated_at"] = approval_time
+    _validate_manifest_structure(manifest)
+    _validate_private_payload_size(manifest)
+
+    updated_report = InstructionReport.from_dict(original_report_data)
+    if _mark_enrolled_candidates(updated_report, selected_ids) != selected_ids:
+        raise ValueError("latest report no longer contains every enrollment candidate")
+    updated_report_payload = _validated_report_payload(updated_report)
+    updated_cycles: List[Tuple[Path, Dict[str, object], Dict[str, object]]] = []
+    for cycle_path, original_cycle_data, cycle_report in cycle_records:
+        _mark_enrolled_candidates(cycle_report, selected_ids)
+        updated_cycles.append(
+            (
+                cycle_path,
+                original_cycle_data,
+                _validated_report_payload(cycle_report),
+            )
+        )
+
+    # Revalidate both public files and private snapshots immediately before the
+    # commit.  The exact hash remains the trust identity even if same-UID
+    # malware races after this point; a later content change will not match it.
+    if _load_private_json(latest_path, required_schema=LATEST_SCHEMA) != latest:
+        raise ValueError("latest Instruction Guard report changed during enrollment")
+    if _load_private_json(report_path, required_schema=REPORT_SCHEMA) != original_report_data:
+        raise ValueError("Instruction Guard report changed during enrollment")
+    current_manifest = _load_private_json(
+        selected_state / "manifest.json", required_schema=MANIFEST_SCHEMA
+    )
+    if current_manifest != original_manifest:
+        raise ValueError("Instruction Guard manifest changed during enrollment")
+    for cycle_path, original_cycle_data, _payload in updated_cycles:
+        if _load_private_json(cycle_path, required_schema=REPORT_SCHEMA) != original_cycle_data:
+            raise ValueError("Instruction Guard continuation changed during enrollment")
+    for candidate in validation_candidates:
+        verified_root, verified_path, read = _verify_candidate_unchanged(
+            report, candidate
+        )
+        _validate_candidate_trust_permissions(
+            verified_root, verified_path, read
+        )
+        if not _enrollment_metadata_matches(candidate, read.metadata):
+            raise ValueError("candidate metadata changed during clean enrollment")
+
+    manifest_path = selected_state / "manifest.json"
+    transaction_path = _enrollment_transaction_path(selected_state)
+    transaction = {
+        "schema": ENROLLMENT_TRANSACTION_SCHEMA,
+        "transaction_id": _new_id("enrollment", latest_report_id),
+        "report_id": latest_report_id,
+        "root_id": report.root_id,
+        "file_ids": sorted(selected_ids),
+        "status": "prepared",
+        "created_at": _timestamp(),
+    }
+    _validate_enrollment_transaction(transaction)
+    _atomic_private_json(transaction_path, transaction)
+    manifest_attempted = False
+    report_attempted = False
+    cycle_attempts: List[Tuple[Path, Dict[str, object]]] = []
+    try:
+        manifest_attempted = True
+        _atomic_private_json(manifest_path, manifest)
+        for cycle_path, original_cycle_data, payload in updated_cycles:
+            cycle_attempts.append((cycle_path, original_cycle_data))
+            _atomic_private_json(cycle_path, payload)
+        # The latest report is the user-visible derived state and is committed
+        # last so a partial transaction cannot look clear without the durable
+        # recovery marker still forcing status unavailable.
+        report_attempted = True
+        _atomic_private_json(report_path, updated_report_payload)
+    except Exception as exc:
+        rollback_errors: List[str] = []
+        if report_attempted:
+            try:
+                _atomic_private_json(report_path, original_report_data)
+            except Exception:
+                rollback_errors.append(report_path.name)
+        for cycle_path, original_cycle_data in reversed(cycle_attempts):
+            try:
+                _atomic_private_json(cycle_path, original_cycle_data)
+            except Exception:
+                rollback_errors.append(cycle_path.name)
+        if manifest_attempted:
+            try:
+                _atomic_private_json(manifest_path, original_manifest)
+            except Exception:
+                rollback_errors.append(manifest_path.name)
+        if rollback_errors:
+            raise ValueError(
+                "clean enrollment failed and private-state recovery is required"
+            ) from exc
+        try:
+            _safe_remove_private(transaction_path)
+        except Exception as cleanup_exc:
+            raise ValueError(
+                "clean enrollment rolled back but transaction recovery is required"
+            ) from cleanup_exc
+        raise
+
+    _safe_remove_private(transaction_path)
+
+    return {
+        "status": "enrolled",
+        "report_id": latest_report_id,
+        "enrolled_count": len(selected_candidates),
+        "file_ids": [candidate.file_id for candidate in selected_candidates],
+        "machine_bound": True,
     }
 
 
@@ -6272,16 +7297,31 @@ def _validate_receipt_structure(receipt: Mapping[str, object]) -> None:
         raise ValueError("corrupt Instruction Guard disable receipt")
 
 
+@_serialized_state_mutation
 def disable_candidate(
     file_id: str,
     *,
     state_root: Optional[Path] = None,
     env: Optional[Mapping[str, str]] = None,
     machine_binding: Optional[str] = None,
+    expected_report_id: Optional[str] = None,
+    expected_sha256: Optional[str] = None,
 ) -> Dict[str, object]:
     selected_state = _state_path(state_root or default_instruction_guard_state_root(env))
+    _require_no_enrollment_transaction(selected_state)
     report = review_report(state_root=selected_state, env=env)
+    if (
+        expected_report_id is not None
+        and report.report_id != _validate_record_id(expected_report_id, "report")
+    ):
+        raise ValueError("latest report changed before candidate disable")
     candidate = _candidate_for_action(report, file_id)
+    if expected_sha256 is not None:
+        expected_digest = str(expected_sha256 or "")
+        if not re.fullmatch(r"[a-f0-9]{64}", expected_digest):
+            raise ValueError("invalid expected candidate SHA-256")
+        if candidate.sha256 != expected_digest:
+            raise ValueError("candidate hash changed before disable")
     if not candidate.disable_eligible or candidate.surface in {
         "claude-configuration", "claude-configuration-resource", "mcp-manifest", "plugin-manifest",
     }:
@@ -6382,6 +7422,7 @@ def disable_candidate(
     }
 
 
+@_serialized_state_mutation
 def restore_disabled(
     action_id: str,
     *,
@@ -6390,6 +7431,7 @@ def restore_disabled(
     machine_binding: Optional[str] = None,
 ) -> Dict[str, object]:
     selected_state = _state_path(state_root or default_instruction_guard_state_root(env))
+    _require_no_enrollment_transaction(selected_state)
     validated = _validate_record_id(action_id, "action")
     receipt_path = selected_state / "receipts" / f"{validated}.json"
     receipt = _load_private_json(receipt_path, required_schema=RECEIPT_SCHEMA)
@@ -6639,6 +7681,7 @@ def _parse_timestamp(value: object) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+@_serialized_state_mutation
 def process_one_ai_job(
     *,
     state_root: Optional[Path] = None,
@@ -6647,6 +7690,7 @@ def process_one_ai_job(
 ) -> Dict[str, object]:
     selected_state = _state_path(state_root or default_instruction_guard_state_root(env))
     _ensure_state_tree(selected_state)
+    _require_no_enrollment_transaction(selected_state)
     now = _now()
     selected: Optional[Tuple[Path, Dict[str, object]]] = None
     job_paths = sorted((selected_state / "ai-jobs").glob("job-*.json"))
@@ -6791,6 +7835,7 @@ def pending_instruction_guard_alerts(
     return alerts
 
 
+@_serialized_state_mutation
 def acknowledge_alert(
     alert_id: str,
     *,
@@ -6798,6 +7843,7 @@ def acknowledge_alert(
     env: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, object]:
     selected_state = _state_path(state_root or default_instruction_guard_state_root(env))
+    _require_no_enrollment_transaction(selected_state)
     validated = _validate_record_id(alert_id, "alert")
     path = selected_state / "alerts" / f"{validated}.json"
     data = _load_private_json(path, required_schema=ALERT_SCHEMA)
@@ -6810,7 +7856,26 @@ def acknowledge_alert(
     return {"status": "acknowledged", "alert_id": validated, "establishes_trust": False}
 
 
-def instruction_guard_status(
+def _unavailable_instruction_guard_status() -> Dict[str, object]:
+    return {
+        "schema": "instruction_guard_status/1.0",
+        "state": "unavailable",
+        "highest_severity": "HIGH",
+        "pending_alert_count": 0,
+        "review_candidate_count": 0,
+        "latest_report_id": "",
+        "security_attention_required": False,
+        "coverage_action_required": True,
+        "baseline_enrollment_required": False,
+        "suspicious_candidate_count": 0,
+        "changed_or_unsafe_candidate_count": 0,
+        "coverage_issue_count": 1,
+        "clean_first_seen_count": 0,
+        "continuation_pending": False,
+    }
+
+
+def _instruction_guard_status_unlocked(
     *,
     state_root: Optional[Path] = None,
     env: Optional[Mapping[str, str]] = None,
@@ -6818,14 +7883,7 @@ def instruction_guard_status(
     try:
         selected_state = _state_path(state_root or default_instruction_guard_state_root(env))
     except (OSError, ValueError):
-        return {
-            "schema": "instruction_guard_status/1.0",
-            "state": "unavailable",
-            "highest_severity": "HIGH",
-            "pending_alert_count": 0,
-            "review_candidate_count": 0,
-            "latest_report_id": "",
-        }
+        return _unavailable_instruction_guard_status()
     if not selected_state.exists() and not selected_state.is_symlink():
         return {
             "schema": "instruction_guard_status/1.0",
@@ -6834,6 +7892,14 @@ def instruction_guard_status(
             "pending_alert_count": 0,
             "review_candidate_count": 0,
             "latest_report_id": "",
+            "security_attention_required": False,
+            "coverage_action_required": False,
+            "baseline_enrollment_required": False,
+            "suspicious_candidate_count": 0,
+            "changed_or_unsafe_candidate_count": 0,
+            "coverage_issue_count": 0,
+            "clean_first_seen_count": 0,
+            "continuation_pending": False,
         }
     try:
         _ensure_private_dir(selected_state)
@@ -6847,6 +7913,8 @@ def instruction_guard_status(
         )
         if manifest is not None:
             _validate_manifest_structure(manifest)
+        if _load_enrollment_transaction(selected_state) is not None:
+            raise ValueError("Instruction Guard enrollment recovery is required")
         cursor_paths = sorted((selected_state / "cursors").glob("cursor-*.json"))
         cycle_paths = sorted((selected_state / "cycles").glob("cycle-*.json"))
         job_paths = sorted((selected_state / "ai-jobs").glob("job-*.json"))
@@ -6879,24 +7947,60 @@ def instruction_guard_status(
         latest = _load_private_json(selected_state / "latest.json", required_schema=LATEST_SCHEMA)
         if latest is not None and manifest is None:
             raise ValueError("Instruction Guard latest state has no manifest")
+        if manifest is not None and latest is None:
+            raise ValueError("Instruction Guard manifest has no coherent latest report")
+        if manifest is None and latest is None:
+            # A wholly absent state root is the only valid pre-first-run clear
+            # state.  Once the private tree exists, missing both authoritative
+            # records means initialization or a first scan was interrupted.
+            raise ValueError("Instruction Guard state has not been initialized coherently")
         report = review_report(state_root=selected_state, env=env) if latest else None
     except (OSError, ValueError):
-        return {
-            "schema": "instruction_guard_status/1.0",
-            "state": "unavailable",
-            "highest_severity": "HIGH",
-            "pending_alert_count": 0,
-            "review_candidate_count": 0,
-            "latest_report_id": "",
-        }
+        return _unavailable_instruction_guard_status()
     review_count = sum(1 for candidate in report.candidates if candidate.review_required) if report else 0
-    review_required = bool(report and report.review_required)
     highest = report.highest_severity if report else "LOW"
+    attention = instruction_report_attention(report) if report else {
+        "state": "clear",
+        "security_attention_required": False,
+        "coverage_action_required": False,
+        "baseline_enrollment_required": False,
+        "suspicious_candidate_count": 0,
+        "changed_or_unsafe_candidate_count": 0,
+        "coverage_issue_count": 0,
+        "clean_first_seen_count": 0,
+        "continuation_pending": False,
+    }
     return {
         "schema": "instruction_guard_status/1.0",
-        "state": "review_required" if review_required else "clear",
+        **attention,
         "highest_severity": highest,
         "pending_alert_count": len(alerts),
         "review_candidate_count": review_count,
         "latest_report_id": report.report_id if report else "",
     }
+
+
+def instruction_guard_status(
+    *,
+    state_root: Optional[Path] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> Dict[str, object]:
+    try:
+        selected_state = _state_path(
+            state_root or default_instruction_guard_state_root(env)
+        )
+    except (OSError, ValueError):
+        return _unavailable_instruction_guard_status()
+    if not selected_state.exists() and not selected_state.is_symlink():
+        return _instruction_guard_status_unlocked(
+            state_root=selected_state,
+            env=env,
+        )
+    try:
+        with _instruction_state_lock(selected_state):
+            return _instruction_guard_status_unlocked(
+                state_root=selected_state,
+                env=env,
+            )
+    except (OSError, ValueError):
+        return _unavailable_instruction_guard_status()

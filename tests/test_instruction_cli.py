@@ -569,7 +569,7 @@ def test_background_capture_returns_clear_and_notification_is_generic(monkeypatc
     assert commands == [[
         "/usr/bin/notify-send",
         "AuraScan Agent Instruction Guard",
-        "Agent file findings need review in AuraScan.",
+        "Instruction Guard has an item that needs attention in AuraScan.",
     ]]
     assert str(tmp_path) not in repr(commands)
     assert secret not in repr(commands)

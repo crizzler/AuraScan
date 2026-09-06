@@ -1,11 +1,22 @@
 ---
 name: develop-aurascan
-description: Diagnose, implement, validate, and publish AuraScan package rules, AUR threat detection, Agent Instruction Guard, security audits, upgrade checks, incident recovery, CLI reporting, Arch packaging, and GitHub/AUR releases. Use for safety-sensitive changes in the AuraScan repository.
+description: Develop and validate AuraScan scanner rules, maintenance and recovery workflows, and Agent Instruction Guard. Use for changes in the AuraScan repository, including explicitly authorized GitHub/AUR releases.
 ---
 
 # Develop AuraScan
 
-Use this workflow for changes in the AuraScan repository.
+Use this workflow for changes in the AuraScan repository. First read the
+canonical product orientation and repository-wide contract in `AGENTS.md`;
+AuraScan's package, maintenance, recovery, instruction-file, and optional AI
+features are one defense-in-depth system, but their evidence and authority
+boundaries must remain separate.
+
+For Codex with GPT-6 Astra, follow [coding-agent operation](AGENTS.md#coding-agent-operation)
+for autonomy, instruction precedence, and bounded parallel work. Preserve user
+intent and existing authorization; this skill does not require approval for
+routine local fixes. Apply only sections relevant to the task. External release
+publication and the product's fresh exact-command consent retain their explicit
+requirements regardless of the agent model.
 
 ## Establish context
 
@@ -92,6 +103,19 @@ Use this workflow for changes in the AuraScan repository.
 10. Scan built package `.INSTALL` control text through the bounded no-follow
    archive reader. An unreadable, changing, oversized, binary, or invalid hook
    is an incomplete-inspection blocker, not evidence of compromise.
+11. Inspect pnpm-related metadata as bounded data, never by installing or
+    invoking dependencies. Match supported decoded fields to concrete path-escape
+    components; keep ordinary scoped names and inert metadata negative. Separate
+    installed-version advisory exposure from suspicious package metadata and
+    disclose unsupported versions or unverified backports. Consult primary
+    advisories before defining affected/fixed ranges; a historical report is
+    not proof of what Arch currently ships or what a user has installed.
+12. Classify precompiled Python artifacts from supported bounded magic/header
+    bytes without importing, executing, deserializing, or decompiling them.
+    PEP 552 source-hash headers do not authenticate bytecode bodies. Preserve
+    the provenance distinction between presence, exact installation, and code
+    loading. A `.pyd` filename selects a native-extension candidate; interpret
+    PEP 552 only when the captured bytes independently establish that format.
 
 ## Design instruction-file protection
 
@@ -106,16 +130,16 @@ Use this workflow for changes in the AuraScan repository.
    text. Attribute only the behavior role actually present at each range, then
    explain why the roles form a dangerous correlation; never copy the complete
    family set onto every line or expose source snippets.
-4. Keep first-seen/change integrity review separate from content severity.
-   Describe a clean first-seen file as integrity-only review with AI
+4. Keep first-seen/change integrity state separate from content severity.
+   Describe a clean first-seen file as neutral baseline enrollment with AI
    `not-needed`, never give a zero-finding file a LOW threat badge, and present
-   suspicious instructions, scan coverage, and integrity approval as distinct
-   sections. Put line roles, the fixed deterministic reason, and any mapped AI
-   rationale together under the actual finding; disclose bounded AI explanation
-   counts, keep malformed configuration in scan coverage, and give safely
-   approvable files a concrete next step. Wrap output without splitting file
-   IDs. Clearly label an incomplete continuation page. Machine-and-UID-bound
-   approval cannot be restored onto a rebuilt host.
+   suspicious instructions, scan coverage, integrity changes, and baseline
+   setup as distinct states. Put line roles, the fixed deterministic reason,
+   and any mapped AI rationale together under the actual finding; disclose
+   bounded AI explanation counts, keep malformed configuration in scan
+   coverage, and give each state a concrete next step. Wrap output without
+   splitting file IDs. Clearly label an incomplete continuation page.
+   Machine-and-UID-bound approval cannot be restored onto a rebuilt host.
 5. Keep the periodic deterministic service offline and credential-free. AI is
    separately enabled, raise-only, tool-free, strict-JSON, and limited to
    bounded opaque evidence IDs, fixed reasons, behavior labels, and
@@ -124,21 +148,38 @@ Use this workflow for changes in the AuraScan repository.
 6. Allow confirmed disable only for unchanged, user-owned, standalone regular
    instruction Markdown. Revalidate every condition at action time and restore
    only an unchanged receipt target when the original path is absent.
-7. Use generic count/severity notifications. Interactive review may identify a
+7. Permit batch baseline enrollment only from a complete, coverage-clear
+   report containing safe clean first-seen candidates. After confirmation,
+   revalidate every selected file and abort the entire action on any stale,
+   changed, suspicious, restored, or unsafe baseline input before one
+   serialized private-state transaction. Clean content-only Markdown is
+   excluded from trust without blocking the safe baseline subset; a content or
+   coverage finding in it still blocks. AI must never perform or authorize
+   enrollment.
+8. Use generic count/severity notifications. Interactive review may identify a
    private path, but usernames, source snippets, secrets, line details, and AI
    output must not enter notifications or other public state.
-8. Retention may prune bounded report and alert history, but never manifest
+9. Keep guided triage foreground-only. Offer fixed approve, confirmed-disable,
+   rescan, leave, or quit decisions only where the underlying core action is
+   eligible; never execute instruction content, invoke an editor, or turn a
+   model response into an action.
+10. Retention may prune bounded report and alert history, but never manifest
    review state; update or remove AI-job references before deleting a report.
-9. Bind every persisted continuation cursor to the matching committed cycle
+11. Bind every persisted continuation cursor to the matching committed cycle
    and page sequence. A cursor without that commit must restart from the root
    with review required; it must never skip the uncommitted page.
-10. Do not treat Markdown quoting or fencing as a trust boundary. Suppress a
+12. Do not treat Markdown quoting or fencing as a trust boundary. Suppress a
     clearly labeled example only while no later active directive references it
     for execution.
-11. Keep tray monitor/AI toggles asynchronous and no-shell. Reuse the
+13. Keep tray monitor/AI toggles asynchronous and no-shell. Reuse the
     transactional CLI, accept review-required status as valid, serialize
     mutations, bound combined output and runtime, retire Qt children, and do
     not let the tray's own Quit action interrupt rollback.
+14. Serialize all private-state mutations under the validated state lock. Bind
+    triage approve/disable actions to the exact displayed report and hash, and
+    keep interrupted enrollment state fail-closed until a complete scan of the
+    transaction's exact root revalidates every recorded target. Never let an
+    unrelated root or partial continuation clear the transaction marker.
 
 ## Preserve scanner safety
 
@@ -329,7 +370,11 @@ Use this path only when the user explicitly authorizes external publication:
 
 ## Validate and report
 
-Run focused tests first, then:
+Apply the [validation scope in AGENTS.md](AGENTS.md#validation). Use meaningful
+regressions for changed behavior; documentation-only work needs consistency and
+diff checks, plus skill frontmatter validation when applicable. Run focused
+tests first and the full source gates for detection, parser, policy, or shared
+security-boundary changes:
 
 ```bash
 python -m compileall aurascan tests tools

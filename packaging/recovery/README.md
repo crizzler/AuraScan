@@ -112,12 +112,12 @@ repository is inserted before every official repository, and the completed
 Archiso package list must contain the exact candidate package version; an
 official package with the same name therefore cannot silently replace it.
 
-Archiso 89's known `modules.alias` defect is handled only when the installed
-root-owned `/usr/bin/mkarchiso` contains one exact affected line. The builder
+The known `modules.alias` defect in Archiso 89 and 90 is handled only when the
+installed root-owned `/usr/bin/mkarchiso` contains one exact affected line. The builder
 makes that one-line correction in root-owned work, verifies the complete
-result, and runs the root-owned copy. Any other Archiso-89 shape fails closed;
-no user-writable elevated copy is permitted. Newer affected implementations
-also fail closed.
+result, and runs the root-owned copy. Any other Archiso-89/90 shape fails closed;
+no user-writable elevated copy is permitted. Affected implementations outside
+those two verified versions also fail closed.
 
 This boundary prevents a normal desktop user from changing the profile,
 package repository, cache, or work tree between validation and root use. It is

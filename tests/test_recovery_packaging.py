@@ -262,8 +262,8 @@ def test_iso_builder_layers_aurascan_onto_the_maintained_archiso_profile():
     assert "AURASCAN_ARCHISO_ROOT_HELPER" not in builder
     assert "AURASCAN_ARCHISO_CACHE" not in builder
     assert "CacheDir = $package_cache" in builder
-    assert "Archiso 89 has an unexpected modules.alias implementation" in builder
-    assert 'mkarchiso_runner="$work/trusted-tools/mkarchiso-archiso89"' in builder
+    assert "Archiso 89/90 has an unexpected modules.alias implementation" in builder
+    assert 'mkarchiso_runner="$work/trusted-tools/mkarchiso-archiso89-90"' in builder
     assert '"$gzip_bin" -t "$modalias"' in builder
     assert '"$python_bin" -I -S "$audit_script"' in builder
     assert '--forbid "$repo_root"' in builder

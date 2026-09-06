@@ -143,7 +143,7 @@ def test_builder_refuses_stale_selection_and_sanitizes_release_processes():
     assert 'iso_size < release_asset_limit' in builder
     assert '${#output_entries[@]} == 3' in builder
     assert "find \"$output\" -maxdepth 1 -type f -name '*.iso'" not in builder
-    assert 'mkarchiso_runner="$work/trusted-tools/mkarchiso-archiso89"' in builder
+    assert 'mkarchiso_runner="$work/trusted-tools/mkarchiso-archiso89-90"' in builder
     assert '"$env_bin" -i' in builder
     for flag in (
         "AURASCAN_AI_ENABLED=0",

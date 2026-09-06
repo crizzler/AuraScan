@@ -649,7 +649,7 @@ if bad_modalias_count="$(/usr/bin/grep -Fxc -- \
 else
   grep_status=$?
   (( grep_status == 1 )) || {
-    printf 'Installed mkarchiso could not be inspected for the Archiso 89 correction\n' >&2
+    printf 'Installed mkarchiso could not be inspected for the Archiso 89/90 correction\n' >&2
     exit 1
   }
   bad_modalias_count=0
@@ -666,13 +666,13 @@ else
   modalias_reference_count=0
 fi
 archiso_package="$("${clean_root_env[@]}" "$pacman_bin" -Q archiso)"
-if [[ "$archiso_package" =~ ^archiso[[:space:]]89-[0-9]+$ ]]; then
+if [[ "$archiso_package" =~ ^archiso[[:space:]](89|90)-[0-9]+$ ]]; then
   [[ "$bad_modalias_count" == "1" && "$modalias_reference_count" == "1" ]] || {
-    printf 'Archiso 89 has an unexpected modules.alias implementation\n' >&2
+    printf 'Archiso 89/90 has an unexpected modules.alias implementation\n' >&2
     exit 1
   }
   /usr/bin/install -d -o root -g root -m 0755 -- "$work/trusted-tools"
-  mkarchiso_runner="$work/trusted-tools/mkarchiso-archiso89"
+  mkarchiso_runner="$work/trusted-tools/mkarchiso-archiso89-90"
   /usr/bin/install -o root -g root -m 0755 -- "$mkarchiso_bin" "$mkarchiso_runner"
   "${clean_root_env[@]}" "$python_bin" -I -S -c '
 import os, stat, sys
@@ -685,7 +685,7 @@ with open(path, "r", encoding="utf-8", errors="strict", newline="") as handle:
 old = before + "\n"
 new = after + "\n"
 if lines.count(old) != 1 or new in lines:
-    raise SystemExit("unexpected Archiso 89 modules.alias implementation")
+    raise SystemExit("unexpected Archiso 89/90 modules.alias implementation")
 expected = [new if line == old else line for line in lines]
 flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
 descriptor = os.open(path, flags)
@@ -708,7 +708,7 @@ else
     unexpected_modalias_pattern=0
   fi
 fi
-if [[ ! "$archiso_package" =~ ^archiso[[:space:]]89-[0-9]+$ ]] && \
+if [[ ! "$archiso_package" =~ ^archiso[[:space:]](89|90)-[0-9]+$ ]] && \
    [[ "$bad_modalias_count" != "0" || "$unexpected_modalias_pattern" == "1" ]]; then
   printf 'Installed mkarchiso has an unexpected modules.alias implementation\n' >&2
   exit 1

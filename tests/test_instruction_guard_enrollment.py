@@ -613,7 +613,7 @@ def test_hardlinked_control_is_integrity_attention_not_scan_coverage(tmp_path):
     first = root / "AGENTS.md"
     first.write_text("# Safe guidance\n", encoding="utf-8")
     second = root / "CLAUDE.md"
-    second.hardlink_to(first)
+    os.link(first, second)
 
     report = _scan(root, tmp_path / "state")
     attention = guard.instruction_report_attention(report)

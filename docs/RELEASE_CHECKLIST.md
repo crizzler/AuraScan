@@ -35,6 +35,13 @@ candidate.
 
 ## Validation
 
+- For v0.10.5, verify CodeWhale/legacy DeepSeek project TOML, recursive and
+  continued import boundaries, user-global config exclusion, installed-version
+  advisory ranges and ambiguity, and decoded Git branch/tag option rejection.
+  Package rules are `1.6.1`; Instruction Guard analysis evidence is `1.3`, and
+  private continuation cursors are `1.1` with legacy `1.0` reads. Public
+  report/AI schemas remain unchanged. This shared acquisition-boundary change
+  is recovery-bearing and requires a fresh image and all applicable gates.
 - For v0.10.4, verify pnpm local-version/metadata coverage and precompiled
   Python carrier regressions with package rules `1.6.0` and repository
   snapshot `1.1`. A patched pacman record does not establish future tool

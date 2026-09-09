@@ -42,6 +42,11 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
+The [v0.10.5 release candidate](docs/releases/v0.10.5.md) adds CodeWhale/DeepSeek
+project-config review, installed-version exposure checks, and Git source-ref
+hardening. It is recovery-bearing; the release record tracks its required
+fresh image and validation gates.
+
 ## What You Can Try Now
 
 AuraScan currently provides ten practical entry points:

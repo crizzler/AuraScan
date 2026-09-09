@@ -353,7 +353,7 @@ def test_init_can_explicitly_install_recovery_with_separate_consent(tmp_path):
 def test_doctor_reports_optional_recovery_state(tmp_path, monkeypatch):
     manifest = Path(__file__).resolve().parents[1] / "aurascan/assets/aurascan-recovery-iso.json"
     monkeypatch.setattr(recovery_cli, "resolve_iso_manifest", lambda: manifest)
-    monkeypatch.setattr(recovery_cli, "recovery_version", lambda: "0.10.4")
+    monkeypatch.setattr(recovery_cli, "recovery_version", lambda: "0.10.5")
     checks = build_doctor_checks(
         env_path=tmp_path / "missing.env",
         env={},
@@ -1142,7 +1142,7 @@ def test_doctor_reports_agent_access_root_policy_and_private_audit(tmp_path):
 
 
 def test_doctor_check_ai_uses_mocked_provider(tmp_path, monkeypatch):
-    monkeypatch.setattr(recovery_cli, "recovery_version", lambda: "0.10.4")
+    monkeypatch.setattr(recovery_cli, "recovery_version", lambda: "0.10.5")
     monkeypatch.setattr(
         recovery_cli,
         "resolve_iso_manifest",
@@ -1211,7 +1211,7 @@ def test_doctor_ai_connectivity_never_exposes_raw_provider_exception(monkeypatch
     ],
 )
 def test_doctor_check_ai_uses_mocked_keyless_local_provider(tmp_path, provider, endpoint, monkeypatch):
-    monkeypatch.setattr(recovery_cli, "recovery_version", lambda: "0.10.4")
+    monkeypatch.setattr(recovery_cli, "recovery_version", lambda: "0.10.5")
     monkeypatch.setattr(
         recovery_cli,
         "resolve_iso_manifest",

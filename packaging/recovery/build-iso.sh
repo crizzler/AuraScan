@@ -2,8 +2,8 @@
 set -euo pipefail
 umask 022
 
-readonly expected_release_version="0.10.4"
-readonly expected_release_date="2026-09-06"
+readonly expected_release_version="0.10.5"
+readonly expected_release_date="2026-09-09"
 readonly release_asset_limit=$((2 * 1024 * 1024 * 1024))
 readonly isolated_build_uid=60999
 readonly isolated_build_gid=60999

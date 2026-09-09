@@ -106,7 +106,6 @@ def test_multiline_array_preserves_physical_lines_and_decodes_paths():
         "instructions = [\n'a.md'\n'b.md'\n]\n",
         "instructions = ['unterminated]\n",
         "instructions = ['a.md'\n",
-        'instructions = ["a\\x2e.md"]\n',
         'instructions = ["a\\uD800.md"]\n',
         'instructions = ["a\\U00110000.md"]\n',
         'instructions = ["a\\u00qq.md"]\n',
@@ -138,6 +137,13 @@ def test_invalid_toml_fails_without_accepting_partial_settings(text):
         tomllib.loads(text)
     with pytest.raises(AgentConfigError):
         parse_codewhale_config(text)
+
+
+def test_extended_hex_escape_is_explicit_coverage_failure():
+    # TOML 1.1 readers accept this escape; older tomllib readers reject it.
+    # AuraScan's bounded subset must refuse it independently of that oracle.
+    with pytest.raises(AgentConfigError):
+        parse_codewhale_config('instructions = ["a\\x2e.md"]\n')
 
 
 @pytest.mark.parametrize(

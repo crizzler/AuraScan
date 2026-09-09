@@ -42,11 +42,11 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
-The [v0.10.6 release candidate](docs/releases/v0.10.6.md) adds offline Shai-Hulud
+The [v0.10.6 release](docs/releases/v0.10.6.md) adds offline Shai-Hulud
 npm intelligence and bounded lifecycle correlations for credential access,
 configuration writes, and publication behavior. It is recovery-bearing;
-publication remains blocked until its fresh image and required validation
-gates are complete.
+the release record identifies its fresh image, completed validation gates,
+and live-scenario limitations.
 
 ## What You Can Try Now
 

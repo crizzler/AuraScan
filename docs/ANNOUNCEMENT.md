@@ -9,7 +9,7 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
-The v0.10.5 release candidate adds bounded review of CodeWhale and legacy
+The v0.10.5 release adds bounded review of CodeWhale and legacy
 DeepSeek project settings, including shell enablement and unsafe instruction
 references. User-global auth configs stay outside project-policy detection
 and reads. Installed-package advisory checks distinguish known affected

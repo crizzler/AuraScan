@@ -35,6 +35,17 @@ candidate.
 
 ## Validation
 
+- For v0.10.6, verify source-attributed Shai-Hulud exact release tuples,
+  broader advisory scope, bounded metadata and install arguments, stable
+  captured-byte hashing, and actual network target matching. Require lifecycle
+  entry scripts to remain bound to their captured package, with active
+  credential, configuration-write, and network/publication roles. Ordinary
+  launchers, inert strings, unacquired dependency trees, and incomplete dynamic
+  JavaScript are not proof of a campaign payload. Confirm that favorable
+  history, registry metadata, signatures, and AI cannot clear blockers.
+  Package rules are `1.7.0`; public report and Instruction Guard schemas remain
+  unchanged. These shared scanning-boundary changes are recovery-bearing and
+  require a fresh image and all applicable gates.
 - For v0.10.5, verify CodeWhale/legacy DeepSeek project TOML, recursive and
   continued import boundaries, user-global config exclusion, installed-version
   advisory ranges and ambiguity, and decoded Git branch/tag option rejection.

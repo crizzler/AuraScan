@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import shutil
@@ -10,6 +11,11 @@ from aurascan.analyzers.clamav import ClamAVAnalyzer
 from aurascan.analyzers.npm_metadata import (
     MetadataIncomplete, inspect_npm_metadata, strict_json_object,
 )
+from aurascan.analyzers.npm_supply_chain import (
+    analyze_npm_install_commands, inspect_npm_campaign_metadata,
+    known_payload_digest_findings, known_payload_findings, malicious_domains,
+)
+from aurascan.analyzers.npm_lifecycle import inspect_npm_lifecycle
 from aurascan.analyzers.python_bytecode import (
     PYTHON_PRECOMPILED_CANDIDATE,
     classify_python_precompiled, is_python_precompiled_path,
@@ -24,6 +30,7 @@ from aurascan.analyzers.remote_stage import (
     analyze_remote_stage_execution,
 )
 from aurascan.core.archive import SafeArchiveExtractor
+from aurascan.core.repository_provenance import _classify_artifact
 from aurascan.core.models import (
     AnalysisResult,
     Confidence,
@@ -38,7 +45,7 @@ from aurascan.core.source_acquisition import SourceFetcher, SourceKind, SourcePa
 
 INTERESTING_NAMES = {
     "Makefile", "CMakeLists.txt", "meson.build", "configure", "autogen.sh",
-    "setup.py", "pyproject.toml", "package.json", "package-lock.json",
+    "setup.py", "pyproject.toml", "package.json", "package-lock.json", "npm-shrinkwrap.json",
     "yarn.lock", "pnpm-lock.yaml", "Cargo.toml", "Cargo.lock", "go.mod",
     "go.sum", "composer.json", "Gemfile", "hyprland-fixes",
     "hyprland-fixes-permissions", "hyprland-fixes-post-install",
@@ -46,7 +53,11 @@ INTERESTING_NAMES = {
 }
 TEXT_SUFFIXES = {".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs", ".ts", ".service", ".timer", ".cron"}
 VENDORED_DIRS = {"node_modules", "vendor", "third_party", "deps"}
-NESTED_ARCHIVE_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.xz", ".tar.zst", ".zip")
+NESTED_ARCHIVE_SUFFIXES = (
+    ".tar", ".tar.gz", ".tgz", ".tar.xz", ".tar.zst", ".zip",
+    ".tar.bz2", ".tbz2", ".tar.lz", ".7z", ".rar",
+)
+_ARCHIVE_KINDS = frozenset({"zip", "gzip", "bzip2", "xz", "zstd", "7z", "rar", "ar", "tar"})
 
 
 class DeepStaticAnalyzer(BaseAnalyzer):
@@ -59,6 +70,8 @@ class DeepStaticAnalyzer(BaseAnalyzer):
         max_file_size: int = 1024 * 1024,
         max_tree_entries: int = 20000,
         max_candidates: int = 5000,
+        max_hash_file_size: int = 64 * 1024 * 1024,
+        max_total_file_bytes: int = 256 * 1024 * 1024,
     ):
         self.extractor = extractor or SafeArchiveExtractor()
         self.clamav = clamav or ClamAVAnalyzer()
@@ -67,8 +80,12 @@ class DeepStaticAnalyzer(BaseAnalyzer):
         self.max_file_size = max_file_size
         self.max_tree_entries = max(1, max_tree_entries)
         self.max_candidates = max(1, max_candidates)
+        self.max_hash_file_size = max(1, max_hash_file_size)
+        self.max_total_file_bytes = max(1, max_total_file_bytes)
         self.last_source_acquisition = []
         self._tree_scan_incomplete = False
+        self._last_read_bytes = 0
+        self._last_read_prefix = b""
 
     def analyze_pkgbuild(self, pkgbuild_path: str, content: str) -> AnalysisResult:
         findings: List[Finding] = []
@@ -127,19 +144,47 @@ class DeepStaticAnalyzer(BaseAnalyzer):
         precompiled_carriers = []
         precompiled_controls = []
         control_bytes = 0
-        for path in self._iter_interesting_files(root):
+        npm_manifests = []
+        npm_scripts = {}
+        npm_bytes = 0
+        remaining_bytes = self.max_total_file_bytes
+        for path in self._iter_interesting_files(root, all_regular=True):
             rel = str(path.relative_to(root))
-            if path.name.lower().endswith(NESTED_ARCHIVE_SUFFIXES):
-                findings.append(self._finding(
-                    "DEEPSTATIC-NESTED-ARCHIVE-UNINSPECTED-001",
-                    str(path),
-                    Severity.HIGH,
-                    "Acquired source contains a nested archive that AuraScan did not recursively expand and inspect.",
-                    "Do not build or install until every nested archive has been inspected independently within equivalent safety bounds.",
-                    True,
-                    "nested archive content was not recursively inspected",
-                    EvidenceQuality.strong_heuristic,
-                ))
+            if remaining_bytes <= 0:
+                self._tree_scan_incomplete = True
+                break
+            # Hash ordinary assets too: renaming a known payload must not
+            # evade exact-byte intelligence. Large non-code files are streamed
+            # through the same stable component-wise no-follow reader.
+            self._last_read_bytes = 0
+            interesting = self._is_interesting_file(path, root, min(4096, remaining_bytes))
+            remaining_bytes -= self._last_read_bytes
+            if remaining_bytes <= 0:
+                self._tree_scan_incomplete = True
+                break
+            if not interesting:
+                digest = self._read_regular_file(
+                    path, min(self.max_hash_file_size, remaining_bytes),
+                    allow_larger=False, hash_only=True,
+                )
+                remaining_bytes -= self._last_read_bytes
+                if digest is None:
+                    self._tree_scan_incomplete = True
+                else:
+                    findings.extend(known_payload_digest_findings(str(path), digest.hex()))
+                    findings.extend(self._nested_archive_findings(path, self._last_read_prefix))
+                continue
+            payload = self._read_regular_file(
+                path, min(self.max_file_size, remaining_bytes), allow_larger=False,
+            )
+            remaining_bytes -= self._last_read_bytes
+            if payload is None:
+                self._tree_scan_incomplete = True
+                continue
+            findings.extend(known_payload_findings(str(path), payload))
+            nested = self._nested_archive_findings(path, payload[:512])
+            if nested:
+                findings.extend(nested)
                 continue
             if any(part in VENDORED_DIRS for part in path.relative_to(root).parts):
                 findings.append(self._finding(
@@ -152,10 +197,6 @@ class DeepStaticAnalyzer(BaseAnalyzer):
                     rel,
                     EvidenceQuality.weak_heuristic,
                 ))
-            payload = self._read_candidate(path)
-            if payload is None:
-                self._tree_scan_incomplete = True
-                continue
             precompiled_kind = classify_python_precompiled(str(path), payload)
             if precompiled_kind:
                 precompiled_carriers.append((str(path), precompiled_kind))
@@ -188,11 +229,25 @@ class DeepStaticAnalyzer(BaseAnalyzer):
                 ))
                 continue
             text = payload.decode("utf-8", errors="replace")
+            if path.name in {"package.json", "index.js"}:
+                npm_bytes += len(payload)
+                if npm_bytes <= 8 * 1024 * 1024:
+                    if path.name == "package.json":
+                        npm_manifests.append((str(path), text))
+                    else:
+                        npm_scripts[str(path)] = text
+                else:
+                    self._tree_scan_incomplete = True
             if is_precompiled_control_script(str(path)):
                 control_bytes += len(payload)
                 if control_bytes <= 5 * 1024 * 1024:
                     precompiled_controls.append((str(path), text))
             findings.extend(self._inspect_text_file(path, text))
+        for manifest_path, manifest_text in npm_manifests:
+            findings.extend(inspect_npm_lifecycle(
+                manifest_path, manifest_text, npm_scripts,
+                malicious_hosts=malicious_domains(),
+            ))
         if precompiled_carriers:
             execution = analyze_precompiled_execution(root, precompiled_carriers, precompiled_controls)
             findings.extend(execution.findings)
@@ -209,7 +264,33 @@ class DeepStaticAnalyzer(BaseAnalyzer):
                 "bounded source-tree inspection did not complete",
                 EvidenceQuality.strong_heuristic,
             ))
-        return findings
+        # Name/path and campaign metadata checks share the same strict reader.
+        # One unsupported document needs one metadata coverage item, while
+        # findings for different documents and distinct evidence stay separate.
+        metadata_coverage = set()
+        unique_findings = []
+        for finding in findings:
+            if finding.rule_id == "NPM-METADATA-INSPECTION-INCOMPLETE-001":
+                if finding.file_path in metadata_coverage:
+                    continue
+                metadata_coverage.add(finding.file_path)
+            unique_findings.append(finding)
+        return unique_findings
+
+    def _nested_archive_findings(self, path: Path, prefix: bytes) -> List[Finding]:
+        if not (
+            path.name.lower().endswith(NESTED_ARCHIVE_SUFFIXES)
+            or _classify_artifact(prefix, pe_valid=False) in _ARCHIVE_KINDS
+        ):
+            return []
+        return [self._finding(
+            "DEEPSTATIC-NESTED-ARCHIVE-UNINSPECTED-001",
+            str(path), Severity.HIGH,
+            "Acquired source contains an archive or compressed carrier that AuraScan did not recursively expand and inspect.",
+            "Do not build or install until nested content has been inspected independently within equivalent safety bounds.",
+            True, "nested archive or compressed content was not recursively inspected",
+            EvidenceQuality.strong_heuristic,
+        )]
 
     def _inspect_text_file(self, path: Path, text: str) -> List[Finding]:
         active_text = self._strip_comment_lines(text)
@@ -296,6 +377,13 @@ class DeepStaticAnalyzer(BaseAnalyzer):
 
         if path.name == "package.json":
             findings.extend(self._inspect_package_json(path, text))
+        if path.name in {"package.json", "package-lock.json", "npm-shrinkwrap.json"}:
+            findings.extend(inspect_npm_campaign_metadata(str(path), text))
+        if path.suffix in {".sh", ".bash", ".zsh"} or (
+            not path.suffix and text.startswith("#!") and
+            re.match(r"^#![^\n]*\b(?:sh|bash|zsh)\b", text)
+        ):
+            findings.extend(analyze_npm_install_commands(text, str(path), Phase.unpacked_source_scan))
         if path.name == "setup.py" and re.search(r"\b(urlopen|requests\.|curl|wget|subprocess)\b", text):
             findings.append(self._finding(
                 "DEEPSTATIC-SETUPPY-SUSPICIOUS",
@@ -402,7 +490,7 @@ class DeepStaticAnalyzer(BaseAnalyzer):
                     f"package.json defines a {name} script.",
                     "Review install-time package scripts manually; AuraScan did not execute them.",
                     False,
-                    f"{name}: {scripts[name]}",
+                    f"declared {name} lifecycle script; content withheld",
                 ))
         dependencies = data.get("dependencies", {})
         development_dependencies = data.get("devDependencies", {})
@@ -423,7 +511,34 @@ class DeepStaticAnalyzer(BaseAnalyzer):
                 ))
         return findings
 
-    def _iter_interesting_files(self, root: Path) -> Iterable[Path]:
+    def _is_interesting_file(self, path: Path, root: Path, sniff_limit: int = 4096) -> bool:
+        rel_parts = path.relative_to(root).parts
+        if ".git" in rel_parts:
+            # VCS internals are hash evidence only. Do not interpret Git data
+            # as shell control text, but do not exempt archive-supplied bytes
+            # from a known-payload lookup based on this directory name.
+            return False
+        try:
+            metadata = path.lstat()
+        except OSError:
+            self._tree_scan_incomplete = True
+            return True
+        return (
+            any(part in VENDORED_DIRS for part in rel_parts)
+            or path.name in INTERESTING_NAMES
+            or path.name.startswith(".")
+            or path.suffix in TEXT_SUFFIXES
+            or is_python_precompiled_path(str(path))
+            or "__pycache__" in rel_parts
+            or path.name.lower().endswith(NESTED_ARCHIVE_SUFFIXES)
+            or ".min." in path.name
+            or bool(metadata.st_mode & stat.S_IXUSR)
+            or "systemd" in rel_parts
+            or "cron" in rel_parts
+            or (not path.suffix and self._has_text_shebang(path, sniff_limit))
+        )
+
+    def _iter_interesting_files(self, root: Path, all_regular: bool = False) -> Iterable[Path]:
         try:
             root_metadata = root.lstat()
         except OSError:
@@ -463,29 +578,12 @@ class DeepStaticAnalyzer(BaseAnalyzer):
                             continue
                         path = Path(entry.path)
                         if stat.S_ISDIR(metadata.st_mode):
-                            if entry.name != ".git":
+                            if all_regular or entry.name != ".git":
                                 pending_directories.append(path)
                             continue
                         if not stat.S_ISREG(metadata.st_mode):
                             continue
-                        rel_parts = path.relative_to(root).parts
-                        if any(part in VENDORED_DIRS for part in rel_parts):
-                            interesting = True
-                        else:
-                            interesting = (
-                                path.name in INTERESTING_NAMES
-                                or path.name.startswith(".")
-                                or path.suffix in TEXT_SUFFIXES
-                                or is_python_precompiled_path(str(path))
-                                or "__pycache__" in rel_parts
-                                or path.name.lower().endswith(NESTED_ARCHIVE_SUFFIXES)
-                                or ".min." in path.name
-                                or bool(metadata.st_mode & stat.S_IXUSR)
-                                or "systemd" in rel_parts
-                                or "cron" in rel_parts
-                                or (not path.suffix and self._has_text_shebang(path))
-                            )
-                        if not interesting:
+                        if not all_regular and not self._is_interesting_file(path, root):
                             continue
                         candidate_count += 1
                         if candidate_count > self.max_candidates:
@@ -495,8 +593,8 @@ class DeepStaticAnalyzer(BaseAnalyzer):
             except OSError:
                 self._tree_scan_incomplete = True
 
-    def _has_text_shebang(self, path: Path) -> bool:
-        payload = self._read_regular_file(path, 4096, allow_larger=True)
+    def _has_text_shebang(self, path: Path, limit: int = 4096) -> bool:
+        payload = self._read_regular_file(path, limit, allow_larger=True)
         if payload is None:
             self._tree_scan_incomplete = True
         return bool(payload is not None and payload.startswith(b"#!") and b"\x00" not in payload)
@@ -510,7 +608,10 @@ class DeepStaticAnalyzer(BaseAnalyzer):
         limit: int,
         *,
         allow_larger: bool,
+        hash_only: bool = False,
     ) -> Optional[bytes]:
+        self._last_read_bytes = 0
+        self._last_read_prefix = b""
         file_descriptor = -1
         directory_descriptors = []
         directory_records = []
@@ -591,11 +692,19 @@ class DeepStaticAnalyzer(BaseAnalyzer):
             if not allow_larger and before.st_size > limit:
                 return None
             payload = bytearray()
-            while len(payload) <= limit:
-                chunk = os.read(file_descriptor, min(65536, limit + 1 - len(payload)))
+            prefix = bytearray()
+            digest = hashlib.sha256() if hash_only else None
+            while self._last_read_bytes < limit:
+                chunk = os.read(file_descriptor, min(65536, limit - self._last_read_bytes))
                 if not chunk:
                     break
-                payload.extend(chunk)
+                self._last_read_bytes += len(chunk)
+                if len(prefix) < 512:
+                    prefix.extend(chunk[:512 - len(prefix)])
+                if digest is not None:
+                    digest.update(chunk)
+                else:
+                    payload.extend(chunk)
             after = os.fstat(file_descriptor)
             current_path = os.stat(parts[-1], dir_fd=directory_fd, follow_symlinks=False)
             if (
@@ -604,8 +713,11 @@ class DeepStaticAnalyzer(BaseAnalyzer):
                 or not parents_unchanged()
             ):
                 return None
-            if not allow_larger and (len(payload) > limit or len(payload) != after.st_size):
+            if not allow_larger and (self._last_read_bytes > limit or self._last_read_bytes != after.st_size):
                 return None
+            if digest is not None:
+                self._last_read_prefix = bytes(prefix)
+                return digest.digest()
             return bytes(payload[:limit])
         except OSError:
             return None

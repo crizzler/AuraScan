@@ -14,6 +14,7 @@ from aurascan.analyzers.remote_stage import (
     analyze_carrier_execution,
     analyze_remote_stage_execution,
 )
+from aurascan.analyzers.npm_supply_chain import analyze_npm_install_commands
 from aurascan.core.models import AnalysisResult, Finding, Phase, Source, Severity, Confidence, EvidenceQuality
 from aurascan.core.package_archive import (
     PACKAGE_HOOK_ABSENT,
@@ -345,6 +346,11 @@ class DeterministicAnalyzer(BaseAnalyzer):
                 line_number=min(signal.line_number for signal in carrier_signals),
             ))
         if phase in {Phase.pkgbuild_static, Phase.install_hook_static}:
+            campaign_findings = analyze_npm_install_commands(content, pkg_path, phase)
+            for finding in campaign_findings:
+                finding.package_name = pkg_name
+                finding.package_version = pkg_ver
+            findings.extend(campaign_findings)
             propagation_signals = find_aur_repository_propagation_signals(
                 content,
                 dot_prefixed_hook=(

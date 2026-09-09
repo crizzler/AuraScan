@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "campaign_id": "NPM-2026-09-07-SHAI-HULUD",
+  "verified_at": "2026-09-09",
+  "references": [
+    "https://www.aikido.dev/blog/shai-hulud-npm-resurfaces",
+    "https://osv.dev/vulnerability/MAL-2026-16032",
+    "https://osv.dev/vulnerability/MAL-2026-16025",
+    "https://osv.dev/vulnerability/MAL-2026-16024",
+    "https://osv.dev/vulnerability/MAL-2026-16026"
+  ],
+  "scope_note": "These exact versions were observed in the September 7 campaign and independently recorded by Amazon Inspector in OSV. GitHub malware advisories currently declare >= 0 with no patched version; this dataset does not establish that every version carries this payload or that unlisted versions are safe.",
+  "malicious_packages": [
+    {
+      "name": "feishu-docx-mcp",
+      "versions": ["0.3.2"],
+      "advisory_ids": ["GHSA-q5c6-p5q5-g3px", "MAL-2026-16032"],
+      "references": [
+        "https://www.aikido.dev/blog/shai-hulud-npm-resurfaces",
+        "https://github.com/advisories/GHSA-q5c6-p5q5-g3px",
+        "https://osv.dev/vulnerability/MAL-2026-16032"
+      ]
+    },
+    {
+      "name": "bmc-i18n-extract-cli",
+      "versions": ["1.1.1"],
+      "advisory_ids": ["GHSA-327g-rcr8-hp3p", "MAL-2026-16025"],
+      "references": [
+        "https://www.aikido.dev/blog/shai-hulud-npm-resurfaces",
+        "https://github.com/advisories/GHSA-327g-rcr8-hp3p",
+        "https://osv.dev/vulnerability/MAL-2026-16025"
+      ]
+    },
+    {
+      "name": "blueai-cli",
+      "versions": ["0.7.0"],
+      "advisory_ids": ["GHSA-c2v5-8c2f-jj54", "MAL-2026-16024"],
+      "references": [
+        "https://www.aikido.dev/blog/shai-hulud-npm-resurfaces",
+        "https://github.com/advisories/GHSA-c2v5-8c2f-jj54",
+        "https://osv.dev/vulnerability/MAL-2026-16024"
+      ]
+    },
+    {
+      "name": "bmc-translate-utils",
+      "versions": ["1.1.1"],
+      "advisory_ids": ["GHSA-997w-vpm2-ww7x", "MAL-2026-16026"],
+      "references": [
+        "https://www.aikido.dev/blog/shai-hulud-npm-resurfaces",
+        "https://github.com/advisories/GHSA-997w-vpm2-ww7x",
+        "https://osv.dev/vulnerability/MAL-2026-16026"
+      ]
+    }
+  ],
+  "payload_sha256": [
+    "e37e3ddeeaaa9e0c4fdbcb829b4895a6521031c80053fc436625b61e6ee5b1a6"
+  ],
+  "malicious_domains": ["t.m-kosche.com"]
+}

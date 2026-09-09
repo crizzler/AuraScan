@@ -1,0 +1,15 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+# Inert scanner input only. Never run this package fixture.
+pkgname=curated-npm-shai-hulud-dependency
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged known malicious npm dependency selection"
+arch=("any")
+url="https://example.invalid/curated-npm-shai-hulud-dependency"
+license=("MIT")
+source=("https://example.invalid/curated-npm-shai-hulud-dependency-1.0.tar.gz")
+sha256sums=("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+
+prepare() {
+  npm --registry=https://example.invalid install blueai-cli@0.7.0
+}

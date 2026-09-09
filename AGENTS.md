@@ -180,6 +180,17 @@ model choice does not change AuraScan's runtime AI defaults or safety policy.
   exposure must use captured package evidence and a verified advisory range,
   disclose version ambiguity or unverified backports, and never imply
   exploitation occurred.
+- Keep npm campaign intelligence offline and source-attributed. Distinguish
+  exact observed malicious releases and captured payload hashes from broader
+  package advisories or unresolved selectors; other versions are not presumed
+  safe. Registry availability, registry malware scanning, signatures, history,
+  and AI cannot waive deterministic blockers. Hash bounded stable source bytes,
+  not checksum mentions, and match network indicators to actual command targets.
+  Bind lifecycle correlations to the same captured package entry script. Require
+  active access/write/network roles rather than token names, ordinary Bun/Node
+  entry points, or editor/agent configuration presence. Never execute a payload
+  or fixture to validate a match, and keep static evidence separate from host
+  execution, compromise, and an unverified AUR campaign.
 - Treat precompiled Python artifacts as opaque executable evidence. Inspect
   only bounded supported magic/header bytes; never import, execute,
   `marshal.load`, or decompile untrusted bytecode during a scan or test. A

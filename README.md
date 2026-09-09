@@ -42,10 +42,11 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
-The [v0.10.5 release](docs/releases/v0.10.5.md) adds CodeWhale/DeepSeek
-project-config review, installed-version exposure checks, and Git source-ref
-hardening. It is recovery-bearing; the release record tracks its required
-fresh image and validation gates.
+The [v0.10.6 release candidate](docs/releases/v0.10.6.md) adds offline Shai-Hulud
+npm intelligence and bounded lifecycle correlations for credential access,
+configuration writes, and publication behavior. It is recovery-bearing;
+publication remains blocked until its fresh image and required validation
+gates are complete.
 
 ## What You Can Try Now
 
@@ -357,6 +358,40 @@ supports bounded literal YAML mappings/sequences for lockfile versions 5.3,
 metadata, or duplicate fields produce a coverage blocker. These checks apply
 to acquired source and extracted dependency archives, even without lifecycle
 scripts. They do not inspect dependencies that were never acquired.
+
+AuraScan also carries offline intelligence for the four npm releases in the
+[September 7 Shai-Hulud report](https://www.aikido.dev/blog/shai-hulud-npm-resurfaces),
+with their GHSA/OSV references. Exact observed package/version selections in
+supported npm/Bun/Yarn/pnpm install commands are CRITICAL blockers. An unpinned
+selector or different version of those advisory packages needs HIGH provenance
+review: the broader malware advisories list no patched release. Package names,
+versions, and file hashes remain distinct evidence.
+
+Explicit deep-static scans also inspect acquired `package.json`, npm lockfiles,
+and shrinkwrap records, and compare bounded regular source files against the
+verified payload SHA-256, including renamed non-code assets. Unsupported reads
+and exhausted bounds block as incomplete inspection. Dependencies that are not
+in the acquired source are outside this coverage; AuraScan never installs them
+to discover their contents. Exact active shell network targets are checked
+against the confirmed C2 hostname without contacting it.
+
+A lifecycle hook that launches the same captured package's root `index.js` via
+Bun or Node receives additional bounded JavaScript analysis. Known C2 use, or
+correlated credential access, persistence writes and network/publication
+behavior, can block the build. Credential access and correlated writes to
+`.vscode/tasks.json` or `.claude/settings.json` receive separate review findings.
+An ordinary entry point, token name, editor configuration, comment, or quoted
+example alone does not establish the correlation. Dynamic JavaScript and
+unfollowed helpers remain coverage limits.
+
+Registry downloadability, publish-time malware scanning, favorable history,
+source checksums, signatures, and AI responses cannot clear deterministic
+blockers. These static matches do not establish execution or host compromise,
+and this intelligence update does not establish a direct AUR campaign or this
+machine's exposure. If installation or execution is independently confirmed,
+the [malware advisory](https://github.com/advisories/GHSA-q5c6-p5q5-g3px)
+calls for investigation and secret rotation from a separate clean machine;
+package removal alone cannot establish recovery.
 
 Repository and acquired-source inspection also select `.pyc`, `.pyo`, `.pyd`,
 and `__pycache__` contents regardless of executable permissions. Presence

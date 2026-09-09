@@ -100,7 +100,7 @@ identity-validated native build/parser tools, and the system
 
 The builder packages the exact commit with `git archive`, stages only that
 snapshot's AuraScan overlay, and refuses a changed HEAD/worktree. Before any
-build it requires the exact v0.10.5 recovery-bearing, `build-required`, empty
+build it requires the exact v0.10.6 recovery-bearing, `build-required`, empty
 URL/digest manifest plus `pkgrel=1` and `sha256sums=('SKIP')` in synchronized
 Arch metadata. The AuraScan package build runs as a fixed unmapped numeric UID
 inside a fresh network namespace with bounded runtime, output, descriptors,

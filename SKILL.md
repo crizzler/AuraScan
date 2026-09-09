@@ -117,6 +117,18 @@ requirements regardless of the agent model.
     loading. A `.pyd` filename selects a native-extension candidate; interpret
     PEP 552 only when the captured bytes independently establish that format.
 
+For npm campaign updates, verify original researcher reports and GHSA/OSV
+records before editing bundled intelligence. Keep exact observed release tuples,
+broader package-advisory scope, and payload evidence hashes distinct. Parse
+supported metadata and active install/network arguments without installing
+dependencies. Explicit deep-static hashing must cover bounded stable regular
+source bytes, including renamed non-code files, and fail closed on missing
+coverage. Bind lifecycle entry scripts to their captured package root and
+correlate credential access, configuration writes, and network/publication
+behavior; ordinary names, comments, and Bun/Node launchers alone are insufficient.
+Registry presence or publish-time scanning cannot override deterministic risk.
+Hash-match tests substitute synthetic byte signatures. All fixture text stays inert.
+
 ## Design instruction-file protection
 
 1. Treat Markdown, JSON, imports, hooks, and skill resources as untrusted data:

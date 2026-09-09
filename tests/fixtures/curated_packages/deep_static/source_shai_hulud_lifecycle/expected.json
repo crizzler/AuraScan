@@ -1,0 +1,28 @@
+{
+  "scenario": "source_shai_hulud_lifecycle",
+  "category": "deep_static_source_content",
+  "scan_modes": [
+    "deep_static"
+  ],
+  "package_name": "curated-deep-shai-hulud-lifecycle",
+  "package_version": "1.0",
+  "archive_scenario": "source_shai_hulud_lifecycle",
+  "expected_rule_ids": [
+    "SOURCE-CHECKSUM-MATCH",
+    "DEEPSTATIC-NPM-INSTALL-SCRIPT",
+    "NPM-LIFECYCLE-SUPPLYCHAIN-001"
+  ],
+  "expected_phases": [
+    "unpacked_source_scan"
+  ],
+  "expected_min_severity": "CRITICAL",
+  "expected_action": "block",
+  "expected_hard_blocker": true,
+  "expected_manual_review": true,
+  "expected_deep_static_required": true,
+  "expected_no_network": true,
+  "expected_terminal_contains": [
+    "Risk Score",
+    "Recommended Action"
+  ]
+}

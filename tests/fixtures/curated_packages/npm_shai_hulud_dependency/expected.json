@@ -1,0 +1,15 @@
+{
+  "scenario": "npm_shai_hulud_dependency",
+  "category": "malicious_defanged",
+  "scan_modes": ["fast", "wrapper"],
+  "package_name": "curated-npm-shai-hulud-dependency",
+  "package_version": "1.0",
+  "expected_rule_ids": ["SUPPLYCHAIN-NPM-SHAIHULUD-20260907"],
+  "expected_phases": ["pkgbuild_static"],
+  "expected_min_severity": "CRITICAL",
+  "expected_action": "block",
+  "expected_manual_review": false,
+  "expected_hard_blocker": true,
+  "expected_makepkg_invoked": false,
+  "expected_wrapper_action": "scan_blocked"
+}

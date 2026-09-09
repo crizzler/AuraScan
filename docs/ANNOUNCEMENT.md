@@ -9,6 +9,15 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
+The v0.10.6 release candidate adds source-attributed Shai-Hulud npm
+intelligence, exact malicious release and captured-byte hash matching, and
+bounded lifecycle correlations for credential access, configuration writes,
+and publication behavior. Ordinary Bun/Node entry points are not enough for a
+campaign finding, and registry availability cannot clear a deterministic
+blocker. This is a recovery-bearing candidate; publication remains blocked
+until the fresh image and required validation gates are complete. Static
+findings do not establish execution, host compromise, or a direct AUR campaign.
+
 The v0.10.5 release adds bounded review of CodeWhale and legacy
 DeepSeek project settings, including shell enablement and unsafe instruction
 references. User-global auth configs stay outside project-policy detection

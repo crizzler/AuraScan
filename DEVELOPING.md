@@ -722,6 +722,63 @@ This rule does not rely on Arch's tracker currently listing an issue and does
 not claim an AUR exploitation campaign. Tests inject database roots/version
 comparison and use inert local tarballs; neither pnpm nor package code runs.
 
+### npm campaign intelligence and lifecycle correlations
+
+Keep verified campaign data in
+`aurascan/assets/npm-shai-hulud-2026-09-07.json`; the supporting Aikido, GHSA,
+and OSV references were checked on 2026-09-09. The four exact observed releases
+and common payload hash are narrower evidence than the GHSA package-wide
+malware ranges. Exact tuples block; unresolved or other versions remain HIGH
+review and must never be presented as patched or safe. OSV record-origin hashes
+are not payload hashes: use only the identified `index.js` evidence digest.
+
+`aurascan/analyzers/npm_supply_chain.py` consumes supported shell install
+arguments, package manifest identities/dependency selectors, and npm lockfile
+v1/v2/v3 or shrinkwrap records. Decode aliases to their real package identity,
+keep option arguments and quoted messages out of dependency selections, and
+never resolve an unpinned selector by running a package manager or contacting a
+registry. Command matching supports literal selectors and destinations; opaque
+dependency variables require coverage review, and shell-variable C2 destinations
+are not resolved. Match C2 against the actual parsed network hostname, not a substring,
+userinfo, URL path, or output filename. Keep fixed explanations and advisory
+IDs secret-free; never persist lifecycle command text.
+
+Deep-static hashes every bounded regular acquired source file, including
+non-code assets and archive-supplied `.git` files, without following links or
+interpreting payloads. VCS internals receive hash and archive-prefix checks only.
+Code/text and vendored dependency candidates retain the 1 MiB content limit;
+other non-code hashes stream in 64 KiB
+chunks with a 64 MiB per-file ceiling. The content-read allowance is 256 MiB per
+tree, including shebang selection reads, with at most 20,000 traversed entries
+and 5,000 regular-file candidates. Exhausted
+bounds and unsafe, replaced, unreadable, or unsupported inputs remain coverage
+blockers. A bounded 512-byte prefix identifies supported archive/compression
+magic even after renaming. Known archive suffixes and supported magic require
+separate inspection; unexpanded contents and unrecognized formats cannot be
+reported as inspected.
+
+`aurascan/analyzers/npm_lifecycle.py` accepts captured text only. Bind exact
+supported preinstall/install/postinstall/prepare Bun/Node launchers to the
+same package's root `index.js`. Retain at most 8 MiB of manifest/entry text
+across one tree for this correlation. Do not read another package's entry file
+or an escaped path to fill missing evidence. Distinguish active credential
+access, configuration writes, network targets, and publication operations from
+comments, strings, names, and unreachable helpers. The lexical subset is not a
+JavaScript evaluator; arbitrary imports, computed calls, callbacks, obfuscation,
+and dynamic data flow are not comprehensively followed. Parser limits or a
+missing required supported entry are coverage findings, not malware claims.
+
+Use the inert `source_shai_hulud_lifecycle` archive template and temporary roots.
+Its fake credential paths, example.invalid endpoint, and empty configuration
+writes are never executed. Hash regressions inject an inert byte digest rather
+than shipping the malware. Tests must also cover renamed non-code files,
+replacement and symlink refusal, budgets, benign lifecycle/configuration use,
+wrong-package correlations, and secret-free findings. Full/smart engine tests
+must preserve the blocker despite an accepted baseline or favorable source
+metadata. The explicitly weaker `new-only` update policy still skips update
+content scans; explicit deep-static overrides that skip. No registry-reputation
+allow path exists or is introduced.
+
 ### Precompiled Python source carriers
 
 `aurascan/analyzers/python_bytecode.py` classifies bounded header bytes and

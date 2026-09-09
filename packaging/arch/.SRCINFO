@@ -44,6 +44,6 @@ pkgbase = aurascan
 	optdepends = snapper: snapshot test and confirmed restore workflows
 	optdepends = xfsprogs: read-only XFS recovery diagnostics
 	source = aurascan-0.10.6.tar.gz::https://github.com/crizzler/AuraScan/archive/refs/tags/v0.10.6.tar.gz
-	sha256sums = SKIP
+	sha256sums = 0a73de292592d75dc4eb138d61bb9c369e9f8061d261276d4cfdc60821c346f2
 
 pkgname = aurascan

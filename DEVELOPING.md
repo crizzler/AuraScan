@@ -270,6 +270,41 @@ analysis only; it must not create integrity-baseline entries for them. Follow
 explicit Markdown imports and final file symlinks only when the resolved regular
 file remains inside an allowed root. Do not traverse symlink directories.
 
+CodeWhale project `.codewhale/config.toml` and legacy `.deepseek/config.toml`
+are baseline-eligible configuration surfaces, never standalone-disable targets.
+Exclude the actual user-global copies at `HOME/.codewhale/config.toml` and
+`HOME/.deepseek/config.toml`: their shell opt-in is legitimate user policy and
+they may contain authentication data. Tests inject HOME inside temporary roots;
+never consult real credential bytes to distinguish these roles.
+`agent_config.py` reads a bounded TOML subset using only the standard library on
+Python 3.8+. Supported strings, quoted keys, ordinary numbers/booleans, arrays
+and simple tables are parsed structurally; top-level shell enablement alone
+selects the execution-authority review rule. Comments, strings containing
+examples, table-scoped lookalikes and false values must remain negative.
+Unsupported constructs (including multiline strings, inline tables, dates,
+dotted assignments and arrays of tables), invalid shapes, duplicates and
+limits are incomplete coverage; do not regex-search them for active grants.
+
+Project instruction references preserve decoded literal filenames, including
+spaces and `#`, and their physical declaration lines. Bind each imported
+resource and recursive import to the containing project, not a broader selected
+home. Nearby project config presence also narrows independently discovered
+controls before the config page is processed; it does not establish a declared
+import or change content-only Markdown into baseline work. Bound no-follow
+ancestor inference by the scan deadline and retain unread work when it expires.
+Bind cached import semantics to prior project context, including config removal.
+Preserve origin in bounded, cycle-bound pending cursor records. Private cursor
+schema `1.1` carries project context, while validated legacy
+`1.0` string cursors remain readable and are upgraded on the next write. Older
+AuraScan binaries refuse `1.1` cursors rather than widening their boundary.
+Revalidate references on every scan and continuation. Refuse credential-file references and outside-project paths
+without opening them. Do not normalize away parent components before checking
+symlinks; parent traversal and config/resource links remain manual-only.
+Deferred findings attached to a resource must not borrow the config's line
+number. Keep unsafe raw reference values out of reports and manifest imports.
+Instruction analysis evidence advances to `1.3`; the report/AI contracts remain
+unchanged.
+
 Discovery must prune cache, trash, VCS, dependency, and virtual-environment
 trees, and bound directories, entries, candidates, file size, and elapsed time.
 Persist a continuation cursor when the root is too large for one run. Candidate
@@ -1185,3 +1220,21 @@ Future AUR-helper integration should prefer configuring the helper's makepkg
 command, when supported, to call `aurascan-makepkg`. Future pacman hook context
 providers must prove transaction operation, installed state, package identity,
 and version information before they can participate in smart update decisions.
+
+## CodeWhale advisory and Git argument boundaries
+
+Installed-version exposure uses only captured exact package names and bounded
+Arch version metadata. The verified CodeWhale/codewhale-tui range is
+`>=0.8.41,<0.8.64`; documented `codewhale-bin` and legacy `deepseek-tui-bin`
+aliases are explicit. Preserve each legacy advisory lower bound and mark the
+ambiguous `0.8.41` rename/ecosystem boundary unresolved. Never turn a version
+match into a campaign, malicious-package, exploitation or current-AUR claim.
+All advisory transports and installed-agent execution remain unnecessary.
+
+Source Git branch/tag fragments are URL-decoded before transport and must not
+start with `-`. Reject option-shaped values before clone or checkout; separate
+argv elements do not prevent Git option interpretation, and checkout's `--`
+selects paths rather than revisions. Test through an intercepted trusted
+runner with inert paths. Package rule version `1.6.1` invalidates older cached
+decisions; this shared acquisition-boundary change requires a recovery-bearing
+future release.

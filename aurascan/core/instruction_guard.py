@@ -17,20 +17,23 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
+from aurascan.core.agent_config import AgentConfigError, parse_codewhale_config
+
 
 INSTRUCTION_GUARD_SCHEMA_VERSION = "1.0"
 INSTRUCTION_GUARD_RULE_VERSION = "1.0"
 # Keep the AI alias binding stable so persisted 1.1 evidence explanations stay
 # addressable.  Location-analysis changes use their own cache version below.
 INSTRUCTION_GUARD_EVIDENCE_VERSION = "1.1"
-INSTRUCTION_GUARD_ANALYSIS_EVIDENCE_VERSION = "1.2"
+INSTRUCTION_GUARD_ANALYSIS_EVIDENCE_VERSION = "1.3"
 REPORT_SCHEMA = "instruction_guard_report/1.0"
 MANIFEST_SCHEMA = "instruction_guard_manifest/1.0"
 AI_JOB_SCHEMA = "instruction_guard_ai_job/1.0"
 ALERT_SCHEMA = "instruction_guard_alert/1.0"
 RECEIPT_SCHEMA = "instruction_guard_disable_receipt/1.0"
 ENROLLMENT_TRANSACTION_SCHEMA = "instruction_guard_enrollment_transaction/1.0"
-CURSOR_SCHEMA = "instruction_guard_cursor/1.0"
+CURSOR_SCHEMA = "instruction_guard_cursor/1.1"
+LEGACY_CURSOR_SCHEMA = "instruction_guard_cursor/1.0"
 LATEST_SCHEMA = "instruction_guard_latest/1.0"
 # A complete bounded inventory can legitimately contain 5,000 control files.
 # Keep a hard read/write ceiling, but size it for that documented bound instead
@@ -96,6 +99,7 @@ CONFIG_NAMES = {
     "manifest.json",
 }
 CLAUDE_CONTROL_DIRS = {"rules", "commands", "agents", "memory", "hooks", "plugins"}
+PROJECT_CONFIG_DIRS = {".codewhale", ".deepseek"}
 TEXT_SUFFIXES = {
     ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".sh", ".bash",
     ".zsh", ".fish", ".py", ".js", ".ts", ".mjs", ".cjs",
@@ -367,6 +371,8 @@ class _Discovered:
     identity_path: str = ""
     symlink_state: str = "regular"
     discovery_findings: List[InstructionFinding] = field(default_factory=list)
+    project_config: str = ""
+    project_line: int = 0
 
 
 @dataclass
@@ -1563,6 +1569,8 @@ def _classify_candidate(relative: str, *, all_markdown: bool) -> Optional[Tuple[
     suffix = Path(name).suffix.lower()
     if name in GENERIC_NAMES:
         return "standalone-instruction", True, True
+    if len(parts) >= 2 and parts[-2] in PROJECT_CONFIG_DIRS and name == "config.toml":
+        return "codewhale-project-configuration", True, False
     if name == ".claude.json":
         return "claude-configuration", True, False
     if name in {".mcp.json", "mcp.json"}:
@@ -1625,7 +1633,7 @@ def _classify_conventional_skill_resource(
 def _is_agent_control_directory(path: Path, root: Path) -> bool:
     relative = _relative_raw(path, root)
     parts = tuple(part for part in relative.split("/") if part)
-    if ".claude" in parts:
+    if ".claude" in parts or any(part in PROJECT_CONFIG_DIRS for part in parts):
         return True
     for index, part in enumerate(parts):
         if part not in {"scripts", "references", "assets"}:
@@ -1640,6 +1648,52 @@ def _is_agent_control_directory(path: Path, root: Path) -> bool:
     return False
 
 
+def _pending_candidate_relative(value: object) -> str:
+    if isinstance(value, dict):
+        if set(value) != {"path", "project_config", "line"}:
+            raise ValueError("corrupt project instruction continuation")
+        config = value["project_config"]
+        line = value["line"]
+        if (
+            not isinstance(config, str) or not config or len(config) > 4096
+            or DISPLAY_UNSAFE_RE.search(config) or Path(config).is_absolute()
+            or ".." in Path(config).parts
+            or _classify_candidate(config, all_markdown=False)
+            != ("codewhale-project-configuration", True, False)
+            or isinstance(line, bool) or not isinstance(line, int)
+            or not 0 <= line <= MAX_EVIDENCE_LINE
+        ):
+            raise ValueError("corrupt project instruction continuation")
+        relative = value["path"]
+    else:
+        relative = value
+    if (
+        not isinstance(relative, str) or not relative or len(relative) > 4096
+        or CONTROL_RE.search(relative) or Path(relative).is_absolute()
+        or ".." in Path(relative).parts
+    ):
+        raise ValueError("corrupt Instruction Guard pending-candidate cursor")
+    if isinstance(value, dict):
+        try:
+            Path(relative).relative_to(Path(value["project_config"]).parent.parent)
+        except ValueError:
+            raise ValueError("project instruction continuation leaves its workspace")
+    return relative
+
+
+def _coalesce_pending_candidates(values: Sequence[object]) -> List[object]:
+    by_path: Dict[str, object] = {}
+    for value in values:
+        relative = _pending_candidate_relative(value)
+        old = by_path.get(relative)
+        if old is None or isinstance(value, dict) and (
+            not isinstance(old, dict)
+            or len(Path(value["project_config"]).parts) > len(Path(old["project_config"]).parts)
+        ):
+            by_path[relative] = value
+    return list(by_path.values())
+
+
 def _validate_cursor_structure(data: Mapping[str, object]) -> None:
     work = data.get("work")
     legacy = False
@@ -1648,7 +1702,7 @@ def _validate_cursor_structure(data: Mapping[str, object]) -> None:
         legacy = True
     pending = data.get("pending_candidates", [])
     if (
-        data.get("schema") != CURSOR_SCHEMA
+        data.get("schema") not in {CURSOR_SCHEMA, LEGACY_CURSOR_SCHEMA}
         or not isinstance(data.get("root_id"), str)
         or not re.fullmatch(r"[a-f0-9]{24}", str(data.get("root_id")))
         or not isinstance(data.get("cycle_id"), str)
@@ -1693,16 +1747,10 @@ def _validate_cursor_structure(data: Mapping[str, object]) -> None:
             )
         ):
             raise ValueError("corrupt Instruction Guard continuation work item")
-    for relative in pending:
-        if (
-            not isinstance(relative, str)
-            or not relative
-            or len(relative) > 4096
-            or CONTROL_RE.search(relative)
-            or Path(relative).is_absolute()
-            or ".." in Path(relative).parts
-        ):
-            raise ValueError("corrupt Instruction Guard pending-candidate cursor")
+    for value in pending:
+        if data.get("schema") == LEGACY_CURSOR_SCHEMA and not isinstance(value, str):
+            raise ValueError("corrupt legacy Instruction Guard pending-candidate cursor")
+        _pending_candidate_relative(value)
     if not work and not pending:
         raise ValueError("corrupt empty Instruction Guard continuation cursor")
 
@@ -1712,10 +1760,10 @@ def _cursor_directories(
     root_id: str,
     root: Path,
     all_markdown: bool,
-) -> Optional[Tuple[List[Tuple[Path, int, int]], List[str], str, int]]:
+) -> Optional[Tuple[List[Tuple[Path, int, int]], List[object], str, int]]:
     mode = "all-markdown" if all_markdown else "agent-surfaces"
     path = state_root / "cursors" / f"cursor-{root_id}-{mode}.json"
-    data = _load_private_json(path, required_schema=CURSOR_SCHEMA)
+    data = _load_private_json(path)
     if not data:
         return None
     _validate_cursor_structure(data)
@@ -1766,7 +1814,7 @@ def _cursor_directories(
         raise ValueError("corrupt Instruction Guard pending-candidate cursor")
     pending = []
     for value in raw_pending:
-        relative = str(value or "")
+        relative = _pending_candidate_relative(value)
         candidate = Path(os.path.abspath(str(root / relative)))
         if (
             not relative
@@ -1775,11 +1823,11 @@ def _cursor_directories(
             or not _path_inside(candidate, root)
         ):
             raise ValueError("corrupt Instruction Guard pending-candidate cursor")
-        if relative not in pending:
-            pending.append(relative)
+        if value not in pending:
+            pending.append(value)
     if not result and not pending:
         raise ValueError("corrupt empty Instruction Guard continuation cursor")
-    return result, pending, str(data.get("cycle_id")), int(data.get("sequence"))
+    return result, _coalesce_pending_candidates(pending), str(data.get("cycle_id")), int(data.get("sequence"))
 
 
 def _write_cursor(
@@ -1788,12 +1836,13 @@ def _write_cursor(
     root: Path,
     queue: Sequence[Tuple[Path, int, int]],
     all_markdown: bool,
-    pending_candidates: Sequence[str] = (),
+    pending_candidates: Sequence[object] = (),
     cycle_id: str = "",
     sequence: int = 0,
 ) -> None:
     work = []
     seen = set()
+    pending_candidates = _coalesce_pending_candidates(pending_candidates)
     if len(queue) > MAX_CURSOR_WORK_ITEMS or len(pending_candidates) > MAX_CURSOR_PENDING_ITEMS:
         raise ValueError("Instruction Guard continuation exceeds its lossless cursor bound")
     for path, _depth, offset in queue:
@@ -1812,9 +1861,10 @@ def _write_cursor(
                 ]
             work.append(item)
     pending = []
-    for relative in pending_candidates:
-        if relative not in pending:
-            pending.append(relative)
+    for value in pending_candidates:
+        _pending_candidate_relative(value)
+        if value not in pending:
+            pending.append(value)
     if not work and not pending:
         raise ValueError("cannot persist an empty Instruction Guard continuation")
     _validate_record_id(cycle_id, "cycle")
@@ -1901,6 +1951,7 @@ def _discover_candidates(
     deadline: float,
     *,
     all_markdown: bool,
+    global_configs: Sequence[Path] = (),
 ) -> Tuple[List[_Discovered], List[InstructionFinding], List[str], bool, bool, bool, str, int]:
     state_absolute = Path(os.path.realpath(str(state_root)))
     cursor = _cursor_directories(state_root, root_id, root, all_markdown)
@@ -1932,8 +1983,21 @@ def _discover_candidates(
             findings.append(finding)
 
     while pending_candidates and len(candidates) < limits.max_candidates:
-        relative = pending_candidates.pop(0)
-        imported, finding = _resolve_import(relative, parent=root, root=root)
+        pending_value = pending_candidates.pop(0)
+        relative = _pending_candidate_relative(pending_value)
+        project_config = pending_value["project_config"] if isinstance(pending_value, dict) else ""
+        project_line = pending_value["line"] if isinstance(pending_value, dict) else 0
+        if project_config:
+            imported, finding = _resolve_codewhale_instruction(
+                str(root / relative), project_line,
+                config_path=root / project_config, root=root,
+            )
+            if finding:
+                # The pending candidate is the resource, not the TOML file
+                # whose declaration supplied this cursor's source line.
+                finding.evidence_locations = []
+        else:
+            imported, finding = _resolve_import(relative, parent=root, root=root, literal=True)
         if imported is not None:
             candidates.append(imported)
         else:
@@ -1945,6 +2009,8 @@ def _discover_candidates(
                 disable_eligible=False,
                 identity_path=relative,
                 discovery_findings=[finding] if finding else [],
+                project_config=project_config,
+                project_line=project_line,
             ))
     if pending_candidates:
         truncated = True
@@ -2049,6 +2115,8 @@ def _discover_candidates(
                     break
                 entries += 1
                 entry_path = directory / entry.name
+                if entry_path in global_configs:
+                    continue  # Credential-bearing user configuration is not a project overlay.
                 relative_raw = _relative_raw(entry_path, root)
                 if not relative_raw:
                     continue
@@ -2064,6 +2132,8 @@ def _discover_candidates(
                     )
                     continue
                 if is_link:
+                    if any(entry_path == path.parent for path in global_configs):
+                        continue
                     classification = (
                         _classify_candidate(relative_raw, all_markdown=all_markdown)
                         or _classify_conventional_skill_resource(relative_raw, root)
@@ -2077,7 +2147,14 @@ def _discover_candidates(
                                 "AuraScan did not traverse a symlinked control directory and requires manual review.",
                             ))
                         continue
-                    resolved, symlink_state, finding = _resolve_file_symlink(entry_path, root)
+                    link_root = (
+                        entry_path.parent.parent
+                        if classification[0] == "codewhale-project-configuration"
+                        else root
+                    )
+                    resolved, symlink_state, finding = _resolve_file_symlink(entry_path, link_root)
+                    if classification[0] == "codewhale-project-configuration" and not finding:
+                        resolved, symlink_state, finding = _project_link_refusal(resolved)
                     discovered = _Discovered(
                         path=resolved or entry_path,
                         relative_path=_sanitize_relative(relative_raw),
@@ -2338,8 +2415,9 @@ def _resolve_import(
     *,
     parent: Path,
     root: Path,
+    literal: bool = False,
 ) -> Tuple[Optional[_Discovered], Optional[InstructionFinding]]:
-    candidate_text = value.split("#", 1)[0].strip()
+    candidate_text = value if literal else value.split("#", 1)[0].strip()
     if not candidate_text or "://" in candidate_text:
         return None, None
     if candidate_text.startswith("~/"):
@@ -2368,7 +2446,12 @@ def _resolve_import(
     symlink_state = "regular"
     target = absolute
     if stat.S_ISLNK(metadata.st_mode):
-        target, symlink_state, finding = _resolve_file_symlink(absolute, root)
+        classification = _classify_candidate(_relative_raw(absolute, root), all_markdown=False)
+        project_config = classification == ("codewhale-project-configuration", True, False)
+        link_root = absolute.parent.parent if project_config else root
+        target, symlink_state, finding = _resolve_file_symlink(absolute, link_root)
+        if project_config and not finding:
+            target, symlink_state, finding = _project_link_refusal(target)
         if finding or target is None:
             return None, finding
         metadata = target.lstat()
@@ -2416,6 +2499,177 @@ def _decode_candidate(data: bytes) -> Tuple[str, str]:
         return data.decode("utf-8"), ""
     except UnicodeDecodeError:
         return "", "invalid UTF-8 content was not analyzed"
+
+
+def _codewhale_config_analysis(
+    text: str,
+) -> Tuple[List[InstructionFinding], Tuple[Tuple[str, int], ...]]:
+    try:
+        config = parse_codewhale_config(text)
+    except AgentConfigError as exc:
+        return [_finding(
+            "IG-CONFIG-INVALID-TOML",
+            "MEDIUM",
+            "An agent project configuration could not be inspected completely.",
+            "The TOML is invalid, unsupported by the bounded reader, or exceeds its limits; manual review is required.",
+            ["invalid-configuration"],
+            line_numbers=[exc.line_number] if exc.line_number else [],
+        )], ()
+    findings = []
+    if config.allow_shell:
+        findings.append(_finding(
+            "IG-CONFIG-PROJECT-SHELL-ENABLE",
+            "HIGH",
+            "A repository-local agent configuration requests shell tools.",
+            "Project-controlled shell enablement requires review against user-owned policy. Fixed CodeWhale versions ignore this override; this match does not establish execution or an affected installed version.",
+            ["broad-tool-grant"],
+            line_numbers=[config.allow_shell_line],
+        ))
+    return findings, config.instructions
+
+
+def _credential_instruction_path(path: Path) -> bool:
+    """Recognize concrete credential-file paths without inspecting their bytes."""
+    parts = path.parts
+    name = path.name
+    return bool(
+        name in {".env", ".netrc", ".npmrc", ".pypirc"}
+        or (".ssh" in parts and name.startswith("id_") and not name.endswith(".pub"))
+        or (".aws" in parts and name == "credentials")
+        or ("gcloud" in parts and name == "application_default_credentials.json")
+        or (".codex" in parts and name == "auth.json")
+    )
+
+
+def _containing_project_config(
+    path: Path, root: Path, deadline: float, user_home: Optional[Path] = None,
+) -> str:
+    """Narrow reads before a project config's discovery page is processed.
+
+    Presence grants no authority and does not imply a declared import. Never
+    open config contents or traverse a linked config directory here.
+    """
+    try:
+        parts = path.parent.relative_to(root).parts
+    except ValueError:
+        return ""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    found = ""
+    parent = root
+    try:
+        directory_fd = os.open(str(root), flags)
+    except OSError:
+        return ""
+    try:
+        for depth in range(len(parts) + 1):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("project boundary inspection reached its deadline")
+            for directory in (() if parent == user_home else sorted(PROJECT_CONFIG_DIRS)):
+                try:
+                    config_fd = os.open(directory, flags, dir_fd=directory_fd)
+                except OSError:
+                    continue
+                try:
+                    metadata = os.stat("config.toml", dir_fd=config_fd, follow_symlinks=False)
+                    if stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                        found = _relative_raw(parent / directory / "config.toml", root)
+                        break
+                except OSError:
+                    pass
+                finally:
+                    os.close(config_fd)
+            if depth == len(parts):
+                break
+            try:
+                next_fd = os.open(parts[depth], flags, dir_fd=directory_fd)
+            except OSError:
+                break  # Never probe metadata beyond an unsafe parent.
+            os.close(directory_fd)
+            directory_fd = next_fd
+            parent = parent / parts[depth]
+    finally:
+        os.close(directory_fd)
+    return found
+
+
+def _project_link_refusal(
+    target: Optional[Path],
+) -> Tuple[None, str, InstructionFinding]:
+    if target is not None and _credential_instruction_path(target):
+        return None, "unsafe-target", _finding(
+            "IG-CONFIG-PROJECT-INSTRUCTION-ESCAPE", "HIGH",
+            "An agent project control link selects a credential file.",
+            "AuraScan refused the credential target without reading it; disclosure is not established.",
+            ["integrity", "credential-access"],
+        )
+    return None, "inside-root", _finding(
+        "IG-INTEGRITY-PROJECT-LINK-UNINSPECTED", "MEDIUM",
+        "An agent project control reference is a symlink.",
+        "CodeWhale configuration and imported file links require manual review; AuraScan did not read the linked bytes.",
+        ["integrity"],
+    )
+
+
+def _resolve_codewhale_instruction(
+    value: str,
+    line: int,
+    *,
+    config_path: Path,
+    root: Path,
+    parent: Optional[Path] = None,
+) -> Tuple[Optional[_Discovered], Optional[InstructionFinding]]:
+    # CodeWhale resolves these paths from its workspace, not the config's
+    # hidden directory or the broader home selected for an AuraScan scan.
+    workspace = config_path.parent.parent
+    if not value.strip():
+        return None, None  # Upstream ignores empty/whitespace-only entries.
+    if len(value) > 4096 or DISPLAY_UNSAFE_RE.search(value) or "://" in value:
+        return None, _finding(
+            "IG-CONFIG-INVALID-INSTRUCTION-PATH",
+            "MEDIUM",
+            "An agent configuration contains an unsupported instruction path.",
+            "AuraScan did not interpret controls or network references as local instruction paths.",
+            ["invalid-configuration"],
+            line_numbers=[line],
+        )
+    target = Path(os.path.abspath(str((parent or workspace) / value)))
+    sensitive = _credential_instruction_path(target)
+    if value.startswith("~") or not _path_inside(target, workspace) or sensitive:
+        return None, _finding(
+            "IG-CONFIG-PROJECT-INSTRUCTION-ESCAPE",
+            "HIGH",
+            "An agent project configuration references instructions outside its content boundary.",
+            "The reference leaves the containing workspace or selects a credential file. AuraScan did not read that target; the reference does not prove disclosure or exploitation.",
+            ["integrity"] + (["credential-access"] if sensitive else []),
+            line_numbers=[line],
+        )
+    if ".." in Path(value).parts:
+        # Do not discard a symlink/../ component before the no-follow check.
+        return None, _finding(
+            "IG-CONFIG-INVALID-INSTRUCTION-PATH", "MEDIUM",
+            "An agent instruction path requires ambiguous parent traversal.",
+            "AuraScan refused parent components rather than normalize away a potentially symlinked directory.",
+            ["invalid-configuration"], line_numbers=[line],
+        )
+    imported, finding = _resolve_import(value, parent=parent or workspace, root=workspace, literal=True)
+    if finding:
+        finding.evidence_locations, finding.evidence_truncated = _locations_from_lines(
+            [line], finding.behavior_families,
+        )
+        return None, finding
+    if imported:
+        if imported.symlink_state != "regular":
+            _, _, finding = _project_link_refusal(imported.path)
+            finding.evidence_locations, finding.evidence_truncated = _locations_from_lines(
+                [line], finding.behavior_families,
+            )
+            return None, finding
+        relative = _relative_raw(target, root)
+        imported.relative_path = _sanitize_relative(relative)
+        imported.identity_path = relative
+        imported.project_config = _relative_raw(config_path, root)
+        imported.project_line = line
+    return imported, None
 
 
 def _looks_inert_line(line: str, _clause_depth: int = 0) -> bool:
@@ -3575,6 +3829,8 @@ def _json_config_findings(text: str, surface: str) -> List[InstructionFinding]:
 
 
 def _analyze_text(text: str, surface: str) -> List[InstructionFinding]:
+    if surface == "codewhale-project-configuration":
+        return _codewhale_config_analysis(text)[0]
     if surface in {"claude-configuration", "mcp-manifest", "plugin-manifest"}:
         # JSON metadata strings are not active prose. Analyze only executable
         # configuration fields and grants structurally so an unrelated
@@ -3958,6 +4214,7 @@ def _manifest_entry(
     old: Optional[Mapping[str, object]],
     *,
     cycle_id: str = "",
+    project_scoped: bool = False,
 ) -> Dict[str, object]:
     approved_hash = ""
     approval_binding = ""
@@ -4002,6 +4259,7 @@ def _manifest_entry(
         "imports": list(imports)[:128],
         "analysis_rule_version": INSTRUCTION_GUARD_RULE_VERSION,
         "analysis_evidence_version": INSTRUCTION_GUARD_ANALYSIS_EVIDENCE_VERSION,
+        "analysis_project_scoped": project_scoped,
         "analysis_findings": [
             finding.to_dict()
             for finding in candidate.findings
@@ -5078,6 +5336,10 @@ def scan_instruction_files(
 ) -> InstructionReport:
     scan_started = time.monotonic()
     selected_root, root_metadata = _validate_root(Path(root))
+    source_env = os.environ if env is None else env
+    home_value = source_env.get("HOME", "")
+    user_home = Path(os.path.abspath(home_value)) if home_value and os.path.isabs(home_value) else Path.home()
+    global_configs = tuple(user_home / name / "config.toml" for name in PROJECT_CONFIG_DIRS)
     selected_state = _state_path(state_root or default_instruction_guard_state_root(env))
     if _path_inside(selected_root, selected_state):
         raise ValueError("private state root must not contain the scan root")
@@ -5237,6 +5499,7 @@ def scan_instruction_files(
         selected_limits,
         deadline,
         all_markdown=all_markdown,
+        global_configs=global_configs,
     )
     report = InstructionReport(
         report_id=_new_id("report", root_id),
@@ -5282,7 +5545,29 @@ def scan_instruction_files(
         ))
         report.notes.append("An uncommitted continuation page was discarded and restarted from the root.")
     seen_file_ids: Set[str] = set()
+    # Resolve project declarations before independently discovered Markdown
+    # when both are on this page (including --all-markdown content-only files).
+    discovered.sort(key=lambda item: item.surface != "codewhale-project-configuration")
     queued_paths: Set[str] = {item.identity_path or item.relative_path for item in discovered}
+
+    def queue_project_resource(imported_item: _Discovered) -> None:
+        identity = imported_item.identity_path
+        if identity not in queued_paths:
+            queued_paths.add(identity)
+            discovered.append(imported_item)
+            return
+        for existing in discovered:
+            if (existing.identity_path or existing.relative_path) != identity:
+                continue
+            # A concrete declared import upgrades content-only discovery to
+            # baseline review and carries its boundary into recursive reads.
+            existing.baseline = True
+            if existing.surface == "other-markdown":
+                existing.surface = imported_item.surface
+            if not existing.project_config or len(Path(imported_item.project_config).parts) > len(Path(existing.project_config).parts):
+                existing.project_config = imported_item.project_config
+                existing.project_line = imported_item.project_line
+            break
     new_entries: Dict[str, object] = {}
     index = 0
 
@@ -5293,6 +5578,24 @@ def scan_instruction_files(
     ):
         item = discovered[index]
         index += 1
+        try:
+            nearby_config = _containing_project_config(
+                selected_root / (item.identity_path or item.relative_path), selected_root, deadline, user_home,
+            )
+        except TimeoutError:
+            index -= 1  # Preserve this unread candidate in the next committed page.
+            report.findings.append(_discovery_finding(
+                "IG-INTEGRITY-ANALYSIS-TRUNCATED", "MEDIUM",
+                "Project-boundary inspection reached the scan deadline.",
+                "AuraScan retained the unread candidate for continuation rather than assuming a broader read boundary.",
+            ))
+            break
+        if nearby_config and (
+            not item.project_config
+            or len(Path(nearby_config).parts) > len(Path(item.project_config).parts)
+        ):
+            item.project_config = nearby_config
+            item.project_line = 0  # Boundary context, not an observed declaration.
         file_id = _candidate_id(root_id, item.identity_path or item.relative_path)
         seen_file_ids.add(file_id)
         for finding in item.discovery_findings:
@@ -5312,6 +5615,11 @@ def scan_instruction_files(
         can_reuse = bool(
             old
             and metadata
+            # Project instruction references must be decoded with physical
+            # locations and revalidated against their workspace on every scan.
+            and item.surface != "codewhale-project-configuration"
+            and not item.project_config
+            and not old.get("analysis_project_scoped", False)
             # A durable enrollment marker means private trust state may be
             # only partly committed.  Recovery must re-read and rehash every
             # candidate before publishing a coherent report and removing the
@@ -5330,6 +5638,7 @@ def scan_instruction_files(
             and not trust_safety_findings
         )
         imports: List[str] = []
+        project_imports: Tuple[Tuple[str, int], ...] = ()
         if can_reuse:
             sha256 = str(old.get("sha256") or "")
             metadata_dict = _metadata_dict(metadata)
@@ -5357,7 +5666,21 @@ def scan_instruction_files(
             )
             imports = _bounded_strings(old.get("imports"), 128, 4096)
         else:
-            read = _safe_read_candidate(item.path, selected_root, selected_limits)
+            read_root = (
+                (selected_root / item.project_config).parent.parent
+                if item.project_config
+                else (selected_root / (item.identity_path or item.relative_path)).parent.parent
+                if item.surface == "codewhale-project-configuration"
+                else selected_root
+            )
+            if item.path in global_configs or selected_root / (item.identity_path or item.relative_path) in global_configs:
+                read = _ReadResult(b"", {}, "user-global agent authentication configuration is outside project review")
+            elif item.project_config and (
+                item.symlink_state != "regular" or _credential_instruction_path(item.path)
+            ):
+                read = _ReadResult(b"", {}, "project control link or credential target was not read")
+            else:
+                read = _safe_read_candidate(item.path, read_root, selected_limits)
             if read.error:
                 candidate = _candidate_from_read_error(item, file_id, read)
                 report.candidates.append(candidate)
@@ -5390,11 +5713,11 @@ def scan_instruction_files(
                         cycle_id=report.cycle_id,
                     )
                 continue
-            findings = (
-                list(item.discovery_findings)
-                + _analyze_text(text, item.surface)
-                + trust_safety_findings
-            )
+            if item.surface == "codewhale-project-configuration":
+                content_findings, project_imports = _codewhale_config_analysis(text)
+            else:
+                content_findings = _analyze_text(text, item.surface)
+            findings = list(item.discovery_findings) + content_findings + trust_safety_findings
             for finding in findings:
                 finding.file_id = file_id
             metadata_dict = read.metadata
@@ -5471,7 +5794,7 @@ def scan_instruction_files(
                 content_risk=_risk_for(findings),
                 findings=findings,
             )
-            if item.baseline and item.surface != "other-markdown":
+            if item.baseline and item.surface not in {"other-markdown", "codewhale-project-configuration"}:
                 imports, imports_truncated = _extract_imports(text)
                 if imports_truncated:
                     finding = _finding(
@@ -5488,25 +5811,73 @@ def scan_instruction_files(
                 imports = []
 
         report.candidates.append(candidate)
-        for imported in imports:
-            imported_item, import_finding = _resolve_import(
-                imported,
-                parent=(selected_root / _decode_locator(candidate.locator)).parent,
+        for imported, import_line in project_imports:
+            imported_item, import_finding = _resolve_codewhale_instruction(
+                imported, import_line,
+                config_path=selected_root / _decode_locator(candidate.locator),
                 root=selected_root,
             )
+            if import_finding:
+                import_finding.file_id = file_id
+                candidate.findings.append(import_finding)
+            elif imported_item:
+                queue_project_resource(imported_item)
+        # Project imports are re-parsed instead of storing raw configuration
+        # paths (which may contain credential locations) in the manifest.
+        for imported in imports:
+            if item.project_config:
+                imported_item, import_finding = _resolve_codewhale_instruction(
+                    imported.split("#", 1)[0].strip(), item.project_line,
+                    config_path=selected_root / item.project_config,
+                    parent=(selected_root / _decode_locator(candidate.locator)).parent,
+                    root=selected_root,
+                )
+                # The saved line belongs to the originating TOML, not this
+                # resource. Do not attribute that line to a different file.
+                if import_finding:
+                    import_finding.evidence_locations = []
+            else:
+                imported_item, import_finding = _resolve_import(
+                    imported,
+                    parent=(selected_root / _decode_locator(candidate.locator)).parent,
+                    root=selected_root,
+                )
             if import_finding:
                 import_finding.file_id = file_id
                 candidate.findings.append(import_finding)
                 candidate.content_risk = _risk_for(candidate.findings)
                 continue
             imported_identity = imported_item.identity_path if imported_item else ""
-            if imported_item and imported_identity not in queued_paths:
+            if imported_item and item.project_config:
+                queue_project_resource(imported_item)
+            elif imported_item and imported_identity not in queued_paths:
                 queued_paths.add(imported_identity)
                 discovered.append(imported_item)
+        if item.project_config:
+            imports = []
         deduped_candidate_findings: List[InstructionFinding] = []
         candidate_rule_ids: Set[str] = set()
         for candidate_finding in candidate.findings:
             if candidate_finding.rule_id in candidate_rule_ids:
+                if item.project_config or item.surface == "codewhale-project-configuration":
+                    previous = next(f for f in deduped_candidate_findings if f.rule_id == candidate_finding.rule_id)
+                    locations = previous.evidence_locations + candidate_finding.evidence_locations
+                    previous.behavior_families = sorted(set(previous.behavior_families + candidate_finding.behavior_families))
+                    line_roles: Dict[int, Set[str]] = {}
+                    bounded = False
+                    for location in locations:
+                        start = int(location["start_line"])
+                        end = int(location["end_line"])
+                        bounded = bounded or end - start >= 256
+                        for line in range(start, min(end + 1, start + 256)):
+                            line_roles.setdefault(line, set()).update(location["behavior_families"])
+                    previous.evidence_locations, clipped = _locations_from_line_families(
+                        line_roles, previous.behavior_families,
+                    )
+                    previous.evidence_truncated = bool(
+                        previous.evidence_truncated or candidate_finding.evidence_truncated
+                        or bounded or clipped
+                    )
                 continue
             candidate_rule_ids.add(candidate_finding.rule_id)
             deduped_candidate_findings.append(candidate_finding)
@@ -5518,6 +5889,7 @@ def scan_instruction_files(
                 imports,
                 None if binding_changed else old,
                 cycle_id=report.cycle_id,
+                project_scoped=bool(item.project_config),
             )
 
     if index < len(discovered):
@@ -5539,11 +5911,15 @@ def scan_instruction_files(
         pending_overflow = False
         for pending_item in discovered[index:]:
             relative = pending_item.identity_path or pending_item.relative_path
-            if relative not in cursor_pending:
+            pending_value: object = (
+                {"path": relative, "project_config": pending_item.project_config, "line": pending_item.project_line}
+                if pending_item.project_config else relative
+            )
+            if pending_value not in cursor_pending:
                 if len(cursor_pending) >= MAX_CURSOR_PENDING_ITEMS:
                     pending_overflow = True
                     break
-                cursor_pending.append(relative)
+                cursor_pending.append(pending_value)
         if pending_overflow:
             overflow_finding = _finding(
                 "IG-INTEGRITY-CANDIDATE-OVERFLOW",
@@ -7922,7 +8298,7 @@ def _instruction_guard_status_unlocked(
         if len(cursor_paths) > 100 or len(cycle_paths) > 100 or len(job_paths) > MAX_AI_JOBS or len(receipt_paths) > 10_000:
             raise ValueError("Instruction Guard private state exceeds a status bound")
         for path in cursor_paths:
-            cursor = _load_private_json(path, required_schema=CURSOR_SCHEMA)
+            cursor = _load_private_json(path)
             if cursor is None:
                 raise ValueError("corrupt Instruction Guard continuation cursor")
             _validate_cursor_structure(cursor)

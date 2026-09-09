@@ -19,6 +19,7 @@ from aurascan.core.security_audit import (
     SecurityAuditReport,
     SecurityFinding,
     audit_campaign_exposure,
+    audit_codewhale_exposure,
     audit_hyprland_fixes_exposure,
     build_security_audit,
     bundled_campaign_doctor_status,
@@ -332,6 +333,120 @@ def test_installed_hyprland_fixes_name_alerts_without_claiming_execution():
     assert findings[0].rule_id == "SEC-AUR-HYPRLAND-FIXES-INSTALLED"
     assert findings[0].severity == Severity.HIGH
     assert "cannot prove" in findings[0].why_it_matters
+
+
+@pytest.mark.parametrize("name", ["codewhale", "codewhale-tui", "codewhale-bin"])
+@pytest.mark.parametrize("version", ["0.8.41-1", "0.8.63-2", "3:0.8.50-20.1"])
+def test_codewhale_installed_release_exposure_keeps_epoch_and_pkgrel_separate(name, version):
+    findings = audit_codewhale_exposure({name: version})
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.rule_id == "SEC-CODEWHALE-VULNERABLE-VERSION"
+    assert finding.severity == Severity.HIGH
+    assert finding.category == "upstream_vulnerability"
+    cves = {item.split(";", 1)[0] for item in finding.evidence if item.startswith("CVE-")}
+    assert cves == {
+        "CVE-2026-75856", "CVE-2026-75857", "CVE-2026-75858", "CVE-2026-75859",
+        "CVE-2026-75911", "CVE-2026-75912", "CVE-2026-75913", "CVE-2026-75914", "CVE-2026-75915",
+    }
+    assert "does not establish exploitation" in finding.why_it_matters
+    assert "backports" in finding.why_it_matters
+
+
+@pytest.mark.parametrize("version", ["0.8.40-1", "0.8.64-1", "0.9.12", "1:0.8.64-2", "0.10.0-1"])
+def test_codewhale_versions_outside_verified_ranges_do_not_raise_exposure(version):
+    assert audit_codewhale_exposure({"codewhale": version}) == []
+
+
+@pytest.mark.parametrize("name", ["deepseek-tui", "deepseek-tui-bin"])
+@pytest.mark.parametrize("version,expected", [
+    ("0.3.9-1", set()),
+    ("0.3.10-1", {"75857"}),
+    ("0.3.27-1", {"75857", "75912", "75913"}),
+    ("0.8.5-1", {"75856", "75857", "75912", "75913"}),
+    ("0.8.6-1", {"75856", "75857", "75911", "75912", "75913"}),
+    ("0.8.8-1", {"75856", "75857", "75859", "75911", "75912", "75913"}),
+    ("0.8.32-1", {"75856", "75857", "75859", "75911", "75912", "75913", "75914", "75915"}),
+    ("0.8.33-1", {"75856", "75857", "75858", "75859", "75911", "75912", "75913", "75914", "75915"}),
+    ("0.8.40-1", {"75856", "75857", "75858", "75859", "75911", "75912", "75913", "75914", "75915"}),
+])
+def test_legacy_deepseek_advisories_have_individual_lower_bounds(name, version, expected):
+    findings = audit_codewhale_exposure({name: version})
+
+    actual = {item.split(";", 1)[0][len("CVE-2026-"):]
+              for finding in findings for item in finding.evidence if item.startswith("CVE-")}
+    assert actual == expected
+    if findings:
+        assert "no patched release" in findings[0].recommended_action
+        assert all("<0.8.41" in item for item in findings[0].evidence if item.startswith("CVE-"))
+
+
+@pytest.mark.parametrize("version", ["0.8.41-1", "0.8.49-1", "0.9.12-1"])
+def test_legacy_rename_and_conflicting_ecosystem_boundary_are_unresolved(version):
+    findings = audit_codewhale_exposure({"deepseek-tui": version})
+
+    assert len(findings) == 1
+    assert findings[0].rule_id == "SEC-CODEWHALE-VERSION-UNRESOLVED"
+    assert findings[0].category == "advisory_coverage"
+    assert "ecosystem ranges" in findings[0].summary
+    assert not any(item.startswith("CVE-") for item in findings[0].evidence)
+
+
+@pytest.mark.parametrize("version", [
+    "", "0.8.64rc1-1", "0.8.64-beta.1-1", "0.8.63.r1.gabcdef-1", "0.8.63+patched-1",
+    "v0.8.64-1", "00.8.64-1", "0.8", "-1:0.8.64-1", "1" * 129,
+    "0.8.64\nFAKE_SECRET=example-fixture", None,
+])
+def test_codewhale_unknown_versions_never_report_fixed_or_echo_unsafe_metadata(version):
+    findings = audit_codewhale_exposure({"codewhale": version})
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.rule_id == "SEC-CODEWHALE-VERSION-UNRESOLVED"
+    assert finding.severity == Severity.MEDIUM
+    assert "FAKE_SECRET" not in json.dumps(finding.to_dict())
+    assert not any(item.startswith("installed=") for item in finding.evidence)
+
+
+def test_codewhale_match_requires_exact_captured_package_name():
+    assert audit_codewhale_exposure({
+        "codewhale-docs": "0.8.50-1", "codewhale-git": "0.8.50-1",
+        "deepseek": "0.8.50-1", "other-codewhale": "0.8.50-1",
+    }) == []
+
+
+def test_codewhale_audit_is_offline_and_distinct_from_campaign_or_official_arch_data(tmp_path):
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("installed agent, native tool, or network must not run with injected package evidence")
+
+    report = build_security_audit(
+        root=tmp_path / "root", state_root=tmp_path / "state", home=tmp_path / "home",
+        installed_packages={"codewhale-bin": "0.8.50-1"}, log_paths=[],
+        runner=forbidden, which=forbidden, urlopen=forbidden,
+        include_arch_audit=False, include_host_indicators=False, offline=True,
+    )
+
+    assert len(report.upstream_vulnerability_findings) == 1
+    assert report.campaign_findings == []
+    assert report.official_vulnerability_findings == []
+    assert report.to_dict()["risk_summary"]["upstream_vulnerability_findings"] == 1
+    rendered = report.render_terminal(verbose=True, use_color=False)
+    assert "Treat the matched evidence as an incident" not in rendered
+    assert "verified fixed updates" in rendered
+    assert "user-local npm/Cargo installs" in report.to_json()
+
+
+def test_codewhale_unknown_version_marks_audit_coverage_partial(tmp_path):
+    report = build_security_audit(
+        root=tmp_path / "root", state_root=tmp_path / "state", home=tmp_path / "home",
+        installed_packages={"codewhale": "0.8.64rc1-1"}, log_paths=[],
+        include_arch_audit=False, include_host_indicators=False, offline=True,
+    )
+
+    assert report.status == "partial"
+    assert report.upstream_vulnerability_findings == []
+    assert not report.has_alert
 
 
 def test_pending_hyprland_fixes_package_is_blocking_audit_evidence():

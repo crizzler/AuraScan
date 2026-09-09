@@ -121,6 +121,12 @@ requirements regardless of the agent model.
 
 1. Treat Markdown, JSON, imports, hooks, and skill resources as untrusted data:
    never source, import, render, execute, or traverse symlink directories.
+   Parse CodeWhale/legacy DeepSeek project TOML structurally with the bounded
+   standard-library subset reader. Keep top-level authority changes distinct
+   from quoted examples and table-scoped settings. Exclude the user-global auth
+   configs from project detection and reads. Unsupported TOML is coverage.
+   Preserve each imported resource's project boundary and literal path across
+   continuation and recursive review; never read escaped or credential targets.
 2. Restrict final regular-file targets to the selected root, use no-follow and
    `fstat` validation, detect replacement during reads, and bound enumeration,
    sizes, and elapsed time.

@@ -646,6 +646,16 @@ with independent persistence, privilege, or anti-forensics signals. A match
 proves suspicious code or artifacts were found, not that enrollment or remote
 access succeeded.
 
+Installed-version `security-audit` checks also cover the nine verified CodeWhale
+trust-boundary advisories, using captured package metadata without running an
+installed agent or fetching advisories. CodeWhale versions `>=0.8.41,<0.8.64`
+match the recorded affected range; legacy DeepSeek TUI lower bounds differ by
+advisory. Legacy versions at or above the rename boundary and unsupported
+version spellings are reported as unresolved coverage, not declared fixed.
+Package provenance and unverified backports remain limitations. These findings
+do not establish exploitation or the versions currently available from AUR.
+See the [maintainer advisories](https://github.com/Hmbown/CodeWhale/security/advisories).
+
 ## Agent Instruction Guard
 
 AI-agent control files can influence an assistant every time a project or
@@ -678,7 +688,22 @@ By default AuraScan scans recognized control surfaces under `$HOME`, including
 `AGENTS.md`, `AGENTS.override.md`, `SKILL.md`, `CLAUDE.md`,
 `CLAUDE.local.md`, and Claude rules, commands, agents, skills, memory, settings,
 hooks, MCP/plugin manifests, and text scripts or resources belonging to a
-discovered skill. `--root PATH` selects an explicit root for testing or a
+discovered skill. It also recognizes repository-local `.codewhale/config.toml`
+and legacy `.deepseek/config.toml`. Their mere presence is neutral baseline
+work. The actual user-global `~/.codewhale/config.toml` and
+`~/.deepseek/config.toml` can contain credentials and are excluded from this
+project review; explicit references to them are refused without reading bytes.
+A supported project top-level `allow_shell = true` requests HIGH-severity review
+of project-controlled execution authority. This does not prove execution or an
+affected installed agent; fixed CodeWhale versions ignore the override.
+Instruction references are bounded data, resolved from the containing workspace
+even when the selected scan root is a broader home. Escapes and credential-file
+references are refused without reading their targets. Config/import symlinks,
+ambiguous parent traversal, and unsupported TOML require manual coverage review.
+Nearby project config presence also confines other discovered controls to that
+project before later discovery pages are processed. The reader supports a
+strict TOML subset on Python 3.8+, not every TOML feature.
+`--root PATH` selects an explicit root for testing or a
 deliberate one-shot scan. `--all-markdown` extends content analysis to other
 Markdown files, but those extra files are not added to the integrity baseline.
 `--no-ai` guarantees deterministic-only analysis; one-shot `--ai` requests the

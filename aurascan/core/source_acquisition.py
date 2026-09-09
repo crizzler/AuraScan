@@ -1925,6 +1925,15 @@ class GitSourceFetcher:
         }
         Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
         try:
+            # URL fragments are decoded by the source parser. A separate argv
+            # element still becomes a Git option when it starts with a dash;
+            # reject it before cloning or invoking checkout. Putting it after
+            # checkout's "--" would instead select a path, not a revision.
+            if (
+                ref.fragment_type in {"branch", "tag"}
+                and (ref.fragment_value or "").startswith("-")
+            ):
+                raise ValueError("Git revision cannot be an option")
             _validate_public_remote_url(repo_url, {"https"})
             revalidate_trusted_system_tool(git_tool)
             self.runner(

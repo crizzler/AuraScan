@@ -229,6 +229,15 @@ model choice does not change AuraScan's runtime AI defaults or safety policy.
   and discovered skill resources as untrusted text. Use bounded no-follow
   reads, never traverse symlink directories, and report links or imports that
   escape the selected root instead of following them.
+- Recognize CodeWhale and legacy DeepSeek project TOML only through bounded
+  structural data parsing. Treat shell enablement as a project-authority review
+  request, not proof of execution or an affected installed version. Preserve
+  project-bound literal instruction references across discovery, recursive
+  imports and continuation; refuse credential targets, escapes and unsafe
+  links without reading them. Unsupported syntax is coverage, and clean
+  configuration remains neutral baseline work. Exclude the actual user-global
+  CodeWhale/DeepSeek auth configs from project policy detection and file reads;
+  their shell opt-in is a separate user-owned authority surface.
 - Keep Instruction Guard's deterministic monitor network-isolated. Its AI
   assistant is a separate opt-in, receives only bounded opaque evidence IDs,
   fixed reasons, semantic labels, and deterministic locations, cannot invent

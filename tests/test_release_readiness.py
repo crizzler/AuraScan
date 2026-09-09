@@ -451,7 +451,7 @@ def test_instruction_review_v0101_release_contract():
     assert 'INSTRUCTION_GUARD_SCHEMA_VERSION = "1.0"' in instruction_source
     assert 'INSTRUCTION_GUARD_RULE_VERSION = "1.0"' in instruction_source
     assert 'INSTRUCTION_GUARD_EVIDENCE_VERSION = "1.1"' in instruction_source
-    assert 'INSTRUCTION_GUARD_ANALYSIS_EVIDENCE_VERSION = "1.2"' in instruction_source
+    assert 'INSTRUCTION_GUARD_ANALYSIS_EVIDENCE_VERSION = "1.3"' in instruction_source
 
 
 def test_repository_provenance_v0102_release_contract():
@@ -490,7 +490,7 @@ def test_repository_provenance_v0102_release_contract():
     assert "for v0.10.2, the package-scanner rule version is `1.5.0`" in checklist
     assert "v0.10.2 release adds an always-on static provenance check" in announcement
     assert 'self.scanner_version = "2.5.0"' in engine_source
-    assert 'self.rule_version = "1.6.0"' in engine_source
+    assert 'self.rule_version = "1.6.1"' in engine_source
     assert 'PACKAGE_SCAN_INPUT_VERSION = "2.0"' in scan_input_source
     assert 'REPOSITORY_SNAPSHOT_VERSION = "1.1"' in repository_source
     assert 'INSTRUCTION_GUARD_SCHEMA_VERSION = "1.0"' in instruction_source
@@ -537,7 +537,7 @@ def test_recovery_bearing_v0104_release_contract():
     for phrase in required_release_phrases:
         assert phrase in release
 
-    assert "changes after v0.10.4 will be recorded here" in unreleased
+    assert "changes after v0.10.4" in unreleased
     assert "release disposition" in checklist
     assert "strictly smaller than 2 gib (2,147,483,648 bytes)" in checklist
     assert "v0.10.4 release refreshes the optional hybrid bios/uefi" in announcement

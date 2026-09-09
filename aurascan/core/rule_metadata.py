@@ -36,6 +36,8 @@ class RuleMetadata:
 
 
 RULE_METADATA: Dict[str, RuleMetadata] = {
+    "SEC-CODEWHALE-VULNERABLE-VERSION": RuleMetadata("SEC-CODEWHALE-VULNERABLE-VERSION", RuleCategory.history_supply_chain, Severity.HIGH, "codewhale-version-exposure", 95, True, "finding_fields", "Captured installed package metadata matches a verified CodeWhale advisory range; exploitation is not established."),
+    "SEC-CODEWHALE-VERSION-UNRESOLVED": RuleMetadata("SEC-CODEWHALE-VERSION-UNRESOLVED", RuleCategory.history_supply_chain, Severity.MEDIUM, "codewhale-version-coverage", 75, True, "finding_fields", "CodeWhale package version or legacy ecosystem identity could not be resolved against the verified advisory ranges."),
     "PNPM-VULNERABLE-BUILDCHAIN-001": RuleMetadata("PNPM-VULNERABLE-BUILDCHAIN-001", RuleCategory.deterministic_static, Severity.HIGH, "pnpm-buildchain-exposure", 95, True, "deterministic", "Correlates a pnpm dependency operation with an affected installed package record."),
     "PNPM-BUILDCHAIN-CONTEXT-INCOMPLETE-001": RuleMetadata("PNPM-BUILDCHAIN-CONTEXT-INCOMPLETE-001", RuleCategory.deterministic_static, Severity.HIGH, "pnpm-buildchain-coverage", 95, True, "deterministic", "Cannot establish the installed pnpm context for a relevant dependency operation."),
     "PNPM-LOCKFILE-PATH-ESCAPE-001": RuleMetadata("PNPM-LOCKFILE-PATH-ESCAPE-001", RuleCategory.deterministic_static, Severity.CRITICAL, "pnpm-lockfile-path", 95, True, "deterministic", "Finds traversal or absolute-path components in decoded pnpm package-name fields."),
@@ -427,6 +429,11 @@ _INSTRUCTION_GUARD_RULES = {
     "IG-BEHAVIOR-PRIVILEGE-ABUSE": (Severity.HIGH, "instruction-privilege", 100, "Agent control text requests password capture, sudo-policy weakening, or setuid behavior."),
     "IG-BEHAVIOR-STEALTH-ACTIVATION": (Severity.HIGH, "instruction-stealth", 95, "Automatic activation is correlated with concealment."),
     "IG-CONFIG-BROAD-TOOL-GRANT": (Severity.HIGH, "instruction-tool-grant", 85, "An agent configuration grants unusually broad shell or filesystem access."),
+    "IG-CONFIG-PROJECT-SHELL-ENABLE": (Severity.HIGH, "instruction-tool-grant", 95, "A repository-local CodeWhale configuration requests shell enablement; installed-version exposure is assessed separately."),
+    "IG-CONFIG-PROJECT-INSTRUCTION-ESCAPE": (Severity.HIGH, "instruction-import-integrity", 100, "A project instruction reference leaves its workspace or selects a credential file; the target was not read."),
+    "IG-CONFIG-INVALID-TOML": (Severity.MEDIUM, "instruction-invalid-config", 75, "Agent project TOML is invalid, unsupported, or exceeds bounded inspection."),
+    "IG-CONFIG-INVALID-INSTRUCTION-PATH": (Severity.MEDIUM, "instruction-invalid-config", 75, "An agent project instruction path has unsupported control or network syntax."),
+    "IG-INTEGRITY-PROJECT-LINK-UNINSPECTED": (Severity.MEDIUM, "instruction-import-integrity", 80, "A CodeWhale control or instruction reference is a symlink and requires manual review without reading linked bytes."),
     "IG-CONFIG-INVALID-FRONTMATTER": (Severity.MEDIUM, "instruction-invalid-config", 60, "Agent Markdown has unterminated YAML frontmatter."),
     "IG-CONFIG-INVALID-JSON": (Severity.MEDIUM, "instruction-invalid-config", 70, "An agent configuration is not valid JSON."),
     "IG-CONFIG-INVALID-SHAPE": (Severity.MEDIUM, "instruction-invalid-config", 60, "An agent configuration has an unexpected JSON shape."),

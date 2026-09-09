@@ -1075,7 +1075,7 @@ def test_scan_limits_persist_a_private_continuation_cursor(tmp_path):
     assert report.truncated is True
     cursor_path = next((tmp_path / "state" / "cursors").glob("cursor-*.json"))
     cursor = json.loads(cursor_path.read_text(encoding="utf-8"))
-    assert cursor["schema"] == "instruction_guard_cursor/1.0"
+    assert cursor["schema"] == "instruction_guard_cursor/1.1"
     assert cursor["work"]
     assert stat.S_IMODE(cursor_path.stat().st_mode) == 0o600
 

@@ -38,6 +38,32 @@ PACMAN_HISTORY_RE = re.compile(
     r"(?P<package>\S+)\s+\((?P<version>[^)]*)\)"
 )
 SEVERITY_ORDER = [Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL]
+# Snapshot verified against the maintainer advisories and GitHub's reviewed
+# metadata on 2026-09-09. The two sources agree below the legacy rename but
+# disagree about Rust deepseek-tui 0.8.41; do not invent a patched legacy floor.
+# Each tuple is (CVE, GHSA, inclusive legacy lower bound).
+CODEWHALE_ADVISORY_REVIEWED = "2026-09-09"
+CODEWHALE_ADVISORIES = (
+    ("CVE-2026-75856", "GHSA-6v2g-fpxh-pmmh", (0, 8, 5)),
+    ("CVE-2026-75857", "GHSA-g29h-pfmp-qp9r", (0, 3, 10)),
+    ("CVE-2026-75858", "GHSA-wrj3-vj8c-784f", (0, 8, 33)),
+    ("CVE-2026-75859", "GHSA-62f5-cp2p-vq95", (0, 8, 8)),
+    ("CVE-2026-75911", "GHSA-gx45-xrj5-g6c4", (0, 8, 6)),
+    ("CVE-2026-75912", "GHSA-c6mw-8xh8-gpq6", (0, 3, 27)),
+    ("CVE-2026-75913", "GHSA-7j5w-7r7x-9v27", (0, 3, 27)),
+    ("CVE-2026-75914", "GHSA-w7wx-5q49-r59w", (0, 8, 32)),
+    ("CVE-2026-75915", "GHSA-h539-c7r8-3xq4", (0, 8, 32)),
+)
+# Upstream packaging/aur/PKGBUILD.template installs codewhale-bin, provides
+# codewhale/codewhale-tui, and replaces deepseek-tui-bin. Match only these
+# exact package identities; an arbitrary suffix is not proof of provenance.
+CODEWHALE_PACKAGE_NAMES = ("codewhale", "codewhale-tui", "codewhale-bin")
+CODEWHALE_LEGACY_PACKAGE_NAMES = ("deepseek-tui", "deepseek-tui-bin")
+CODEWHALE_ARCH_VERSION_RE = re.compile(
+    r"(?:(?:0|[1-9][0-9]*):)?"
+    r"(?P<upstream>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))"
+    r"(?:-[0-9]+(?:\.[0-9]+)*)?\Z"
+)
 HYPRLAND_FIXES_INCIDENT_PACKAGE = "hyprland-fixes"
 HYPRLAND_FIXES_INCIDENT_REFERENCE = (
     "https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/"
@@ -208,6 +234,10 @@ class SecurityAuditReport:
     def official_vulnerability_findings(self) -> List[SecurityFinding]:
         return [item for item in self.findings if item.category == "official_vulnerability"]
 
+    @property
+    def upstream_vulnerability_findings(self) -> List[SecurityFinding]:
+        return [item for item in self.findings if item.category == "upstream_vulnerability"]
+
     def to_dict(self) -> Dict[str, object]:
         return {
             "schema_version": self.schema_version,
@@ -219,6 +249,7 @@ class SecurityAuditReport:
                 "requires_attention": self.has_alert,
                 "known_campaign_matches": len(self.campaign_findings),
                 "official_vulnerability_findings": len(self.official_vulnerability_findings),
+                "upstream_vulnerability_findings": len(self.upstream_vulnerability_findings),
                 "clean_proof": False,
             },
             "campaign": self.campaign.to_dict() if self.campaign else None,
@@ -234,6 +265,7 @@ class SecurityAuditReport:
             "limitations": [
                 "A package-name match is exposure evidence, not proof that a particular malicious commit executed.",
                 "No match means no known match in the loaded intelligence; it does not prove system integrity.",
+                "Bundled CodeWhale advisories check captured exact pacman package names and supported release versions only; user-local npm/Cargo installs, custom aliases, backports, and exploitation are not verified.",
                 "AuraScan does not automatically remove packages or clean a potentially compromised host.",
             ],
         }
@@ -268,6 +300,7 @@ class SecurityAuditReport:
                 f"Pacman history records: {self.history_record_count}"
             ),
             f"Official package advisories: {self._arch_audit_summary()}",
+            f"Bundled CodeWhale version advisories: {len(self.upstream_vulnerability_findings)} match(es); reviewed {CODEWHALE_ADVISORY_REVIEWED}",
             "-" * 54,
         ]
         if self.campaign is None:
@@ -301,10 +334,12 @@ class SecurityAuditReport:
         lines.append(
             "\nA clean-looking result means no known match was found; it is not proof that package code or the system is safe."
         )
-        if self.has_alert:
+        if any(item.severity in {Severity.HIGH, Severity.CRITICAL}
+               and item.category not in {"official_vulnerability", "upstream_vulnerability"}
+               for item in self.findings):
             lines.append("Recommended Action: Treat the matched evidence as an incident and investigate from trusted media.")
         elif self.findings:
-            lines.append("Recommended Action: Review the advisory context and apply normal signed repository updates.")
+            lines.append("Recommended Action: Review the advisory context and package provenance, then apply verified fixed updates.")
         else:
             lines.append("Recommended Action: No campaign-specific response is indicated by the available evidence.")
         return "\n".join(lines)
@@ -1117,6 +1152,76 @@ def audit_campaign_exposure(
     return findings
 
 
+def audit_codewhale_exposure(installed_packages: Mapping[str, str]) -> List[SecurityFinding]:
+    """Compare captured package metadata without running the installed agent.
+
+    Only numeric three-component releases have a defined interpretation here.
+    Epoch/pkgrel order Arch revisions, not upstream fixes; no native comparator
+    is needed for this deliberately narrow numeric subset. Never retain an
+    unsupported version string, which may contain control bytes or secrets.
+    """
+    findings: List[SecurityFinding] = []
+    for name in CODEWHALE_PACKAGE_NAMES + CODEWHALE_LEGACY_PACKAGE_NAMES:
+        if name not in installed_packages:
+            continue
+        version = installed_packages[name]
+        match = (CODEWHALE_ARCH_VERSION_RE.fullmatch(version)
+                 if isinstance(version, str) and len(version) <= 128 else None)
+        upstream = tuple(int(part) for part in match.group("upstream").split(".")) if match else None
+        legacy = name in CODEWHALE_LEGACY_PACKAGE_NAMES
+        if upstream is None or (legacy and upstream >= (0, 8, 41)):
+            reason = (
+                "The captured package version is not a supported numeric upstream release."
+                if upstream is None else
+                "The legacy package name is at or beyond the rename boundary; advisory ecosystem ranges and package lineage cannot be resolved from its name and version alone."
+            )
+            findings.append(SecurityFinding(
+                rule_id="SEC-CODEWHALE-VERSION-UNRESOLVED",
+                severity=Severity.MEDIUM,
+                category="advisory_coverage",
+                title=f"{name} needs upstream-version verification.",
+                summary=reason,
+                why_it_matters="Custom or prerelease versions and deprecated package aliases cannot establish whether the bundled CodeWhale fixes are present. This is incomplete advisory coverage, not a vulnerability or exploitation claim.",
+                recommended_action="Verify the installed package's source revision and patch provenance against the upstream advisories; for legacy installations, review migration to a supported CodeWhale release.",
+                package_name=name,
+                evidence=[f"installed-package={name}", f"advisory-reviewed={CODEWHALE_ADVISORY_REVIEWED}"],
+                confidence="high",
+                source="bundled-upstream-advisory",
+            ))
+            continue
+        applicable = [
+            (cve, ghsa, lower)
+            for cve, ghsa, lower in CODEWHALE_ADVISORIES
+            if ((lower <= upstream < (0, 8, 41)) if legacy
+                else ((0, 8, 41) <= upstream < (0, 8, 64)))
+        ]
+        if not applicable:
+            continue
+        evidence = [f"installed={name} {version}", f"advisory-reviewed={CODEWHALE_ADVISORY_REVIEWED}"]
+        for cve, ghsa, lower in applicable:
+            minimum = ".".join(str(part) for part in lower) if legacy else "0.8.41"
+            maximum = "0.8.41" if legacy else "0.8.64"
+            evidence.append(f"{cve}; affected=>={minimum},<{maximum}; https://github.com/Hmbown/CodeWhale/security/advisories/{ghsa}")
+        findings.append(SecurityFinding(
+            rule_id="SEC-CODEWHALE-VULNERABLE-VERSION",
+            severity=Severity.HIGH,
+            category="upstream_vulnerability",
+            title=f"{name} matches known affected CodeWhale version ranges.",
+            summary=f"Captured package version {version} falls within {len(applicable)} bundled upstream advisory range(s) for agent trust-boundary vulnerabilities.",
+            why_it_matters="Affected tools can bypass approval, workspace, or network boundaries when given attacker-controlled inputs. Version evidence does not establish exploitation, a malicious AUR package, or the presence of a triggering project. Distribution backports and the installed binary's provenance have not been verified.",
+            recommended_action=(
+                "Review migration to a supported CodeWhale release containing the 0.8.64 fixes. The legacy Rust advisories list no patched release; do not assume the npm rename boundary establishes a fixed Rust package."
+                if legacy else
+                "Verify package provenance and update to a supported CodeWhale release containing the 0.8.64 fixes before using it with untrusted inputs."
+            ),
+            package_name=name,
+            evidence=evidence,
+            confidence="medium",
+            source="bundled-upstream-advisory",
+        ))
+    return findings
+
+
 def build_security_audit(
     *,
     runner: Callable = subprocess.run,
@@ -1197,11 +1302,14 @@ def build_security_audit(
     elif arch_result.status not in {"ok", "disabled", "skipped_offline"} and arch_result.error:
         notes.append(f"arch-audit did not complete: {arch_result.error}")
 
-    findings = campaign_findings + list(arch_result.findings)
+    upstream_findings = audit_codewhale_exposure(installed)
+    findings = campaign_findings + upstream_findings + list(arch_result.findings)
     status = "ok"
     if campaign is None:
         status = "partial" if arch_result.status == "ok" else "unavailable"
     elif arch_result.status not in {"ok", "disabled"}:
+        status = "partial"
+    if status == "ok" and any(item.category == "advisory_coverage" for item in upstream_findings):
         status = "partial"
     return SecurityAuditReport(
         campaign=campaign,

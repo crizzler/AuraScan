@@ -1202,6 +1202,86 @@ def test_git_fetch_uses_isolated_home_and_disables_credentials(tmp_path: Path, m
     assert all(call[0][0] == "/usr/bin/git" for call in calls)
 
 
+@pytest.mark.parametrize("fragment_type", ["branch", "tag", "commit"])
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "--pathspec-from-file={sentinel}",
+        "%2D%2Dpathspec-from-file={sentinel}",
+        "--output={sentinel}",
+        "--recurse-submodules",
+        "--detach",
+        "-p",
+        "--",
+        "-",
+    ],
+)
+def test_git_fetch_refuses_option_shaped_revisions_before_runner(
+    tmp_path: Path, monkeypatch, fragment_type: str, fragment: str
+):
+    sentinel = tmp_path / "inert-sentinel.txt"
+    sentinel.write_text("inert path data\n", encoding="utf-8")
+    source = (
+        "git+https://example.invalid/repo.git#"
+        f"{fragment_type}={fragment.format(sentinel=sentinel)}"
+    )
+    refs, _ = parse_pkgbuild(f'source=("{source}")\nsha256sums=(SKIP)\n')
+    calls = []
+
+    def fake_runner(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("aurascan.core.source_acquisition.shutil.which", lambda _name: "/usr/bin/git")
+
+    result = GitSourceFetcher(runner=fake_runner).fetch(refs[0], tmp_path)
+
+    assert calls == []
+    expected_rule = (
+        "SOURCE-GIT-COMMIT-NOT-FULL" if fragment_type == "commit" else "SOURCE-GIT-FETCH-FAILED"
+    )
+    assert result.status == ("skipped" if fragment_type == "commit" else "failed")
+    assert result.local_path is None
+    assert any(
+        finding.rule_id == expected_rule and finding.blocks_installation
+        for finding in result.findings
+    )
+    assert sentinel.read_text(encoding="utf-8") == "inert path data\n"
+
+
+@pytest.mark.parametrize(
+    ("fragment_type", "fragment_value"),
+    [
+        ("branch", "main"),
+        ("branch", "topic-with-hyphens"),
+        ("branch", "release/next-version"),
+        ("tag", "v1.0-rc1"),
+        ("tag", "releases/v1.0"),
+        ("commit", "0123456789abcdef0123456789abcdef01234567"),
+    ],
+)
+def test_git_fetch_keeps_supported_revisions_as_single_arguments(
+    tmp_path: Path, monkeypatch, fragment_type: str, fragment_value: str
+):
+    source = f"git+https://example.invalid/repo.git#{fragment_type}={fragment_value}"
+    refs, _ = parse_pkgbuild(f'source=("{source}")\nsha256sums=(SKIP)\n')
+    calls = []
+
+    def fake_runner(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("aurascan.core.source_acquisition.shutil.which", lambda _name: "/usr/bin/git")
+
+    result = GitSourceFetcher(runner=fake_runner).fetch(refs[0], tmp_path)
+
+    assert result.status == "acquired"
+    assert len(calls) == 2
+    checkout_args = calls[1][calls[1].index("checkout") + 1:]
+    expected_args = [fragment_value] if fragment_type == "branch" else ["--detach", fragment_value]
+    assert checkout_args == expected_args
+
+
 def test_git_fetch_refuses_path_shadowed_executable_before_runner(tmp_path: Path, monkeypatch):
     ref = SourceReference(
         "git+https://example.invalid/repo.git#commit=0123456789abcdef0123456789abcdef01234567",

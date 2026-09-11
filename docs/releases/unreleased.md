@@ -1,6 +1,8 @@
 # AuraScan Unreleased
 
-Changes after v0.10.6:
+Changes after v0.10.7:
 
-No changes recorded yet. See [v0.10.6](v0.10.6.md) for the Shai-Hulud npm
-intelligence, bounded lifecycle inspection, and recovery release record.
+- No additional changes recorded.
+
+See [v0.10.7](v0.10.7.md) for the recovery-bearing release record and its
+validation status, and [v0.10.6](v0.10.6.md) for the previous release.

@@ -8,6 +8,7 @@ from typing import Iterable, List, Optional
 
 from aurascan.analyzers.base import BaseAnalyzer
 from aurascan.analyzers.clamav import ClamAVAnalyzer
+from aurascan.analyzers.editor_tasks import editor_task_findings
 from aurascan.analyzers.npm_metadata import (
     MetadataIncomplete, inspect_npm_metadata, strict_json_object,
 )
@@ -30,7 +31,7 @@ from aurascan.analyzers.remote_stage import (
     analyze_remote_stage_execution,
 )
 from aurascan.core.archive import SafeArchiveExtractor
-from aurascan.core.repository_provenance import _classify_artifact
+from aurascan.core.repository_provenance import _classify_artifact, is_editor_tasks_path
 from aurascan.core.models import (
     AnalysisResult,
     Confidence,
@@ -182,6 +183,16 @@ class DeepStaticAnalyzer(BaseAnalyzer):
                 self._tree_scan_incomplete = True
                 continue
             findings.extend(known_payload_findings(str(path), payload))
+            if is_editor_tasks_path(path.relative_to(root).as_posix()):
+                # JSON command fields have their own semantics. In particular,
+                # labels and descriptions must never become shell commands.
+                task_findings = editor_task_findings(
+                    payload, str(path), phase=Phase.unpacked_source_scan,
+                )
+                findings.extend(task_findings)
+                if any(f.rule_id == "EDITOR-TASK-INSPECTION-INCOMPLETE-001" for f in task_findings):
+                    self._tree_scan_incomplete = True
+                continue
             nested = self._nested_archive_findings(path, payload[:512])
             if nested:
                 findings.extend(nested)
@@ -525,6 +536,7 @@ class DeepStaticAnalyzer(BaseAnalyzer):
             return True
         return (
             any(part in VENDORED_DIRS for part in rel_parts)
+            or is_editor_tasks_path(path.relative_to(root).as_posix())
             or path.name in INTERESTING_NAMES
             or path.name.startswith(".")
             or path.suffix in TEXT_SUFFIXES

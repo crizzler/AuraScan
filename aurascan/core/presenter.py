@@ -9,6 +9,22 @@ from aurascan.core.text_safety import sanitize_terminal_text
 _SEVERITY_ORDER = [Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL]
 
 EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
+    'EDITOR-TASK-AUTORUN-CARRIER-001': {
+        'title': 'An automatic editor task treats an asset path as code.',
+        'summary': 'A captured folder-open task or its reachable dependency invokes an interpreter with a literal data, media, document or font path as code.',
+        'why': 'Editor task configuration can introduce execution independently of package build functions when workspace trust and automatic-task permissions allow it.',
+        'checked': 'AuraScan structurally parsed bounded captured task bytes and supported Linux command arguments without executing commands or opening their targets.',
+        'not_prove': 'This does not prove the target exists, contains malware, belongs to a particular campaign, ran successfully, or compromised the host.',
+        'action': 'Keep automatic tasks disabled for this workspace and review the task and referenced carrier as inert data before accepting this revision.',
+    },
+    'EDITOR-TASK-INSPECTION-INCOMPLETE-001': {
+        'title': 'Editor task inspection did not complete.',
+        'summary': 'Malformed task data, ambiguous dependencies, unsupported active command syntax or a resource bound prevented complete structural inspection.',
+        'why': 'An unresolved automatic execution path cannot be treated as inspected.',
+        'checked': 'AuraScan applied bounded static JSON and command-field parsing without resolving variables, invoking extensions or executing tasks.',
+        'not_prove': 'Incomplete coverage is not evidence of malware, task execution or host compromise.',
+        'action': 'Review the unresolved configuration as inert data before building; keep automatic tasks disabled while reviewing it.',
+    },
     'SUPPLYCHAIN-NPM-SHAIHULUD-20260907': {
         'title': 'An observed malicious npm release is selected.',
         'summary': 'A supported package installation or decoded dependency field selects an exact package/version tuple reported in the September 2026 Shai-Hulud campaign.',
@@ -201,16 +217,24 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
         "not_prove": "An inside-root symlink is not proof of malicious instructions, an outside-root escape, execution, or compromise.",
         "action": "Review the link and target manually; use a standalone regular control file if you want it to become eligible for enrollment.",
     },
+    "HIST-MAINTAINER-ANNOTATION-CHANGED": {
+        "title": "PKGBUILD maintainer annotation changed.",
+        "summary": "The maintainer comment was added, removed, or edited since the accepted local scan.",
+        "why": "Comment edits can be ordinary maintenance, but they deserve review alongside changes to package code or verification.",
+        "checked": "AuraScan compared maintainer comment text in the current PKGBUILD and the accepted local snapshot.",
+        "not_prove": "Comments do not establish AUR ownership, orphan status, restoration, adoption, or compromise.",
+        "action": "Review the package changes. Confirm ownership separately from authoritative AUR metadata or history if it matters to the decision.",
+    },
     "HIST-MAINTAINER-CHANGED": {
-        "title": "Package maintainer changed.",
-        "summary": "This package is now maintained by a different AUR account than before.",
-        "why": "This can be normal, for example when a package is handed over or adopted. It can also matter because a malicious update may come from a new maintainer after a takeover or adoption.",
+        "title": "Maintainer metadata needs review.",
+        "summary": "An earlier local scan recorded changed maintainer text; AUR account ownership was not verified.",
+        "why": "Legacy history findings used PKGBUILD comments, which do not establish an account transition.",
         "action": "Review the update more carefully if this change appears together with source URL changes, removed signatures, new dependencies, or new install hooks.",
     },
     "HIST-ORPHAN-ADOPTED": {
-        "title": "Orphaned package was adopted.",
-        "summary": "This package appears to have moved from no maintainer to a new maintainer.",
-        "why": "Adoption is common in the AUR, but it is also a moment when source or install behavior deserves a closer look.",
+        "title": "Earlier adoption inference is unverified.",
+        "summary": "An earlier local scan observed maintainer text appearing; missing text does not establish orphan status or adoption.",
+        "why": "An AUR ownership transition requires authoritative package-bound before-and-after maintainer state.",
         "action": "Review this update more carefully if source URLs, verification settings, or install hooks changed at the same time.",
     },
     "HIST-SOURCE-URL-CHANGED": {
@@ -833,8 +857,8 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
     },
     "SOURCE-GIT-TAG": {
         "title": "Git source uses a tag.",
-        "summary": "AuraScan found a Git source pinned to a tag rather than a full commit hash.",
-        "why": "Tags are usually stable, but some tags can be moved unless upstream protects them.",
+        "summary": "AuraScan found a Git source selecting a movable tag rather than a full commit hash.",
+        "why": "Tags can move; AuraScan has not verified tag protection or signatures.",
         "checked": "AuraScan inspected the declared Git source fragment during source acquisition.",
         "not_prove": "This does not prove the tag is unsafe; it means the source is less strict than a full commit pin.",
         "action": "Review the upstream tag or prefer a full commit hash for stronger reproducibility.",
@@ -1107,6 +1131,10 @@ class FindingPresenter:
         history = [finding for finding in findings if finding.rule_id.startswith("HIST-")]
         rule_ids = {finding.rule_id for finding in history}
         combos = [
+            {"HIST-MAINTAINER-ANNOTATION-CHANGED", "HIST-SOURCE-HOST-CHANGED"},
+            {"HIST-MAINTAINER-ANNOTATION-CHANGED", "HIST-SOURCE-URL-CHANGED"},
+            {"HIST-MAINTAINER-ANNOTATION-CHANGED", "HIST-PGP-REMOVED"},
+            {"HIST-MAINTAINER-ANNOTATION-CHANGED", "HIST-INSTALL-ADDED"},
             {"HIST-MAINTAINER-CHANGED", "HIST-SOURCE-HOST-CHANGED"},
             {"HIST-MAINTAINER-CHANGED", "HIST-SOURCE-URL-CHANGED"},
             {"HIST-MAINTAINER-CHANGED", "HIST-PGP-REMOVED"},
@@ -1120,7 +1148,7 @@ class FindingPresenter:
         ]
         dependency_added = any(rule_id.endswith("-ADDED") and "DEPENDS" in rule_id for rule_id in rule_ids)
         matched = any(combo <= rule_ids for combo in combos)
-        matched = matched or (dependency_added and "HIST-MAINTAINER-CHANGED" in rule_ids)
+        matched = matched or (dependency_added and bool({"HIST-MAINTAINER-CHANGED", "HIST-MAINTAINER-ANNOTATION-CHANGED"} & rule_ids))
         matched = matched or "HIST-COMBINED-SUSPICIOUS-CHANGE" in rule_ids
         if not matched:
             return None
@@ -1128,7 +1156,7 @@ class FindingPresenter:
         severity = Severity.HIGH if any(f.severity == Severity.HIGH for f in history) else Severity.MEDIUM
         return PresentedFinding(
             title="Package update has multiple supply-chain risk signals.",
-            summary="This update changed more than one trust-related part of the package, such as maintainer, source location, dependencies, or verification settings.",
+            summary="This update changed more than one trust-related part of the package, such as maintainer annotations, source location, dependencies, or verification settings.",
             why_it_matters="Each change can be legitimate by itself. Together, they deserve closer review because package takeover attacks often involve several small changes at once.",
             checked="AuraScan compared this package against the previous local history snapshot.",
             not_prove="This does not prove the update is malicious; it shows several trust-related changes happened together.",

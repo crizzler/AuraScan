@@ -1,12 +1,12 @@
 {
   "schema": "aurascan_recovery_iso/2.0",
-  "application_version": "0.10.6",
+  "application_version": "0.10.7",
   "release_disposition": "recovery-bearing",
-  "version": "0.10.6",
+  "version": "0.10.7",
   "architecture": "x86_64",
-  "filename": "aurascan-recovery-0.10.6-x86_64.iso",
-  "released_at": "2026-09-09",
-  "url": "https://github.com/crizzler/AuraScan/releases/download/v0.10.6/aurascan-recovery-0.10.6-x86_64.iso",
-  "sha256": "216fb8847f79a1870e14cacc18b7fe235dd8297003205a1ba8772e49c641d8c6",
-  "status": "release-ready"
+  "filename": "aurascan-recovery-0.10.7-x86_64.iso",
+  "released_at": "2026-09-11",
+  "url": "",
+  "sha256": "",
+  "status": "build-required"
 }

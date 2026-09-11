@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple
 
 from aurascan.analyzers.base import BaseAnalyzer
 from aurascan.core.models import AnalysisResult, Confidence, EvidenceQuality, Finding, Phase, Severity, Source
-from aurascan.core.source_acquisition import PgpKeyNormalizer, SourceKind, SourceParser, SourceReference
+from aurascan.core.source_acquisition import PgpKeyNormalizer, SourceKind, SourceParser, SourceReference, git_selector_supported
 
 
 ARCHIVE_SUFFIXES = (
@@ -52,6 +52,20 @@ class SourceMetadataAnalyzer(BaseAnalyzer):
                 findings.append(self._signature_present(pkgbuild_path, ref))
                 continue
 
+            supported_git_selector = ref.kind != SourceKind.git_https or git_selector_supported(ref)
+            if not supported_git_selector:
+                findings.append(self._finding(
+                    "SOURCE-META-GIT-SELECTOR-UNRESOLVED",
+                    pkgbuild_path,
+                    Severity.HIGH,
+                    "Git source selector needs review.",
+                    "The Git selector is ambiguous or outside AuraScan's supported literal revision forms.",
+                    "A commit selector must contain a full 40-character hexadecimal commit identity; a name or abbreviated hash does not establish an immutable pin.",
+                    "Review the declared selector and intended source revision before installation.",
+                    "declared Git selector was not established as a supported revision",
+                    85,
+                ))
+
             has_signature = ref.filename in signatures
             checksum = (ref.checksum or "").upper()
             if ref.checksum is None:
@@ -73,7 +87,7 @@ class SourceMetadataAnalyzer(BaseAnalyzer):
                 severity = Severity.HIGH if checksum == "SKIP" else Severity.MEDIUM
                 findings.append(self._http_not_https(pkgbuild_path, ref, severity))
 
-            if checksum == "SKIP":
+            if checksum == "SKIP" and supported_git_selector:
                 findings.extend(self._skip_findings(pkgbuild_path, ref, has_signature))
 
         findings.extend(self._validpgpkey_findings(pkgbuild_path, refs, bool(signatures)))
@@ -81,7 +95,7 @@ class SourceMetadataAnalyzer(BaseAnalyzer):
 
     def _skip_findings(self, path: str, ref: SourceReference, has_signature: bool) -> List[Finding]:
         if ref.kind == SourceKind.git_https:
-            if ref.fragment_type == "commit" and ref.fragment_value:
+            if ref.fragment_type == "commit" and git_selector_supported(ref):
                 return [self._finding(
                     "SOURCE-META-SKIP-GIT-COMMIT",
                     path,
@@ -102,7 +116,7 @@ class SourceMetadataAnalyzer(BaseAnalyzer):
                     Severity.MEDIUM,
                     "Source uses a Git tag.",
                     "This package uses a Git tag with SKIP checksum.",
-                    "Tags are more stable than branches, but tag signing is not checked in fast scan.",
+                    "A tag can be moved or replaced upstream. Fast scan does not resolve its commit or verify tag signing.",
                     "Use --deep-static for a closer source check if other warnings appear.",
                     ref.original,
                     35,

@@ -79,6 +79,47 @@ def test_likely_normal_version_churn_allows_smart_fast_path():
     assert "checksums" in result.normal_churn_fields
 
 
+@pytest.mark.parametrize("version", ["1.2.3", "1.2.4"])
+@pytest.mark.parametrize(
+    ("previous_selector", "current_selector"),
+    [
+        ("commit=" + "a" * 40, "branch=main"),
+        ("commit=" + "a" * 40, "tag=v1.2.4"),
+        ("commit=" + "a" * 40, "commit=" + "b" * 40),
+        ("tag=v1.2.3", "tag=v1.2.4"),
+        ("branch=main", "branch=release"),
+        ("commit=" + "a" * 40, ""),
+    ],
+)
+def test_git_selector_changes_never_become_archive_version_churn(version, previous_selector, current_selector):
+    repository = "git+https://example.invalid/repository.git"
+    previous = snapshot(source_urls=[repository + "#" + previous_selector], checksums=["SKIP"])
+    current = snapshot(
+        version=version,
+        source_urls=[repository + ("#" + current_selector if current_selector else "")],
+        checksums=["SKIP"],
+    )
+
+    result = classify(previous, current)
+
+    assert result.require_full_scan is True
+    assert result.requires_manual_review is True
+    assert result.allow_smart_fast_path is False
+    assert result.classification == TrustBoundaryClassification.source_location_changed
+    assert "source_url_changed" in result.reason_codes
+    assert "source_path_version_only_change" not in result.reason_codes
+
+
+def test_identical_git_selector_comparison_does_not_claim_remote_revision_inspection():
+    unchanged = snapshot(source_urls=["git+https://example.invalid/repository.git#branch=main"], checksums=["SKIP"])
+
+    result = classify(unchanged, unchanged)
+
+    assert result.reason_codes == ["no_relevant_change"]
+    assert "does not prove" in result.what_not_proved
+    assert "metadata" in result.what_not_proved
+
+
 @pytest.mark.parametrize(
     ("overrides", "expected_reason", "expected_classification"),
     [
@@ -113,13 +154,8 @@ def test_no_prior_baseline_forces_full_scan_without_manual_review():
     [
         (
             snapshot(maintainer="Bob <bob@example.invalid>"),
-            "maintainer_changed",
-            TrustBoundaryClassification.maintainer_or_ownership_changed,
-        ),
-        (
-            snapshot(maintainer="Bob <bob@example.invalid>"),
-            "orphan_adopted",
-            TrustBoundaryClassification.maintainer_or_ownership_changed,
+            "maintainer_annotation_changed",
+            TrustBoundaryClassification.trust_boundary_changed,
         ),
         (
             snapshot(source_urls=["https://evil.example.invalid/demo-1.2.3.tar.gz"], source_hosts=["evil.example.invalid"]),
@@ -193,8 +229,6 @@ def test_no_prior_baseline_forces_full_scan_without_manual_review():
 )
 def test_trust_boundary_blockers_force_full_scan_and_manual_review(current, reason, classification):
     previous = snapshot()
-    if reason == "orphan_adopted":
-        previous = snapshot(maintainer="")
     if reason == "signature_source_removed":
         previous = snapshot(
             source_urls=[
@@ -211,6 +245,109 @@ def test_trust_boundary_blockers_force_full_scan_and_manual_review(current, reas
     assert result.allow_smart_fast_path is False
     assert result.requires_manual_review is True
     assert reason in result.reason_codes
+
+
+@pytest.mark.parametrize(
+    ("previous_annotation", "current_annotation"),
+    [
+        ("", "Alice"),
+        (None, "Alice"),
+        ("Alice", ""),
+        ("Alice", None),
+        ("Alice", "Bob"),
+    ],
+)
+def test_unverified_annotation_changes_preserve_review_without_ownership_claims(
+    previous_annotation, current_annotation
+):
+    result = classify(
+        snapshot(maintainer=previous_annotation),
+        snapshot(maintainer=current_annotation),
+    )
+
+    assert result.reason_codes == ["maintainer_annotation_changed"]
+    assert result.classification == TrustBoundaryClassification.trust_boundary_changed
+    assert result.severity == Severity.MEDIUM
+    assert result.require_full_scan is True
+    assert result.requires_manual_review is True
+    assert result.allow_smart_fast_path is False
+    assert not {"maintainer_changed", "orphan_adopted"} & set(result.reason_codes)
+    assert "Alice" not in json.dumps(result.to_dict())
+    assert "Bob" not in json.dumps(result.to_dict())
+
+
+def test_legacy_snapshot_missing_maintainer_is_not_an_orphan_record():
+    previous = snapshot()
+    previous.pop("maintainer")
+
+    result = classify(previous, snapshot())
+
+    assert result.reason_codes == ["maintainer_annotation_changed"]
+    assert result.classification != TrustBoundaryClassification.maintainer_or_ownership_changed
+    assert result.require_full_scan is True
+    assert result.requires_manual_review is True
+
+
+@pytest.mark.parametrize(("previous_annotation", "current_annotation"), [("", ""), (None, ""), ("", None), ("Alice", "Alice")])
+def test_unchanged_or_unavailable_annotation_is_not_an_ownership_event(previous_annotation, current_annotation):
+    result = classify(snapshot(maintainer=previous_annotation), snapshot(maintainer=current_annotation))
+
+    assert result.reason_codes == ["no_relevant_change"]
+    assert result.classification == TrustBoundaryClassification.no_relevant_change
+    assert result.requires_manual_review is False
+
+
+@pytest.mark.parametrize(
+    ("annotation", "local_narrative"),
+    [
+        ("", {"states": ["deleted", "restored", "orphan"], "event": "restore"}),
+        ("", {"state": "orphan", "event": "push", "actor_role": "unprivileged", "outcome": "denied"}),
+        ("", {"state": "orphan", "event": "push", "actor_role": "co-maintainer", "outcome": "accepted"}),
+        ("Bob", {"states": ["orphan", "maintained"], "event": "adoption", "reviewed": True}),
+    ],
+    ids=["deleted-restore-orphan", "orphan-unprivileged-push", "orphan-co-maintainer-push", "claimed-reviewed-adoption"],
+)
+def test_local_aur_narratives_do_not_establish_authoritative_ownership(annotation, local_narrative):
+    # These are unverified local fields, not an AUR RPC response or server history.
+    # In particular, a claimed review is not evidence that a platform review occurred.
+    previous = snapshot(maintainer="")
+    current = snapshot(maintainer=annotation, aur_history=local_narrative, commit_author="Bob")
+
+    result = classify(previous, current)
+
+    assert not {"maintainer_changed", "orphan_adopted", "restored", "package_restored"} & set(result.reason_codes)
+    assert result.classification != TrustBoundaryClassification.maintainer_or_ownership_changed
+    if annotation:
+        assert result.reason_codes == ["maintainer_annotation_changed"]
+        assert result.require_full_scan is True
+        assert result.requires_manual_review is True
+    else:
+        assert result.reason_codes == ["no_relevant_change"]
+
+
+@pytest.mark.parametrize(("previous_annotation", "current_annotation"), [("", "Bob"), ("Alice", "Bob")])
+def test_explicit_maintainer_string_inputs_do_not_assert_aur_authority(previous_annotation, current_annotation):
+    result = classify(
+        previous_maintainer=previous_annotation,
+        current_maintainer=current_annotation,
+    )
+
+    assert result.reason_codes == ["maintainer_annotation_changed"]
+    assert result.classification == TrustBoundaryClassification.trust_boundary_changed
+    assert result.require_full_scan is True
+    assert result.requires_manual_review is True
+
+
+def test_hostile_annotation_is_not_exposed_in_trust_details():
+    hostile = "fake-secret-value \x1b[31m https://example.invalid/?token=fake-secret-value"
+
+    result = classify(snapshot(), snapshot(maintainer=hostile))
+
+    assert result.reason_codes == ["maintainer_annotation_changed"]
+    serialized = json.dumps(result.to_dict())
+    assert "fake-secret-value" not in serialized
+    assert "\\u001b" not in serialized
+    assert "alice@example.invalid" not in serialized
 
 
 def test_install_hook_added_forces_full_scan():
@@ -376,7 +513,8 @@ def test_update_policy_smart_uses_classifier_blocker_for_full_scan():
 
     assert decision.action == UpdateFastPathAction.use_full_scan
     assert decision.title == "Update changed an important trust boundary."
-    assert "maintainer_changed" in decision.reason_codes
+    assert "maintainer_annotation_changed" in decision.reason_codes
+    assert not {"maintainer_changed", "orphan_adopted"} & set(decision.reason_codes)
     assert decision.technical_details["trust_boundary_diff"]["requires_manual_review"] is True
 
 
@@ -446,3 +584,4 @@ def test_terminal_render_trust_boundary_change_is_clear_and_actionable():
     assert "smart fast path should not be used" in output
     assert "Review the warning details." in output
     assert "maintainer_changed" not in output
+    assert "maintainer_annotation_changed" not in output

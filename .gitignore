@@ -57,6 +57,11 @@ tools/reports/*
 !tools/reports/.gitignore
 !tools/reports/README.md
 
+# Security research contracts are public; corpus/run material is not auto-published.
+# Keep private data outside the worktree. Explicit public additions need review.
+/security-data/*
+!/security-data/README.md
+
 # Editor and OS junk
 .DS_Store
 Thumbs.db
@@ -65,3 +70,5 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+!tests/fixtures/curated_packages/editor_task_autorun_carrier/.vscode/
+!tests/fixtures/curated_packages/editor_task_benign/.vscode/

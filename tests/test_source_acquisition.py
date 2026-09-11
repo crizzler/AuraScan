@@ -22,7 +22,7 @@ from aurascan.core.source_acquisition import (
     SourceReference,
     TrustedKeyDirectoryProvider,
 )
-from aurascan.core.trusted_tools import run_bounded_trusted_tool
+from aurascan.core.trusted_tools import capture_trusted_system_tool, revalidate_trusted_system_tool, run_bounded_trusted_tool
 
 
 def parse_pkgbuild(content: str):
@@ -679,6 +679,14 @@ def test_skip_on_git_branch_creates_high_manual_review():
     assert findings[0].requires_manual_review is True
 
 
+@pytest.mark.parametrize("selector", ["tag=v1&branch=main", "tag=v1&tag=v2", "commit=main", "commit=" + "a" * 40 + "&tag=v1"])
+def test_ambiguous_selector_cannot_reduce_missing_checksum_review(selector):
+    refs, _ = parse_pkgbuild('source=("git+https://example.invalid/repo.git#' + selector + '")\nsha256sums=(SKIP)\n')
+    findings = ChecksumVerifier().verify(SourceAcquisitionResult(refs[0], status="skipped"))
+    assert findings[0].severity == Severity.HIGH
+    assert findings[0].requires_manual_review is True
+
+
 def test_checksum_match(tmp_path: Path):
     source = tmp_path / "src.tar.gz"
     source.write_text("hello")
@@ -1187,7 +1195,8 @@ def test_git_fetch_uses_isolated_home_and_disables_credentials(tmp_path: Path, m
         calls.append((args, kwargs))
         if "clone" in args:
             Path(args[-1]).mkdir(parents=True)
-        return subprocess.CompletedProcess(args, 0, "", "")
+        output = "0123456789abcdef0123456789abcdef01234567\n" if "rev-parse" in args else ""
+        return subprocess.CompletedProcess(args, 0, output, "")
 
     monkeypatch.setattr("aurascan.core.source_acquisition.shutil.which", lambda name: "/usr/bin/git")
     fetcher = GitSourceFetcher(runner=fake_runner)
@@ -1200,6 +1209,9 @@ def test_git_fetch_uses_isolated_home_and_disables_credentials(tmp_path: Path, m
     assert all(call[1]["env"]["SSH_AUTH_SOCK"] == "" for call in calls)
     assert all("-c" in call[0] and "credential.helper=" in call[0] for call in calls)
     assert all(call[0][0] == "/usr/bin/git" for call in calls)
+    assert "--no-checkout" in calls[0][0]
+    assert result.resolved_revision == "0123456789abcdef0123456789abcdef01234567"
+    assert result.to_dict()["resolved_revision"] == result.resolved_revision
 
 
 @pytest.mark.parametrize("fragment_type", ["branch", "tag", "commit"])
@@ -1230,7 +1242,8 @@ def test_git_fetch_refuses_option_shaped_revisions_before_runner(
 
     def fake_runner(args, **kwargs):
         calls.append(args)
-        return subprocess.CompletedProcess(args, 0, "", "")
+        output = "0123456789abcdef0123456789abcdef01234567\n" if "rev-parse" in args else ""
+        return subprocess.CompletedProcess(args, 0, output, "")
 
     monkeypatch.setattr("aurascan.core.source_acquisition.shutil.which", lambda _name: "/usr/bin/git")
 
@@ -1269,17 +1282,175 @@ def test_git_fetch_keeps_supported_revisions_as_single_arguments(
 
     def fake_runner(args, **kwargs):
         calls.append(args)
-        return subprocess.CompletedProcess(args, 0, "", "")
+        output = "0123456789abcdef0123456789abcdef01234567\n" if "rev-parse" in args else ""
+        return subprocess.CompletedProcess(args, 0, output, "")
 
     monkeypatch.setattr("aurascan.core.source_acquisition.shutil.which", lambda _name: "/usr/bin/git")
 
     result = GitSourceFetcher(runner=fake_runner).fetch(refs[0], tmp_path)
 
     assert result.status == "acquired"
-    assert len(calls) == 2
-    checkout_args = calls[1][calls[1].index("checkout") + 1:]
-    expected_args = [fragment_value] if fragment_type == "branch" else ["--detach", fragment_value]
-    assert checkout_args == expected_args
+    assert len(calls) == 4
+    expected_selector = {
+        "branch": "refs/remotes/origin/" + fragment_value,
+        "tag": "refs/tags/" + fragment_value,
+        "commit": fragment_value,
+    }[fragment_type]
+    assert calls[1][-4:] == ["rev-parse", "--verify", "--end-of-options", expected_selector + "^{commit}"]
+    checkout_args = calls[2][calls[2].index("checkout") + 1:]
+    assert checkout_args == ["--detach", result.resolved_revision, "--"]
+    assert calls[3][-1] == "HEAD^{commit}"
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        "branch=HEAD", "branch=main~1", "branch=main/", "branch=main//next",
+        "branch=main..next", "branch=main.lock", "tag=.hidden", "tag=v1^{commit}",
+        "tag=v1%00", "tag=", "branch=main&tag=v1", "tag=v1&tag=v2",
+        "commit=" + "a" * 40 + "&branch=main", "unknown=value",
+    ],
+)
+def test_git_fetch_rejects_ambiguous_or_unsupported_selector_without_native_calls(tmp_path: Path, selector):
+    source = "git+https://example.invalid/repo.git#" + selector
+    refs, _ = parse_pkgbuild('source=("' + source + '")\nsha256sums=(SKIP)\n')
+    calls = []
+
+    result = GitSourceFetcher(runner=lambda *args, **kwargs: calls.append(args)).fetch(refs[0], tmp_path)
+
+    assert calls == []
+    assert result.status == "failed"
+    assert result.resolved_revision is None
+    assert result.local_path is None
+    assert any(finding.blocks_installation for finding in result.findings)
+    assert not any(finding.rule_id == "SOURCE-GIT-PINNED-COMMIT" for finding in result.findings)
+
+
+@pytest.mark.parametrize("output", ["", "a" * 39 + "\n", "a" * 41 + "\n", "g" * 40 + "\n", "a" * 64 + "\n", "a" * 40 + "\n" + "b" * 40 + "\n", "a" * 40 + "\x1b\n", " " + "a" * 40 + "\n", None])
+def test_git_revision_output_must_be_one_full_supported_commit(tmp_path: Path, output):
+    refs, _ = parse_pkgbuild('source=("git+https://example.invalid/repo.git#tag=v1")\nsha256sums=(SKIP)\n')
+    calls = []
+
+    def runner(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, output if "rev-parse" in args else "", "")
+
+    result = GitSourceFetcher(runner=runner).fetch(refs[0], tmp_path)
+
+    assert result.status == "failed"
+    assert result.resolved_revision is None
+    assert not any("checkout" in call for call in calls)
+    assert any(finding.blocks_installation for finding in result.findings)
+
+
+@pytest.mark.parametrize("mismatch_at", ["declared_commit", "checkout_head"])
+def test_git_revision_mismatch_blocks_without_publishing_an_identity(tmp_path: Path, mismatch_at):
+    commit = "a" * 40
+    refs, _ = parse_pkgbuild('source=("git+https://example.invalid/repo.git#commit=' + commit + '")\nsha256sums=(SKIP)\n')
+    calls = []
+
+    def runner(args, **kwargs):
+        calls.append(args)
+        output = ""
+        if "rev-parse" in args:
+            mismatch = mismatch_at == "declared_commit" or args[-1] == "HEAD^{commit}"
+            output = ("b" * 40 if mismatch else commit) + "\n"
+        return subprocess.CompletedProcess(args, 0, output, "")
+
+    result = GitSourceFetcher(runner=runner).fetch(refs[0], tmp_path)
+
+    assert result.status == "failed"
+    assert result.local_path is None
+    assert result.to_dict()["resolved_revision"] is None
+    assert any(finding.blocks_installation for finding in result.findings)
+    if mismatch_at == "declared_commit":
+        assert not any("checkout" in call for call in calls)
+
+
+def test_git_identity_steps_share_one_acquisition_deadline(tmp_path: Path, monkeypatch):
+    refs, _ = parse_pkgbuild('source=("git+https://example.invalid/repo.git#branch=main")\nsha256sums=(SKIP)\n')
+    ticks = iter([0.0, 1.0, 4.0])
+    monkeypatch.setattr("aurascan.core.source_acquisition.time.monotonic", lambda: next(ticks))
+    calls = []
+
+    def runner(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    result = GitSourceFetcher(SourcePolicy(timeout=3), runner=runner).fetch(refs[0], tmp_path)
+
+    assert result.status == "failed"
+    assert len(calls) == 1
+    assert calls[0][1]["timeout"] == 2.0
+    assert any(finding.blocks_installation for finding in result.findings)
+
+
+def test_git_acquisition_resolves_exact_refs_in_an_inert_local_repository(tmp_path: Path):
+    # Git receives only locally constructed inert text and metadata. The clone
+    # transport is replaced with this temporary repository; no public host,
+    # package code, user Git configuration, or hook participates in the test.
+    tool = capture_trusted_system_tool("git")
+    repository = tmp_path / "inert-repository"
+    repository.mkdir()
+    home = tmp_path / "private-home"
+    home.mkdir(mode=0o700)
+    env = {
+        "HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+        "GIT_AUTHOR_NAME": "Inert Test", "GIT_AUTHOR_EMAIL": "inert@example.invalid",
+        "GIT_COMMITTER_NAME": "Inert Test", "GIT_COMMITTER_EMAIL": "inert@example.invalid",
+        "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+0000", "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+0000",
+    }
+
+    def git(*arguments):
+        revalidate_trusted_system_tool(tool)
+        return run_bounded_trusted_tool(
+            [tool.path, "-C", str(repository), "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null"] + list(arguments),
+            capture_output=True, text=True, timeout=10, check=True, env=env,
+        ).stdout.strip()
+
+    git("init", "--template=")
+    git("symbolic-ref", "HEAD", "refs/heads/main")
+    (repository / "README").write_text("inert earlier content\n", encoding="utf-8")
+    git("add", "README")
+    git("commit", "-m", "inert earlier snapshot")
+    earlier = git("rev-parse", "HEAD")
+    git("branch", "release")
+    git("tag", "-a", "annotated", "-m", "inert annotation")
+    (repository / "README").write_text("inert later content\n", encoding="utf-8")
+    git("add", "README")
+    git("commit", "-m", "inert later snapshot")
+    later = git("rev-parse", "HEAD")
+    git("tag", "release")
+
+    def local_transport(args, **kwargs):
+        arguments = list(args)
+        if "clone" in arguments:
+            assert arguments[-2] == "https://example.invalid/repo.git"
+            arguments[-2] = str(repository)
+        return run_bounded_trusted_tool(arguments, **kwargs)
+
+    scenarios = [
+        ("branch=release", earlier), ("tag=release", later), ("tag=annotated", earlier),
+        ("commit=" + earlier, earlier), ("", later),
+        ("branch=README", None), ("tag=main", None),
+    ]
+    for index, (selector, expected) in enumerate(scenarios):
+        output = tmp_path / ("capture-" + str(index))
+        output.mkdir(mode=0o700)
+        source = "git+https://example.invalid/repo.git" + ("#" + selector if selector else "")
+        refs, _ = parse_pkgbuild('source=("' + source + '")\nsha256sums=(SKIP)\n')
+
+        result = GitSourceFetcher(runner=local_transport).fetch(refs[0], output)
+
+        assert result.resolved_revision == expected
+        if expected is None:
+            assert result.status == "failed"
+            assert result.local_path is None
+            assert any(finding.blocks_installation for finding in result.findings)
+        else:
+            assert result.status == "acquired"
+            expected_content = "inert earlier content\n" if expected == earlier else "inert later content\n"
+            assert (result.local_path / "README").read_text(encoding="utf-8") == expected_content
 
 
 def test_git_fetch_refuses_path_shadowed_executable_before_runner(tmp_path: Path, monkeypatch):
@@ -1310,7 +1481,8 @@ def test_git_fetch_refuses_path_shadowed_executable_before_runner(tmp_path: Path
     assert any(f.rule_id == "SOURCE-GIT-UNAVAILABLE" and f.blocks_installation for f in result.findings)
 
 
-def test_git_fetch_revalidates_executable_before_checkout(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("changed_after_command", [1, 2, 3])
+def test_git_fetch_revalidates_executable_before_each_identity_step(tmp_path: Path, monkeypatch, changed_after_command):
     ref = SourceReference(
         "git+https://example.invalid/repo.git#commit=0123456789abcdef0123456789abcdef01234567",
         "git+https://example.invalid/repo.git#commit=0123456789abcdef0123456789abcdef01234567",
@@ -1330,12 +1502,13 @@ def test_git_fetch_revalidates_executable_before_checkout(tmp_path: Path, monkey
         calls.append(args)
         if "clone" in args:
             Path(args[-1]).mkdir(parents=True)
-        return subprocess.CompletedProcess(args, 0, "", "")
+        output = "0123456789abcdef0123456789abcdef01234567\n" if "rev-parse" in args else ""
+        return subprocess.CompletedProcess(args, 0, output, "")
 
     def replacement_guard(_tool):
         nonlocal revalidations
         revalidations += 1
-        if revalidations > 1:
+        if revalidations > changed_after_command:
             from aurascan.core.trusted_tools import TrustedToolError
             raise TrustedToolError("fixture replacement")
 
@@ -1347,7 +1520,7 @@ def test_git_fetch_revalidates_executable_before_checkout(tmp_path: Path, monkey
 
     result = GitSourceFetcher(runner=fake_runner).fetch(ref, tmp_path)
 
-    assert len(calls) == 1
+    assert len(calls) == changed_after_command
     assert result.status == "failed"
     assert any(f.rule_id == "SOURCE-GIT-FETCH-FAILED" and f.blocks_installation for f in result.findings)
 

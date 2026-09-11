@@ -1,0 +1,15 @@
+{
+  "scenario": "editor_task_autorun_carrier",
+  "category": "malicious_defanged",
+  "scan_modes": ["fast", "wrapper"],
+  "package_name": "curated-editor-task-autorun-carrier",
+  "package_version": "1.0",
+  "expected_rule_ids": ["EDITOR-TASK-AUTORUN-CARRIER-001"],
+  "expected_absent_rule_ids": ["EDITOR-TASK-INSPECTION-INCOMPLETE-001"],
+  "expected_phases": ["pkgbuild_static"],
+  "expected_min_severity": "CRITICAL",
+  "expected_action": "block",
+  "expected_hard_blocker": true,
+  "expected_makepkg_invoked": false,
+  "expected_wrapper_action": "scan_blocked"
+}

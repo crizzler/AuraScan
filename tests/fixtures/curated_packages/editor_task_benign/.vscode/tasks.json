@@ -1,0 +1,25 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Manual fixture; never execute",
+      "type": "process",
+      "command": "node",
+      "args": ["${workspaceFolder}/font.woff2"]
+    },
+    {
+      "label": "Ordinary build task",
+      "type": "process",
+      "command": "node",
+      "args": ["${workspaceFolder}/build.js"],
+      "runOptions": {"runOn": "folderOpen"}
+    },
+    {
+      "label": "curl https://example.invalid/inert -o font.woff2 && node font.woff2",
+      "type": "process",
+      "command": "echo",
+      "args": ["Inert label and ordinary local asset"],
+      "runOptions": {"runOn": "folderOpen"}
+    }
+  ]
+}

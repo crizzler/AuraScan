@@ -10,6 +10,7 @@ from aurascan.analyzers.ai_static import AIStaticAnalyzer
 from aurascan.analyzers.dynamic import DynamicSandboxAnalyzer
 from aurascan.analyzers.deterministic import DeterministicAnalyzer
 from aurascan.analyzers.deep_static import DeepStaticAnalyzer
+from aurascan.analyzers.editor_tasks import editor_task_findings
 from aurascan.analyzers.history import HistoryAnalyzer
 from aurascan.analyzers.repository_provenance import RepositoryProvenanceAnalyzer
 from aurascan.analyzers.source_metadata import SourceMetadataAnalyzer
@@ -73,7 +74,7 @@ class AuraScanEngine:
         self.last_pnpm_buildchain = None
         self._pnpm_controls = []
         self.scanner_version = "2.5.0"
-        self.rule_version = "1.7.0"
+        self.rule_version = "1.9.0"
         self.cache = ScanCache()
         self.risk_engine = RiskEngine()
         self.trust_diff_adapter = HistoryTrustDiffAdapter()
@@ -274,6 +275,18 @@ class AuraScanEngine:
         all_findings.extend(repository_result.findings)
         if not repository_result.is_safe:
             is_safe = False
+
+        # Inspect only the captured bytes already bound into the input digest;
+        # never reopen a mutable editor configuration pathname here.
+        for task in scan_input.repository_snapshot.editor_tasks:
+            task_findings = editor_task_findings(
+                task.payload,
+                str(Path(pkgbuild_path).parent / task.relative_path),
+                pkgname=pkg_name, pkgver=pkg_ver, phase=Phase.pkgbuild_static,
+            )
+            all_findings.extend(task_findings)
+            if any(finding.blocks_installation for finding in task_findings):
+                is_safe = False
 
         update_decision = self._prepare_update_decision(
             pkgbuild_path,

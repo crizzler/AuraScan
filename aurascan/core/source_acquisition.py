@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -101,6 +102,7 @@ class SourceAcquisitionResult:
     status: str = "skipped"
     findings: List[Finding] = field(default_factory=list)
     pgp_verification: Optional[Dict[str, object]] = None
+    resolved_revision: Optional[str] = None
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -119,6 +121,7 @@ class SourceAcquisitionResult:
             "status": self.status,
             "findings": [finding.to_dict() for finding in self.findings],
             "pgp_verification": self.pgp_verification,
+            "resolved_revision": self.resolved_revision,
         }
 
 
@@ -1524,10 +1527,10 @@ class ChecksumVerifier:
         return [finding]
 
     def _skip_finding(self, ref: SourceReference) -> Finding:
-        if ref.kind == SourceKind.git_https and ref.fragment_type == "commit" and _is_full_commit(ref.fragment_value or ""):
+        if ref.kind == SourceKind.git_https and ref.fragment_type == "commit" and git_selector_supported(ref):
             severity = Severity.LOW
             explanation = "Checksum is SKIP, but git source is pinned to a full commit hash."
-        elif ref.kind == SourceKind.git_https and ref.fragment_type == "tag":
+        elif ref.kind == SourceKind.git_https and ref.fragment_type == "tag" and git_selector_supported(ref):
             severity = Severity.MEDIUM
             explanation = "Checksum is SKIP for a git tag source; signed tag verification is not implemented yet."
         elif ref.kind == SourceKind.git_https:
@@ -1929,31 +1932,54 @@ class GitSourceFetcher:
             # element still becomes a Git option when it starts with a dash;
             # reject it before cloning or invoking checkout. Putting it after
             # checkout's "--" would instead select a path, not a revision.
-            if (
-                ref.fragment_type in {"branch", "tag"}
-                and (ref.fragment_value or "").startswith("-")
-            ):
-                raise ValueError("Git revision cannot be an option")
+            if not git_selector_supported(ref):
+                raise ValueError("Git selector is unsupported or ambiguous")
             _validate_public_remote_url(repo_url, {"https"})
-            revalidate_trusted_system_tool(git_tool)
-            self.runner(
-                [git_tool.path, "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "clone", "--no-recurse-submodules", "--filter=blob:none", repo_url, str(checkout_dir)],
-                capture_output=True,
-                text=True,
-                timeout=self.policy.timeout,
-                env=env,
-                check=True,
-            )
-            if ref.fragment_type in {"commit", "tag", "branch"} and ref.fragment_value:
+            deadline = time.monotonic() + self.policy.timeout
+
+            def run_git(arguments: List[str], *, in_checkout: bool = True):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ValueError("Git acquisition deadline expired")
                 revalidate_trusted_system_tool(git_tool)
-                self.runner(
-                    [git_tool.path, "-C", str(checkout_dir), "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "checkout", "--detach" if ref.fragment_type != "branch" else ref.fragment_value, ref.fragment_value] if ref.fragment_type != "branch" else [git_tool.path, "-C", str(checkout_dir), "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "checkout", ref.fragment_value],
+                command = [git_tool.path]
+                if in_checkout:
+                    command.extend(["-C", str(checkout_dir)])
+                command.extend(["-c", "credential.helper=", "-c", "core.hooksPath=/dev/null"])
+                return self.runner(
+                    command + arguments,
                     capture_output=True,
                     text=True,
-                    timeout=self.policy.timeout,
+                    timeout=remaining,
                     env=env,
                     check=True,
                 )
+
+            def resolve_commit(selector: str) -> str:
+                result = run_git(["rev-parse", "--verify", "--end-of-options", selector + "^{commit}"])
+                output = result.stdout
+                if result.returncode != 0 or not isinstance(output, str) or not re.fullmatch(r"[0-9a-fA-F]{40}\n", output):
+                    raise ValueError("Git did not return one supported full commit identity")
+                return output[:-1].lower()
+
+            run_git(
+                ["clone", "--no-checkout", "--no-recurse-submodules", "--filter=blob:none", repo_url, str(checkout_dir)],
+                in_checkout=False,
+            )
+            if ref.fragment_type == "branch":
+                selector = "refs/remotes/origin/" + ref.fragment_value
+            elif ref.fragment_type == "tag":
+                selector = "refs/tags/" + ref.fragment_value
+            elif ref.fragment_type == "commit":
+                selector = ref.fragment_value.lower()
+            else:
+                selector = "HEAD"
+            resolved_revision = resolve_commit(selector)
+            if ref.fragment_type == "commit" and resolved_revision != ref.fragment_value.lower():
+                raise ValueError("Git resolution differs from the declared commit")
+            run_git(["checkout", "--detach", resolved_revision, "--"])
+            if resolve_commit("HEAD") != resolved_revision:
+                raise ValueError("Git checkout differs from the resolved commit")
         except (subprocess.SubprocessError, OSError, ValueError, TrustedToolError):
             shutil.rmtree(checkout_dir, ignore_errors=True)
             findings.append(_finding(
@@ -1966,10 +1992,15 @@ class GitSourceFetcher:
                 "declared Git source was not acquired",
             ))
             return SourceAcquisitionResult(ref, status="failed", findings=findings)
-        return SourceAcquisitionResult(ref, checkout_dir, ref.resolved, 0, None, "acquired", findings)
+        return SourceAcquisitionResult(
+            ref, checkout_dir, ref.resolved, 0, None, "acquired", findings,
+            resolved_revision=resolved_revision,
+        )
 
     def classification_findings(self, ref: SourceReference) -> List[Finding]:
-        if ref.fragment_type == "commit" and _is_full_commit(ref.fragment_value or ""):
+        if not git_selector_supported(ref):
+            return []
+        if ref.fragment_type == "commit":
             return [_finding(
                 "SOURCE-GIT-PINNED-COMMIT",
                 ref.original,
@@ -1985,7 +2016,7 @@ class GitSourceFetcher:
                 "SOURCE-GIT-TAG",
                 ref.original,
                 Severity.MEDIUM,
-                "git+https source is pinned to a tag; signed tag verification is not implemented.",
+                "git+https source selects a movable tag; signed tag verification is not implemented.",
                 "Verify tag provenance manually.",
                 False,
                 ref.fragment_value or "",
@@ -2458,6 +2489,41 @@ def _hash_file(path: Path, algorithm: str) -> str:
 
 def _is_full_commit(value: str) -> bool:
     return bool(re.fullmatch(r"[0-9a-fA-F]{40}", value))
+
+
+def git_selector_supported(ref: SourceReference) -> bool:
+    """Require one unambiguous supported selector; this does not verify Git objects."""
+    if ref.kind != SourceKind.git_https:
+        return False
+    try:
+        fragment = urllib.parse.urlparse(ref.resolved[4:]).fragment
+        if not fragment:
+            return ref.fragment_type is None and ref.fragment_value is None
+        fields = urllib.parse.parse_qs(
+            fragment, keep_blank_values=True, strict_parsing=True, max_num_fields=2,
+        )
+    except ValueError:
+        return False
+    if ref.fragment_type not in {"commit", "tag", "branch"}:
+        return False
+    value = ref.fragment_value
+    if not isinstance(value, str) or not value or fields != {ref.fragment_type: [value]}:
+        return False
+    if ref.fragment_type == "commit":
+        return _is_full_commit(value)
+    if ref.fragment_type == "branch" and value == "HEAD":
+        # clone creates origin/HEAD as a default-branch alias, independently
+        # of whether an upstream branch with the literal name HEAD exists.
+        return False
+    # Keep Git revision expressions, path fallback, control bytes and options
+    # out of the supported literal branch/tag grammar. Namespace binding below
+    # still requires the selected ref to exist and resolve to a commit.
+    if len(value) > 1024 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/+@-]*", value):
+        return False
+    return ".." not in value and all(
+        part and not part.startswith(".") and not part.endswith((".", ".lock"))
+        for part in value.split("/")
+    )
 
 
 def _finding(

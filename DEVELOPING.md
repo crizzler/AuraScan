@@ -23,6 +23,79 @@ suite, and both strict presenter audits on Python 3.8 and 3.14. Provider calls
 are mocked; CI explicitly disables general, Instruction Guard, Incident, and
 Recovery AI and never starts a live local model server.
 
+## Maintainer-history evidence
+
+For maintainer-history changes, the current runtime observes only PKGBUILD
+comment text. Preserve the legacy snapshot `maintainer` field as annotation
+data; it carries no AUR ownership authority. Use
+`HIST-MAINTAINER-ANNOTATION-CHANGED` and `maintainer_annotation_changed` for
+added, removed or edited comments, retaining MEDIUM/manual review and normal
+scanning. Do not invent a timestamp cutoff or interpret missing comments,
+restore/push narratives, Git authors, or adoption requests as platform state.
+Future ownership acquisition must bind authoritative before-and-after package
+base identity and maintainer state separately from code history. The existing
+normalized ownership/adoption policy reasons still require conservative scanning;
+the policy consumer does not authenticate the source of those reasons.
+
+## Security intelligence and model evaluation groundwork
+
+Use [Security model research](docs/SECURITY_MODEL_RND.md) for corpus admission,
+model-neutral research roles, training/evaluation separation, immutable run
+identities and the inert hypothesis-to-regression workflow. The separate
+[security-data contract](security-data/README.md) defines versioned JSON
+metadata and its offline validator. The separate
+[intake CLI](docs/SECURITY_DATA_INTAKE.md) captures explicitly selected public
+sources and fixtures into private quarantine, then records explicit reviews
+without enabling training/evaluation or other use flags. Acquisition alone does
+not create a validated record. Neither tool invokes models or exports operational
+state. Keep private holdouts and generated manifests
+outside the worktree. Existing public fixtures remain exposed regressions and
+keep their current `expected.json` format.
+
+For changes to this contract or intake, run `tests/test_security_data_*.py` plus the existing release
+and CI contracts, review documentation links, validate `SKILL.md` frontmatter,
+and run the applicable source gates. No model service or new runtime dependency
+is required. Historical evaluation results must retain their exact inputs,
+labels, detector/model configuration and coverage rather than being overwritten.
+
+## Editor task and Git identity evidence
+
+The PolinRider review uses [Socket's primary campaign tracker](https://socket.dev/supply-chain-attacks/polinrider)
+as behavioral evidence, not an AUR compromise claim or a package-name blacklist.
+Its counts are changing observations. The [VS Code task documentation](https://code.visualstudio.com/docs/debugtest/tasks#run-behavior)
+defines `runOptions.runOn: folderOpen`; workspace trust and automatic-task
+permission remain execution prerequisites.
+
+Keep `.vscode/tasks.json` analysis on structurally selected command fields,
+using the same captured bytes as the scan identity. Repository snapshots retain
+at most 32 task files, 1 MiB each and 4 MiB combined, through the existing
+no-follow descriptor read. Ordinary repository pruning still applies; exact
+declared local task files do not waive task inspection. Deep-static selects the
+same path under its existing acquired-tree bounds and bypasses generic
+raw-text shell matching for that JSON. JSONC comments and trailing commas are
+supported; duplicate keys, malformed data, ambiguous dependency labels, cycles,
+unresolved active variables or unsupported active syntax are coverage failures.
+Use the bounded Linux task subset; never resolve extensions, execute tasks,
+reopen command targets or treat task labels as active commands. A literal
+interpreter/carrier execution correlation in a reachable automatic task is
+CRITICAL; mere task or asset presence is neutral.
+
+Do not generalize this into font validation, arbitrary JavaScript deobfuscation,
+or a blockchain/RPC blacklist. Existing acquired JavaScript checks still have
+their documented lexical limits; full RPC → decrypt → eval dataflow analysis
+and standalone Instruction Guard task discovery are deferred. The new
+regressions are exposed inert examples, not an estimate of campaign recall.
+
+Git selector fragments participate in trust-diff identity. A selector change
+must not qualify as ordinary URL version churn, and a non-full commit selector
+must not get pinning reassurance. Resolve exact branch/tag namespaces to a
+verified commit, detach by that hash and verify HEAD; persist only the resolved
+commit identifier alongside redacted acquisition metadata. Keep deep-static
+allow caching disabled. Default non-fetching scans cannot detect unseen remote
+ref movement; do not invent history-rewrite findings from commit dates or
+hosting reputation. Git revision verification authenticates neither author nor
+content and does not prove the later makepkg build will use those bytes.
+
 ## Recovery release disposition
 
 Every release must be classified in its release note and checklist as either

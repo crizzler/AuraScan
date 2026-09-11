@@ -38,12 +38,38 @@ def render(findings, verbose=False):
     return report.render_terminal(use_color=False, verbose=verbose)
 
 
-def test_maintainer_changed_template_uses_plain_language():
+def test_legacy_maintainer_template_does_not_claim_account_change():
     output = render([make_finding("HIST-MAINTAINER-CHANGED", evidence="Alice -> Bob")])
 
-    assert "Package maintainer changed." in output
-    assert "different AUR account" in output
+    assert "Maintainer metadata needs review." in output
+    assert "AUR account ownership was not verified" in output
+    assert "different AUR account" not in output
     assert "HIST-MAINTAINER-CHANGED" not in output
+
+
+def test_maintainer_annotation_review_discloses_ownership_limit():
+    output = render([make_finding("HIST-MAINTAINER-ANNOTATION-CHANGED")])
+    assert "PKGBUILD maintainer annotation changed." in output
+    assert "Comments do not establish AUR ownership" in output
+    assert "different AUR account" not in output
+    assert "Orphaned package was adopted." not in output
+
+
+def test_legacy_adoption_finding_is_not_rendered_as_verified_adoption():
+    output = render([make_finding("HIST-ORPHAN-ADOPTED")])
+    assert "Earlier adoption inference is unverified." in output
+    assert "missing text does not establish orphan status or adoption" in output
+    assert "Orphaned package was adopted." not in output
+
+
+def test_annotation_and_source_change_keep_combined_review_visible():
+    output = render([
+        make_finding("HIST-MAINTAINER-ANNOTATION-CHANGED"),
+        make_finding("HIST-SOURCE-HOST-CHANGED"),
+    ])
+    assert "Package update has multiple supply-chain risk signals." in output
+    assert "maintainer annotations" in output
+    assert "different AUR account" not in output
 
 
 def test_source_host_changed_template_uses_plain_language():
@@ -267,7 +293,7 @@ def test_combined_warning_for_maintainer_and_source_host_change_appears_first():
     ], verbose=True)
 
     combined = output.index("Package update has multiple supply-chain risk signals.")
-    individual = output.index("Package maintainer changed.")
+    individual = output.index("Maintainer metadata needs review.")
     assert combined < individual
 
 

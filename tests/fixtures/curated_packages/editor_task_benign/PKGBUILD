@@ -1,0 +1,12 @@
+# Maintainer: Inert Fixture <fixture@example.invalid>
+pkgname=curated-editor-task-benign
+pkgver=1.0
+pkgrel=1
+pkgdesc="Inert manual task and ordinary editor build configuration"
+arch=("any")
+url="https://example.invalid/editor-task-benign"
+license=("MIT")
+
+package() {
+  :
+}

@@ -70,6 +70,8 @@ class HistoryAnalyzer(BaseAnalyzer):
             "package_name": "",
             "pkgbase": "",
             "version": "",
+            # Compatibility field: PKGBUILD comment text, never AUR ownership.
+            # An absent comment does not establish an orphaned package base.
             "maintainer": "",
             "source_urls": [],
             "source_hosts": [],
@@ -335,11 +337,12 @@ class HistoryAnalyzer(BaseAnalyzer):
                 evidence_snippet=evidence,
             ))
 
-        if old.get("maintainer") and new.get("maintainer") and old["maintainer"] != new["maintainer"]:
-            add("HIST-MAINTAINER-CHANGED", Severity.MEDIUM, "Package maintainer changed.", f"{old['maintainer']} -> {new['maintainer']}")
-
-        if not old.get("maintainer") and new.get("maintainer"):
-            add("HIST-ORPHAN-ADOPTED", Severity.MEDIUM, "Previously unmaintained package appears adopted.", new["maintainer"])
+        if (old.get("maintainer") or "") != (new.get("maintainer") or ""):
+            add(
+                "HIST-MAINTAINER-ANNOTATION-CHANGED", Severity.MEDIUM,
+                "PKGBUILD maintainer annotation changed; AUR ownership was not verified.",
+                "Maintainer comment text differs between local snapshots.",
+            )
 
         if old.get("source_urls") != new.get("source_urls"):
             add("HIST-SOURCE-URL-CHANGED", Severity.MEDIUM, "Source URL list changed.", f"{old.get('source_urls', [])} -> {new.get('source_urls', [])}")

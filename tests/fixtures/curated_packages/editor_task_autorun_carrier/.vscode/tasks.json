@@ -1,0 +1,12 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Inert autorun regression; never execute fixture commands",
+      "type": "process",
+      "command": "node",
+      "args": ["${workspaceFolder}/font.woff2"],
+      "runOptions": {"runOn": "folderOpen"}
+    }
+  ]
+}

@@ -52,6 +52,41 @@ model choice does not change AuraScan's runtime AI defaults or safety policy.
   validation, and remaining limitations. Never infer a passing gate from another
   agent's confidence or from the model that wrote an earlier change.
 
+## Security data and model research
+
+- Follow [security model research](docs/SECURITY_MODEL_RND.md) and the
+  [metadata contract](security-data/README.md) when adding corpus or evaluation
+  evidence. Keep provenance, origin, rights for each use, privacy, lineage,
+  expected/observed results and validation explicit; operational reports and
+  existing fixture labels require separate corpus-admission review.
+- Keep the [developer intake](docs/SECURITY_DATA_INTAKE.md) offline unless its
+  selected acquisition command explicitly enables network access. Capture only
+  the selected public sources and existing fixture bytes as inert private data;
+  admission and explicit review retain quarantine with all use flags false.
+  Keep scanner assessments separate from labels, retain revision/content and
+  package-family lineage, and never invoke collected code or package managers.
+- Research or training with user scans requires separate, explicit consent.
+  Keep secrets, private paths and unnecessary identifying data out; prefer
+  reviewed metadata over payloads. Unresolved permission for the intended use
+  blocks that use. Proprietary provider outputs require explicit provider
+  permission for training; commercial training and redistribution need their
+  own rights decisions. Version research schemas and review incompatible
+  migrations without granting missing permissions.
+- Separate training and evaluation by content and derivation family. Private
+  holdouts and their derivatives remain outside the worktree and training;
+  contamination invalidates evaluation claims. Public regressions are exposed
+  development evidence, not private holdouts. Training and adversarial-example
+  generators must have no access to reserved holdouts. Preserve versioned run
+  history and derive model acceptance thresholds from empirical baselines.
+- Evaluate models, runtimes, fine-tunes and quantizations on AuraScan tasks;
+  size, novelty, precision, marketing or reduced refusal do not establish
+  superiority. Assess refusal separately from quality and policy compliance;
+  evaluate independent cases and disclose shared model/teacher lineage.
+- Keep research tooling outside production authority. Retain only reviewed,
+  bounded disagreement evidence, never rejected raw model output. A suspected
+  behavior, detector bypass, exploitability and actual compromise are distinct
+  claims; synthetic examples never become production intelligence automatically.
+
 ## Safety invariants
 
 - Never execute a PKGBUILD, `.install` hook, downloaded source, malware sample,
@@ -147,6 +182,12 @@ model choice does not change AuraScan's runtime AI defaults or safety policy.
   confirmation is not sufficient device identity by itself.
 - Do not claim execution, compromise, enrollment, or attacker access from a
   static match alone. State the uncertainty in findings and recovery advice.
+- Treat PKGBUILD maintainer comments, Git authors/pushes, restore operations,
+  and adoption requests as distinct from AUR ownership state. Missing comments
+  are not orphan status; changed comments require annotation-specific review,
+  never an adoption or takeover claim. Ownership transitions require separate
+  authoritative, package-bound before-and-after evidence. Preserve normal-scan
+  fallback and do not reduce risk from a platform-review policy or date alone.
 - Keep AUR repository-propagation detection on deterministic PKGBUILD and
   declared install-hook control text. Require the correlated AUR target,
   repository mutation/staging, and push behavior; do not blanket-flag ordinary
@@ -171,6 +212,17 @@ model choice does not change AuraScan's runtime AI defaults or safety policy.
   control-file path, the deterministic one-based control line when one exists,
   and a short artifact SHA-256 prefix. Fixed summaries and evidence labels must
   remain secret-free, and no output may claim that the static command ran.
+- Inspect editor tasks only as bounded captured structural data. Correlate a
+  supported `folderOpen` task or its reachable dependencies with actual
+  interpreter/carrier command fields; labels, ordinary tasks and fonts alone
+  are neutral. Preserve Linux scope, no-follow capture, secret-free evidence
+  and fail-closed coverage for unresolved active paths. Never execute a task
+  or claim that workspace trust and automatic-task permission were granted.
+- Preserve Git selector identity through smart-scan decisions. Require a full
+  supported commit identifier for pinning claims, resolve exact branch/tag
+  namespaces before detached checkout and verify the captured HEAD. A stable
+  URL or commit timestamp cannot prove unchanged remote content, authenticity
+  or the absence of a history rewrite.
 - Keep package-manager metadata evidence separate from package control flow.
   Inspect pnpm-related manifests and lockfiles only as bounded no-follow data;
   never run a package manager, lifecycle script, or YAML/JSON-provided command

@@ -43,6 +43,8 @@ class TrustBoundaryDiffInput:
     package_name: str = ""
     previous_version: str = ""
     current_version: str = ""
+    # Unqualified strings and legacy snapshot values are annotations, not
+    # authoritative AUR maintainer-state observations.
     previous_maintainer: Optional[str] = None
     current_maintainer: Optional[str] = None
     previous_sources: Optional[Sequence[str]] = None
@@ -248,7 +250,7 @@ def classify_trust_boundary_diff(diff_input: TrustBoundaryDiffInput) -> TrustBou
             reason_codes,
             "Update changed an important trust boundary.",
             "AuraScan found a change that can affect package trust, so the smart fast path should not be used.",
-            "Changes to maintainers, source hosts, signature verification, install hooks, dependencies, or build logic can be legitimate, but they deserve a normal scan.",
+            "Changes to maintainer annotations, source hosts, signature verification, install hooks, dependencies, or build logic can be legitimate, but they deserve a normal scan.",
             changed_fields=changed_fields,
             normal_churn_fields=normal_churn_fields,
             suspicious_fields=suspicious_fields or changed_fields,
@@ -412,13 +414,14 @@ class _ResolvedFields:
 
 def _classify_maintainer(fields: _ResolvedFields, reason_codes: Set[str], changed_fields: Set[str], suspicious_fields: Set[str], technical_details: Dict[str, Any]) -> None:
     if fields.previous_maintainer != fields.current_maintainer:
-        changed_fields.add("maintainer")
-        technical_details["maintainer"] = {"previous": fields.previous_maintainer, "current": fields.current_maintainer}
-        if not fields.previous_maintainer and fields.current_maintainer:
-            reason_codes.add("orphan_adopted")
-        else:
-            reason_codes.add("maintainer_changed")
-        suspicious_fields.add("maintainer")
+        changed_fields.add("maintainer_annotation")
+        technical_details["maintainer_annotation"] = {
+            "previous_present": bool(fields.previous_maintainer),
+            "current_present": bool(fields.current_maintainer),
+            "ownership_verified": False,
+        }
+        reason_codes.add("maintainer_annotation_changed")
+        suspicious_fields.add("maintainer_annotation")
 
 
 def _classify_sources(
@@ -668,6 +671,7 @@ def _blocking_reason_codes(reason_codes: Set[str]) -> Set[str]:
         "previous_scan_manual_review",
         "scanner_or_rules_changed",
         "cache_stale",
+        "maintainer_annotation_changed",
         "maintainer_changed",
         "orphan_adopted",
         "source_url_changed",
@@ -749,6 +753,7 @@ def _severity_for_blocking_reasons(reason_codes: Set[str]) -> Severity:
 
 def _requires_manual_review(reason_codes: Set[str]) -> bool:
     review = {
+        "maintainer_annotation_changed",
         "maintainer_changed",
         "orphan_adopted",
         "source_host_changed",
@@ -811,12 +816,12 @@ def _result(
         not_proved = "AuraScan did not compare this update against a trusted baseline."
     elif allow_fast_path:
         action = "No action needed for normal use. Use --deep-static if you want AuraScan to fetch and inspect the updated source."
-        checked = "AuraScan checked maintainer, source host, checksum policy, signing metadata, dependencies, install hooks, and build metadata available in fast mode."
+        checked = "AuraScan checked maintainer annotations, source host, checksum policy, signing metadata, dependencies, install hooks, and build metadata available in fast mode."
         not_proved = "This does not prove the new upstream source is safe. It only means the package metadata did not show major trust-boundary changes."
     else:
         action = "Review the warning details. Use --deep-static for a deeper source check if needed."
         checked = "AuraScan compared the current package metadata and local history snapshot for trust-boundary changes."
-        not_proved = "This does not prove the update is malicious; it means the update should use the normal scan path."
+        not_proved = "This does not prove the update is malicious; it means the update should use the normal scan path. AUR ownership, restoration, and adoption were not verified."
 
     return TrustBoundaryDiffResult(
         classification=classification,
@@ -851,7 +856,7 @@ def _source_paths_are_version_churn(fields: _ResolvedFields) -> bool:
     return all(comparisons) and any(old != new for old, new in zip(fields.previous_sources, fields.current_sources))
 
 
-def _normalized_source_pattern(value: str, previous_version: str, current_version: str) -> Tuple[str, str, str]:
+def _normalized_source_pattern(value: str, previous_version: str, current_version: str) -> Tuple[str, str, str, str]:
     parsed = urlparse(value)
     scheme = parsed.scheme.lower()
     host = (parsed.hostname or "").lower()
@@ -863,7 +868,9 @@ def _normalized_source_pattern(value: str, previous_version: str, current_versio
     for version in sorted({previous_version, current_version}, key=len, reverse=True):
         if version:
             query = query.replace(version, "{version}")
-    return scheme, host, f"{path}?{query}" if query else path
+    # VCS fragments choose executable source content. Never discard them or
+    # normalize a tag/branch/commit change into ordinary archive-version churn.
+    return scheme, host, f"{path}?{query}" if query else path, parsed.fragment
 
 
 def _checksum_algorithms_weakened(previous: List[str], current: List[str]) -> bool:

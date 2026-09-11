@@ -42,11 +42,12 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
-The [v0.10.6 release](docs/releases/v0.10.6.md) adds offline Shai-Hulud
-npm intelligence and bounded lifecycle correlations for credential access,
-configuration writes, and publication behavior. It is recovery-bearing;
-the release record identifies its fresh image, completed validation gates,
-and live-scenario limitations.
+The [v0.10.7 release candidate](docs/releases/v0.10.7.md) adds bounded
+editor-task inspection, verified Git acquisition identities, corrected local
+maintainer-annotation history, and developer-only security-data intake and
+evaluation groundwork. It is recovery-bearing; its fresh image and required
+validation gates are pending. The latest published release remains
+[v0.10.6](docs/releases/v0.10.6.md) until those gates and publication complete.
 
 ## What You Can Try Now
 
@@ -308,6 +309,27 @@ or decode step alone is not a finding. Both correlations use a bounded command
 parser; if that parser cannot finish, AuraScan blocks with
 `STATIC-REMOTE-STAGE-INSPECTION-INCOMPLETE-001` and describes incomplete
 inspection rather than asserting malware or execution.
+
+Local package scans and explicit deep-static scans also inspect captured
+`.vscode/tasks.json` files structurally. `EDITOR-TASK-AUTORUN-CARRIER-001`
+blocks a supported `folderOpen` task, or its reachable task dependency, that
+configures an interpreter to execute a literal font, media, document or data
+path. A task file, a normal automatic build, or a font alone does not establish
+this correlation. Actual task execution depends on VS Code workspace trust and
+automatic-task permissions; AuraScan does not execute tasks or establish that
+their targets exist or are malicious. Malformed or unsupported active task
+configuration produces a blocking coverage finding. This bounded Linux task
+check belongs to package/source scanning; standalone Instruction Guard does not
+discover VS Code task files.
+
+Git source identity is separate from a repository URL. Changing a source
+selector requires normal scanning; a branch name or short identifier cannot be
+presented as a full commit pin. Explicit deep-static acquisition resolves the
+selected Git namespace to a commit, checks out that commit and verifies the
+resulting HEAD, recording `resolved_revision`. It reacquires sources on every
+scan. Default local scans cannot observe remote branch/tag movement or prove
+that upstream history was not rewritten. Commit identity is not authenticity,
+and neither old timestamps nor a familiar hosting provider establish trust.
 
 A literal local `install=` target is mandatory scan evidence, including a
 dot-prefixed hook. AuraScan will not call the package clear when that declared
@@ -1654,6 +1676,22 @@ an update. A skipped update does not become a trusted baseline.
 stability, AUR metadata, and version strings alone are also not proof that a
 scan is a safe update.
 
+Local history compares the PKGBUILD's `# Maintainer:` annotation, not the AUR
+account that owns its package base. Adding, removing, or changing that text
+requires review and a normal scan, but never proves orphanhood, adoption,
+restoration, or an ownership transfer. A Git author, push, or adoption-request
+description is not authoritative maintainer state. AuraScan's normal history
+scan has no AUR ownership-event feed and makes no network request to obtain one.
+
+The September [aurweb hardening](https://github.com/archlinux/aurweb/commit/714ea5f8d0332744ebd2c84df79594375b3d834a)
+rejects pushes to deleted bases until restoration, which returns an orphan;
+an existing co-maintainer remains an exception to the restriction on claiming
+an orphan through a push. The [August adoption-review change](https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/thread/P5C7GZ4C3OJIH4EXJ62JAF6X6PY2BCQ4/)
+does not establish that any particular package's adoption was reviewed or that
+its code is safe. These platform changes do not lower AuraScan's risk weights.
+Confirmed ownership transitions require separate, package-bound authoritative
+before-and-after state; collection of that evidence remains future work.
+
 `--scan-context auto` uses a local package database provider. It reads local
 pacman DB metadata without root, package installation, makepkg, package-code
 execution, or network access. If identity, installed state, candidate version,
@@ -1761,6 +1799,15 @@ When a finding is unclear, review the evidence. Do not treat a warning as proof
 of malicious intent, and do not treat a clean report as proof of safety.
 
 ## Tests And Tuning
+
+The developer [security intelligence and model research contract](docs/SECURITY_MODEL_RND.md)
+describes curated evidence, training/evaluation separation and future specialized
+model evaluation. Its [offline metadata contract](security-data/README.md) and
+[explicit developer intake](docs/SECURITY_DATA_INTAKE.md) support private
+quarantine of selected public sources and existing regression fixtures.
+Acquisition and review never grant training/evaluation eligibility or infer
+ground truth from scanner results. Operational scans are not collected for
+research; existing scanning and AI consent boundaries are unchanged.
 
 Run the core validation:
 

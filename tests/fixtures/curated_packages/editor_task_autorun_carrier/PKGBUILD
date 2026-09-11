@@ -1,0 +1,12 @@
+# Maintainer: Inert Fixture <fixture@example.invalid>
+pkgname=curated-editor-task-autorun-carrier
+pkgver=1.0
+pkgrel=1
+pkgdesc="Inert automatic editor task targeting font-named data"
+arch=("any")
+url="https://example.invalid/editor-task-autorun-carrier"
+license=("MIT")
+
+package() {
+  :
+}

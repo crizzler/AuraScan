@@ -42,6 +42,14 @@ requirements regardless of the agent model.
 - Add default static rules in `aurascan/analyzers/deterministic.py`.
 - Add acquired-source checks in `aurascan/analyzers/deep_static.py`.
 - Put shared, secret-free correlations in a small analyzer helper.
+- Keep editor-task JSON command semantics separate from shell text, and bind
+  inspection to captured bytes. See [editor task and Git identity evidence](DEVELOPING.md#editor-task-and-git-identity-evidence)
+  for the bounded Linux subset, execution prerequisites and deferred coverage.
+- Preserve source selectors in trust-diff identity; explicit Git acquisition
+  must resolve the intended namespace and verify the resulting commit.
+- Keep local maintainer-comment history separate from authoritative AUR
+  ownership. Changed annotations retain review and normal scanning; missing
+  comments, pushes, restoration and adoption requests cannot establish adoption.
 - Add exposure and host checks in `aurascan/core/security_audit.py`.
 - Add bounded agent-control discovery, content correlations, integrity state,
   and disable receipts in `aurascan/core/instruction_guard.py`; add CLI and
@@ -53,9 +61,40 @@ requirements regardless of the agent model.
   `aurascan/core/presenter.py` for every user-visible MEDIUM+ rule.
 - Add focused tests beside the affected subsystem and a defanged curated
   fixture when normal fast/wrapper coverage should retain the behavior.
+- For security-corpus or model-evaluation groundwork, follow
+  [security model research](docs/SECURITY_MODEL_RND.md) and the separate
+  [metadata contract](security-data/README.md); reuse existing injected
+  analyzer/provider/test interfaces before introducing runtime abstractions.
+- Use [developer intake](docs/SECURITY_DATA_INTAKE.md) for explicitly selected
+  public source/fixture capture. Acquisition, candidate admission and review are
+  separate operations; reviewed candidates remain quarantined and ineligible.
+  Preserve exact content/revision and package-family lineage, unknown rights,
+  and the distinction between scanner assessments and established labels.
 - Update `README.md`, `DEVELOPING.md`, and
   `docs/releases/unreleased.md` when capabilities or contributor contracts
   change.
+
+## Retain research evidence
+
+When work produces a reusable finding, bypass attempt, false positive, fix or
+model disagreement, consider an explicitly reviewed metadata record. Preserve
+source/rights/privacy, real versus synthetic origin, parent/family lineage,
+claim scope and expected versus observed outcomes; do not copy private reports
+or rejected model prose. Validate manifests with the offline data-contract tool
+before admission. Its structural result does not establish rights or safety.
+Use explicit schema versions and reviewed migrations. Record generation and
+provider provenance; verify separate rights for analysis, redistribution and
+commercial training, including explicit provider permission for training on
+proprietary outputs. Missing evidence keeps the affected use ineligible.
+
+Keep training separate from evaluation, reserve private holdout lineages outside
+the worktree, and record exposure before a fix or regression leaks an evaluation
+case. Contamination invalidates the comparison. Model selection needs frozen,
+task-specific evidence and independent cases; reduced refusal is a separate
+measurement from reasoning, calibration and policy compliance. Research roles
+never inherit credentials, release authority or privileged execution. Keep
+reserved holdouts inaccessible to training/adversarial-example generators;
+establish acceptance thresholds from development baselines before held-out scoring.
 
 ## Design threat detection
 

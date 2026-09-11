@@ -575,6 +575,52 @@ def test_deep_static_scans_never_reuse_or_write_pkgbuild_cache(tmp_path):
     assert cached_pkgbuild(engine, pkgbuild) is None
 
 
+def test_unchanged_git_url_reacquires_changed_source_and_blocks_new_behavior(tmp_path):
+    from aurascan.core.source_acquisition import SourceAcquisitionResult
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    pkgbuild = checkout / "PKGBUILD"
+    pkgbuild.write_text(
+        'pkgname=demo\npkgver=1\nsource=("git+https://example.invalid/demo.git#branch=main")\nsha256sums=(SKIP)\n',
+        encoding="utf-8",
+    )
+    acquired = tmp_path / "acquired"
+    acquired.mkdir()
+    (acquired / "build.sh").write_text("echo fixture\n", encoding="utf-8")
+
+    class ChangingFetcher:
+        calls = 0
+
+        def acquire_all(self, refs, pkg_dir):
+            self.calls += 1
+            return [SourceAcquisitionResult(
+                refs[0], local_path=acquired, status="acquired",
+                resolved_revision=("a" if self.calls == 1 else "b") * 40,
+            )]
+
+    class NoopClam:
+        def scan_unpacked_source(self, path):
+            return AnalysisResult(True, "fixture transport", [])
+
+    fetcher = ChangingFetcher()
+    engine = AuraScanEngine(deep_static=True)
+    engine.cache = ScanCache(tmp_path / "cache")
+    engine.analyzers = [DeepStaticAnalyzer(source_fetcher=fetcher, clamav=NoopClam())]
+    assert engine.scan_pkgbuild(str(pkgbuild)) is True
+    original_input = engine.last_scan_input_digest
+    assert engine.last_report["source_acquisition"][0]["resolved_revision"] == "a" * 40
+
+    # Mutate only simulated upstream bytes: no package/URL/selector change.
+    (acquired / "build.sh").write_text("node assets/inert.woff2\n", encoding="utf-8")
+    assert engine.scan_pkgbuild(str(pkgbuild)) is False
+    assert engine.last_scan_input_digest == original_input
+    assert engine.last_report["source_acquisition"][0]["resolved_revision"] == "b" * 40
+    assert any(f["blocks_installation"] for f in engine.last_report["findings"])
+    assert fetcher.calls == 2
+    assert cached_pkgbuild(engine, pkgbuild) is None
+
+
 def test_pkgbuild_cache_is_bound_to_exact_pkgbuild_and_install_hook_bytes(tmp_path):
     pkgbuild = tmp_path / "PKGBUILD"
     pkgbuild.write_bytes(b"pkgname=demo\npkgver=1\ninstall=demo.install\n")
@@ -585,7 +631,7 @@ def test_pkgbuild_cache_is_bound_to_exact_pkgbuild_and_install_hook_bytes(tmp_pa
     engine.cache = ScanCache(tmp_path / "cache")
     engine.analyzers = [analyzer]
 
-    assert engine.rule_version == "1.7.0"
+    assert engine.rule_version == "1.9.0"
     assert engine.scan_pkgbuild(str(pkgbuild)) is True
     first_digest = engine.last_scan_input_digest
     assert analyzer.pkgbuild_calls == 1
@@ -889,6 +935,30 @@ def test_smart_update_uses_trust_diff_and_skips_expensive_analyzers(tmp_path):
     assert history.get_snapshot("demo")["scan_level"] == "smart_fast_path"
 
 
+def test_maintainer_comment_change_forces_normal_scan_without_ownership_claim(tmp_path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text(BASE_UPDATE, encoding="utf-8")
+    history = accepted_history(tmp_path)
+    baseline = history.get_accepted_snapshot("demo")
+    pkgbuild.write_text(BASE_UPDATE.replace("Alice <alice@example.invalid>", "Bob <bob@example.invalid>"), encoding="utf-8")
+    engine = AuraScanEngine(update_scan_policy="smart", scan_context="update", scan_context_source="test_fixture")
+    engine.cache = ScanCache(tmp_path / "cache")
+    engine.analyzers = [history]
+
+    engine.scan_pkgbuild(str(pkgbuild))
+
+    report = engine.last_report
+    decision = report["fast_path_decision"]
+    assert decision["action"] == "use_full_scan"
+    diff = decision["technical_details"]["trust_boundary_diff"]
+    assert diff["requires_manual_review"] is True
+    assert "maintainer_annotation_changed" in diff["reason_codes"]
+    assert not {"maintainer_changed", "orphan_adopted"} & set(diff["reason_codes"])
+    assert {f["rule_id"] for f in report["findings"]} == {"HIST-MAINTAINER-ANNOTATION-CHANGED"}
+    assert report["trusted_baseline_updated"] is False
+    assert history.get_accepted_snapshot("demo")["snapshot_id"] == baseline["snapshot_id"]
+
+
 def test_smart_update_host_change_runs_normal_scan_and_keeps_baseline(tmp_path):
     pkgbuild = tmp_path / "PKGBUILD"
     pkgbuild.write_text(BASE_UPDATE.replace("example.invalid", "evil.example.invalid").replace('sha256sums=("aaa")', 'sha256sums=("bbb")'))
@@ -907,6 +977,31 @@ def test_smart_update_host_change_runs_normal_scan_and_keeps_baseline(tmp_path):
     assert cached["trusted_baseline_updated"] is False
     assert cached["baseline_update_policy"] == "not_updated_manual_review_required"
     assert history.get_snapshot("demo")["version"] == "1.0"
+
+
+def test_commit_to_branch_downgrade_cannot_use_smart_update_shortcut(tmp_path):
+    pkgbuild = tmp_path / "PKGBUILD"
+    previous = BASE_UPDATE.replace(
+        "https://example.invalid/demo-1.0.tar.gz",
+        "git+https://example.invalid/demo.git#commit=" + "a" * 40,
+    ).replace('sha256sums=("aaa")', 'sha256sums=("SKIP")')
+    pkgbuild.write_text(previous, encoding="utf-8")
+    history = HistoryAnalyzer(tmp_path / ".cache" / "history.db")
+    baseline_input = capture_package_scan_input(pkgbuild)
+    history.analyze_pkgbuild(str(pkgbuild), previous, repository_snapshot=baseline_input.repository_snapshot)
+    history.commit_pending_snapshots(scan_level="fast_default")
+    baseline = history.get_accepted_snapshot("demo")["snapshot_id"]
+
+    pkgbuild.write_text(previous.replace("commit=" + "a" * 40, "branch=main"), encoding="utf-8")
+    spy = SpyAIAnalyzer()
+    engine = AuraScanEngine(update_scan_policy="smart", scan_context="update", scan_context_source="test_fixture")
+    engine.cache = ScanCache(tmp_path / "cache")
+    engine.analyzers = [history, SourceMetadataAnalyzer(), spy]
+    engine.scan_pkgbuild(str(pkgbuild))
+    assert spy.called is True
+    assert engine.last_report["fast_path_decision"]["action"] == "use_full_scan"
+    assert engine.last_report["trusted_baseline_updated"] is False
+    assert history.get_accepted_snapshot("demo")["snapshot_id"] == baseline
 
 
 def test_smart_update_unknown_context_runs_normal_scan(tmp_path):

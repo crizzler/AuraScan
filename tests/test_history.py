@@ -1,6 +1,10 @@
+import json
 from pathlib import Path
 
+import pytest
+
 from aurascan.analyzers.history import HistoryAnalyzer
+from aurascan.core.models import Severity
 from aurascan.core.repository_provenance import (
     REPOSITORY_COMPLETE,
     RepositorySnapshot,
@@ -56,7 +60,7 @@ def test_history_snapshot_persists_repository_identity_and_status(tmp_path: Path
     assert saved["repository_status"] == REPOSITORY_COMPLETE
 
 
-def test_maintainer_source_and_pgp_change_emit_manual_review_findings(tmp_path: Path):
+def test_maintainer_annotation_source_and_pgp_change_emit_manual_review_findings(tmp_path: Path):
     db = tmp_path / "history.db"
     analyzer = HistoryAnalyzer(db)
     analyzer.analyze_pkgbuild(str(tmp_path / "PKGBUILD"), BASE_PKGBUILD)
@@ -76,12 +80,98 @@ build() {
     result = analyzer.analyze_pkgbuild(str(tmp_path / "PKGBUILD"), changed)
     rule_ids = {finding.rule_id for finding in result.findings}
 
-    assert "HIST-MAINTAINER-CHANGED" in rule_ids
+    assert "HIST-MAINTAINER-ANNOTATION-CHANGED" in rule_ids
+    assert not {"HIST-MAINTAINER-CHANGED", "HIST-ORPHAN-ADOPTED"} & rule_ids
     assert "HIST-SOURCE-HOST-CHANGED" in rule_ids
     assert "HIST-PGP-REMOVED" in rule_ids
     assert "HIST-BUILD-NEW-NETWORK" in rule_ids
     assert all(f.requires_manual_review for f in result.findings)
     assert not any(f.blocks_installation for f in result.findings)
+
+
+@pytest.mark.parametrize(
+    ("previous_annotation", "current_annotation"),
+    [
+        ("", "# Maintainer: Alice <alice@example.invalid>\n"),
+        ("# Maintainer:\n", "# Maintainer: Alice <alice@example.invalid>\n"),
+        ("# Maintainer: Alice <alice@example.invalid>\n", ""),
+        ("# Maintainer: Alice <alice@example.invalid>\n", "# Maintainer:\n"),
+        ("# Maintainer: Alice <alice@example.invalid>\n", "# Maintainer: Bob <bob@example.invalid>\n"),
+    ],
+)
+def test_annotation_addition_removal_and_change_do_not_establish_aur_ownership(
+    tmp_path: Path, previous_annotation, current_annotation
+):
+    analyzer = HistoryAnalyzer(tmp_path / "history.db")
+    body = BASE_PKGBUILD.split("\n", 1)[1]
+    path = str(tmp_path / "PKGBUILD")
+    analyzer.analyze_pkgbuild(path, previous_annotation + body)
+    analyzer.commit_pending_snapshots(scan_level="fast_default")
+
+    result = analyzer.analyze_pkgbuild(path, current_annotation + body)
+
+    assert [finding.rule_id for finding in result.findings] == ["HIST-MAINTAINER-ANNOTATION-CHANGED"]
+    finding = result.findings[0]
+    assert finding.severity == Severity.MEDIUM
+    assert finding.requires_manual_review is True
+    assert finding.blocks_installation is False
+    assert "Alice" not in json.dumps(finding.to_dict())
+    assert "Bob" not in json.dumps(finding.to_dict())
+
+
+@pytest.mark.parametrize(
+    ("previous_annotation", "current_annotation"),
+    [
+        ("", ""),
+        ("", "# Maintainer:  \n"),
+        ("# Maintainer:\n", ""),
+        ("# Maintainer: Alice\n", "  # Maintainer:  Alice  \n"),
+    ],
+)
+def test_absent_blank_or_unchanged_annotation_does_not_report_adoption(
+    tmp_path: Path, previous_annotation, current_annotation
+):
+    analyzer = HistoryAnalyzer(tmp_path / "history.db")
+    body = BASE_PKGBUILD.split("\n", 1)[1]
+    path = str(tmp_path / "PKGBUILD")
+    analyzer.analyze_pkgbuild(path, previous_annotation + body)
+    analyzer.commit_pending_snapshots(scan_level="fast_default")
+
+    result = analyzer.analyze_pkgbuild(path, current_annotation + body)
+
+    assert result.findings == []
+
+
+def test_legacy_snapshot_without_maintainer_annotation_is_not_orphan_evidence(tmp_path: Path):
+    analyzer = HistoryAnalyzer(tmp_path / "history.db")
+    path = str(tmp_path / "PKGBUILD")
+    analyzer.analyze_pkgbuild(path, BASE_PKGBUILD)
+    analyzer.commit_pending_snapshots(scan_level="fast_default")
+    legacy = analyzer.get_snapshot("demo")
+    legacy.pop("maintainer")
+    analyzer.save_snapshot("demo", legacy)
+
+    result = analyzer.analyze_pkgbuild(path, BASE_PKGBUILD)
+
+    assert [finding.rule_id for finding in result.findings] == ["HIST-MAINTAINER-ANNOTATION-CHANGED"]
+    assert result.findings[0].requires_manual_review is True
+
+
+def test_hostile_annotation_is_not_copied_into_history_finding(tmp_path: Path):
+    analyzer = HistoryAnalyzer(tmp_path / "history.db")
+    path = str(tmp_path / "PKGBUILD")
+    analyzer.analyze_pkgbuild(path, BASE_PKGBUILD)
+    analyzer.commit_pending_snapshots(scan_level="fast_default")
+    hostile = "fake-secret-value \x1b[31m https://example.invalid/?token=fake-secret-value"
+    changed = BASE_PKGBUILD.replace("Alice <alice@example.invalid>", hostile)
+
+    result = analyzer.analyze_pkgbuild(path, changed)
+
+    assert [finding.rule_id for finding in result.findings] == ["HIST-MAINTAINER-ANNOTATION-CHANGED"]
+    exported = json.dumps(result.findings[0].to_dict())
+    assert "fake-secret-value" not in exported
+    assert "example.invalid" not in exported
+    assert "\\u001b" not in exported
 
 
 def test_install_file_added_is_detected(tmp_path: Path):

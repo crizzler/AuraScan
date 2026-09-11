@@ -75,6 +75,7 @@ def test_smart_policy_forces_full_scan_for_stale_or_risky_state(field, reason_co
 @pytest.mark.parametrize(
     "trust_change",
     [
+        "maintainer_annotation_changed",
         "maintainer_changed",
         "orphan_adopted",
         "source_host_changed",

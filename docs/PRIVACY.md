@@ -125,6 +125,33 @@ artifact bytes or matched command text in that manifest. Treat these databases
 as private local security data; same-UID malware can read or alter user-owned
 cache or data state, and root malware can defeat the scanner.
 
+## Research and training data
+
+Operational scans, caches, reports, provider requests and diagnostic retention
+do not enroll user data in a research corpus or authorize model training.
+The [security research contract](SECURITY_MODEL_RND.md) requires a separate
+review of provenance, privacy, lineage and permission for the intended use.
+The developer-only metadata validator does not export or read those stores,
+fetch referenced sources, inspect payloads or contact a model.
+
+The separate [developer intake](SECURITY_DATA_INTAKE.md) copies only explicitly
+selected public sources or fixture bytes to a private store outside the worktree.
+Network acquisition requires an explicit command flag. It discards RPC
+maintainer/email fields and retains response digests, but selected recipe bytes
+can still contain identifying data or secrets; private storage is not redaction
+or anonymization. Unknown privacy and rights remain unresolved. Intake and manual
+validation keep every use flag false; neither scans operational state nor
+authorizes sharing with a provider. Store retention and rights review remain
+operator responsibilities.
+
+Private held-out evaluations and their derivatives stay outside the worktree
+and training data. Keep secrets, private paths and unnecessary identifiers out
+of corpus records; hashes are not anonymization. Permission to analyze, share
+with a provider, redistribute and train remain separate decisions. Unknown
+rights for one use do not grant that use, and this policy makes no legal
+determination about upstream material. See the
+[data contract](../security-data/README.md) for the limited checks implemented.
+
 ## Package and Advisory AI Boundaries
 
 Optional package AI receives only a bounded head/tail selection of numbered
@@ -163,6 +190,12 @@ Default cloud and local provider transports refuse redirects. Gemini
 credentials are sent in a request header rather than a URL. Source-acquisition
 reports separately omit URL userinfo, query strings, and fragments so embedded
 credentials or tokens are not retained in scan state.
+Explicit Git acquisition additionally records the verified hexadecimal commit
+identity as `resolved_revision`; it does not retain the raw selector fragment
+or authenticate the author. Captured editor-task bytes remain bounded in-memory
+scan inputs. New task findings use fixed explanations and task ordinals rather
+than configuration labels, command strings or environment values; task targets
+are never opened by the task analyzer.
 
 ## Explicit Source Acquisition and Native Tools
 

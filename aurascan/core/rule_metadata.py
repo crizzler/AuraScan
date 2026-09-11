@@ -36,6 +36,26 @@ class RuleMetadata:
 
 
 RULE_METADATA: Dict[str, RuleMetadata] = {
+    "EDITOR-TASK-AUTORUN-CARRIER-001": RuleMetadata(
+        "EDITOR-TASK-AUTORUN-CARRIER-001", RuleCategory.deterministic_static,
+        Severity.CRITICAL, "editor-task-carrier", 95, True, "deterministic",
+        "A captured automatic editor task configures interpreter execution of a data, media, document or font path.",
+    ),
+    "EDITOR-TASK-INSPECTION-INCOMPLETE-001": RuleMetadata(
+        "EDITOR-TASK-INSPECTION-INCOMPLETE-001", RuleCategory.deterministic_static,
+        Severity.HIGH, "editor-task-coverage", 95, True, "deterministic",
+        "Bounded structural inspection of editor task configuration did not complete.",
+    ),
+    "SOURCE-META-GIT-SELECTOR-UNRESOLVED": RuleMetadata(
+        "SOURCE-META-GIT-SELECTOR-UNRESOLVED", RuleCategory.source_metadata,
+        Severity.HIGH, "source-git-pinning", 80, True, "finding_fields",
+        "A Git selector is unsupported or ambiguous and cannot establish a fixed source revision.",
+    ),
+    "HIST-MAINTAINER-ANNOTATION-CHANGED": RuleMetadata(
+        "HIST-MAINTAINER-ANNOTATION-CHANGED", RuleCategory.history_supply_chain,
+        Severity.MEDIUM, None, 50, True, None,
+        "Untrusted PKGBUILD maintainer comment changed; AUR ownership is unverified.",
+    ),
     "SUPPLYCHAIN-NPM-SHAIHULUD-20260907": RuleMetadata("SUPPLYCHAIN-NPM-SHAIHULUD-20260907", RuleCategory.history_supply_chain, Severity.CRITICAL, "npm-shai-hulud-exact", 95, True, "deterministic", "Captured package control text selects an observed malicious npm package version."),
     "DEEPSTATIC-NPM-SHAIHULUD-20260907": RuleMetadata("DEEPSTATIC-NPM-SHAIHULUD-20260907", RuleCategory.history_supply_chain, Severity.CRITICAL, "npm-shai-hulud-exact", 95, True, "deterministic", "Acquired metadata or source control text selects an observed malicious npm package version."),
     "SUPPLYCHAIN-NPM-SHAIHULUD-REVIEW-001": RuleMetadata("SUPPLYCHAIN-NPM-SHAIHULUD-REVIEW-001", RuleCategory.history_supply_chain, Severity.HIGH, "npm-shai-hulud-review", 95, True, "deterministic", "A malware-advisory package is selected without an exact observed campaign version."),

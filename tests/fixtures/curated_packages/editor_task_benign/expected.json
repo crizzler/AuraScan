@@ -1,0 +1,14 @@
+{
+  "scenario": "editor_task_benign",
+  "category": "benign",
+  "scan_modes": ["fast", "wrapper"],
+  "package_name": "curated-editor-task-benign",
+  "package_version": "1.0",
+  "expected_rule_ids": [],
+  "expected_absent_rule_ids": ["EDITOR-TASK-AUTORUN-CARRIER-001", "EDITOR-TASK-INSPECTION-INCOMPLETE-001"],
+  "expected_min_severity": "LOW",
+  "expected_action": "allow",
+  "expected_manual_review": false,
+  "expected_makepkg_invoked": true,
+  "expected_wrapper_action": "makepkg_invoked"
+}

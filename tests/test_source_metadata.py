@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from aurascan.analyzers.source_metadata import SourceMetadataAnalyzer
 from aurascan.core.models import PackageMetadata, ScanReport, Severity
 from aurascan.core.risk import RiskEngine
@@ -49,6 +51,47 @@ def test_git_commit_with_skip_is_low_and_hidden_unless_verbose():
 
     assert finding.severity == Severity.LOW
     assert finding.show_by_default is False
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        "commit=main",
+        "commit=abc123",
+        "commit=" + "a" * 39,
+        "commit=" + "a" * 41,
+        "commit=" + "g" * 40,
+        "commit=" + "a" * 64,
+        "commit=--detach",
+        "commit=",
+        "commit=" + "a" * 40 + "&branch=main",
+        "commit=" + "a" * 40 + "&commit=" + "b" * 40,
+        "branch=main&branch=other",
+        "branch=main~1",
+        "branch=HEAD",
+        "tag=v1^{commit}",
+        "tag=",
+        "unknown=main",
+    ],
+)
+def test_unsupported_git_selector_never_receives_fixed_commit_reassurance(selector):
+    findings = findings_for('source=("git+https://example.invalid/repo.git#' + selector + '")\nsha256sums=(SKIP)\n')
+
+    finding = next(f for f in findings if f.rule_id == "SOURCE-META-GIT-SELECTOR-UNRESOLVED")
+    assert finding.severity == Severity.HIGH
+    assert finding.show_by_default is True
+    assert finding.requires_manual_review is True
+    assert not any(f.rule_id == "SOURCE-META-SKIP-GIT-COMMIT" for f in findings)
+    assert selector not in finding.evidence_snippet
+
+
+def test_git_tag_description_discloses_mutability_and_missing_identity_verification():
+    findings = findings_for('source=("git+https://example.invalid/repo.git#tag=v1")\nsha256sums=(SKIP)\n')
+    finding = next(f for f in findings if f.rule_id == "SOURCE-META-SKIP-GIT-TAG")
+
+    assert "moved or replaced" in finding.why_it_matters
+    assert "does not resolve its commit" in finding.why_it_matters
+    assert finding.requires_manual_review is True
 
 
 def test_archive_skip_with_signature_less_severe_than_without_signature():

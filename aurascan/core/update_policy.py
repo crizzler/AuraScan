@@ -53,7 +53,11 @@ EXPENSIVE_PHASES = [
 # These are normalized signals from cheap update-diff checks. A caller should
 # only pass source/checksum churn here after deciding it is trust-relevant; a
 # plain version bump on the same host with strong verification can remain clean.
+# Ownership/adoption reasons require independently established platform state;
+# local comment diffs produce only maintainer_annotation_changed. This policy
+# consumes normalized signals and does not authenticate their source.
 TRUST_BOUNDARY_REASON_CODES = {
+    "maintainer_annotation_changed",
     "maintainer_changed",
     "orphan_adopted",
     "source_url_changed",
@@ -333,7 +337,7 @@ def _decide_smart(state: UpdateScanState) -> UpdateFastPathDecision:
             state,
             ["trust_boundary_changed"] + trust_changes,
             "Full scan required because trust boundaries changed.",
-            "Source locations, maintainers, verification settings, dependencies, or install behavior changed since the accepted baseline.",
+            "Source locations, maintainer metadata, verification settings, dependencies, or install behavior changed since the accepted baseline.",
         )
 
     return _decision(

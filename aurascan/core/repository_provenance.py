@@ -13,7 +13,7 @@ import os
 import re
 import stat
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Dict, Iterable, List, Sequence, Set, Tuple
 
@@ -22,7 +22,7 @@ from aurascan.analyzers.python_bytecode import classify_python_precompiled
 
 REPOSITORY_COMPLETE = "complete"
 REPOSITORY_UNINSPECTED = "uninspected"
-REPOSITORY_SNAPSHOT_VERSION = "1.1"
+REPOSITORY_SNAPSHOT_VERSION = "1.2"
 
 MAX_REPOSITORY_ENTRIES = 20_000
 MAX_REPOSITORY_REGULAR_FILES = 4_096
@@ -33,6 +33,9 @@ MAX_REPOSITORY_TOTAL_BYTES = 256 * 1024 * 1024
 MAX_REPOSITORY_PATH_BYTES = 4096
 MAX_REQUIRED_RELATIVE_PATHS = 256
 MAX_MAGIC_BYTES = 4096
+MAX_EDITOR_TASK_BYTES = 1024 * 1024
+MAX_EDITOR_TASK_FILES = 32
+MAX_EDITOR_TASK_TOTAL_BYTES = 4 * 1024 * 1024
 MAX_REPOSITORY_ELAPSED_SECONDS = 15.0
 
 _VCS_DIRECTORIES = frozenset({".git", ".hg", ".svn", ".bzr"})
@@ -83,12 +86,24 @@ class RepositoryArtifact:
 
 
 @dataclass(frozen=True)
+class RepositoryEditorTask:
+    relative_path: str
+    sha256: str
+    payload: bytes = field(repr=False)
+
+
+def is_editor_tasks_path(path: str) -> bool:
+    return PurePosixPath(path).parts[-2:] == (".vscode", "tasks.json")
+
+
+@dataclass(frozen=True)
 class RepositorySnapshot:
     status: str
     input_digest: str
     artifacts: Tuple[RepositoryArtifact, ...]
     error_code: str = ""
     entry_count: int = 0
+    editor_tasks: Tuple[RepositoryEditorTask, ...] = ()
 
 
 @dataclass
@@ -107,6 +122,8 @@ class _CaptureState:
     entry_count: int = 0
     regular_file_count: int = 0
     total_bytes: int = 0
+    editor_tasks: List[RepositoryEditorTask] = field(default_factory=list)
+    editor_task_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -276,6 +293,7 @@ def capture_repository_snapshot(
         sorted(excluded_subtree_paths),
         sorted(independently_bound_paths),
         sorted(required_paths),
+        editor_tasks=state.editor_tasks,
     )
 
 
@@ -334,6 +352,17 @@ def _walk_directory(
                     not required_traversal
                     and relative_path in state.excluded_subtree_paths
                 ):
+                    if name == ".vscode":
+                        # A package-controlled VCS alias cannot hide this
+                        # observed editor authority surface. Capture only its
+                        # exact task file through the existing required-path
+                        # boundary; the rest of the source tree stays pruned.
+                        task_path = relative_path + "/tasks.json"
+                        if len(os.fsencode(task_path)) > MAX_REPOSITORY_PATH_BYTES:
+                            raise _CaptureFailure("path_too_long")
+                        state.required_paths.add(task_path)
+                        if len(state.required_paths) > MAX_REQUIRED_RELATIVE_PATHS:
+                            raise _CaptureFailure("required_path_limit")
                     state.pruned_paths.add(relative_path)
                     _record_manifest_entry(
                         state,
@@ -395,7 +424,7 @@ def _walk_directory(
             if state.regular_file_count > MAX_REPOSITORY_REGULAR_FILES:
                 raise _CaptureFailure("candidate_limit")
 
-            if relative_path in state.independently_bound_paths:
+            if relative_path in state.independently_bound_paths and not is_editor_tasks_path(relative_path):
                 # PKGBUILD and install-hook bytes are captured through their
                 # own stronger snapshot readers.  Record only the stable path
                 # role here so changing those bytes does not masquerade as a
@@ -422,6 +451,7 @@ def _walk_directory(
                     excluded=excluded,
                     unreferenced_generated_archive=unreferenced_generated_archive,
                     require_full_capture=relative_path in state.required_paths,
+                    relative_path=relative_path,
                 )
             )
             kind = _classify_artifact(prefix, pe_valid=pe_valid, relative_path=relative_path)
@@ -465,6 +495,7 @@ def _capture_regular_entry(
     excluded: bool,
     unreferenced_generated_archive: bool = False,
     require_full_capture: bool = False,
+    relative_path: str = "",
 ) -> Tuple[str, bytes, bool, int, int, str]:
     """Capture content, or stable metadata for an independently bounded file.
 
@@ -479,6 +510,8 @@ def _capture_regular_entry(
     A statically required control path always receives normal full capture.
     """
 
+    editor_task = is_editor_tasks_path(relative_path)
+    require_full_capture = require_full_capture or editor_task
     metadata_only = (
         not require_full_capture
         and expected.st_size > MAX_REPOSITORY_FILE_BYTES
@@ -506,6 +539,7 @@ def _capture_regular_entry(
             require_full_capture
             or (not excluded and not unreferenced_generated_archive)
         ),
+        editor_task_path=relative_path if editor_task else "",
     )
     return digest, prefix, pe_valid, size, opened_mode, "regular"
 
@@ -665,7 +699,7 @@ def _capture_required_path(
             raise _CaptureFailure("candidate_limit")
         state.visited_paths.add(relative_path)
 
-        if relative_path in state.independently_bound_paths:
+        if relative_path in state.independently_bound_paths and not is_editor_tasks_path(relative_path):
             _record_manifest_entry(
                 state,
                 _manifest_entry(relative_path, "independently-bound-regular"),
@@ -683,6 +717,7 @@ def _capture_required_path(
                 state,
                 excluded=excluded,
                 require_full_capture=True,
+                relative_path=relative_path,
             )
         )
         kind = _classify_artifact(prefix, pe_valid=pe_valid, relative_path=relative_path)
@@ -911,6 +946,7 @@ def _read_regular_entry(
     state: _CaptureState,
     *,
     count_toward_total: bool = True,
+    editor_task_path: str = "",
 ) -> Tuple[str, bytes, bool, int, int]:
     file_fd = -1
     try:
@@ -932,9 +968,17 @@ def _read_regular_entry(
             raise _CaptureFailure("file_oversized")
         if count_toward_total and state.total_bytes + before.st_size > MAX_REPOSITORY_TOTAL_BYTES:
             raise _CaptureFailure("total_size_limit")
+        if editor_task_path:
+            if len(state.editor_tasks) >= MAX_EDITOR_TASK_FILES:
+                raise _CaptureFailure("editor_task_count_limit")
+            if before.st_size > MAX_EDITOR_TASK_BYTES:
+                raise _CaptureFailure("editor_task_size_limit")
+            if state.editor_task_bytes + before.st_size > MAX_EDITOR_TASK_TOTAL_BYTES:
+                raise _CaptureFailure("editor_task_total_limit")
 
         digest = hashlib.sha256()
         prefix = bytearray()
+        task_payload = bytearray()
         total = 0
         while True:
             _check_deadline(state)
@@ -955,6 +999,12 @@ def _read_regular_entry(
             if count_toward_total and state.total_bytes + total > MAX_REPOSITORY_TOTAL_BYTES:
                 raise _CaptureFailure("total_size_limit")
             digest.update(chunk)
+            if editor_task_path:
+                if total > MAX_EDITOR_TASK_BYTES:
+                    raise _CaptureFailure("editor_task_size_limit")
+                if state.editor_task_bytes + total > MAX_EDITOR_TASK_TOTAL_BYTES:
+                    raise _CaptureFailure("editor_task_total_limit")
+                task_payload.extend(chunk)
             if len(prefix) < MAX_MAGIC_BYTES:
                 prefix.extend(chunk[: MAX_MAGIC_BYTES - len(prefix)])
 
@@ -972,6 +1022,11 @@ def _read_regular_entry(
             raise _CaptureFailure("file_changed")
         if count_toward_total:
             state.total_bytes += total
+        if editor_task_path:
+            state.editor_tasks.append(RepositoryEditorTask(
+                editor_task_path, digest.hexdigest(), bytes(task_payload),
+            ))
+            state.editor_task_bytes += total
         return (
             digest.hexdigest(),
             bytes(prefix),
@@ -1219,6 +1274,7 @@ def _build_snapshot(
     excluded_subtree_paths: Sequence[str] = (),
     independently_bound_paths: Sequence[str] = (),
     required_paths: Sequence[str] = (),
+    editor_tasks: Sequence[RepositoryEditorTask] = (),
 ) -> RepositorySnapshot:
     ordered_entries = sorted(
         (dict(entry) for entry in entries),
@@ -1252,4 +1308,5 @@ def _build_snapshot(
         )),
         error_code=error_code,
         entry_count=int(entry_count),
+        editor_tasks=tuple(sorted(editor_tasks, key=lambda task: task.relative_path)),
     )

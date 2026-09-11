@@ -35,6 +35,21 @@ candidate.
 
 ## Validation
 
+- For v0.10.7, verify bounded structural editor-task inspection from stable
+  captured bytes, automatic-task reachability, ordinary-task/asset negatives,
+  source-owned path exclusions, incomplete-coverage blockers, and cache/update
+  policy binding. Verify Git selector changes retain normal scans, unsupported
+  selectors cannot claim pinning, and explicit acquisition resolves exact ref
+  namespaces and verifies detached HEAD. Local maintainer-comment changes must
+  remain annotation evidence rather than verified AUR ownership or adoption.
+  Verify developer security-data rights/lineage and private quarantine/review
+  contracts without executing collected data, contacting models, or enabling
+  training or corpus publication. Package rules are `1.9.0`, repository snapshot
+  identity is `1.2`, and existing public report/Instruction Guard schemas remain
+  unchanged. The Arch check environment includes Git for inert local identity
+  regressions. These shared scanning-boundary changes are recovery-bearing;
+  the fresh image, candidate/package checks and all applicable recovery gates
+  must pass before publication.
 - For v0.10.6, verify source-attributed Shai-Hulud exact release tuples,
   broader advisory scope, bounded metadata and install arguments, stable
   captured-byte hashing, and actual network target matching. Require lifecycle

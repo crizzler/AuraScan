@@ -9,14 +9,14 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
-The v0.10.7 release candidate adds bounded editor-task inspection, verified
-Git acquisition identities, and more precise maintainer-history evidence.
+The v0.10.7 release adds bounded editor-task inspection, verified Git
+acquisition identities, and more precise maintainer-history evidence.
 Developer-only security-data tools keep selected observations in private
 quarantine with explicit review and purpose-specific rights. Automatic task
 findings describe static launch intent, not execution or compromise. This
-recovery-bearing candidate requires a fresh image; build, validation and
-publication are pending. See the versioned note for the exact remaining gates
-and live-scenario limitations.
+recovery-bearing release includes a fresh validated image. The versioned
+note records exact artifact identities, completed gates, and live-scenario
+limitations.
 
 The v0.10.6 release adds source-attributed Shai-Hulud npm
 intelligence, exact malicious release and captured-byte hash matching, and

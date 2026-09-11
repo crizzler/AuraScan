@@ -42,12 +42,11 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
-The [v0.10.7 release candidate](docs/releases/v0.10.7.md) adds bounded
-editor-task inspection, verified Git acquisition identities, corrected local
+The [v0.10.7 release](docs/releases/v0.10.7.md) adds bounded editor-task
+inspection, verified Git acquisition identities, corrected local
 maintainer-annotation history, and developer-only security-data intake and
-evaluation groundwork. It is recovery-bearing; its fresh image and required
-validation gates are pending. The latest published release remains
-[v0.10.6](docs/releases/v0.10.6.md) until those gates and publication complete.
+evaluation groundwork. It is recovery-bearing; the release record identifies
+its fresh image, completed validation gates, and live-scenario limitations.
 
 ## What You Can Try Now
 

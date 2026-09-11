@@ -795,6 +795,56 @@ This rule does not rely on Arch's tracker currently listing an issue and does
 not claim an AUR exploitation campaign. Tests inject database roots/version
 comparison and use inert local tarballs; neither pnpm nor package code runs.
 
+### Emergency vendor advisory evidence
+
+`aurascan/core/security_audit.py` contains a deliberately small reviewed
+`VENDOR_EMERGENCY_ADVISORIES` mapping for gaps before distribution advisories
+arrive. It consumes captured installed package names/versions, never executes
+the installed browser or fetches a feed, and remains active with `--offline`
+and `--no-arch-audit`. Entries need an exact Arch package mapping, a verified
+Linux upstream fixed floor, authoritative exploitation evidence, references,
+and a review date. The initial comparator supports only canonical four-part
+numeric Chromium releases; adding other products requires explicit review of
+their version semantics and finding descriptions. This is compiled curated
+intelligence shipped with AuraScan, not a separately signed or live-updated feed.
+
+On 2026-09-11 the [Google release announcement](https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_0808145027.html)
+and [CISA KEV](https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json)
+confirmed CVE-2026-87491 exploitation and the Linux floor `153.0.8010.36`.
+Arch's [package metadata](https://archlinux.org/packages/extra/x86_64/chromium/json/)
+reported `152.0.7977.82-1`; the [Arch tracker](https://security.archlinux.org/package/chromium)
+did not yet list this CVE. Those are dated observations, not runtime checks.
+The [Chrome CNA record](https://cveawg.mitre.org/api/cve/CVE-2026-87491)
+describes versions prior to the floor, but its structured `version` and
+`lessThan` values both equal that floor. The curated exclusive upper bound
+uses the vendor announcement and CNA prose; no introduced lower bound is
+established. Do not mechanically import the inconsistent structured interval.
+Google rates the issue Medium; AuraScan's HIGH prioritization reflects the
+confirmed exploitation evidence, not an attributed Google severity rating.
+
+Keep `SEC-KNOWN-EXPLOITED-VERSION-LAG` separate from distribution-feed findings
+and malware incidents. Supported versions at/above the floor mean only that
+this advisory did not match. Unknown/missing versions require
+`SEC-VENDOR-ADVISORY-VERSION-UNRESOLVED` and partial coverage without echoing
+untrusted version text. Package-query failures must also keep coverage partial.
+Epoch/pkgrel cannot override an upstream range, and package names/versions
+cannot establish official origin, signatures, backports, or exploitation.
+Do not discount findings based on repository presence, out-of-date flags,
+signatures, or a currently empty `arch-audit` result.
+
+The upgrade consumer may suppress this HIGH warning only for a supported,
+exact mapped repository candidate reaching the floor, preserving the original
+audit evidence. An AUR candidate, epoch-only bump, custom version, or unrelated
+update cannot do so. Upgrade snapshots currently collect package names only;
+without captured versions this check remains unresolved coverage. Adding
+version collection there is deferred. Full system audit collects versions.
+
+Security audits are regenerated, not package-scan cache entries; this addition
+does not change the engine rule/cache version. The report remains schema 1.0
+with an additive `risk_summary.vendor_emergency_findings` count and existing
+finding fields. Tests use injected package maps, temporary roots, and fake
+runners; no browser, package payload, real host scan, or live feed is needed.
+
 ### npm campaign intelligence and lifecycle correlations
 
 Keep verified campaign data in

@@ -54,7 +54,7 @@ def test_pyproject_console_scripts_are_registered():
     data = tomllib.loads(read_text("pyproject.toml"))
 
     scripts = data["project"]["scripts"]
-    assert data["project"]["version"] == "0.10.7"
+    assert data["project"]["version"] == "0.10.8"
     assert scripts["aurascan"] == "aurascan.cli:main"
     assert scripts["aurascan-makepkg"] == "aurascan.makepkg_wrapper:main"
     assert data["project"]["requires-python"] == ">=3.8"
@@ -571,27 +571,13 @@ def test_recovery_bearing_v0106_release_contract():
 
 
 def test_recovery_bearing_v0107_release_contract():
-    import json
-
-    def normalized(relative: str) -> str:
-        return " ".join(read_text(relative).lower().split())
-
     release_text = read_text("docs/releases/v0.10.7.md")
     release = " ".join(release_text.lower().split())
-    unreleased = normalized("docs/releases/unreleased.md")
-    checklist = normalized("docs/RELEASE_CHECKLIST.md")
-    announcement = normalized("docs/ANNOUNCEMENT.md")
-    pkgbuild = read_text("packaging/arch/PKGBUILD")
-    srcinfo = read_text("packaging/arch/.SRCINFO")
-    recovery_source = read_text("aurascan/core/recovery_cli.py")
-    profile = read_text("packaging/recovery/archiso/profiledef.sh")
-    archiso_issue = read_text("packaging/recovery/archiso/airootfs/etc/issue")
-    uki_issue = read_text("packaging/recovery/rootfs/etc/issue")
-    manifest = json.loads(read_text("aurascan/assets/aurascan-recovery-iso.json"))
+    announcement = " ".join(read_text("docs/ANNOUNCEMENT.md").lower().split())
 
     required_release_phrases = [
         "# aurascan v0.10.7",
-        "release date: 2026-09-11" if manifest["status"] == "build-required" else "released on 2026-09-11",
+        "released on 2026-09-11",
         "recovery-bearing release",
         "`aurascan-recovery-0.10.7-x86_64.iso`",
         "sorted `.iso.packages.txt` manifest",
@@ -606,44 +592,85 @@ def test_recovery_bearing_v0107_release_contract():
     for phrase in required_release_phrases:
         assert phrase in release
 
-    assert "changes after v0.10.7" in unreleased
-    assert "release disposition" in checklist
-    assert "strictly smaller than 2 gib (2,147,483,648 bytes)" in checklist
     assert "v0.10.7 release" in announcement
     assert "adds bounded editor-task inspection" in announcement
-    assert "pkgver=0.10.7" in pkgbuild
+    assert re.findall(
+        r"^Recovery build candidate: `([0-9a-f]{40})`$", release_text, re.MULTILINE
+    ) == ["05ea645e1270e521ebb84abc56141d364ac33e3b"]
+    assert re.findall(
+        r"^ISO SHA-256: `([0-9a-f]{64})`$", release_text, re.MULTILINE
+    ) == ["edf1a306d30483e22187f99005351cbce7c86c731fd9aeba8044dd02cb80e462"]
+    for outcome in (
+        "- hybrid iso, seabios readiness: `pass`",
+        "- hybrid iso, ovmf uefi readiness: `pass`",
+        "- local uki, ordinary ovmf uefi readiness: `pass`",
+        "- local uki, disposable-key secure boot unsigned rejection and signed readiness: `pass`",
+        "- complete python suite and python 3.8/3.14 ci matrix: `pass`",
+        "- presenter, shell-syntax, unit, and package-metadata audits: `pass`",
+        "- clean arch release-candidate package build: `pass`",
+        "- expanded-artifact privacy/path audit: `pass`",
+        "- strict sub-2-gib iso size gate: `pass`",
+        "- deterministic recovery scenario fixtures: `pass`",
+    ):
+        assert outcome in release
+
+
+def test_package_only_v0108_release_contract():
+    def normalized(relative: str) -> str:
+        return " ".join(read_text(relative).lower().split())
+
+    release_text = read_text("docs/releases/v0.10.8.md")
+    release = " ".join(release_text.lower().split())
+    unreleased = normalized("docs/releases/unreleased.md")
+    checklist = normalized("docs/RELEASE_CHECKLIST.md")
+    announcement = normalized("docs/ANNOUNCEMENT.md")
+    pkgbuild = read_text("packaging/arch/PKGBUILD")
+    srcinfo = read_text("packaging/arch/.SRCINFO")
+    recovery_source = read_text("aurascan/core/recovery_cli.py")
+    profile = read_text("packaging/recovery/archiso/profiledef.sh")
+    archiso_issue = read_text("packaging/recovery/archiso/airootfs/etc/issue")
+    uki_issue = read_text("packaging/recovery/rootfs/etc/issue")
+    manifest = json.loads(read_text("aurascan/assets/aurascan-recovery-iso.json"))
+
+    assert "package-only release" in release
+    assert "changes after v0.10.8" in unreleased
+    assert "release disposition" in checklist
+    assert "strictly smaller than 2 gib (2,147,483,648 bytes)" in checklist
+    assert "for v0.10.8" in checklist
+    assert "v0.10.8 release" in announcement
+    assert "pkgver=0.10.8" in pkgbuild
     assert "pkgrel=1" in pkgbuild
     assert "sha256sums=('SKIP')" in pkgbuild or re.search(r"sha256sums=\('[0-9a-f]{64}'\)", pkgbuild)
-    assert "\tpkgver = 0.10.7" in srcinfo
-    assert "aurascan-0.10.7.tar.gz" in srcinfo
+    assert "\tpkgver = 0.10.8" in srcinfo
+    assert "aurascan-0.10.8.tar.gz" in srcinfo
     assert "\tsha256sums = SKIP" in srcinfo or re.search(r"\tsha256sums = [0-9a-f]{64}", srcinfo)
-    assert 'return "0.10.7-dev"' in recovery_source
+    assert 'return "0.10.8-dev"' in recovery_source
     assert ': "${AURASCAN_RECOVERY_VERSION:' in profile
     assert 'iso_version="$AURASCAN_RECOVERY_VERSION"' in profile
     assert "AuraScan Recovery v@AURASCAN_VERSION@" in archiso_issue
     assert "AuraScan Recovery" in uki_issue
     assert "v0.6.0" not in uki_issue
-    assert manifest["schema"] == "aurascan_recovery_iso/2.0"
-    assert manifest["application_version"] == "0.10.7"
-    assert manifest["release_disposition"] == "recovery-bearing"
-    assert manifest["version"] == "0.10.7"
-    assert manifest["architecture"] == "x86_64"
-    assert manifest["filename"] == "aurascan-recovery-0.10.7-x86_64.iso"
-    assert manifest["released_at"] == "2026-09-11"
-    assert manifest["status"] in {"build-required", "release-ready"}
-    if manifest["status"] == "build-required":
-        assert manifest["url"] == ""
-        assert manifest["sha256"] == ""
-    else:
-        assert manifest["url"].endswith(
-            "/v0.10.7/aurascan-recovery-0.10.7-x86_64.iso"
-        )
-        assert re.fullmatch(r"[0-9a-f]{64}", manifest["sha256"])
+    assert manifest == {
+        "schema": "aurascan_recovery_iso/2.0",
+        "application_version": "0.10.8",
+        "release_disposition": "package-only",
+        "version": "0.10.7",
+        "architecture": "x86_64",
+        "filename": "aurascan-recovery-0.10.7-x86_64.iso",
+        "released_at": "2026-09-11",
+        "url": "https://github.com/crizzler/AuraScan/releases/download/v0.10.7/aurascan-recovery-0.10.7-x86_64.iso",
+        "sha256": "edf1a306d30483e22187f99005351cbce7c86c731fd9aeba8044dd02cb80e462",
+        "status": "release-ready",
+    }
+    assert manifest["url"] in release_text
+    assert re.findall(
+        r"^ISO SHA-256: `([0-9a-f]{64})`$", release_text, re.MULTILINE
+    ) == [manifest["sha256"]]
+    assert "iso and local-uki gates were not rerun for v0.10.8" in release
+    assert "general-purpose audit cli does not contain the new chromium advisory" in release
 
     if os.environ.get("AURASCAN_RELEASE_FINAL") == "1":
-        assert os.environ.get("AURASCAN_RELEASE_TAG") == "v0.10.7"
-        assert manifest["status"] == "release-ready"
-        assert re.fullmatch(r"[0-9a-f]{64}", manifest["sha256"])
+        assert os.environ.get("AURASCAN_RELEASE_TAG") == "v0.10.8"
         forbidden_release_phrases = (
             "pending",
             "publication remains blocked",
@@ -655,36 +682,6 @@ def test_recovery_bearing_v0107_release_contract():
         )
         for phrase in forbidden_release_phrases:
             assert phrase not in release
-        rc_commits = re.findall(
-            r"^Recovery build candidate: `([0-9a-f]{40})`$",
-            release_text,
-            re.MULTILINE,
-        )
-        assert len(rc_commits) == 1
-        release_digests = re.findall(
-            r"^ISO SHA-256: `([0-9a-f]{64})`$",
-            release_text,
-            re.MULTILINE,
-        )
-        assert release_digests == [manifest["sha256"]]
-        required_boot_outcomes = (
-            "- hybrid iso, seabios readiness: `pass`",
-            "- hybrid iso, ovmf uefi readiness: `pass`",
-            "- local uki, ordinary ovmf uefi readiness: `pass`",
-            "- local uki, disposable-key secure boot unsigned rejection and signed readiness: `pass`",
-        )
-        for outcome in required_boot_outcomes:
-            assert outcome in release
-        required_additional_outcomes = (
-            "- complete python suite and python 3.8/3.14 ci matrix: `pass`",
-            "- presenter, shell-syntax, unit, and package-metadata audits: `pass`",
-            "- clean arch release-candidate package build: `pass`",
-            "- expanded-artifact privacy/path audit: `pass`",
-            "- strict sub-2-gib iso size gate: `pass`",
-            "- deterministic recovery scenario fixtures: `pass`",
-        )
-        for outcome in required_additional_outcomes:
-            assert outcome in release
         assert "sha256sums=('skip')" in pkgbuild.lower()
 
 

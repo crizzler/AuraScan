@@ -36,7 +36,9 @@ from aurascan.core.kernel_module_autopilot import (
 )
 from aurascan.core.local_package_db import compare_versions_with_vercmp
 from aurascan.core.models import SCANNER_VERSION, Severity
-from aurascan.core.security_audit import SecurityAuditReport, build_security_audit
+from aurascan.core.security_audit import (
+    SecurityAuditReport, build_security_audit, vendor_emergency_version_status,
+)
 from aurascan.core.text_safety import (
     load_strict_json_object,
     validate_model_advisory_text,
@@ -1984,6 +1986,15 @@ def security_audit_upgrade_findings(
     pending_repo = {pkg.name: pkg.new_version for pkg in plan.repo_packages}
     findings: List[UpgradeFinding] = []
     for item in security_report.findings:
+        if (item.category == "vendor_emergency_advisory"
+                and item.rule_id == "SEC-KNOWN-EXPLOITED-VERSION-LAG"
+                and item.source == "vendor_emergency_advisory"
+                and vendor_emergency_version_status(item.package_name, pending_repo.get(item.package_name))
+                == "at_or_above_floor"):
+            # A pkgrel/epoch bump alone cannot prove this upstream fix. Only
+            # an exact mapped repository candidate can resolve this warning;
+            # keep the installed-exposure evidence in the original audit.
+            continue
         if item.category == "official_vulnerability":
             planned_version = pending_repo.get(item.package_name, "")
             fixed_version = next(

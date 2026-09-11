@@ -36,6 +36,16 @@ class RuleMetadata:
 
 
 RULE_METADATA: Dict[str, RuleMetadata] = {
+    "SEC-KNOWN-EXPLOITED-VERSION-LAG": RuleMetadata(
+        "SEC-KNOWN-EXPLOITED-VERSION-LAG", RuleCategory.history_supply_chain,
+        Severity.HIGH, "vendor-emergency-version", 95, True, "finding_fields",
+        "Captured installed package version is below a curated known-exploited vendor fix; origin, backports and host exploitation remain unverified.",
+    ),
+    "SEC-VENDOR-ADVISORY-VERSION-UNRESOLVED": RuleMetadata(
+        "SEC-VENDOR-ADVISORY-VERSION-UNRESOLVED", RuleCategory.history_supply_chain,
+        Severity.MEDIUM, "vendor-emergency-coverage", 75, True, "finding_fields",
+        "Captured installed version cannot be evaluated against a bundled emergency vendor advisory.",
+    ),
     "EDITOR-TASK-AUTORUN-CARRIER-001": RuleMetadata(
         "EDITOR-TASK-AUTORUN-CARRIER-001", RuleCategory.deterministic_static,
         Severity.CRITICAL, "editor-task-carrier", 95, True, "deterministic",

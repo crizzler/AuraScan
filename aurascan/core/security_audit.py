@@ -38,6 +38,28 @@ PACMAN_HISTORY_RE = re.compile(
     r"(?P<package>\S+)\s+\((?P<version>[^)]*)\)"
 )
 SEVERITY_ORDER = [Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL]
+# Reviewed, bundled emergency exceptions, not a remotely refreshed CVE feed.
+# Admit only an exact Arch package mapping with a vendor-verified Linux floor
+# and explicit exploitation evidence. Each tuple is (CVE, exclusive upstream
+# fixed floor, vendor reference, exploitation reference). All entries are known
+# exploited; ordinary out-of-date flags are never inputs to this table.
+VENDOR_EMERGENCY_REVIEWED = "2026-09-11"
+VENDOR_EMERGENCY_ADVISORIES = {
+    "chromium": (
+        "CVE-2026-87491",
+        (153, 0, 8010, 36),
+        "https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_0808145027.html",
+        "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2026-87491",
+    ),
+}
+# This is a narrow numeric Chromium release comparator, not Arch vercmp or a
+# general SemVer implementation. Epoch and pkgrel cannot establish an upstream
+# fix; custom suffixes, abbreviated and prerelease versions remain unresolved.
+VENDOR_EMERGENCY_ARCH_VERSION_RE = re.compile(
+    r"(?:(?:0|[1-9][0-9]*):)?"
+    r"(?P<upstream>(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){3})"
+    r"(?:-[1-9][0-9]*(?:\.[0-9]+)*)?\Z"
+)
 # Snapshot verified against the maintainer advisories and GitHub's reviewed
 # metadata on 2026-09-09. The two sources agree below the legacy rename but
 # disagree about Rust deepseek-tui 0.8.41; do not invent a patched legacy floor.
@@ -238,6 +260,10 @@ class SecurityAuditReport:
     def upstream_vulnerability_findings(self) -> List[SecurityFinding]:
         return [item for item in self.findings if item.category == "upstream_vulnerability"]
 
+    @property
+    def vendor_emergency_findings(self) -> List[SecurityFinding]:
+        return [item for item in self.findings if item.category == "vendor_emergency_advisory"]
+
     def to_dict(self) -> Dict[str, object]:
         return {
             "schema_version": self.schema_version,
@@ -250,6 +276,7 @@ class SecurityAuditReport:
                 "known_campaign_matches": len(self.campaign_findings),
                 "official_vulnerability_findings": len(self.official_vulnerability_findings),
                 "upstream_vulnerability_findings": len(self.upstream_vulnerability_findings),
+                "vendor_emergency_findings": len(self.vendor_emergency_findings),
                 "clean_proof": False,
             },
             "campaign": self.campaign.to_dict() if self.campaign else None,
@@ -266,6 +293,7 @@ class SecurityAuditReport:
                 "A package-name match is exposure evidence, not proof that a particular malicious commit executed.",
                 "No match means no known match in the loaded intelligence; it does not prove system integrity.",
                 "Bundled CodeWhale advisories check captured exact pacman package names and supported release versions only; user-local npm/Cargo installs, custom aliases, backports, and exploitation are not verified.",
+                "Bundled emergency vendor advisories cover selected exact Arch package names and numeric upstream versions only. Package origin, signatures, backports, current repository availability, and exploitation on this host or platform are not verified; this is not a complete CVE or KEV feed.",
                 "AuraScan does not automatically remove packages or clean a potentially compromised host.",
             ],
         }
@@ -301,6 +329,7 @@ class SecurityAuditReport:
             ),
             f"Official package advisories: {self._arch_audit_summary()}",
             f"Bundled CodeWhale version advisories: {len(self.upstream_vulnerability_findings)} match(es); reviewed {CODEWHALE_ADVISORY_REVIEWED}",
+            f"Bundled emergency vendor/KEV advisories: {len(self.vendor_emergency_findings)} match(es); reviewed {VENDOR_EMERGENCY_REVIEWED}",
             "-" * 54,
         ]
         if self.campaign is None:
@@ -335,7 +364,7 @@ class SecurityAuditReport:
             "\nA clean-looking result means no known match was found; it is not proof that package code or the system is safe."
         )
         if any(item.severity in {Severity.HIGH, Severity.CRITICAL}
-               and item.category not in {"official_vulnerability", "upstream_vulnerability"}
+               and item.category not in {"official_vulnerability", "upstream_vulnerability", "vendor_emergency_advisory"}
                for item in self.findings):
             lines.append("Recommended Action: Treat the matched evidence as an incident and investigate from trusted media.")
         elif self.findings:
@@ -614,11 +643,23 @@ def collect_installed_packages(
     if int(getattr(result, "returncode", 0)) != 0:
         return {}, str(getattr(result, "stderr", "") or "pacman package query failed").strip()
     packages: Dict[str, str] = {}
+    collection_error = ""
     for line in str(getattr(result, "stdout", "") or "").splitlines():
         parts = line.split(None, 1)
-        if len(parts) == 2 and PACKAGE_NAME_RE.fullmatch(parts[0]):
-            packages[parts[0]] = parts[1].strip()
-    return packages, ""
+        if not parts:
+            continue
+        if not PACKAGE_NAME_RE.fullmatch(parts[0]):
+            collection_error = "installed package metadata contains an invalid record"
+            continue
+        name = parts[0]
+        if len(parts) != 2 or name in packages:
+            # Missing versions and duplicate identities must not turn into
+            # absence or let the last (possibly fixed-looking) version win.
+            packages[name] = ""
+            collection_error = "installed package metadata has missing or duplicate version evidence"
+        else:
+            packages[name] = parts[1].strip()
+    return packages, collection_error
 
 
 def parse_pacman_history(text: str) -> List[PacmanHistoryRecord]:
@@ -1222,6 +1263,66 @@ def audit_codewhale_exposure(installed_packages: Mapping[str, str]) -> List[Secu
     return findings
 
 
+def vendor_emergency_version_status(package_name: str, version: object) -> str:
+    """Interpret only a curated package's bounded four-component release.
+
+    At/above the floor means no match for this advisory, never proof of safety,
+    installed origin, or integrity. No installed program or comparator runs.
+    """
+    advisory = VENDOR_EMERGENCY_ADVISORIES.get(package_name)
+    if advisory is None:
+        return "not_mapped"
+    match = (VENDOR_EMERGENCY_ARCH_VERSION_RE.fullmatch(version)
+             if isinstance(version, str) and len(version) <= 128 else None)
+    if match is None:
+        return "unresolved"
+    upstream = tuple(int(part) for part in match.group("upstream").split("."))
+    return "affected" if upstream < advisory[1] else "at_or_above_floor"
+
+
+def audit_vendor_emergency_exposure(installed_packages: Mapping[str, str]) -> List[SecurityFinding]:
+    """Match captured installed versions independently of Arch's advisory feed."""
+    findings: List[SecurityFinding] = []
+    for name, (cve, floor, vendor, exploitation) in VENDOR_EMERGENCY_ADVISORIES.items():
+        if name not in installed_packages:
+            continue
+        version = installed_packages[name]
+        status = vendor_emergency_version_status(name, version)
+        fixed = ".".join(str(part) for part in floor)
+        if status == "unresolved":
+            findings.append(SecurityFinding(
+                rule_id="SEC-VENDOR-ADVISORY-VERSION-UNRESOLVED",
+                severity=Severity.MEDIUM,
+                category="advisory_coverage",
+                title=f"{name} needs emergency-advisory version verification.",
+                summary="The captured installed version is missing or is not a supported numeric upstream release.",
+                why_it_matters="The bundled vendor/KEV advisory cannot be evaluated from this version evidence. This is incomplete coverage, not a vulnerability or exploitation finding.",
+                recommended_action="Verify the installed upstream revision and distribution patch provenance against the cited vendor advisory before relying on a fixed-version claim.",
+                package_name=name,
+                evidence=[f"installed-package={name}", cve, f"upstream-fixed={fixed}",
+                          f"advisory-reviewed={VENDOR_EMERGENCY_REVIEWED}", vendor, exploitation],
+                confidence="high",
+                source="vendor_emergency_advisory",
+            ))
+        elif status == "affected":
+            findings.append(SecurityFinding(
+                rule_id="SEC-KNOWN-EXPLOITED-VERSION-LAG",
+                severity=Severity.HIGH,
+                category="vendor_emergency_advisory",
+                title=f"{name} is below a known-exploited vulnerability's upstream fix.",
+                summary=f"Captured installed version {version} is below Linux upstream fix {fixed} for {cve}; Google confirms exploitation and CISA lists it in KEV.",
+                why_it_matters="The V8 flaw can allow crafted HTML to execute code inside the browser sandbox. Version evidence does not establish exploitation on this host, Linux-specific targeting, sandbox escape, or a malicious package. Package origin and distribution backports have not been verified.",
+                recommended_action="Avoid untrusted browsing with this build until its patch status is verified. Use a verified distribution update containing the vendor fix when available; review package origin and any backport evidence.",
+                package_name=name,
+                evidence=[f"installed={name} {version}", cve, f"upstream-fixed={fixed}",
+                          "known-exploited=true; authority=Google/CISA",
+                          f"advisory-reviewed={VENDOR_EMERGENCY_REVIEWED}", vendor, exploitation],
+                confidence="medium",
+                source="vendor_emergency_advisory",
+            ))
+    return findings
+
+
 def build_security_audit(
     *,
     runner: Callable = subprocess.run,
@@ -1260,6 +1361,7 @@ def build_security_audit(
         except (OSError, UnicodeError, ValueError, HTTPError, URLError) as exc:
             notes.append(f"Campaign refresh failed; retained validated {campaign.data_origin} data: {exc}")
 
+    package_error = ""
     if installed_packages is None:
         installed, package_error = collect_installed_packages(runner=runner, root=root)
         if package_error:
@@ -1303,13 +1405,15 @@ def build_security_audit(
         notes.append(f"arch-audit did not complete: {arch_result.error}")
 
     upstream_findings = audit_codewhale_exposure(installed)
-    findings = campaign_findings + upstream_findings + list(arch_result.findings)
+    vendor_findings = audit_vendor_emergency_exposure(installed)
+    findings = campaign_findings + upstream_findings + vendor_findings + list(arch_result.findings)
     status = "ok"
     if campaign is None:
         status = "partial" if arch_result.status == "ok" else "unavailable"
     elif arch_result.status not in {"ok", "disabled"}:
         status = "partial"
-    if status == "ok" and any(item.category == "advisory_coverage" for item in upstream_findings):
+    if status == "ok" and (package_error or any(
+            item.category == "advisory_coverage" for item in upstream_findings + vendor_findings)):
         status = "partial"
     return SecurityAuditReport(
         campaign=campaign,
@@ -1350,13 +1454,13 @@ def bundled_campaign_doctor_status(
 def build_security_audit_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aurascan security-audit",
-        description="Check installed packages and pacman history against bounded AUR campaign intelligence and optional Arch security advisories.",
+        description="Check installed packages and pacman history against bounded AUR campaign intelligence, bundled vendor advisories, and optional Arch security advisories.",
     )
     parser.add_argument("--json", action="store_true", dest="json_output", help="emit a structured JSON report")
     parser.add_argument("--verbose", action="store_true", help="show every finding and bounded evidence")
     parser.add_argument("--refresh", action="store_true", help="refresh the plain-text campaign list over HTTPS before scanning")
     parser.add_argument("--offline", action="store_true", help="use packaged/cached campaign data and skip arch-audit network access")
-    parser.add_argument("--no-arch-audit", action="store_true", help="skip optional official-package CVE checks")
+    parser.add_argument("--no-arch-audit", action="store_true", help="skip arch-audit only; bundled offline vendor advisory checks still run")
     parser.add_argument("--root", type=Path, default=Path("/"), help=argparse.SUPPRESS)
     parser.add_argument("--home", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--state-root", type=Path, default=None, help=argparse.SUPPRESS)

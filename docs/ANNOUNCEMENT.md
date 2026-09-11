@@ -9,6 +9,15 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
+The v0.10.8 release adds an offline emergency vendor/KEV advisory check for
+installed Chromium below the verified Linux fix for CVE-2026-87491. Known
+exploitation evidence raises HIGH independently of Arch's advisory feed;
+unknown versions remain incomplete coverage, and ordinary out-of-date flags
+do not establish exposure. Version evidence does not establish package origin,
+backport status, or host compromise. This package-only release retains the
+exact v0.10.7 recovery image. ISO and local-UKI gates were not rerun, no v0.10.8
+image is published, and the retained image does not contain the new advisory.
+
 The v0.10.7 release adds bounded editor-task inspection, verified Git
 acquisition identities, and more precise maintainer-history evidence.
 Developer-only security-data tools keep selected observations in private

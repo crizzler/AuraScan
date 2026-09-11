@@ -42,11 +42,12 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
-The [v0.10.7 release](docs/releases/v0.10.7.md) adds bounded editor-task
-inspection, verified Git acquisition identities, corrected local
-maintainer-annotation history, and developer-only security-data intake and
-evaluation groundwork. It is recovery-bearing; the release record identifies
-its fresh image, completed validation gates, and live-scenario limitations.
+The [v0.10.8 release](docs/releases/v0.10.8.md) adds offline emergency
+vendor-advisory checks for installed Chromium versions below a verified
+security floor, separately from Arch's advisory feed. It is package-only and
+retains the exact [v0.10.7 recovery image](docs/releases/v0.10.7.md); ISO and
+local-UKI gates were not rerun. That image's older application does not include
+the new Chromium advisory, and no v0.10.8 recovery image is published.
 
 ## What You Can Try Now
 
@@ -58,7 +59,8 @@ AuraScan currently provides ten practical entry points:
   pacman, AUR helper, known campaign, kernel/module, config drift, and AI-raised
   risks.
 - `aurascan security-audit` checks installed packages and pacman history against
-  validated AUR campaign intelligence, plus optional official Arch advisories.
+  validated AUR campaign intelligence, bundled emergency vendor advisories,
+  and optional official Arch advisories.
 - `aurascan instruction-audit` reviews recognized Claude Code, `AGENTS.md`, and
   Agent Skill control files for suspicious content and unexpected changes.
 - `aurascan config-drift --dry-run` explains `.pacnew` and `.pacsave` files and
@@ -680,7 +682,28 @@ strict JSON output. Those findings are shown separately because `arch-audit`
 uses official Arch Security Team advisories for repository packages; it is not
 an AUR-malware list. During `aurascan upgrade`, known campaign checks run by
 default and official HIGH/CRITICAL advisories are raised only when the pending
-repository transaction does not already include the affected package.
+repository transaction does not already include a verifiably fixed version of
+the affected package.
+
+Bundled emergency vendor/KEV advisories also run offline and with
+`--no-arch-audit`. The initial curated entry checks the exact installed package
+name `chromium` against Linux upstream fix `153.0.8010.36` for
+[CVE-2026-87491](https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_0808145027.html),
+whose exploitation is confirmed by Google and
+[CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2026-87491).
+Below-floor versions raise HIGH with source/category
+`vendor_emergency_advisory`, separate from `arch-audit` and AUR incidents.
+Unknown/custom versions produce incomplete-coverage review. Epoch and package
+revision bumps do not establish an upstream fix, and an out-of-date flag alone
+never raises this finding.
+
+This small mapping is bundled, curated, and reviewed on 2026-09-11; `--refresh`
+does not update it. Captured names and versions cannot authenticate package
+origin or rule out downstream backports. A match does not establish exploitation
+on this host, Linux targeting, sandbox escape, or compromise. Other Chromium
+forks, user-local installs, and unlisted vulnerabilities remain outside this
+check; no match is not a safety guarantee. The check does not query current
+repository availability or recommend an automatic package replacement.
 
 A package-name-only match is MEDIUM because cleaned packages can later be
 legitimate. A matching pacman transaction inside the campaign window,

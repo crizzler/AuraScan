@@ -35,6 +35,18 @@ candidate.
 
 ## Validation
 
+- For v0.10.8, verify the offline emergency vendor/KEV Chromium range and
+  exploitation evidence independently of Arch's feed. Missing, unsupported,
+  duplicate or failed installed-version queries must retain partial coverage;
+  ordinary out-of-date flags and epoch/pkgrel bumps must not determine fixes.
+  Upgrade suppression requires an exact supported fixed repository candidate
+  and preserves the original audit evidence; names-only upgrade snapshots
+  retain unresolved coverage. No source claim establishes official package
+  origin, a backport, Linux targeting or host compromise. This package-only
+  change is outside recovery workflows: retain and re-verify the exact
+  v0.10.7 image identity and date, disclose that its older application lacks
+  the new advisory, and do not relabel assets or claim ISO/local-UKI reruns.
+  Complete source, package, metadata and exact-ref CI gates before publication.
 - For v0.10.7, verify bounded structural editor-task inspection from stable
   captured bytes, automatic-task reachability, ordinary-task/asset negatives,
   source-owned path exclusions, incomplete-coverage blockers, and cache/update

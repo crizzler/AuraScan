@@ -9,6 +9,17 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
+The v0.10.9 release adds bounded Cursor rules, MCP configuration and approval
+settings to Agent Instruction Guard. Broad approvals request authority review;
+supported command correlations raise HIGH without claiming activation or
+compromise. Clean controls remain neutral baseline work. Inert regressions
+preserve deterministic blockers across optional AI refusals and claimed source
+attestations. Full Cursor policy merging, plugins and MCP implementation
+analysis remain outside this coverage. This package-only release retains the
+exact v0.10.7 recovery image; ISO and local-UKI gates were not rerun and no
+v0.10.9 image is published. Its older application lacks the new Cursor checks
+and the v0.10.8 Chromium advisory.
+
 The v0.10.8 release adds an offline emergency vendor/KEV advisory check for
 installed Chromium below the verified Linux fix for CVE-2026-87491. Known
 exploitation evidence raises HIGH independently of Arch's advisory feed;

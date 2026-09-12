@@ -1,6 +1,6 @@
 {
   "schema": "aurascan_recovery_iso/2.0",
-  "application_version": "0.10.8",
+  "application_version": "0.10.9",
   "release_disposition": "package-only",
   "version": "0.10.7",
   "architecture": "x86_64",

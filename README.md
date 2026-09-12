@@ -42,12 +42,13 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
-The [v0.10.8 release](docs/releases/v0.10.8.md) adds offline emergency
-vendor-advisory checks for installed Chromium versions below a verified
-security floor, separately from Arch's advisory feed. It is package-only and
-retains the exact [v0.10.7 recovery image](docs/releases/v0.10.7.md); ISO and
-local-UKI gates were not rerun. That image's older application does not include
-the new Chromium advisory, and no v0.10.8 recovery image is published.
+The [v0.10.9 release](docs/releases/v0.10.9.md) adds bounded Cursor rule,
+MCP and approval-setting review to Agent Instruction Guard, plus inert
+regressions preserving deterministic blockers across AI refusals and package
+provenance claims. It is package-only and retains the exact
+[v0.10.7 recovery image](docs/releases/v0.10.7.md); ISO and local-UKI gates
+were not rerun. That image's older application lacks the new Cursor coverage
+and the v0.10.8 Chromium advisory. No v0.10.9 recovery image is published.
 
 ## What You Can Try Now
 
@@ -787,6 +788,18 @@ ambiguous parent traversal, and unsupported TOML require manual coverage review.
 Nearby project config presence also confines other discovered controls to that
 project before later discovery pages are processed. The reader supports a
 strict TOML subset on Python 3.8+, not every TOML feature.
+Cursor `.cursor/rules/**/*.mdc`, legacy `.cursorrules`, `.cursor/mcp.json`
+and `.cursor/permissions.json` also enter bounded content and integrity review.
+Clean rules are neutral baseline work. A `mcpAllowlist` entry of `*:*` requests
+HIGH review of approval-free MCP authority; it does not establish maliciousness
+or execution. Supported MCP commands and permission fields receive structural
+analysis, with malformed or unsupported configuration reported as coverage.
+Ordinary `git`/`npm` permission entries and authentication placeholders alone
+are not malicious behavior. AuraScan never starts a server, expands variables,
+reads referenced credential files, or executes a configured command. Cursor
+controls remain manual-only for disable/restore. This covers selected local
+files, not Cursor's effective merged user/team policy, plugin component graph,
+CLI permissions, or proof that Cursor loaded a file.
 `--root PATH` selects an explicit root for testing or a
 deliberate one-shot scan. `--all-markdown` extends content analysis to other
 Markdown files, but those extra files are not added to the integrity baseline.

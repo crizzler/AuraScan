@@ -301,6 +301,13 @@ model choice does not change AuraScan's runtime AI defaults or safety policy.
   configuration remains neutral baseline work. Exclude the actual user-global
   CodeWhale/DeepSeek auth configs from project policy detection and file reads;
   their shell opt-in is a separate user-owned authority surface.
+- Treat Cursor rules, MCP settings and approval settings as bounded control
+  evidence. Analyze executable/grant fields structurally; ordinary tool names,
+  URLs and authentication placeholders alone are not maliciousness. Wildcard
+  MCP approval deserves authority review, not a claim of execution.
+  Never expand variables or read referenced credential files.
+  Never start MCP servers or infer effective merged Cursor policy.
+  Keep these controls manual-only for disable/restore.
 - Keep Instruction Guard's deterministic monitor network-isolated. Its AI
   assistant is a separate opt-in, receives only bounded opaque evidence IDs,
   fixed reasons, semantic labels, and deterministic locations, cannot invent

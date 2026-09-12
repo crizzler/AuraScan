@@ -86,7 +86,7 @@ def test_archiso_profile_is_hybrid_and_contains_no_credentials():
     assert "airootfs_image_tool_options=('-comp' 'xz' '-Xbcj' 'x86' '-b' '1M')" in profile
     assert "aurascan" in packages
     assert not re.search(r"AURASCAN_(?:AI|OPENAI|ANTHROPIC|DEEPSEEK|GEMINI|OPENROUTER)_KEY=", material)
-    assert manifest["application_version"] == "0.10.8"
+    assert manifest["application_version"] == "0.10.9"
     assert manifest["release_disposition"] == "package-only"
     assert manifest["version"] == "0.10.7"
     assert manifest["status"] in {"build-required", "release-ready"}

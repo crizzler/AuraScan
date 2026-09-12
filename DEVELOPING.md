@@ -329,6 +329,46 @@ makepkg, inspect packages, or contact the network during install or upgrade.
 
 ## Agent Instruction Guard
 
+The September 8, 2026 [GTIG DUSTMAKER report](https://cloud.google.com/blog/topics/threat-intelligence/from-prompting-to-autonomy-the-evolution-of-adversarial-ai)
+describes poisoned agent configuration, scanner-directed loader comments, and
+compromised publishing with valid attestations. It supplies no exact affected
+package range suitable for a new AuraScan package denylist. Static matches
+cannot attribute this campaign or establish execution or an AUR compromise.
+
+Cursor discovery includes `.cursor/rules/**/*.mdc`, `.cursorrules`,
+`.cursor/mcp.json` and `.cursor/permissions.json`. Reuse bounded discovery,
+stable reads, continuation, machine-bound enrollment and content correlations;
+do not run Cursor or any collected command. Rules use the Markdown analyzer,
+including frontmatter descriptions; JSON configuration uses structural fields,
+never metadata prose as command evidence. These files remain manual-only for
+disable/restore. The analysis-evidence cache version advances to 1.4 so old
+approved MCP analysis cannot suppress newly supported semantics; persisted
+report/rule schemas remain compatible and package-scan versions are unchanged.
+
+Use the official [Cursor rules](https://prod.cursor.com/docs/rules),
+[MCP](https://prod.cursor.com/docs/mcp) and
+[permissions](https://prod.cursor.com/docs/reference/permissions) contracts.
+Approval-free MCP wildcard authority warrants HIGH review, independently of
+maliciousness. Ordinary terminal entries, remote endpoints or authentication
+placeholders alone are neutral. Malformed, ambiguous or unsupported active
+configuration is coverage, with no interpolation, credential lookup, server
+launch or network resolution. Do not claim to calculate merged user/team policy
+or Cursor run-mode enforcement. Plugin manifests/component resolution, CLI
+permissions and arbitrary MCP implementation analysis remain deferred.
+
+Package AI is not summary-only: it can receive bounded numbered PKGBUILD text
+or captured built-package `.INSTALL` text, including comments. Adjacent declared
+hooks are inspected deterministically; arbitrary acquired JavaScript is not
+sent through this package-AI path. Provider refusals or malformed replies must
+preserve deterministic findings and the existing AI inspection-failure blocker,
+without persisting rejected prose. Instruction Guard AI instead receives fixed
+evidence without file contents. Regression tests use inert scanner-control
+comments and mocked refusals, not the report's adversarial subject matter.
+No vocabulary blacklist or speculative leading-comment classifier is added.
+Source-signature verification cannot waive deterministic findings; AuraScan
+does not currently implement SLSA attestation verification. An attestation
+claim in package metadata cannot grant trust either.
+
 `aurascan instruction-audit` is a static, unprivileged review surface for
 AI-agent control files. It is not part of package scan rule versioning. Its
 report and rule contract starts at `instruction_guard_report/1.0` and rule
@@ -375,7 +415,7 @@ without opening them. Do not normalize away parent components before checking
 symlinks; parent traversal and config/resource links remain manual-only.
 Deferred findings attached to a resource must not borrow the config's line
 number. Keep unsafe raw reference values out of reports and manifest imports.
-Instruction analysis evidence advances to `1.3`; the report/AI contracts remain
+Instruction analysis evidence is now `1.4`; the report/AI contracts remain
 unchanged.
 
 Discovery must prune cache, trash, VCS, dependency, and virtual-environment

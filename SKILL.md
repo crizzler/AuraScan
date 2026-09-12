@@ -178,6 +178,11 @@ Hash-match tests substitute synthetic byte signatures. All fixture text stays in
    configs from project detection and reads. Unsupported TOML is coverage.
    Preserve each imported resource's project boundary and literal path across
    continuation and recursive review; never read escaped or credential targets.
+   Cursor `.mdc` and legacy rules are instruction text; MCP and approval JSON
+   require structural analysis of supported command/grant fields. Reuse bounded
+   reads and enrollment, keep disable/restore manual-only, and report unsupported
+   configuration as coverage. Never resolve credentials, expand variables or
+   launch a configured server to inspect it.
 2. Restrict final regular-file targets to the selected root, use no-follow and
    `fstat` validation, detect replacement during reads, and bound enumeration,
    sizes, and elapsed time.

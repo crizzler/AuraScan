@@ -35,6 +35,21 @@ candidate.
 
 ## Validation
 
+- For v0.10.9, verify bounded Cursor rule discovery, stable no-follow reads,
+  pagination and machine-bound enrollment. Broad approvals require authority
+  review, supported commands correlate only within the same server, and
+  malformed or unsupported active configuration retains incomplete coverage.
+  Check ordinary tools, literal quoted arguments, JSON comments, metadata and
+  authentication placeholders as negatives; neither comments nor stale cached
+  MCP analysis may authorize imports. Inert mocked-provider regressions must
+  retain deterministic blockers and AI inspection-failure evidence without
+  persisting rejected prose. Instruction analysis advances to `1.4`; public
+  report/rule schemas and package-scanner versions remain unchanged. This
+  package-only change leaves recovery workflows and shared boundaries intact.
+  Re-verify the exact v0.10.7 image identity and date, disclose its missing new
+  Cursor coverage and v0.10.8 Chromium advisory, and do not claim ISO/local-UKI
+  reruns. Complete source, package, metadata and exact-ref CI gates before
+  publication.
 - For v0.10.8, verify the offline emergency vendor/KEV Chromium range and
   exploitation evidence independently of Arch's feed. Missing, unsupported,
   duplicate or failed installed-version queries must retain partial coverage;

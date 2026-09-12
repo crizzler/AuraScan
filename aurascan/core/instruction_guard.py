@@ -25,7 +25,7 @@ INSTRUCTION_GUARD_RULE_VERSION = "1.0"
 # Keep the AI alias binding stable so persisted 1.1 evidence explanations stay
 # addressable.  Location-analysis changes use their own cache version below.
 INSTRUCTION_GUARD_EVIDENCE_VERSION = "1.1"
-INSTRUCTION_GUARD_ANALYSIS_EVIDENCE_VERSION = "1.3"
+INSTRUCTION_GUARD_ANALYSIS_EVIDENCE_VERSION = "1.4"
 REPORT_SCHEMA = "instruction_guard_report/1.0"
 MANIFEST_SCHEMA = "instruction_guard_manifest/1.0"
 AI_JOB_SCHEMA = "instruction_guard_ai_job/1.0"
@@ -101,7 +101,7 @@ CONFIG_NAMES = {
 CLAUDE_CONTROL_DIRS = {"rules", "commands", "agents", "memory", "hooks", "plugins"}
 PROJECT_CONFIG_DIRS = {".codewhale", ".deepseek"}
 TEXT_SUFFIXES = {
-    ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".sh", ".bash",
+    ".md", ".mdc", ".txt", ".json", ".yaml", ".yml", ".toml", ".sh", ".bash",
     ".zsh", ".fish", ".py", ".js", ".ts", ".mjs", ".cjs",
 }
 PRUNED_DIR_NAMES = {
@@ -1569,6 +1569,20 @@ def _classify_candidate(relative: str, *, all_markdown: bool) -> Optional[Tuple[
     suffix = Path(name).suffix.lower()
     if name in GENERIC_NAMES:
         return "standalone-instruction", True, True
+    # Cursor rule files are Markdown control text, but remain manual-only for
+    # disable/restore. JSON settings must never fall through to prose analysis.
+    if name == ".cursorrules":
+        return "cursor-rules", True, False
+    if len(parts) >= 2 and parts[-2] == ".cursor":
+        if name == "permissions.json":
+            return "cursor-permissions-configuration", True, False
+        if name == "mcp.json":
+            return "cursor-mcp-manifest", True, False
+    if any(
+        parts[index:index + 2] == (".cursor", "rules")
+        for index in range(len(parts) - 2)
+    ) and suffix == ".mdc":
+        return "cursor-rules", True, False
     if len(parts) >= 2 and parts[-2] in PROJECT_CONFIG_DIRS and name == "config.toml":
         return "codewhale-project-configuration", True, False
     if name == ".claude.json":
@@ -1633,7 +1647,7 @@ def _classify_conventional_skill_resource(
 def _is_agent_control_directory(path: Path, root: Path) -> bool:
     relative = _relative_raw(path, root)
     parts = tuple(part for part in relative.split("/") if part)
-    if ".claude" in parts or any(part in PROJECT_CONFIG_DIRS for part in parts):
+    if any(part in {".claude", ".cursor"} | PROJECT_CONFIG_DIRS for part in parts):
         return True
     for index, part in enumerate(parts):
         if part not in {"scripts", "references", "assets"}:
@@ -3828,7 +3842,365 @@ def _json_config_findings(text: str, surface: str) -> List[InstructionFinding]:
     return findings
 
 
+def _cursor_json_document(text: str) -> Tuple[Dict[str, object], Dict[Tuple[object, ...], int]]:
+    """Read bounded JSONC data and exact value locations, without accepting ambiguity."""
+    import math
+
+    if len(text) > 1024 * 1024:
+        raise ValueError("configuration byte limit")
+    locations: Dict[Tuple[object, ...], int] = {}
+    position, line, nodes = 0, 1, 0
+
+    def number(value: str) -> object:
+        if len(value) > 64:
+            raise ValueError("configuration number limit")
+        result = float(value) if any(c in value for c in ".eE") else int(value)
+        if isinstance(result, float) and not math.isfinite(result):
+            raise ValueError("nonfinite configuration number")
+        return result
+
+    def constant(_value: str) -> None:
+        raise ValueError("nonfinite configuration number")
+
+    decoder = json.JSONDecoder(parse_int=number, parse_float=number, parse_constant=constant)
+
+    def advance(end: int) -> None:
+        nonlocal position, line
+        line += text.count("\n", position, end)
+        position = end
+
+    def space() -> None:
+        while position < len(text):
+            if text[position] in " \r\n\t":
+                advance(position + 1)
+            elif text.startswith("//", position):
+                end = text.find("\n", position + 2)
+                advance(len(text) if end < 0 else end)
+            elif text.startswith("/*", position):
+                end = text.find("*/", position + 2)
+                if end < 0:
+                    raise ValueError("unterminated configuration comment")
+                advance(end + 2)
+            else:
+                break
+
+    def value(path: Tuple[object, ...], depth: int) -> object:
+        nonlocal nodes
+        nodes += 1
+        if nodes > 20_000 or depth > 32:
+            raise ValueError("configuration structure limit")
+        space()
+        if position >= len(text):
+            raise ValueError("incomplete configuration")
+        locations[path] = line
+        marker = text[position]
+        if marker in "[{":
+            mapping = marker == "{"
+            result = {} if mapping else []
+            closing = "}" if mapping else "]"
+            advance(position + 1)
+            space()
+            if position < len(text) and text[position] == closing:
+                advance(position + 1)
+                return result
+            while True:
+                if mapping:
+                    if position >= len(text) or text[position] != '"':
+                        raise ValueError("invalid configuration key")
+                    key, end = decoder.raw_decode(text, position)
+                    if not isinstance(key, str) or len(key) > 4096 or key in result:
+                        raise ValueError("ambiguous configuration key")
+                    advance(end)
+                    space()
+                    if position >= len(text) or text[position] != ":":
+                        raise ValueError("invalid configuration separator")
+                    advance(position + 1)
+                    result[key] = value(path + (key,), depth + 1)
+                else:
+                    result.append(value(path + (len(result),), depth + 1))
+                space()
+                if position < len(text) and text[position] == closing:
+                    advance(position + 1)
+                    return result
+                if position >= len(text) or text[position] != ",":
+                    raise ValueError("invalid configuration delimiter")
+                advance(position + 1)
+                space()
+                # JSONC permits a single trailing comma, never empty entries.
+                if position < len(text) and text[position] == closing:
+                    advance(position + 1)
+                    return result
+        result, end = decoder.raw_decode(text, position)
+        if isinstance(result, str) and (len(result) > 65_536 or any(0xD800 <= ord(c) <= 0xDFFF for c in result)):
+            raise ValueError("unsupported configuration string")
+        advance(end)
+        return result
+
+    payload = value((), 0)
+    space()
+    if position != len(text) or not isinstance(payload, dict):
+        raise ValueError("unsupported configuration document")
+    return payload, locations
+
+
+def _cursor_command_analysis(command: str, args: Sequence[str]) -> Tuple[Set[str], bool]:
+    """Interpret literal argv or bounded shell -c text, never a configured program."""
+    from aurascan.analyzers.remote_stage import (
+        _commands_and_constants, analyze_remote_stage_execution,
+    )
+
+    if len(command) > 4096 or len(args) > 256 or sum(map(len, args)) > 65_536:
+        return set(), False
+    if "${" in command or "\x00" in command or any("\x00" in arg for arg in args):
+        return set(), False
+    executable = command.rsplit("/", 1)[-1]
+    families: Set[str] = set()
+    complete = True
+    segments = [[command] + list(args)]
+    if executable in {"sh", "bash", "zsh", "dash", "ksh"}:
+        if args and args[0] in {"-c", "-lc", "-ec", "-euc"} and len(args) >= 2:
+            script = args[1]
+            parsed = _commands_and_constants(script)
+            if parsed is None:
+                return families, False
+            commands, _constants = parsed
+            if len(commands) > 256:
+                return families, False
+            # The shared shell parser preserves quoted/escaped punctuation as
+            # arguments, and exposes actual command/pipeline positions only.
+            segments = [[entry.executable] + list(entry.arguments) for entry in commands]
+            remote = analyze_remote_stage_execution(script)
+            complete = remote.complete
+            if remote.signals:
+                families.update({"fetch", "execute"})
+            for index, entry in enumerate(commands[1:], 1):
+                previous = commands[index - 1]
+                if (not entry.pipeline_from_previous
+                        or entry.executable.rsplit("/", 1)[-1] not in {"sh", "bash", "zsh", "dash", "ksh"}
+                        or list(entry.arguments) not in ([], ["-s"], ["-"])):
+                    continue
+                if previous.executable.rsplit("/", 1)[-1] != "curl":
+                    continue
+                urls = [arg for arg in previous.arguments if re.match(r"^https?://[^\s/]+", arg)]
+                flags = [arg for arg in previous.arguments if arg not in urls]
+                # A deliberately narrow stdout producer: no output file,
+                # header-value URL, data transfer, or unknown option semantics.
+                if len(urls) == 1 and all(re.fullmatch(r"-[fSsL]+", arg) or arg in {
+                    "--fail", "--silent", "--show-error", "--location",
+                } for arg in flags):
+                    families.update({"fetch", "execute"})
+                    if len(commands) == 2:
+                        complete = True
+        elif any(arg.startswith("-") and "c" in arg for arg in args):
+            return families, False
+    protected = re.compile(r"(?:^|/)\.(?:ssh|aws|gnupg|config/gcloud)(?:/|$)|(?:^|/)\.npmrc$")
+    for segment in segments:
+        name = segment[0].rsplit("/", 1)[-1]
+        if name not in {"curl", "wget"}:
+            continue
+        # Consume option values before interpreting positional URLs or file
+        # options; a header containing a URL or option name is only header data.
+        value_options = ({
+            "--data", "--data-binary", "--data-raw", "--data-urlencode", "--upload-file", "-d", "-T",
+            "--header", "-H", "--user-agent", "-A", "--referer", "-e", "--user", "-u",
+            "--proxy", "-x", "--output", "-o", "--request", "-X", "--form", "-F",
+            "--url", "--connect-timeout", "--max-time", "--cookie", "-b", "--cookie-jar", "-c",
+        } if name == "curl" else {
+            "--post-file", "--body-file", "--post-data", "--body-data", "--header",
+            "--output-document", "-O", "--user-agent", "-U", "--referer", "--timeout",
+        })
+        options: List[Tuple[str, str]] = []
+        urls: List[str] = []
+        position, positional, supported = 1, False, True
+        informational = False
+        while position < len(segment):
+            arg = segment[position]
+            position += 1
+            if arg == "--" and not positional:
+                positional = True
+                continue
+            option, equal, attached = arg.partition("=")
+            if not positional and arg in {"--help", "--version"}:
+                informational = True
+            if not positional and option in value_options:
+                if equal:
+                    target = attached
+                elif position < len(segment):
+                    target = segment[position]
+                    position += 1
+                else:
+                    supported = False
+                    break
+                options.append((option, target))
+                if option == "--url":
+                    urls.append(target)
+            elif not positional and arg.startswith("-"):
+                if not (re.fullmatch(r"-[fSsLkIq]+", arg) or arg in {
+                    "--fail", "--silent", "--show-error", "--location", "--insecure",
+                    "--head", "--quiet", "--version", "--help",
+                }):
+                    supported = False
+                    break
+            else:
+                urls.append(arg)
+        if informational:
+            continue  # Informational client modes do not transfer these files.
+        if not supported:
+            # Unsupported argument forms remain coverage when they could hide
+            # an intended file transfer; ordinary server argv is not inspected.
+            complete = False
+            continue
+        if not any(re.match(r"^https?://[^\s/]+", arg) for arg in urls):
+            continue
+        for option, target in options:
+            reads_file = (option in {"--upload-file", "-T", "--post-file", "--body-file"}
+                          or (option in {"--data", "--data-binary", "-d"} and target.startswith("@")))
+            if reads_file and protected.search(target.lstrip("@")):
+                families.update({"credential-access", "upload"})
+    return families, complete
+
+
+def _cursor_config_analysis(text: str, surface: str) -> List[InstructionFinding]:
+    """Cursor authority/configuration evidence; no effective permission or execution claim."""
+    findings: List[InstructionFinding] = []
+    locations: Dict[Tuple[object, ...], int] = {}
+
+    def coverage() -> None:
+        if not any(f.rule_id == "IG-CONFIG-INVALID-SHAPE" for f in findings):
+            findings.append(_finding(
+                "IG-CONFIG-INVALID-SHAPE", "MEDIUM",
+                "A Cursor control configuration could not be inspected completely.",
+                "Malformed, ambiguous, unsupported or over-limit configuration remains manual review; no commands, references or substitutions were evaluated.",
+                ["invalid-configuration"],
+            ))
+
+    def emit(rule: str, title: str, reason: str, families: Iterable[str], path: Tuple[object, ...]) -> None:
+        if not any(f.rule_id == rule for f in findings):
+            findings.append(_finding(rule, "HIGH", title, reason, families,
+                                     line_numbers=[locations[path]] if path in locations else []))
+
+    def strings(value: object) -> bool:
+        return isinstance(value, list) and len(value) <= 256 and all(isinstance(s, str) for s in value)
+
+    def grant(path: Tuple[object, ...]) -> None:
+        emit("IG-CONFIG-CURSOR-BROAD-GRANT",
+             "A Cursor control file requests broad tool approval.",
+             "The configured allowlist or Auto-review guidance requests broad authority. Repository-controlled settings can cross a project trust boundary; effective permissions depend on Cursor mode and higher-priority policy. This does not establish execution or malicious intent.",
+             ["broad-tool-grant"], path)
+
+    def behavior(command: str, args: Sequence[str], path: Tuple[object, ...]) -> None:
+        families, complete = _cursor_command_analysis(command, args)
+        if not complete:
+            coverage()
+        if families:
+            emit("IG-CONFIG-CURSOR-COMMAND-BEHAVIOR",
+                 "A Cursor control file configures a sensitive command correlation.",
+                 "A supported command field correlates remote retrieval with execution or a credential-file read with outbound transfer. AuraScan inspected only static configuration; server activation, permission approval and successful execution are not established.",
+                 families, path)
+
+    try:
+        payload, locations = _cursor_json_document(text)
+    except (ValueError, RecursionError):
+        coverage()
+        return findings
+    if surface == "cursor-permissions-configuration":
+        for key in ("mcpAllowlist", "terminalAllowlist"):
+            if key not in payload:
+                continue
+            if not strings(payload[key]):
+                coverage()
+                continue
+            for index, entry in enumerate(payload[key]):
+                path = (key, index)
+                if key == "mcpAllowlist":
+                    if entry.strip() == "*:*":
+                        grant(path)
+                    elif ":" not in entry:
+                        coverage()
+                else:
+                    import shlex
+                    try:
+                        tokens = shlex.split(entry)
+                    except ValueError:
+                        coverage()
+                        continue
+                    if entry.strip() == "*" or (tokens and tokens[0].rsplit("/", 1)[-1] in {
+                        "sh", "bash", "zsh", "fish", "dash", "ksh", "python", "python3", "node", "perl", "ruby", "pwsh", "powershell", "cmd",
+                    } and (len(tokens) == 1 or tokens[1:] == ["*"])):
+                        grant(path)
+                    if tokens:
+                        behavior(tokens[0], tokens[1:], path)
+        auto = payload.get("autoRun", {})
+        if not isinstance(auto, dict):
+            coverage()
+        else:
+            for key in ("allow_instructions", "block_instructions"):
+                if key in auto and not strings(auto[key]):
+                    coverage()
+            if strings(auto.get("allow_instructions", [])):
+                for index, entry in enumerate(auto.get("allow_instructions", [])):
+                    path = ("autoRun", "allow_instructions", index)
+                    if re.match(r"(?i)^\s*(?:always\s+)?(?:allow|approve|permit)\s+(?:all|any|every)\s+(?:terminal\s+|shell\s+)?(?:commands?|tools?|operations?)\b", entry):
+                        grant(path)
+                    # Only classifier allow guidance is active prose. Block
+                    # guidance and metadata cannot form cross-field chains.
+                    for finding in _analyze_text(entry, "cursor-auto-review-guidance"):
+                        if set(finding.behavior_families) & {"invalid-configuration", "integrity"}:
+                            coverage()
+                            continue
+                        emit("IG-CONFIG-CURSOR-AUTOREVIEW-BEHAVIOR",
+                             "Cursor Auto-review guidance contains a sensitive behavior correlation.",
+                             "The allow-instructions field steers permission review toward correlated sensitive behavior. This is a review request, not evidence that a tool was approved or executed.",
+                             finding.behavior_families, path)
+        return findings
+    servers = payload.get("mcpServers", {})
+    if not isinstance(servers, dict) or len(servers) > 64:
+        coverage()
+        return findings
+    for name, server in servers.items():
+        if not isinstance(server, dict):
+            coverage()
+            continue
+        base = ("mcpServers", name)
+        if any(key in server for key in ("shell", "script", "run", "commands", "envFile")):
+            coverage()
+        for key in ("env", "headers"):
+            if key in server and (not isinstance(server[key], dict) or not all(isinstance(v, str) for v in server[key].values())):
+                coverage()
+        for key in ("command", "url"):
+            if key in server and (not isinstance(server[key], str) or not server[key].strip()):
+                coverage()
+        if "args" in server and not strings(server["args"]):
+            coverage()
+            continue
+        if "command" in server and "url" in server:
+            coverage()
+            continue
+        if isinstance(server.get("command"), str) and server["command"].strip():
+            args = server.get("args", [])
+            path = base + ("command",)
+            if (server["command"].rsplit("/", 1)[-1] in {"sh", "bash", "zsh", "dash", "ksh"}
+                    and len(args) >= 2 and args[0] in {"-c", "-lc", "-ec", "-euc"}):
+                path = base + ("args", 1)
+            elif any(locations.get(base + ("args", index)) != locations.get(path)
+                     for index in range(len(args))):
+                # A direct argv correlation spans fields with different roles;
+                # omit locations rather than assigning every role to command.
+                path = ("unmapped-argv-correlation",)
+            behavior(server["command"], args, path)
+        elif isinstance(server.get("url"), str) and server["url"].strip():
+            # Ordinary remote transports and authentication placeholders are
+            # neutral. Neither URLs nor env/header metadata prove secret theft.
+            if not re.match(r"^https?://[^\s/]+", server["url"]):
+                coverage()
+        else:
+            coverage()
+    return findings
+
+
 def _analyze_text(text: str, surface: str) -> List[InstructionFinding]:
+    if surface in {"cursor-permissions-configuration", "cursor-mcp-manifest"}:
+        return _cursor_config_analysis(text, surface)
     if surface == "codewhale-project-configuration":
         return _codewhale_config_analysis(text)[0]
     if surface in {"claude-configuration", "mcp-manifest", "plugin-manifest"}:
@@ -5664,7 +6036,10 @@ def scan_instruction_files(
                 hash_reused=True,
                 findings=findings,
             )
-            imports = _bounded_strings(old.get("imports"), 128, 4096)
+            imports = (
+                [] if item.surface in {"cursor-mcp-manifest", "cursor-permissions-configuration"}
+                else _bounded_strings(old.get("imports"), 128, 4096)
+            )
         else:
             read_root = (
                 (selected_root / item.project_config).parent.parent
@@ -5794,7 +6169,10 @@ def scan_instruction_files(
                 content_risk=_risk_for(findings),
                 findings=findings,
             )
-            if item.baseline and item.surface not in {"other-markdown", "codewhale-project-configuration"}:
+            if item.baseline and item.surface not in {
+                "other-markdown", "codewhale-project-configuration",
+                "cursor-mcp-manifest", "cursor-permissions-configuration",
+            }:
                 imports, imports_truncated = _extract_imports(text)
                 if imports_truncated:
                     finding = _finding(

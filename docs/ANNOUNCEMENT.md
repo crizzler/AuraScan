@@ -9,14 +9,14 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
-The v0.10.10 release candidate adds signed runtime-intelligence support and
+The v0.10.10 release adds signed runtime-intelligence support and
 tray entries for detection-data status, explicit refresh and optional daily
 updates. Bundled detections remain available; production feed and signing keys
 are not yet configured, so online/offline update activation and timer
 enablement remain unavailable. Fixed service requests use ordinary desktop
 administrator authorization without elevating the tray. This recovery-bearing
-release requires a fresh validated image before publication; see its versioned
-note for the exact gate status and remaining limitations.
+release includes a fresh validated image; see its versioned note for the exact
+image identity, gate results and remaining limitations.
 
 The v0.10.9 release adds bounded Cursor rules, MCP configuration and approval
 settings to Agent Instruction Guard. Broad approvals request authority review;

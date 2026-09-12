@@ -42,13 +42,13 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
-The [v0.10.10 release candidate](docs/releases/v0.10.10.md) adds signed
+The [v0.10.10 release](docs/releases/v0.10.10.md) adds signed
 runtime-intelligence support and tray controls for detection-data status,
 explicit refresh, and optional daily updates. Production feed and signing keys
 remain unconfigured; bundled detections continue to work. This is a
-recovery-bearing release: publication requires a fresh image and the applicable
-build, boot, privacy, source, package, and exact-ref CI gates recorded in its
-release note.
+recovery-bearing release with a fresh validated image. Its release note
+records the exact image identity, build and boot gates, validation, and
+remaining limitations.
 
 ## What You Can Try Now
 

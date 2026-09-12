@@ -1,0 +1,45 @@
+[Unit]
+Description=AuraScan unprivileged signed-intelligence download
+Documentation=https://github.com/crizzler/AuraScan
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=aurascan-intel
+Group=aurascan-intel
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/usr/sbin LANG=C LC_ALL=C HOME=/ /usr/bin/python -I -m aurascan.core.intelligence_cli _fetch
+WorkingDirectory=/
+UMask=0077
+StateDirectory=aurascan-intelligence-staging
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @privileged @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+TimeoutStartSec=110
+MemoryMax=192M
+TasksMax=16
+LimitFSIZE=4M
+CPUQuota=25%
+Restart=no

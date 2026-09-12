@@ -1,10 +1,11 @@
 # AuraScan Unreleased
 
-Changes after v0.10.9:
+Changes after v0.10.10:
 
-No unreleased changes recorded.
+No additional changes recorded.
 
-See [v0.10.9](v0.10.9.md) for the package-only Cursor control review and
-DUSTMAKER-inspired boundary regressions, [v0.10.8](v0.10.8.md) for emergency
-vendor advisory checks, and [v0.10.7](v0.10.7.md) for the retained recovery
-image's exact identity and validation record.
+See [v0.10.10](v0.10.10.md) for signed runtime-intelligence support, detection-data
+tray controls, the optional-install-script wording, and the recovery-bearing
+release validation record. Production feed and signing keys remain
+unconfigured; provisioning them requires a separately reviewed application
+release. No automatic update is enabled by package installation.

@@ -54,7 +54,7 @@ def test_pyproject_console_scripts_are_registered():
     data = tomllib.loads(read_text("pyproject.toml"))
 
     scripts = data["project"]["scripts"]
-    assert data["project"]["version"] == "0.10.9"
+    assert data["project"]["version"] == "0.10.10"
     assert scripts["aurascan"] == "aurascan.cli:main"
     assert scripts["aurascan-makepkg"] == "aurascan.makepkg_wrapper:main"
     assert data["project"]["requires-python"] == ">=3.8"
@@ -416,7 +416,7 @@ def test_hostile_content_v0100_release_contract():
         assert phrase in release
 
     assert "for v0.10.0, the package-scanner rule version is `1.4.0`" in checklist
-    assert 'self.scanner_version = "2.5.0"' in engine_source
+    assert 'self.scanner_version = "2.6.0"' in engine_source
 
 
 def test_instruction_review_v0101_release_contract():
@@ -447,7 +447,7 @@ def test_instruction_review_v0101_release_contract():
     assert "for v0.10.1, instruction guard terminal reviews keep suspicious content" in checklist
     assert "instruction guard report schema and rule version remain `1.0` for v0.10.1" in checklist
     assert "v0.10.1 release redesigns agent instruction guard reviews" in announcement
-    assert 'self.scanner_version = "2.5.0"' in engine_source
+    assert 'self.scanner_version = "2.6.0"' in engine_source
     assert 'INSTRUCTION_GUARD_SCHEMA_VERSION = "1.0"' in instruction_source
     assert 'INSTRUCTION_GUARD_RULE_VERSION = "1.0"' in instruction_source
     assert 'INSTRUCTION_GUARD_EVIDENCE_VERSION = "1.1"' in instruction_source
@@ -489,8 +489,8 @@ def test_repository_provenance_v0102_release_contract():
 
     assert "for v0.10.2, the package-scanner rule version is `1.5.0`" in checklist
     assert "v0.10.2 release adds an always-on static provenance check" in announcement
-    assert 'self.scanner_version = "2.5.0"' in engine_source
-    assert 'self.rule_version = "1.9.0"' in engine_source
+    assert 'self.scanner_version = "2.6.0"' in engine_source
+    assert 'self.rule_version = "1.10.0"' in engine_source
     assert 'PACKAGE_SCAN_INPUT_VERSION = "2.0"' in scan_input_source
     assert 'REPOSITORY_SNAPSHOT_VERSION = "1.2"' in repository_source
     assert 'INSTRUCTION_GUARD_SCHEMA_VERSION = "1.0"' in instruction_source
@@ -616,10 +616,26 @@ def test_recovery_bearing_v0107_release_contract():
 
 
 def test_package_only_v0109_release_contract():
+    release_text = read_text("docs/releases/v0.10.9.md")
+    release = " ".join(release_text.lower().split())
+
+    assert "package-only release" in release
+    assert "iso and local-uki gates were not rerun for v0.10.9" in release
+    assert "general-purpose audit cli does not contain the new chromium advisory" in release
+    assert (
+        "https://github.com/crizzler/AuraScan/releases/download/v0.10.7/"
+        "aurascan-recovery-0.10.7-x86_64.iso"
+    ) in release_text
+    assert re.findall(
+        r"^ISO SHA-256: `([0-9a-f]{64})`$", release_text, re.MULTILINE
+    ) == ["edf1a306d30483e22187f99005351cbce7c86c731fd9aeba8044dd02cb80e462"]
+
+
+def test_recovery_bearing_v01010_release_contract():
     def normalized(relative: str) -> str:
         return " ".join(read_text(relative).lower().split())
 
-    release_text = read_text("docs/releases/v0.10.9.md")
+    release_text = read_text("docs/releases/v0.10.10.md")
     release = " ".join(release_text.lower().split())
     unreleased = normalized("docs/releases/unreleased.md")
     checklist = normalized("docs/RELEASE_CHECKLIST.md")
@@ -632,45 +648,72 @@ def test_package_only_v0109_release_contract():
     uki_issue = read_text("packaging/recovery/rootfs/etc/issue")
     manifest = json.loads(read_text("aurascan/assets/aurascan-recovery-iso.json"))
 
-    assert "package-only release" in release
-    assert "changes after v0.10.9" in unreleased
+    assert "recovery-bearing release" in release
+    assert "production feed and signing keys remain unconfigured" in release
+    assert "changes after v0.10.10" in unreleased
     assert "release disposition" in checklist
     assert "strictly smaller than 2 gib (2,147,483,648 bytes)" in checklist
-    assert "for v0.10.9" in checklist
-    assert "v0.10.9 release" in announcement
-    assert "pkgver=0.10.9" in pkgbuild
+    assert "for v0.10.10" in checklist
+    assert "v0.10.10 release" in announcement
+    assert "pkgver=0.10.10" in pkgbuild
     assert "pkgrel=1" in pkgbuild
     assert "sha256sums=('SKIP')" in pkgbuild or re.search(r"sha256sums=\('[0-9a-f]{64}'\)", pkgbuild)
-    assert "\tpkgver = 0.10.9" in srcinfo
-    assert "aurascan-0.10.9.tar.gz" in srcinfo
+    assert "\tpkgver = 0.10.10" in srcinfo
+    assert "aurascan-0.10.10.tar.gz" in srcinfo
     assert "\tsha256sums = SKIP" in srcinfo or re.search(r"\tsha256sums = [0-9a-f]{64}", srcinfo)
-    assert 'return "0.10.9-dev"' in recovery_source
+    assert 'return "0.10.10-dev"' in recovery_source
     assert ': "${AURASCAN_RECOVERY_VERSION:' in profile
     assert 'iso_version="$AURASCAN_RECOVERY_VERSION"' in profile
     assert "AuraScan Recovery v@AURASCAN_VERSION@" in archiso_issue
     assert "AuraScan Recovery" in uki_issue
     assert "v0.6.0" not in uki_issue
-    assert manifest == {
+    expected_manifest = {
         "schema": "aurascan_recovery_iso/2.0",
-        "application_version": "0.10.9",
-        "release_disposition": "package-only",
-        "version": "0.10.7",
+        "application_version": "0.10.10",
+        "release_disposition": "recovery-bearing",
+        "version": "0.10.10",
         "architecture": "x86_64",
-        "filename": "aurascan-recovery-0.10.7-x86_64.iso",
-        "released_at": "2026-09-11",
-        "url": "https://github.com/crizzler/AuraScan/releases/download/v0.10.7/aurascan-recovery-0.10.7-x86_64.iso",
-        "sha256": "edf1a306d30483e22187f99005351cbce7c86c731fd9aeba8044dd02cb80e462",
-        "status": "release-ready",
+        "filename": "aurascan-recovery-0.10.10-x86_64.iso",
+        "released_at": "2026-09-12",
     }
-    assert manifest["url"] in release_text
-    assert re.findall(
-        r"^ISO SHA-256: `([0-9a-f]{64})`$", release_text, re.MULTILINE
-    ) == [manifest["sha256"]]
-    assert "iso and local-uki gates were not rerun for v0.10.9" in release
-    assert "general-purpose audit cli does not contain the new chromium advisory" in release
+    assert set(manifest) == set(expected_manifest) | {"url", "sha256", "status"}
+    assert {key: manifest[key] for key in expected_manifest} == expected_manifest
+    assert manifest["status"] in {"build-required", "release-ready"}
+    if manifest["status"] == "build-required":
+        assert manifest["url"] == ""
+        assert manifest["sha256"] == ""
+        assert "publication remains blocked" in release
+    else:
+        assert manifest["url"] == (
+            "https://github.com/crizzler/AuraScan/releases/download/v0.10.10/"
+            "aurascan-recovery-0.10.10-x86_64.iso"
+        )
+        assert re.fullmatch(r"[0-9a-f]{64}", manifest["sha256"])
+        assert re.findall(
+            r"^ISO SHA-256: `([0-9a-f]{64})`$", release_text, re.MULTILINE
+        ) == [manifest["sha256"]]
+        assert len(re.findall(
+            r"^Recovery build candidate: `([0-9a-f]{40})`$", release_text, re.MULTILINE
+        )) == 1
+        assert len(re.findall(
+            r"^Validation UKI SHA-256: `([0-9a-f]{64})`$", release_text, re.MULTILINE
+        )) == 1
+        sizes = re.findall(r"^ISO size: `([0-9]+)` bytes$", release_text, re.MULTILINE)
+        assert len(sizes) == 1 and 0 < int(sizes[0]) < 2 ** 31
+        for outcome in (
+            "- hybrid iso, seabios readiness: `pass`",
+            "- hybrid iso, ovmf uefi readiness: `pass`",
+            "- local uki, ordinary ovmf uefi readiness: `pass`",
+            "- local uki, disposable-key secure boot unsigned rejection and signed readiness: `pass`",
+            "- expanded-artifact privacy/path audit: `pass`",
+            "- strict sub-2-gib iso size gate: `pass`",
+            "- deterministic recovery scenario fixtures: `pass`",
+        ):
+            assert outcome in release
 
     if os.environ.get("AURASCAN_RELEASE_FINAL") == "1":
-        assert os.environ.get("AURASCAN_RELEASE_TAG") == "v0.10.9"
+        assert os.environ.get("AURASCAN_RELEASE_TAG") == "v0.10.10"
+        assert manifest["status"] == "release-ready"
         forbidden_release_phrases = (
             "pending",
             "publication remains blocked",

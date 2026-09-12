@@ -11,6 +11,7 @@ import aurascan.makepkg_wrapper as wrapper
 from aurascan.analyzers.history import HistoryAnalyzer
 from aurascan.core.cache import ScanCache
 from aurascan.core.engine import AuraScanEngine
+from aurascan.core.intelligence import bundled_snapshot
 from aurascan.core.models import Phase, Severity
 from aurascan.core.trusted_tools import TrustedTool
 
@@ -251,7 +252,7 @@ def test_new_only_policy_cannot_skip_vulnerable_buildchain(tmp_path):
     root = database(tmp_path)
     history = HistoryAnalyzer(tmp_path / "history.db")
     history.analyze_pkgbuild(str(path), path.read_text().replace("pkgver=1", "pkgver=0"))
-    history.commit_pending_snapshots(scan_level="fast_default", scanner_version="test", rule_version="test")
+    history.commit_pending_snapshots(scan_level="fast_default", scanner_version="test", rule_version="test", intelligence_identity=bundled_snapshot().identity)
     engine = AuraScanEngine(
         json_output=True, update_scan_policy="new-only", scan_context="update",
         scan_context_source="test_fixture", local_package_db_root=root,

@@ -186,6 +186,7 @@ class HistoryAnalyzer(BaseAnalyzer):
         scan_level: str = "fast_default",
         scanner_version: str = "",
         rule_version: str = "",
+        intelligence_identity: str = "",
         forced_accept: bool = False,
         trust_diff: Dict[str, Any] = None,
     ) -> None:
@@ -199,6 +200,7 @@ class HistoryAnalyzer(BaseAnalyzer):
                 accepted_by=accepted_by,
                 scanner_version=scanner_version,
                 rule_version=rule_version,
+                intelligence_identity=intelligence_identity,
                 forced_accept=forced_accept,
                 trust_diff=trust_diff,
             ))
@@ -218,6 +220,7 @@ class HistoryAnalyzer(BaseAnalyzer):
         review_decision_id: str = "",
         scanner_version: str = "",
         rule_version: str = "",
+        intelligence_identity: str = "",
         trust_diff: Dict[str, Any] = None,
     ) -> None:
         snapshot = self.snapshot_from_pkgbuild(
@@ -237,6 +240,7 @@ class HistoryAnalyzer(BaseAnalyzer):
             accepted_by=f"review_decision:{review_decision_id}" if review_decision_id else "review_decision",
             scanner_version=scanner_version,
             rule_version=rule_version,
+            intelligence_identity=intelligence_identity,
             required_manual_review=True,
             manual_review_resolved=True,
             trust_diff=trust_diff,
@@ -286,6 +290,7 @@ class HistoryAnalyzer(BaseAnalyzer):
         accepted_by: str,
         scanner_version: str = "",
         rule_version: str = "",
+        intelligence_identity: str = "",
         blocked: bool = False,
         required_manual_review: bool = False,
         manual_review_resolved: bool = False,
@@ -311,6 +316,7 @@ class HistoryAnalyzer(BaseAnalyzer):
             "forced_accept": forced_accept,
             "scanner_version": scanner_version,
             "rule_version": rule_version,
+            "intelligence_identity": intelligence_identity,
             "trust_diff": trust_diff or {},
         }
 

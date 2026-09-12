@@ -126,8 +126,9 @@ def test_new_campaign_intelligence_overrides_accepted_history_and_low_metadata(
         finding["rule_id"] == "SOURCE-META-SKIP-GIT-COMMIT" and finding["severity"] == "LOW"
         for finding in report["findings"]
     )
-    expected_action = "use_smart_fast_path" if policy == "smart" else "use_full_scan"
-    assert report["fast_path_decision"]["action"] == expected_action
+    # This explicitly models an older accepted scan without current intelligence
+    # identity. It must receive a normal scan even with smart policy selected.
+    assert report["fast_path_decision"]["action"] == "use_full_scan"
     assert history.get_accepted_snapshot("campaign-policy-fixture")["snapshot_id"] == baseline["snapshot_id"]
 
 

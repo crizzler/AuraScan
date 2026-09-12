@@ -151,6 +151,11 @@ _HYPRLAND_FIXES_SOURCE = re.compile(
 )
 
 class DeterministicAnalyzer(BaseAnalyzer):
+    def __init__(self, intelligence_snapshot=None):
+        from aurascan.core.intelligence import bundled_snapshot
+        self.intelligence_snapshot = (intelligence_snapshot if intelligence_snapshot is not None
+                                      else bundled_snapshot())
+
     def analyze_package(self, pkg_path: str) -> AnalysisResult:
         captured = capture_package_install_hook(Path(pkg_path))
         if captured.status == PACKAGE_HOOK_ABSENT:
@@ -346,7 +351,7 @@ class DeterministicAnalyzer(BaseAnalyzer):
                 line_number=min(signal.line_number for signal in carrier_signals),
             ))
         if phase in {Phase.pkgbuild_static, Phase.install_hook_static}:
-            campaign_findings = analyze_npm_install_commands(content, pkg_path, phase)
+            campaign_findings = analyze_npm_install_commands(content, pkg_path, phase, self.intelligence_snapshot)
             for finding in campaign_findings:
                 finding.package_name = pkg_name
                 finding.package_version = pkg_ver

@@ -10,37 +10,36 @@ import json
 import posixpath
 import re
 import urllib.parse
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from aurascan.analyzers.npm_metadata import (
     MAX_DEPTH, MAX_NODES, MAX_SCALAR, MetadataIncomplete, strict_json_object,
 )
 from aurascan.analyzers.remote_stage import _commands_and_constants
+from aurascan.core.intelligence import IntelligenceSnapshot, bundled_snapshot
 from aurascan.core.models import (
     Confidence, EvidenceQuality, Finding, Phase, Severity, Source,
 )
 
 
-def _load_intelligence() -> Dict[str, Any]:
-    # This is shipped application data, never a path selected by a package.
-    path = Path(__file__).resolve().parents[1] / "assets/npm-shai-hulud-2026-09-07.json"
-    with path.open("rb") as stream:
-        payload = stream.read(65537)
-    if len(payload) > 65536:
-        raise ValueError("bundled npm intelligence exceeds its bound")
-    data = json.loads(payload.decode("utf-8"))
-    if data.get("schema_version") != "1.0":
-        raise ValueError("unsupported bundled npm intelligence")
-    return data
-
-
-_INTELLIGENCE = _load_intelligence()
+# Compatibility exports describe only the shipped baseline. Production matches
+# always use the operation's immutable snapshot, never mutable global tables.
+_BASELINE = bundled_snapshot()
 MALICIOUS_PACKAGES = {
-    entry["name"]: entry for entry in _INTELLIGENCE["malicious_packages"]
+    entry["name"]: entry for campaign in _BASELINE.payload["npm_campaigns"]
+    for entry in campaign["packages"]
 }
-KNOWN_PAYLOAD_SHA256 = frozenset(_INTELLIGENCE["payload_sha256"])
-_MALICIOUS_DOMAINS = tuple(_INTELLIGENCE["malicious_domains"])
+KNOWN_PAYLOAD_SHA256 = frozenset(
+    digest for campaign in _BASELINE.payload["npm_campaigns"]
+    for digest in campaign["payload_sha256"]
+)
+_SHAIHULUD_CAMPAIGN = "NPM-2026-09-07-SHAI-HULUD"
+
+
+def _campaigns(snapshot: Optional[IntelligenceSnapshot]):
+    return (snapshot if snapshot is not None else _BASELINE).payload["npm_campaigns"]
+
+
 _DEPENDENCY_FIELDS = ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies")
 _NAME = re.compile(r"(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*\Z", re.I)
 _INSTALL_COMMANDS = {
@@ -71,34 +70,39 @@ _FLAG_OPTIONS = {
 }
 
 
-def malicious_domains() -> Tuple[str, ...]:
-    """Return the verified exact host indicators; do not resolve or contact them."""
-    return _MALICIOUS_DOMAINS
+def malicious_domains(intelligence_snapshot: Optional[IntelligenceSnapshot] = None) -> Tuple[str, ...]:
+    """Return exact reviewed host indicators without resolving or contacting them."""
+    return tuple(sorted({host for campaign in _campaigns(intelligence_snapshot)
+                         for host in campaign["malicious_domains"]}))
 
 
-def known_malicious_npm_host(value: str) -> bool:
-    """Match an actual HTTP(S) URL host or bare hostname, never a substring."""
+def _network_host(value: str) -> Optional[str]:
     if not isinstance(value, str) or not value or len(value) > MAX_SCALAR:
-        return False
+        return None
     if "\\" in value or any(ord(char) < 33 or ord(char) == 127 for char in value):
-        return False
+        return None
     try:
         if "://" in value:
             parsed = urllib.parse.urlsplit(value)
             if parsed.scheme.lower() not in {"http", "https"}:
-                return False
+                return None
             host = parsed.hostname
-            # Validate a supplied port instead of accepting malformed authority.
             parsed.port
         else:
             if any(char in value for char in "/:@?#\\"):
-                return False
+                return None
             host = value
     except ValueError:
-        return False
+        return None
     if host and host.endswith("."):
         host = host[:-1]
-    return bool(host and host.lower() in _MALICIOUS_DOMAINS)
+    return host.lower() if host else None
+
+
+def known_malicious_npm_host(value: str, intelligence_snapshot: Optional[IntelligenceSnapshot] = None) -> bool:
+    """Match an actual HTTP(S) URL host or bare hostname, never a substring."""
+    host = _network_host(value)
+    return bool(host and host in malicious_domains(intelligence_snapshot))
 
 
 def _finding(rule_id: str, path: str, phase: Phase, severity: Severity,
@@ -128,34 +132,43 @@ def _finding(rule_id: str, path: str, phase: Phase, severity: Severity,
     )
 
 
-def _selection_finding(name: str, version: str, path: str, phase: Phase,
-                       line: Optional[int] = None) -> Optional[Finding]:
-    entry = MALICIOUS_PACKAGES.get(name)
-    if entry is None:
-        return None
-    exact = version in entry["versions"]
-    source = phase == Phase.unpacked_source_scan
-    if exact:
-        rule = "DEEPSTATIC-NPM-SHAIHULUD-20260907" if source else "SUPPLYCHAIN-NPM-SHAIHULUD-20260907"
-        explanation = (
-            "A captured npm package selection exactly matches an observed Shai-Hulud malicious "
-            "release: " + name + "@" + version + ". This is static selection evidence; no "
-            "installation or execution was observed."
-        )
-    else:
-        rule = "DEEPSTATIC-NPM-SHAIHULUD-REVIEW-001" if source else "SUPPLYCHAIN-NPM-SHAIHULUD-REVIEW-001"
-        explanation = (
-            "A captured selection names " + name + ", whose malware advisories cover all "
-            "versions with no patched release. Its version is unresolved or differs from the "
-            "separately observed campaign releases. This requires provenance review; it does "
-            "not confirm the identical payload or establish execution. Other versions are "
-            "not assumed safe."
-        )
-    return _finding(
-        rule, path, phase, Severity.CRITICAL if exact else Severity.HIGH,
-        explanation, "verified npm malware advisory: " + ", ".join(entry["advisory_ids"]),
-        line=line,
-    )
+def _selection_findings(name: str, version: str, path: str, phase: Phase,
+                        line: Optional[int] = None,
+                        intelligence_snapshot: Optional[IntelligenceSnapshot] = None) -> List[Finding]:
+    findings = []
+    prefix = "DEEPSTATIC" if phase == Phase.unpacked_source_scan else "SUPPLYCHAIN"
+    for campaign in _campaigns(intelligence_snapshot):
+        for entry in campaign["packages"]:
+            if entry["name"] != name:
+                continue
+            exact = version in entry["versions"]
+            if not exact and entry["broad_advisory"] != "all_versions":
+                # Exact-only evidence cannot establish a different version's
+                # maliciousness or invent an all-version advisory.
+                continue
+            legacy = campaign["id"] == _SHAIHULUD_CAMPAIGN
+            if exact:
+                rule = prefix + ("-NPM-SHAIHULUD-20260907" if legacy else "-NPM-MALICIOUS-RELEASE-001")
+                explanation = (
+                    "A captured npm package selection exactly matches an observed malicious "
+                    "release: " + name + "@" + version + ". Reviewed campaign: " + campaign["id"] +
+                    ". This is static selection evidence; no installation or execution was observed."
+                )
+            else:
+                rule = prefix + ("-NPM-SHAIHULUD-REVIEW-001" if legacy else "-NPM-ADVISORY-REVIEW-001")
+                explanation = (
+                    "A captured selection names " + name + ", whose referenced malware advisories "
+                    "cover all versions with no patched release. Its version is unresolved or "
+                    "differs from the separately observed campaign releases. This requires provenance "
+                    "review; it does not confirm the identical payload or establish execution. "
+                    "Other versions are not assumed safe. Reviewed campaign: " + campaign["id"] + "."
+                )
+            findings.append(_finding(
+                rule, path, phase, Severity.CRITICAL if exact else Severity.HIGH,
+                explanation, "reviewed npm malware advisory: " + ", ".join(entry["advisory_ids"]),
+                line=line,
+            ))
+    return findings
 
 
 def _selector(name: str, value: str) -> Tuple[str, str]:
@@ -322,7 +335,8 @@ def _network_destinations(arguments: Sequence[str], executable: str) -> Optional
     return result
 
 
-def analyze_npm_install_commands(text: str, file_path: str, phase: Phase) -> List[Finding]:
+def analyze_npm_install_commands(text: str, file_path: str, phase: Phase,
+                                 intelligence_snapshot: Optional[IntelligenceSnapshot] = None) -> List[Finding]:
     """Inspect only caller-selected shell controls, never general JS or prose."""
     parsed = _commands_and_constants(text)
     if parsed is None:
@@ -340,7 +354,7 @@ def analyze_npm_install_commands(text: str, file_path: str, phase: Phase) -> Lis
             destinations = _network_destinations(command.arguments, executable)
             if destinations is None and any(
                 value.lower().startswith(("http://", "https://"))
-                and known_malicious_npm_host(value) for value in command.arguments
+                and known_malicious_npm_host(value, intelligence_snapshot) for value in command.arguments
             ):
                 findings.append(_finding(
                     "SUPPLYCHAIN-NPM-INSPECTION-INCOMPLETE-001", str(file_path), phase,
@@ -351,20 +365,23 @@ def analyze_npm_install_commands(text: str, file_path: str, phase: Phase) -> Lis
                     "campaign URL argument role could not be established",
                     line=command.line_number, coverage=True,
                 ))
-            if destinations is not None and any(
-                value.lower().startswith(("http://", "https://"))
-                and known_malicious_npm_host(value) for value in destinations
-            ):
-                findings.append(_finding(
-                    "DEEPSTATIC-NPM-SHAIHULUD-C2-001" if phase == Phase.unpacked_source_scan
-                    else "SUPPLYCHAIN-NPM-SHAIHULUD-C2-001",
-                    str(file_path), phase, Severity.CRITICAL,
-                    "A static network command targets the exact verified Shai-Hulud command-and-control "
-                    "hostname. This establishes a literal destination match, not successful contact "
-                    "or host compromise.",
-                    "active network destination matches verified Shai-Hulud C2 hostname",
-                    line=command.line_number,
-                ))
+            if destinations is not None:
+                hosts = {_network_host(value) for value in destinations
+                         if value.lower().startswith(("http://", "https://"))}
+                for campaign in _campaigns(intelligence_snapshot):
+                    if not hosts.intersection(campaign["malicious_domains"]):
+                        continue
+                    legacy = campaign["id"] == _SHAIHULUD_CAMPAIGN
+                    prefix = "DEEPSTATIC" if phase == Phase.unpacked_source_scan else "SUPPLYCHAIN"
+                    findings.append(_finding(
+                        prefix + ("-NPM-SHAIHULUD-C2-001" if legacy else "-NPM-MALICIOUS-DESTINATION-001"),
+                        str(file_path), phase, Severity.CRITICAL,
+                        "A static network command targets an exact reviewed malicious hostname. "
+                        "Reviewed campaign: " + campaign["id"] + ". This establishes a literal "
+                        "destination match, not successful contact or host compromise.",
+                        "active network destination matches reviewed malicious hostname",
+                        line=command.line_number,
+                    ))
         if executable not in _INSTALL_COMMANDS:
             continue
         specs = _install_specs(command.arguments, executable)
@@ -393,10 +410,10 @@ def analyze_npm_install_commands(text: str, file_path: str, phase: Phase) -> Lis
             if key in seen:
                 continue
             seen.add(key)
-            finding = _selection_finding(name, version, str(file_path), phase, command.line_number)
-            if finding is not None:
-                findings.append(finding)
-            elif "$" in spec or "`" in spec:
+            matches = _selection_findings(name, version, str(file_path), phase,
+                                          command.line_number, intelligence_snapshot)
+            findings.extend(matches)
+            if not matches and ("$" in spec or "`" in spec):
                 findings.append(_finding(
                     "SUPPLYCHAIN-NPM-INSPECTION-INCOMPLETE-001", str(file_path), phase,
                     Severity.HIGH,
@@ -503,7 +520,8 @@ def _lockfile_selections(data: Dict[str, Any]) -> List[Tuple[str, str]]:
     return selected
 
 
-def inspect_npm_campaign_metadata(path: str, text: str) -> List[Finding]:
+def inspect_npm_campaign_metadata(path: str, text: str,
+                                  intelligence_snapshot: Optional[IntelligenceSnapshot] = None) -> List[Finding]:
     """Read selected package identities from strict package.json/npm lock data."""
     path = str(path)
     if posixpath.basename(path) not in {"package.json", "package-lock.json", "npm-shrinkwrap.json"}:
@@ -528,27 +546,33 @@ def inspect_npm_campaign_metadata(path: str, text: str) -> List[Finding]:
         if (name, version) in seen:
             continue
         seen.add((name, version))
-        finding = _selection_finding(name, version, path, Phase.unpacked_source_scan)
-        if finding is not None:
-            findings.append(finding)
+        findings.extend(_selection_findings(name, version, path, Phase.unpacked_source_scan,
+                                            intelligence_snapshot=intelligence_snapshot))
     return findings
 
 
-def known_payload_digest_findings(path: str, digest_hex: str) -> List[Finding]:
+def known_payload_digest_findings(path: str, digest_hex: str,
+                                  intelligence_snapshot: Optional[IntelligenceSnapshot] = None) -> List[Finding]:
     """Match a digest computed by a bounded, stable reader, never a text claim."""
-    if digest_hex not in KNOWN_PAYLOAD_SHA256:
-        return []
-    finding = _finding(
-        "DEEPSTATIC-NPM-SHAIHULUD-PAYLOAD-001", str(path), Phase.unpacked_source_scan,
-        Severity.CRITICAL,
-        "Captured source bytes have the exact SHA-256 of the verified Shai-Hulud payload. "
-        "This confirms a payload signature match, not execution or host compromise.",
-        "exact captured-byte Shai-Hulud payload SHA-256 match", signature=True,
-    )
-    finding.file_hash = digest_hex
-    return [finding]
+    findings = []
+    for campaign in _campaigns(intelligence_snapshot):
+        if digest_hex not in campaign["payload_sha256"]:
+            continue
+        legacy = campaign["id"] == _SHAIHULUD_CAMPAIGN
+        finding = _finding(
+            "DEEPSTATIC-NPM-SHAIHULUD-PAYLOAD-001" if legacy else "DEEPSTATIC-NPM-MALICIOUS-PAYLOAD-001",
+            str(path), Phase.unpacked_source_scan, Severity.CRITICAL,
+            "Captured source bytes have the exact SHA-256 of a reviewed malicious payload. "
+            "Reviewed campaign: " + campaign["id"] + ". This confirms a payload signature "
+            "match, not execution or host compromise.",
+            "exact captured-byte malicious payload SHA-256 match", signature=True,
+        )
+        finding.file_hash = digest_hex
+        findings.append(finding)
+    return findings
 
 
-def known_payload_findings(path: str, payload: bytes) -> List[Finding]:
+def known_payload_findings(path: str, payload: bytes,
+                           intelligence_snapshot: Optional[IntelligenceSnapshot] = None) -> List[Finding]:
     """Hash already bounded captured bytes without parsing or executing them."""
-    return known_payload_digest_findings(path, hashlib.sha256(payload).hexdigest())
+    return known_payload_digest_findings(path, hashlib.sha256(payload).hexdigest(), intelligence_snapshot)

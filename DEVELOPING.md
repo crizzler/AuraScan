@@ -23,6 +23,87 @@ suite, and both strict presenter audits on Python 3.8 and 3.14. Provider calls
 are mocked; CI explicitly disables general, Instruction Guard, Incident, and
 Recovery AI and never starts a live local model server.
 
+## Signed runtime intelligence
+
+The [runtime contract](tools/intelligence_repository/SCHEMA.md) and
+[publisher workflow](tools/intelligence_repository/README.md) define a separate
+`1.0` format for reviewed runtime indicators. Research intake never promotes or
+publishes these records. Explicit redistribution permission and a review basis
+are mandatory; public availability does not establish permission. Keep exact
+observed malicious versions distinct from broader source-backed advisories.
+
+One immutable snapshot belongs to each scan/audit. Matchers accept the captured
+snapshot, and upgrade projections use the advisory identity/floor already bound
+to the finding. New intelligence invalidates caches, trusted history,
+`new-only` shortcuts, review fingerprints, and wrapper acceptance; do not reload
+inside a matcher or mix generations. Stale verified records remain available
+with shortcuts disabled. Corrupt active state reports incomplete coverage and
+cannot silently become an allowed install. Freshness cannot authenticate the
+host clock or reveal an unseen newer release during an offline scan.
+
+The fixed unprivileged `aurascan-intel` account fetches bounded assets into
+untrusted staging. A distinct privileged system service has a private network
+namespace and activates only stable captured bytes verified by fixed trusted
+GnuPG, exact packaged fingerprints, strict metadata, and rollback checks. The
+active pointer and highest accepted sequence form one serialized durable
+transaction. All scans use the protected system installation, including root
+package hooks. Ordinary commands never fetch. The explicit updater bypasses
+project/user dotenv loading, starts no AI, and uses no feed credentials.
+
+An interrupted first activation can leave generation data without a committed
+active pointer. This ambiguous state refuses automatic sequence-history reset.
+Operator recovery must restore verified activation metadata and retained
+sequence history from trustworthy evidence; deleting state to make a bundle
+appear to be the first update is not a supported recovery procedure.
+
+The optional daily timer ships disabled with an explicit systemd preset.
+Package scripts must not enable/start it or contact the network. Root service
+definitions use minimal environments and fixed entry points; the fetch account
+cannot write the active store. Root activation has only the DAC read capability
+needed to capture the fetch account's private staging files. Test these
+boundaries with temporary roots and injected runners instead of changing host
+accounts/services. Real detached-signature tests use disposable temporary keys.
+
+Tray intelligence controls use asynchronous, fixed `/usr/bin/aurascan` status
+and unprivileged `/usr/bin/systemctl` service requests, with a minimal child
+environment, closed stdin, bounded output/runtime, and no shell. A fixed trusted
+`/usr/bin/setsid --wait` detaches service clients from any controlling terminal
+so systemctl cannot open a hidden terminal authentication prompt. Desktop polkit
+authorizes service management; AuraScan installs no passwordless policy or
+custom authorization grant. Two fixed network-isolated root oneshots delegate
+timer enable/disable to the same administrative CLI checks. The tray never
+becomes root. Terminating a waiting client does not cancel an already accepted
+service transaction; services retain their own deadlines and status is reread.
+
+Validate the `intelligence-status/1.0` display fields before rendering them;
+never display raw stdout/stderr. The optional `--include-services` query reads
+only selected local systemd properties. Use actual enabled/active timer state,
+not an optimistic checkbox; inconsistent or unavailable state needs review.
+`activated_at` comes from protected activation metadata and does not change on
+an identical reimport. Service result properties may reset on unit unload and
+must not be described as durable attempt history. Menu refresh is non-fetching.
+Keep Quit guarded by both Instruction Guard and intelligence mutations, and
+retire child processes/timers without letting late callbacks affect new work.
+Test authorization failures, state disagreements and Qt adapters using injected
+processes; do not start host services or request real privilege in tests.
+
+Production feed/key configuration remains empty in v0.10.10. No CLI or
+environment setting may inject keys, weaken verification, or choose a different
+feed. Initial key replacement/revocation recovery requires an application
+update, and this bounded protocol must not be described as TUF-compliant.
+Schema/capability changes need an explicit migration preserving fail-closed
+rights and rollback state. Same-UID/root compromise, native parser flaws,
+publisher mistakes, and an absent live freshness oracle remain limitations.
+
+Run `tests/test_intelligence_*.py`, publisher template tests, scanner/audit
+parity and cache/review regressions, then the full source gates. The existing
+Python 3.8/3.14 CI matrix includes the publisher tests. Validate new systemd,
+sysusers, tmpfiles and packaging definitions without starting them. The v0.10.10
+application release is **recovery-bearing** because this changes shared scanner
+trust and handoff decisions; the release workflow requires a fresh validated
+recovery build. Production key provisioning and feed publication remain
+separate reviewed work, and package installation never enables updates.
+
 ## Maintainer-history evidence
 
 For maintainer-history changes, the current runtime observes only PKGBUILD
@@ -837,16 +918,18 @@ comparison and use inert local tarballs; neither pnpm nor package code runs.
 
 ### Emergency vendor advisory evidence
 
-`aurascan/core/security_audit.py` contains a deliberately small reviewed
-`VENDOR_EMERGENCY_ADVISORIES` mapping for gaps before distribution advisories
-arrive. It consumes captured installed package names/versions, never executes
-the installed browser or fetches a feed, and remains active with `--offline`
-and `--no-arch-audit`. Entries need an exact Arch package mapping, a verified
+`aurascan/core/security_audit.py` consumes the deliberately small reviewed
+vendor-advisory mapping from the operation's captured runtime-intelligence
+snapshot for gaps before distribution advisories arrive. It uses captured
+installed package names/versions, never executes the installed browser or
+fetches a feed, and remains active with `--offline` and `--no-arch-audit`. Entries need an exact Arch package mapping, a verified
 Linux upstream fixed floor, authoritative exploitation evidence, references,
 and a review date. The initial comparator supports only canonical four-part
 numeric Chromium releases; adding other products requires explicit review of
-their version semantics and finding descriptions. This is compiled curated
-intelligence shipped with AuraScan, not a separately signed or live-updated feed.
+their version semantics and finding descriptions. The curated baseline ships
+in `aurascan/assets/runtime-intelligence.json`; separately signed updates can
+replace its reviewed records only after production trust is provisioned.
+Normal audits never fetch or reload intelligence within an operation.
 
 On 2026-09-11 the [Google release announcement](https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_0808145027.html)
 and [CISA KEV](https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json)
@@ -879,20 +962,24 @@ update cannot do so. Upgrade snapshots currently collect package names only;
 without captured versions this check remains unresolved coverage. Adding
 version collection there is deferred. Full system audit collects versions.
 
-Security audits are regenerated, not package-scan cache entries; this addition
-does not change the engine rule/cache version. The report remains schema 1.0
-with an additive `risk_summary.vendor_emergency_findings` count and existing
-finding fields. Tests use injected package maps, temporary roots, and fake
+Security audits are regenerated, not package-scan cache entries. The report
+remains schema 1.0 with additive intelligence identity metadata,
+`risk_summary.vendor_emergency_findings`, and captured advisory identity/floor
+on findings. Tests use injected package maps, temporary roots, and fake
 runners; no browser, package payload, real host scan, or live feed is needed.
 
 ### npm campaign intelligence and lifecycle correlations
 
-Keep verified campaign data in
-`aurascan/assets/npm-shai-hulud-2026-09-07.json`; the supporting Aikido, GHSA,
-and OSV references were checked on 2026-09-09. The four exact observed releases
+Keep the runtime baseline in `aurascan/assets/runtime-intelligence.json` and
+pass its captured snapshot to matchers. The retained historical
+`aurascan/assets/npm-shai-hulud-2026-09-07.json` records the original evidence;
+the supporting Aikido, GHSA, and OSV references were checked on 2026-09-09.
+The four exact observed releases
 and common payload hash are narrower evidence than the GHSA package-wide
-malware ranges. Exact tuples block; unresolved or other versions remain HIGH
-review and must never be presented as patched or safe. OSV record-origin hashes
+malware ranges. Exact tuples block; for those explicitly broader advisories,
+unresolved or other versions remain HIGH review and must never be presented as
+patched or safe. Exact-only future records cannot inherit that broader claim.
+OSV record-origin hashes
 are not payload hashes: use only the identified `index.js` evidence digest.
 
 `aurascan/analyzers/npm_supply_chain.py` consumes supported shell install

@@ -293,8 +293,12 @@ class AIStaticAnalyzer(BaseAnalyzer):
         if content:
             return self._call_api("Package Metadata & Install Scripts", content, pkg_path=pkg_path)
         else:
-            print("[AuraScan] No scripts found to analyze.", file=sys.stderr)
-            return AnalysisResult(True, "No scripts", [])
+            print(
+                "[AuraScan] This package has no optional install script (.INSTALL). "
+                "This is normal; no AI review is needed for this step.",
+                file=sys.stderr,
+            )
+            return AnalysisResult(True, "No optional install script (.INSTALL); AI review not applicable", [])
 
     def analyze_pkgbuild(self, pkgbuild_path: str, content: str) -> AnalysisResult:
         return self._call_api("PKGBUILD", content, pkg_path=pkgbuild_path)

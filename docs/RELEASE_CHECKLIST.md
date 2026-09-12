@@ -35,6 +35,33 @@ candidate.
 
 ## Validation
 
+- For v0.10.10, verify migration parity for existing npm and emergency vendor
+  detections under the separate runtime-intelligence schema `1.0`. Exact
+  observed versions must not become all-version claims; corrections require
+  newer signed source-attributed records. Keep fixed comparator, severity,
+  evidence and blocking authority in application code. The package-scanner
+  version is `2.6.0` and rule version is `1.10.0`.
+  Exercise real disposable-key detached-signature verification, wrong signers,
+  tampering, expiry, time/sequence rollback, conflicting same-sequence content,
+  missing GnuPG, malformed records and unsupported schemas. Temporary-root
+  tests must cover symlinks, replacement, concurrent/interrupted activation and
+  retained-generation integrity without changing host services or live trust.
+  Prove one snapshot per operation, invalidated cache/history/review/wrapper
+  shortcuts after updates, and advisory identity/floor retention through
+  upgrade projections. Stale records retain detection with visible status;
+  corrupt storage is incomplete coverage rather than a silent allowance.
+  Verify both Qt bindings, asynchronous bounded tray children, desktop
+  authorization failure, shared Quit guards, and observed timer/service status.
+  Opening the menu or scanning must not fetch; package installation must not
+  enable the daily timer, activate a feed or contact a provider. Check package
+  contents, fixed privilege separation and network-isolated activation. The
+  production feed and signing keys remain unconfigured in this release;
+  developer publisher tooling is excluded from installed runtime contents.
+  These shared trust and installation changes are recovery-bearing: require a
+  fresh candidate ISO and local UKI, all applicable recovery gates, complete
+  Python 3.8/3.14 source/package validation, both strict presenter audits, and
+  exact branch/tag CI before publication. The optional-install-script message
+  must explain the absence of `.INSTALL` without claiming package safety.
 - For v0.10.9, verify bounded Cursor rule discovery, stable no-follow reads,
   pagination and machine-bound enrollment. Broad approvals require authority
   review, supported commands correlate only within the same server, and

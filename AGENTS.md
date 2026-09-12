@@ -89,6 +89,26 @@ model choice does not change AuraScan's runtime AI defaults or safety policy.
 
 ## Safety invariants
 
+- Keep runtime intelligence separate from research quarantine. Accept only the
+  strict versioned declarative contract with explicit redistribution rights;
+  preserve exact versus broader advisory claims and source-attributed
+  withdrawals. No record grants executable-rule, AI, key, URL or policy authority.
+- Capture one intelligence snapshot per operation and bind its identity to
+  reports, caches, history and review acceptance. Changed/missing identities
+  disable shortcuts and invalidate pre-handoff acceptance. Stale verified
+  intelligence retains detections with visible status; corrupt active storage
+  is an incomplete-coverage failure, never a silent allowance.
+- Intelligence refresh is explicit or a separately enabled timer. Keep its
+  unprivileged download separate from network-isolated privileged verification
+  and atomic installation. Use packaged fingerprints and trusted bounded GnuPG;
+  reject rollback, unsupported schemas, expired activation and changed same-
+  sequence content. No project configuration, AI credentials, live keys or host
+  service mutations belong in tests. Package scripts never fetch or enable it.
+- Keep detection-data tray status local and mutations on fixed, unprivileged
+  service clients with desktop administrator authorization. Never run the tray
+  as root or add passwordless policy. Bound child lifetime/output, reread timer
+  state after operations, keep shared Quit guards intact, and never render raw
+  child output. A stopped client does not cancel an accepted service transaction.
 - Never execute a PKGBUILD, `.install` hook, downloaded source, malware sample,
   package payload, agent instruction file, imported resource, hook/config
   command, or fixture command while analyzing or testing it.
@@ -121,8 +141,8 @@ model choice does not change AuraScan's runtime AI defaults or safety policy.
   application-version-matched image exists when none was built.
   For package-only releases, advance the packaged manifest's application
   version and disposition while retaining and re-verifying the exact prior ISO
-  version, filename, public URL, digest, and `release-ready` status; do not
-  upload newly relabeled recovery assets.
+  version, filename, public URL, digest, and `release-ready` status.
+  Never upload newly relabeled recovery assets.
 - Do not ship a package-only release when the retained recovery image is more
   than 90 days old on the release date. The manifest records the image date,
   runtime status and Doctor warn when the window is exceeded, and the next

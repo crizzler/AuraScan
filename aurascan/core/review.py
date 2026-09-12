@@ -444,6 +444,7 @@ def build_scan_fingerprint(
         "scanner_version": scanner_version or report.get("scanner_version") or "",
         "scan_input_digest": scan_input_digest,
         "source_metadata_hash": source_metadata_hash,
+        "intelligence_identity": (report.get("intelligence") or {}).get("identity", ""),
     }
     scan_fingerprint = hashlib.sha256(json.dumps(material, sort_keys=True).encode("utf-8")).hexdigest()
     return ScanFingerprint(

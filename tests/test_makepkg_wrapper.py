@@ -12,6 +12,7 @@ from aurascan.analyzers.history import HistoryAnalyzer, MANUAL_REVIEW_ACCEPTED_S
 from aurascan.analyzers.source_metadata import SourceMetadataAnalyzer
 from aurascan.core.cache import ScanCache
 from aurascan.core.engine import AuraScanEngine
+from aurascan.core.intelligence import bundled_snapshot
 from aurascan.core.install_hook import capture_package_scan_input
 from aurascan.core.review import (
     ReviewDecisionStore,
@@ -153,7 +154,7 @@ def accepted_history_from_pkgbuild(tmp_path, pkgbuild_path):
         install_hook_resolution=scan_input.install_hook,
         repository_snapshot=scan_input.repository_snapshot,
     )
-    history.commit_pending_snapshots(scan_level="fast_default", scanner_version="test", rule_version="test")
+    history.commit_pending_snapshots(scan_level="fast_default", scanner_version="test", rule_version="test", intelligence_identity=bundled_snapshot().identity)
     return history
 
 
@@ -1632,6 +1633,7 @@ def test_review_acceptance_records_manual_review_history_without_clean_baseline(
     assert snapshot["scan_status"] == MANUAL_REVIEW_ACCEPTED_STATUS
     assert snapshot["manual_review_resolved"] is True
     assert snapshot["review_decision_id"]
+    assert snapshot["intelligence_identity"] == created[-1].last_report["intelligence"]["identity"]
     assert history.get_accepted_snapshot("aurascan-wrapper-suspicious-update") == {}
 
 

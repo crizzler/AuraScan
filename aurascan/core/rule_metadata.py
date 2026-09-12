@@ -44,7 +44,7 @@ RULE_METADATA: Dict[str, RuleMetadata] = {
     "SEC-VENDOR-ADVISORY-VERSION-UNRESOLVED": RuleMetadata(
         "SEC-VENDOR-ADVISORY-VERSION-UNRESOLVED", RuleCategory.history_supply_chain,
         Severity.MEDIUM, "vendor-emergency-coverage", 75, True, "finding_fields",
-        "Captured installed version cannot be evaluated against a bundled emergency vendor advisory.",
+        "Captured installed version cannot be evaluated against a captured emergency vendor advisory.",
     ),
     "EDITOR-TASK-AUTORUN-CARRIER-001": RuleMetadata(
         "EDITOR-TASK-AUTORUN-CARRIER-001", RuleCategory.deterministic_static,
@@ -66,6 +66,14 @@ RULE_METADATA: Dict[str, RuleMetadata] = {
         Severity.MEDIUM, None, 50, True, None,
         "Untrusted PKGBUILD maintainer comment changed; AUR ownership is unverified.",
     ),
+    "INTELLIGENCE-UNAVAILABLE-001": RuleMetadata("INTELLIGENCE-UNAVAILABLE-001", RuleCategory.deterministic_static, Severity.HIGH, "runtime-intelligence-coverage", 99, True, "deterministic", "Protected runtime intelligence could not be captured as a verified generation; incomplete coverage blocks trust shortcuts."),
+    "SUPPLYCHAIN-NPM-MALICIOUS-RELEASE-001": RuleMetadata("SUPPLYCHAIN-NPM-MALICIOUS-RELEASE-001", RuleCategory.history_supply_chain, Severity.CRITICAL, "npm-malicious-release", 95, True, "deterministic", "A captured package selection exactly matches a reviewed malicious npm release."),
+    "SUPPLYCHAIN-NPM-ADVISORY-REVIEW-001": RuleMetadata("SUPPLYCHAIN-NPM-ADVISORY-REVIEW-001", RuleCategory.history_supply_chain, Severity.HIGH, "npm-malware-advisory", 95, True, "deterministic", "A captured npm selection names a package with an explicitly supported all-version malware advisory."),
+    "SUPPLYCHAIN-NPM-MALICIOUS-DESTINATION-001": RuleMetadata("SUPPLYCHAIN-NPM-MALICIOUS-DESTINATION-001", RuleCategory.network_behavior, Severity.CRITICAL, "npm-malicious-destination", 95, True, "deterministic", "A supported active network command targets an exact reviewed malicious hostname."),
+    "DEEPSTATIC-NPM-MALICIOUS-RELEASE-001": RuleMetadata("DEEPSTATIC-NPM-MALICIOUS-RELEASE-001", RuleCategory.history_supply_chain, Severity.CRITICAL, "npm-malicious-release", 95, True, "deterministic", "A captured package selection exactly matches a reviewed malicious npm release."),
+    "DEEPSTATIC-NPM-ADVISORY-REVIEW-001": RuleMetadata("DEEPSTATIC-NPM-ADVISORY-REVIEW-001", RuleCategory.history_supply_chain, Severity.HIGH, "npm-malware-advisory", 95, True, "deterministic", "A captured npm selection names a package with an explicitly supported all-version malware advisory."),
+    "DEEPSTATIC-NPM-MALICIOUS-DESTINATION-001": RuleMetadata("DEEPSTATIC-NPM-MALICIOUS-DESTINATION-001", RuleCategory.network_behavior, Severity.CRITICAL, "npm-malicious-destination", 95, True, "deterministic", "A supported active network command targets an exact reviewed malicious hostname."),
+    "DEEPSTATIC-NPM-MALICIOUS-PAYLOAD-001": RuleMetadata("DEEPSTATIC-NPM-MALICIOUS-PAYLOAD-001", RuleCategory.history_supply_chain, Severity.CRITICAL, "npm-malicious-payload", 95, True, "deterministic", "Stable captured source bytes exactly match a reviewed malicious payload SHA-256."),
     "SUPPLYCHAIN-NPM-SHAIHULUD-20260907": RuleMetadata("SUPPLYCHAIN-NPM-SHAIHULUD-20260907", RuleCategory.history_supply_chain, Severity.CRITICAL, "npm-shai-hulud-exact", 95, True, "deterministic", "Captured package control text selects an observed malicious npm package version."),
     "DEEPSTATIC-NPM-SHAIHULUD-20260907": RuleMetadata("DEEPSTATIC-NPM-SHAIHULUD-20260907", RuleCategory.history_supply_chain, Severity.CRITICAL, "npm-shai-hulud-exact", 95, True, "deterministic", "Acquired metadata or source control text selects an observed malicious npm package version."),
     "SUPPLYCHAIN-NPM-SHAIHULUD-REVIEW-001": RuleMetadata("SUPPLYCHAIN-NPM-SHAIHULUD-REVIEW-001", RuleCategory.history_supply_chain, Severity.HIGH, "npm-shai-hulud-review", 95, True, "deterministic", "A malware-advisory package is selected without an exact observed campaign version."),

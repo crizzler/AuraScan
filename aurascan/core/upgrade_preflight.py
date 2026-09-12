@@ -1989,7 +1989,9 @@ def security_audit_upgrade_findings(
         if (item.category == "vendor_emergency_advisory"
                 and item.rule_id == "SEC-KNOWN-EXPLOITED-VERSION-LAG"
                 and item.source == "vendor_emergency_advisory"
-                and vendor_emergency_version_status(item.package_name, pending_repo.get(item.package_name))
+                and bool(item.advisory.get("intelligence_identity"))
+                and vendor_emergency_version_status(item.package_name, pending_repo.get(item.package_name),
+                                                    advisory=item.advisory)
                 == "at_or_above_floor"):
             # A pkgrel/epoch bump alone cannot prove this upstream fix. Only
             # an exact mapped repository candidate can resolve this warning;

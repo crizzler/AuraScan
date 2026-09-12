@@ -1,0 +1,13 @@
+[Unit]
+Description=Optional daily AuraScan intelligence update
+Documentation=https://github.com/crizzler/AuraScan
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=4h
+AccuracySec=15m
+Persistent=yes
+Unit=aurascan-intelligence-activate.service
+
+[Install]
+WantedBy=timers.target

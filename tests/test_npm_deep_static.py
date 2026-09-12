@@ -13,6 +13,7 @@ from aurascan.analyzers.deep_static import DeepStaticAnalyzer
 from aurascan.core.models import AnalysisResult, Phase, Severity
 from aurascan.core.source_acquisition import SourceFetcher, SourcePolicy
 from tests.helpers.archive_fixtures import TarEntry, write_tar_archive
+from tests.helpers.intelligence_fixtures import inert_signature_snapshot
 
 
 PAYLOAD_RULE = "DEEPSTATIC-NPM-SHAIHULUD-PAYLOAD-001"
@@ -31,20 +32,14 @@ def analyzer(**kwargs):
     return DeepStaticAnalyzer(clamav=NoClamAV(), **kwargs)
 
 
-def inert_signature(monkeypatch, payload):
-    monkeypatch.setattr(npm_supply_chain, "KNOWN_PAYLOAD_SHA256", frozenset({
-        hashlib.sha256(payload).hexdigest(),
-    }))
-
-
 @pytest.mark.parametrize("name", ["index.js", "renamed.png", "opaque.dat", "node_modules/fixture/data.bin", ".git/fixture.dat"])
 def test_known_payload_matches_captured_bytes_including_renamed_assets(tmp_path, monkeypatch, name):
     payload = b"AURASCAN_INERT_HASH_FIXTURE\x00no executable contents\n"
-    inert_signature(monkeypatch, payload)
+    intelligence = inert_signature_snapshot(payload)
     path = tmp_path / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(payload)
-    findings = analyzer().inspect_source_tree(tmp_path)
+    findings = analyzer(intelligence_snapshot=intelligence).inspect_source_tree(tmp_path)
     match = next(item for item in findings if item.rule_id == PAYLOAD_RULE)
     assert match.blocks_installation and match.severity == Severity.CRITICAL
     assert match.phase == Phase.unpacked_source_scan
@@ -53,19 +48,19 @@ def test_known_payload_matches_captured_bytes_including_renamed_assets(tmp_path,
 
 def test_noncode_hash_streaming_does_not_expand_text_parser_limit(tmp_path, monkeypatch):
     payload = b"inert asset bytes\n" * 10000
-    inert_signature(monkeypatch, payload)
+    intelligence = inert_signature_snapshot(payload)
     (tmp_path / "large.png").write_bytes(payload)
-    findings = analyzer(max_file_size=32, max_hash_file_size=len(payload)).inspect_source_tree(tmp_path)
+    findings = analyzer(intelligence_snapshot=intelligence, max_file_size=32, max_hash_file_size=len(payload)).inspect_source_tree(tmp_path)
     assert any(item.rule_id == PAYLOAD_RULE for item in findings)
     assert not any(item.rule_id == INCOMPLETE for item in findings)
 
 
 def test_hash_text_mention_or_different_bytes_is_not_payload_match(tmp_path, monkeypatch):
     payload = b"inert exact hash fixture"
-    inert_signature(monkeypatch, payload)
+    intelligence = inert_signature_snapshot(payload)
     (tmp_path / "index.js").write_text('// ' + hashlib.sha256(payload).hexdigest())
     (tmp_path / "changed.dat").write_bytes(payload + b"changed")
-    assert not any(item.rule_id == PAYLOAD_RULE for item in analyzer().inspect_source_tree(tmp_path))
+    assert not any(item.rule_id == PAYLOAD_RULE for item in analyzer(intelligence_snapshot=intelligence).inspect_source_tree(tmp_path))
 
 
 @pytest.mark.parametrize("name", ["nested.tar.bz2", "nested.png", ".git/nested.dat"])
@@ -95,7 +90,7 @@ def test_hash_reader_refuses_symlinks_without_reading_target(tmp_path, monkeypat
     source = tmp_path / "source"
     source.mkdir()
     payload = b"inert outside file"
-    inert_signature(monkeypatch, payload)
+    intelligence = inert_signature_snapshot(payload)
     target = tmp_path / "private.dat"
     target.write_bytes(payload)
     (source / "link.dat").symlink_to(target)
@@ -106,7 +101,7 @@ def test_hash_reader_refuses_symlinks_without_reading_target(tmp_path, monkeypat
         return original(fd, length)
 
     monkeypatch.setattr(os, "read", read)
-    findings = analyzer().inspect_source_tree(source)
+    findings = analyzer(intelligence_snapshot=intelligence).inspect_source_tree(source)
     assert any(item.rule_id == INCOMPLETE for item in findings)
     assert not any(item.rule_id == PAYLOAD_RULE for item in findings)
 
@@ -130,7 +125,7 @@ def test_extensionless_selection_reads_count_against_total_budget(tmp_path, monk
 
 def test_hash_reader_rejects_replaced_regular_file(tmp_path, monkeypatch):
     payload = b"inert replacement test"
-    inert_signature(monkeypatch, payload)
+    intelligence = inert_signature_snapshot(payload)
     path = tmp_path / "asset.dat"
     path.write_bytes(payload)
     inode = path.stat().st_ino
@@ -147,7 +142,7 @@ def test_hash_reader_rejects_replaced_regular_file(tmp_path, monkeypatch):
         return data
 
     monkeypatch.setattr(os, "read", read)
-    findings = analyzer().inspect_source_tree(tmp_path)
+    findings = analyzer(intelligence_snapshot=intelligence).inspect_source_tree(tmp_path)
     assert replaced
     assert any(item.rule_id == INCOMPLETE for item in findings)
     assert not any(item.rule_id == PAYLOAD_RULE for item in findings)

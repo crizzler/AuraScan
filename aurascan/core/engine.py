@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import List
 from aurascan.core.audit import log_audit
@@ -34,6 +35,7 @@ from aurascan.core.models import (
 )
 from aurascan.core.risk import RiskEngine
 from aurascan.core.cache import ScanCache
+from aurascan.core.intelligence import load_intelligence_snapshot
 from aurascan.core.context_provider import build_scan_context_proof
 from aurascan.core.local_package_db import LocalPackageDbContextProvider
 from aurascan.core.pnpm_buildchain import analyze_pnpm_buildchain
@@ -56,7 +58,7 @@ from aurascan.core.update_policy import (
 )
 
 class AuraScanEngine:
-    def __init__(self, json_output=False, deep_static=False, offline=False, auto_key_fetch=True, keyserver=None, trusted_key_dirs=None, verbose=False, update_scan_policy="full", scan_context="unknown", scan_context_source="unknown", allow_user_asserted_update_context=False, local_package_db_root=None, version_compare=None):
+    def __init__(self, json_output=False, deep_static=False, offline=False, auto_key_fetch=True, keyserver=None, trusted_key_dirs=None, verbose=False, update_scan_policy="full", scan_context="unknown", scan_context_source="unknown", allow_user_asserted_update_context=False, local_package_db_root=None, version_compare=None, intelligence_loader=None):
         self.json_output = json_output
         self.deep_static = deep_static
         self.offline = offline
@@ -68,13 +70,15 @@ class AuraScanEngine:
         self.allow_user_asserted_update_context = allow_user_asserted_update_context
         self.local_package_db_root = Path(local_package_db_root) if local_package_db_root is not None else None
         self.version_compare = version_compare
+        self._intelligence_loader = intelligence_loader or load_intelligence_snapshot
+        self.last_intelligence_snapshot = None
         self.last_report = None
         self.last_scan_input_digest = ""
         self.last_scan_input = None
         self.last_pnpm_buildchain = None
         self._pnpm_controls = []
-        self.scanner_version = "2.5.0"
-        self.rule_version = "1.9.0"
+        self.scanner_version = "2.6.0"
+        self.rule_version = "1.10.0"
         self.cache = ScanCache()
         self.risk_engine = RiskEngine()
         self.trust_diff_adapter = HistoryTrustDiffAdapter()
@@ -104,10 +108,11 @@ class AuraScanEngine:
         # Built-package analyzers still consume a filesystem path independently.
         # Do not read or write their cache until all phases share one immutable,
         # no-follow archive snapshot and digest.
+        self._capture_intelligence()
         pkg_name, pkg_ver = self._resolve_package_identity(pkg_path, pkg_name, pkg_ver)
 
         self._print(f"\n[AuraScan] --- Auditing Package: {pkg_path} ---", True)
-        all_findings = []
+        all_findings = self._intelligence_findings(pkg_name, pkg_ver)
         source_acquisition = []
         is_safe = True
 
@@ -182,6 +187,8 @@ class AuraScanEngine:
         return not value or value == "unknown"
 
     def scan_pkgbuild(self, pkgbuild_path: str, pkg_name: str = "unknown", pkg_ver: str = "unknown") -> bool:
+        self.last_report = None
+        self._capture_intelligence()
         self.last_scan_input_digest = ""
         self.last_scan_input = None
         self.last_pnpm_buildchain = None
@@ -218,7 +225,11 @@ class AuraScanEngine:
         )
         # The installed toolchain can change independently of package bytes.
         # Relevant checks stay fresh even across cached or new-only scans.
-        cacheable = not self.deep_static and not self.last_pnpm_buildchain.relevant
+        cacheable = (
+            not self.deep_static
+            and not self.last_pnpm_buildchain.relevant
+            and self.last_intelligence_snapshot.shortcut_eligible
+        )
         cache_key_parts = {
             "config_flags": cache_flags,
             "input_digest": scan_input_digest,
@@ -236,6 +247,8 @@ class AuraScanEngine:
                 self.rule_version,
                 **cache_key_parts,
             )
+        if cached_res and (cached_res.get("intelligence") or {}).get("identity") != self.last_intelligence_snapshot.identity:
+            cached_res = None
         if cached_res:
             self.last_report = cached_res
             self._print(f"\n[AuraScan] --- Auditing PKGBUILD: {pkgbuild_path} (CACHED) ---", True)
@@ -252,7 +265,7 @@ class AuraScanEngine:
             return True
 
         self._print(f"\n[AuraScan] --- Auditing PKGBUILD: {pkgbuild_path} ---", True)
-        all_findings = list(self.last_pnpm_buildchain.findings)
+        all_findings = self._intelligence_findings(pkg_name, pkg_ver) + list(self.last_pnpm_buildchain.findings)
         source_acquisition = []
         is_safe = True
         if install_hook.declared and install_hook.status != INSTALL_HOOK_RESOLVED:
@@ -400,6 +413,43 @@ class AuraScanEngine:
         )
         return not current.findings and current.identity == previous.identity
 
+    def _capture_intelligence(self):
+        """Resolve protected local data once; analyzers share these exact bytes."""
+        self.last_intelligence_snapshot = self._intelligence_loader()
+        for analyzer in self.analyzers:
+            if isinstance(analyzer, (DeterministicAnalyzer, DeepStaticAnalyzer)):
+                analyzer.intelligence_snapshot = self.last_intelligence_snapshot
+
+    def revalidate_intelligence(self):
+        """A generation or freshness change requires a new displayed scan."""
+        previous = self.last_intelligence_snapshot
+        if previous is None or previous.coverage_error:
+            return False
+        current = self._intelligence_loader()
+        return not current.coverage_error and current.identity == previous.identity
+
+    def _intelligence_findings(self, pkg_name, pkg_ver):
+        if not self.last_intelligence_snapshot.coverage_error:
+            return []
+        return [Finding(
+            rule_id="INTELLIGENCE-UNAVAILABLE-001",
+            package_name=pkg_name,
+            package_version=pkg_ver,
+            phase=Phase.pkgbuild_static,
+            source=Source.deterministic_rule,
+            severity=Severity.HIGH,
+            confidence=Confidence.CONFIRMED,
+            evidence_quality=EvidenceQuality.confirmed_static_pattern,
+            file_path="",
+            line_number=None,
+            evidence_snippet="protected intelligence state could not be validated",
+            explanation="AuraScan could not validate installed security intelligence; bundled detection remains active with incomplete update coverage.",
+            recommendation="Restore verified intelligence before building or installing the package, then scan again.",
+            false_positive_notes="This coverage failure does not establish malicious package behavior or compromise.",
+            blocks_installation=True,
+            requires_manual_review=False,
+        )]
+
     def _build_report(self, pkg_name, pkg_ver, findings, messages, source_acquisition=None, fast_path_decision=None):
         report = ScanReport(
             package_metadata=PackageMetadata(name=pkg_name, version=pkg_ver),
@@ -410,6 +460,7 @@ class AuraScanEngine:
             scan_context=self.scan_context.value,
             scan_context_source=self.scan_context_source.value,
             fast_path_decision=fast_path_decision,
+            intelligence=dict(self.last_intelligence_snapshot.metadata(), identity=self.last_intelligence_snapshot.identity),
         )
         if fast_path_decision:
             technical = fast_path_decision.get("technical_details", {})
@@ -442,6 +493,7 @@ class AuraScanEngine:
             "local_package_db_root": str(self.local_package_db_root) if self.local_package_db_root is not None else "",
             "ai_enabled": ai_config.enabled,
             "ai_ready": ai_config.ready,
+            "intelligence_identity": self.last_intelligence_snapshot.identity if self.last_intelligence_snapshot is not None else "",
         }
         if ai_config.enabled:
             flags.update({
@@ -539,10 +591,35 @@ class AuraScanEngine:
             context_proof=context_proof,
         )
         decision = decide_update_fast_path(state)
+        intelligence_matches = bool(
+            self.last_intelligence_snapshot is not None
+            and self.last_intelligence_snapshot.shortcut_eligible
+            and previous_accepted.get("intelligence_identity") == self.last_intelligence_snapshot.identity
+        )
+        if not intelligence_matches and decision.action in (
+            UpdateFastPathAction.use_smart_fast_path,
+            UpdateFastPathAction.skip_update_scan,
+        ):
+            decision = replace(
+                decision,
+                action=UpdateFastPathAction.use_full_scan,
+                reason_codes=["intelligence_baseline_missing_changed_or_stale"],
+                title="Normal scan required for security intelligence.",
+                summary="The previous accepted scan does not establish coverage under the current intelligence state.",
+                why_it_matters="New or stale intelligence cannot reuse an earlier update-scan shortcut.",
+                what_checked="AuraScan checked the intelligence identity and the accepted package baseline.",
+                what_not_checked="A normal scan is required before a new baseline can be accepted.",
+                recommended_action="Review the normal scan result.",
+                expensive_phases_skipped=False,
+                skipped_phases=[],
+                may_update_history_baseline=True,
+                scan_level="fast_default",
+            )
         if decision.technical_details is not None:
             decision.technical_details["previous_baseline_id"] = previous_accepted.get("snapshot_id") if previous_accepted else None
             decision.technical_details["previous_baseline_scan_level"] = previous_accepted.get("scan_level") if previous_accepted else None
             decision.technical_details["package_key"] = package_key
+            decision.technical_details["intelligence_baseline_matches"] = intelligence_matches
         if decision.action == UpdateFastPathAction.use_smart_fast_path and history and package_key:
             history.pending_snapshots[package_key] = current_snapshot
         return decision
@@ -596,6 +673,9 @@ class AuraScanEngine:
                 if risk_summary.requires_manual_review:
                     analyzer.discard_pending_snapshots()
                     return False, "not_updated_manual_review_required"
+                if not self.last_intelligence_snapshot.shortcut_eligible:
+                    analyzer.discard_pending_snapshots()
+                    return False, "not_updated_intelligence_not_current"
                 if analyzer.pending_snapshots:
                     trust_diff = None
                     if decision:
@@ -604,6 +684,7 @@ class AuraScanEngine:
                         scan_level=self._scan_level_for_decision(decision),
                         scanner_version=self.scanner_version,
                         rule_version=self.rule_version,
+                        intelligence_identity=self.last_intelligence_snapshot.identity,
                         trust_diff=trust_diff,
                     )
                     updated = True

@@ -1,0 +1,112 @@
+{
+  "schema_version": "1.0",
+  "feed_id": "aurascan-intelligence",
+  "reviewed_at": "2026-09-11",
+  "npm_campaigns": [
+    {
+      "id": "NPM-2026-09-07-SHAI-HULUD",
+      "reviewed_at": "2026-09-09",
+      "references": [
+        "https://www.aikido.dev/blog/shai-hulud-npm-resurfaces",
+        "https://osv.dev/vulnerability/MAL-2026-16032",
+        "https://osv.dev/vulnerability/MAL-2026-16025",
+        "https://osv.dev/vulnerability/MAL-2026-16024",
+        "https://osv.dev/vulnerability/MAL-2026-16026"
+      ],
+      "rights": {
+        "redistribution": "permitted",
+        "basis": "AuraScan-maintained factual indicators and original metadata; source references only, without upstream payloads or copied advisory prose."
+      },
+      "packages": [
+        {
+          "name": "feishu-docx-mcp",
+          "versions": [
+            "0.3.2"
+          ],
+          "advisory_ids": [
+            "GHSA-q5c6-p5q5-g3px",
+            "MAL-2026-16032"
+          ],
+          "references": [
+            "https://www.aikido.dev/blog/shai-hulud-npm-resurfaces",
+            "https://github.com/advisories/GHSA-q5c6-p5q5-g3px",
+            "https://osv.dev/vulnerability/MAL-2026-16032"
+          ],
+          "broad_advisory": "all_versions"
+        },
+        {
+          "name": "bmc-i18n-extract-cli",
+          "versions": [
+            "1.1.1"
+          ],
+          "advisory_ids": [
+            "GHSA-327g-rcr8-hp3p",
+            "MAL-2026-16025"
+          ],
+          "references": [
+            "https://www.aikido.dev/blog/shai-hulud-npm-resurfaces",
+            "https://github.com/advisories/GHSA-327g-rcr8-hp3p",
+            "https://osv.dev/vulnerability/MAL-2026-16025"
+          ],
+          "broad_advisory": "all_versions"
+        },
+        {
+          "name": "blueai-cli",
+          "versions": [
+            "0.7.0"
+          ],
+          "advisory_ids": [
+            "GHSA-c2v5-8c2f-jj54",
+            "MAL-2026-16024"
+          ],
+          "references": [
+            "https://www.aikido.dev/blog/shai-hulud-npm-resurfaces",
+            "https://github.com/advisories/GHSA-c2v5-8c2f-jj54",
+            "https://osv.dev/vulnerability/MAL-2026-16024"
+          ],
+          "broad_advisory": "all_versions"
+        },
+        {
+          "name": "bmc-translate-utils",
+          "versions": [
+            "1.1.1"
+          ],
+          "advisory_ids": [
+            "GHSA-997w-vpm2-ww7x",
+            "MAL-2026-16026"
+          ],
+          "references": [
+            "https://www.aikido.dev/blog/shai-hulud-npm-resurfaces",
+            "https://github.com/advisories/GHSA-997w-vpm2-ww7x",
+            "https://osv.dev/vulnerability/MAL-2026-16026"
+          ],
+          "broad_advisory": "all_versions"
+        }
+      ],
+      "payload_sha256": [
+        "e37e3ddeeaaa9e0c4fdbcb829b4895a6521031c80053fc436625b61e6ee5b1a6"
+      ],
+      "malicious_domains": [
+        "t.m-kosche.com"
+      ]
+    }
+  ],
+  "vendor_advisories": [
+    {
+      "id": "CVE-2026-87491-chromium",
+      "cve": "CVE-2026-87491",
+      "package": "chromium",
+      "fixed_floor": "153.0.8010.36",
+      "comparator": "chromium_four_part",
+      "known_exploited": true,
+      "vendor_reference": "https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_0808145027.html",
+      "exploitation_reference": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2026-87491",
+      "reviewed_at": "2026-09-11",
+      "rights": {
+        "redistribution": "permitted",
+        "basis": "AuraScan-maintained factual indicators and original metadata; source references only, without upstream payloads or copied advisory prose."
+      }
+    }
+  ],
+  "withdrawals": []
+}

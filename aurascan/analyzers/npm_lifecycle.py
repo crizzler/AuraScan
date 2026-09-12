@@ -522,13 +522,18 @@ def _finding(rule_id: str, path: str, severity: Severity, explanation: str,
 
 def inspect_npm_lifecycle(manifest_path: str, manifest_text: str,
                           scripts: Mapping[str, str], *,
-                          malicious_hosts: Optional[Sequence[str]] = None) -> List[Finding]:
+                          malicious_hosts: Optional[Sequence[str]] = None,
+                          intelligence_snapshot=None) -> List[Finding]:
     """Inspect exact root index.js lifecycle launches using already captured data.
 
     ``scripts`` must map exact absolute captured paths to text. Other packages
     and siblings are never consulted. ``malicious_hosts`` is a test override;
-    production defaults to the verified campaign-intelligence host matcher.
+    production uses only the supplied operation snapshot (or bundled baseline).
     """
+    if malicious_hosts is None:
+        from aurascan.analyzers.npm_supply_chain import malicious_domains
+        malicious_hosts = malicious_domains(intelligence_snapshot)
+
     def incomplete() -> List[Finding]:
         return [_finding(
             "NPM-LIFECYCLE-INSPECTION-INCOMPLETE-001", manifest_path, Severity.HIGH,
@@ -582,7 +587,7 @@ def inspect_npm_lifecycle(manifest_path: str, manifest_text: str,
     if critical:
         findings.append(_finding(
             "NPM-LIFECYCLE-SUPPLYCHAIN-001", target, Severity.CRITICAL,
-            "A declared npm lifecycle launcher reaches a captured entry point with correlated supply-chain indicators consistent with Shai-Hulud-style behavior. Static evidence does not establish execution, campaign attribution, or compromise.",
+            "A declared npm lifecycle launcher reaches a captured entry point with correlated supply-chain indicators. Static evidence does not establish execution, campaign attribution, or compromise.",
             ("exact package-root lifecycle launcher",) + tuple(sorted(signals)), min(signals.values()),
         ))
         return findings

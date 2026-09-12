@@ -14,7 +14,7 @@ from aurascan.analyzers.npm_metadata import (
 )
 from aurascan.analyzers.npm_supply_chain import (
     analyze_npm_install_commands, inspect_npm_campaign_metadata,
-    known_payload_digest_findings, known_payload_findings, malicious_domains,
+    known_payload_digest_findings, known_payload_findings,
 )
 from aurascan.analyzers.npm_lifecycle import inspect_npm_lifecycle
 from aurascan.analyzers.python_bytecode import (
@@ -73,7 +73,11 @@ class DeepStaticAnalyzer(BaseAnalyzer):
         max_candidates: int = 5000,
         max_hash_file_size: int = 64 * 1024 * 1024,
         max_total_file_bytes: int = 256 * 1024 * 1024,
+        intelligence_snapshot=None,
     ):
+        from aurascan.core.intelligence import bundled_snapshot
+        self.intelligence_snapshot = (intelligence_snapshot if intelligence_snapshot is not None
+                                      else bundled_snapshot())
         self.extractor = extractor or SafeArchiveExtractor()
         self.clamav = clamav or ClamAVAnalyzer()
         self.source_parser = source_parser or SourceParser()
@@ -172,7 +176,7 @@ class DeepStaticAnalyzer(BaseAnalyzer):
                 if digest is None:
                     self._tree_scan_incomplete = True
                 else:
-                    findings.extend(known_payload_digest_findings(str(path), digest.hex()))
+                    findings.extend(known_payload_digest_findings(str(path), digest.hex(), self.intelligence_snapshot))
                     findings.extend(self._nested_archive_findings(path, self._last_read_prefix))
                 continue
             payload = self._read_regular_file(
@@ -182,7 +186,7 @@ class DeepStaticAnalyzer(BaseAnalyzer):
             if payload is None:
                 self._tree_scan_incomplete = True
                 continue
-            findings.extend(known_payload_findings(str(path), payload))
+            findings.extend(known_payload_findings(str(path), payload, self.intelligence_snapshot))
             if is_editor_tasks_path(path.relative_to(root).as_posix()):
                 # JSON command fields have their own semantics. In particular,
                 # labels and descriptions must never become shell commands.
@@ -257,7 +261,7 @@ class DeepStaticAnalyzer(BaseAnalyzer):
         for manifest_path, manifest_text in npm_manifests:
             findings.extend(inspect_npm_lifecycle(
                 manifest_path, manifest_text, npm_scripts,
-                malicious_hosts=malicious_domains(),
+                intelligence_snapshot=self.intelligence_snapshot,
             ))
         if precompiled_carriers:
             execution = analyze_precompiled_execution(root, precompiled_carriers, precompiled_controls)
@@ -389,12 +393,12 @@ class DeepStaticAnalyzer(BaseAnalyzer):
         if path.name == "package.json":
             findings.extend(self._inspect_package_json(path, text))
         if path.name in {"package.json", "package-lock.json", "npm-shrinkwrap.json"}:
-            findings.extend(inspect_npm_campaign_metadata(str(path), text))
+            findings.extend(inspect_npm_campaign_metadata(str(path), text, self.intelligence_snapshot))
         if path.suffix in {".sh", ".bash", ".zsh"} or (
             not path.suffix and text.startswith("#!") and
             re.match(r"^#![^\n]*\b(?:sh|bash|zsh)\b", text)
         ):
-            findings.extend(analyze_npm_install_commands(text, str(path), Phase.unpacked_source_scan))
+            findings.extend(analyze_npm_install_commands(text, str(path), Phase.unpacked_source_scan, self.intelligence_snapshot))
         if path.name == "setup.py" and re.search(r"\b(urlopen|requests\.|curl|wget|subprocess)\b", text):
             findings.append(self._finding(
                 "DEEPSTATIC-SETUPPY-SUSPICIOUS",

@@ -12,6 +12,7 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence
 
 from aurascan.core.ai_provider import parse_bool as parse_config_bool
 from aurascan.core.config import read_env_file, user_env_path, write_user_env
+from aurascan.core.intelligence_tray import build_intelligence_menu
 from aurascan.core.incidents import (
     INCIDENT_MAINTENANCE_STATUS,
     INCIDENT_MONITOR_MARKER_ROOT,
@@ -777,6 +778,7 @@ class InstructionGuardMenuController:
         self.current_failed = False
         self.quit_action = None
         self.mutation_active = False
+        self.mutation_changed = lambda: None
 
     def bind_quit_action(self, action) -> None:
         self.quit_action = action
@@ -786,6 +788,7 @@ class InstructionGuardMenuController:
         self.mutation_active = bool(active)
         if self.quit_action is not None:
             self.quit_action.setEnabled(not self.mutation_active)
+        self.mutation_changed()
 
     def _checking(self) -> None:
         self.monitor_action.setEnabled(False)
@@ -1165,6 +1168,17 @@ def _schedule_instruction_control_timeout(QtCore, process, callback):
     return timer
 
 
+def bind_tray_mutation_guard(quit_action, instruction_controls, intelligence_controls):
+    """Neither independent controller may release the other's shutdown guard."""
+    def changed():
+        quit_action.setEnabled(not (
+            instruction_controls.mutation_active or intelligence_controls.mutation_active
+        ))
+    instruction_controls.mutation_changed = changed
+    intelligence_controls.busy_changed = changed
+    changed()
+
+
 def _bounded_nonnegative_int(value: object, *, maximum: int = 1_000_000) -> int:
     try:
         parsed = int(value or 0)
@@ -1244,15 +1258,24 @@ def start_tray_app(
             if label == INSTRUCTION_REVIEW_ACTION_LABEL:
                 instruction_review_action = action
     menu.addSeparator()
+    intelligence_controls = build_intelligence_menu(
+        menu, tray, QtCore, QtWidgets,
+        clear_notification=lambda: notification_router.route(()),
+        busy_changed=lambda: None,
+    )
+    menu.addSeparator()
     quit_action = menu.addAction("Quit")
     instruction_controls.bind_quit_action(quit_action)
+    bind_tray_mutation_guard(quit_action, instruction_controls, intelligence_controls)
     quit_action.triggered.connect(app.quit)
     tray.setContextMenu(menu)
     menu.aboutToShow.connect(instruction_controls.refresh)
+    menu.aboutToShow.connect(intelligence_controls.refresh)
     tray.activated.connect(lambda reason: _handle_tray_activation(reason, tray, config.terminal, which, popen))
     tray.messageClicked.connect(notification_router.activate)
     tray.show()
     instruction_controls.refresh()
+    intelligence_controls.refresh()
     seen_path = incident_seen_path or incident_seen_state_path(env)
     reviewed_path = incident_reviewed_path or incident_reviewed_state_path(env)
     report_root = user_incident_root(env)

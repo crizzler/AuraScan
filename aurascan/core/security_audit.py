@@ -16,6 +16,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen as urllib_urlopen
 
+from aurascan.core.intelligence import (
+    IntelligenceSnapshot, bundled_snapshot, load_intelligence_snapshot,
+)
 from aurascan.core.models import SCANNER_VERSION, Severity
 
 
@@ -38,20 +41,6 @@ PACMAN_HISTORY_RE = re.compile(
     r"(?P<package>\S+)\s+\((?P<version>[^)]*)\)"
 )
 SEVERITY_ORDER = [Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL]
-# Reviewed, bundled emergency exceptions, not a remotely refreshed CVE feed.
-# Admit only an exact Arch package mapping with a vendor-verified Linux floor
-# and explicit exploitation evidence. Each tuple is (CVE, exclusive upstream
-# fixed floor, vendor reference, exploitation reference). All entries are known
-# exploited; ordinary out-of-date flags are never inputs to this table.
-VENDOR_EMERGENCY_REVIEWED = "2026-09-11"
-VENDOR_EMERGENCY_ADVISORIES = {
-    "chromium": (
-        "CVE-2026-87491",
-        (153, 0, 8010, 36),
-        "https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_0808145027.html",
-        "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2026-87491",
-    ),
-}
 # This is a narrow numeric Chromium release comparator, not Arch vercmp or a
 # general SemVer implementation. Epoch and pkgrel cannot establish an upstream
 # fix; custom suffixes, abbreviated and prerelease versions remain unresolved.
@@ -186,6 +175,7 @@ class SecurityFinding:
     evidence: List[str] = field(default_factory=list)
     confidence: str = "medium"
     source: str = "deterministic"
+    advisory: Dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.severity, Severity):
@@ -204,6 +194,7 @@ class SecurityFinding:
             "evidence": list(self.evidence),
             "confidence": self.confidence,
             "source": self.source,
+            "advisory": dict(self.advisory),
         }
 
 
@@ -237,6 +228,7 @@ class SecurityAuditReport:
     status: str = "ok"
     schema_version: str = SECURITY_AUDIT_SCHEMA_VERSION
     scanner_version: str = SCANNER_VERSION
+    intelligence: Dict[str, object] = field(default_factory=dict)
 
     @property
     def highest_severity(self) -> Severity:
@@ -269,6 +261,7 @@ class SecurityAuditReport:
             "schema_version": self.schema_version,
             "scanner_version": self.scanner_version,
             "report_type": "security_audit",
+            "intelligence": dict(self.intelligence),
             "status": self.status,
             "risk_summary": {
                 "severity": self.highest_severity.value,
@@ -293,7 +286,7 @@ class SecurityAuditReport:
                 "A package-name match is exposure evidence, not proof that a particular malicious commit executed.",
                 "No match means no known match in the loaded intelligence; it does not prove system integrity.",
                 "Bundled CodeWhale advisories check captured exact pacman package names and supported release versions only; user-local npm/Cargo installs, custom aliases, backports, and exploitation are not verified.",
-                "Bundled emergency vendor advisories cover selected exact Arch package names and numeric upstream versions only. Package origin, signatures, backports, current repository availability, and exploitation on this host or platform are not verified; this is not a complete CVE or KEV feed.",
+                "Runtime emergency vendor advisories cover selected exact Arch package names and numeric upstream versions only. Package origin, signatures, backports, current repository availability, and exploitation on this host or platform are not verified; this is not a complete CVE or KEV feed.",
                 "AuraScan does not automatically remove packages or clean a potentially compromised host.",
             ],
         }
@@ -329,7 +322,8 @@ class SecurityAuditReport:
             ),
             f"Official package advisories: {self._arch_audit_summary()}",
             f"Bundled CodeWhale version advisories: {len(self.upstream_vulnerability_findings)} match(es); reviewed {CODEWHALE_ADVISORY_REVIEWED}",
-            f"Bundled emergency vendor/KEV advisories: {len(self.vendor_emergency_findings)} match(es); reviewed {VENDOR_EMERGENCY_REVIEWED}",
+            f"Emergency vendor/KEV advisories: {len(self.vendor_emergency_findings)} match(es)",
+            "Runtime intelligence: " + str(self.intelligence.get("status", "legacy-unrecorded")),
             "-" * 54,
         ]
         if self.campaign is None:
@@ -1263,32 +1257,60 @@ def audit_codewhale_exposure(installed_packages: Mapping[str, str]) -> List[Secu
     return findings
 
 
-def vendor_emergency_version_status(package_name: str, version: object) -> str:
-    """Interpret only a curated package's bounded four-component release.
+def vendor_emergency_version_status(package_name: str, version: object, *,
+                                    advisory: Optional[Mapping[str, str]] = None,
+                                    intelligence_snapshot: Optional[IntelligenceSnapshot] = None) -> str:
+    """Compare against captured advisory evidence, never consult live state.
 
     At/above the floor means no match for this advisory, never proof of safety,
     installed origin, or integrity. No installed program or comparator runs.
+    An explicit projection is required to resolve an existing upgrade finding.
     """
-    advisory = VENDOR_EMERGENCY_ADVISORIES.get(package_name)
     if advisory is None:
-        return "not_mapped"
+        snapshot = intelligence_snapshot if intelligence_snapshot is not None else bundled_snapshot()
+        entries = [entry for entry in snapshot.payload["vendor_advisories"]
+                   if entry["package"] == package_name]
+        if not entries:
+            return "not_mapped"
+        statuses = [vendor_emergency_version_status(package_name, version, advisory=entry)
+                    for entry in entries]
+        if "affected" in statuses:
+            return "affected"
+        if any(status != "at_or_above_floor" for status in statuses):
+            return "unresolved"
+        return "at_or_above_floor"
+    if (advisory.get("package") != package_name
+            or advisory.get("comparator") != "chromium_four_part"
+            or not isinstance(advisory.get("id"), str) or not advisory.get("id")):
+        return "unresolved"
+    floor = advisory.get("fixed_floor")
+    if (not isinstance(floor, str) or len(floor) > 128
+            or not re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){3}", floor)):
+        return "unresolved"
     match = (VENDOR_EMERGENCY_ARCH_VERSION_RE.fullmatch(version)
              if isinstance(version, str) and len(version) <= 128 else None)
     if match is None:
         return "unresolved"
     upstream = tuple(int(part) for part in match.group("upstream").split("."))
-    return "affected" if upstream < advisory[1] else "at_or_above_floor"
+    return "affected" if upstream < tuple(int(part) for part in floor.split(".")) else "at_or_above_floor"
 
 
-def audit_vendor_emergency_exposure(installed_packages: Mapping[str, str]) -> List[SecurityFinding]:
-    """Match captured installed versions independently of Arch's advisory feed."""
+def audit_vendor_emergency_exposure(installed_packages: Mapping[str, str],
+                                    intelligence_snapshot: Optional[IntelligenceSnapshot] = None) -> List[SecurityFinding]:
+    """Match one captured snapshot independently of Arch's advisory feed."""
+    snapshot = intelligence_snapshot if intelligence_snapshot is not None else bundled_snapshot()
     findings: List[SecurityFinding] = []
-    for name, (cve, floor, vendor, exploitation) in VENDOR_EMERGENCY_ADVISORIES.items():
+    for entry in snapshot.payload["vendor_advisories"]:
+        name = entry["package"]
         if name not in installed_packages:
             continue
         version = installed_packages[name]
-        status = vendor_emergency_version_status(name, version)
-        fixed = ".".join(str(part) for part in floor)
+        status = vendor_emergency_version_status(name, version, advisory=entry)
+        cve, fixed = entry["cve"], entry["fixed_floor"]
+        vendor, exploitation = entry["vendor_reference"], entry["exploitation_reference"]
+        reviewed = entry["reviewed_at"]
+        projection = {key: entry[key] for key in ("id", "package", "comparator", "fixed_floor")}
+        projection["intelligence_identity"] = snapshot.identity
         if status == "unresolved":
             findings.append(SecurityFinding(
                 rule_id="SEC-VENDOR-ADVISORY-VERSION-UNRESOLVED",
@@ -1296,29 +1318,32 @@ def audit_vendor_emergency_exposure(installed_packages: Mapping[str, str]) -> Li
                 category="advisory_coverage",
                 title=f"{name} needs emergency-advisory version verification.",
                 summary="The captured installed version is missing or is not a supported numeric upstream release.",
-                why_it_matters="The bundled vendor/KEV advisory cannot be evaluated from this version evidence. This is incomplete coverage, not a vulnerability or exploitation finding.",
+                why_it_matters="The captured vendor advisory cannot be evaluated from this version evidence. This is incomplete coverage, not a vulnerability or exploitation finding.",
                 recommended_action="Verify the installed upstream revision and distribution patch provenance against the cited vendor advisory before relying on a fixed-version claim.",
                 package_name=name,
                 evidence=[f"installed-package={name}", cve, f"upstream-fixed={fixed}",
-                          f"advisory-reviewed={VENDOR_EMERGENCY_REVIEWED}", vendor, exploitation],
-                confidence="high",
-                source="vendor_emergency_advisory",
+                          f"advisory-reviewed={reviewed}", vendor, exploitation],
+                confidence="high", source="vendor_emergency_advisory", advisory=projection,
             ))
         elif status == "affected":
+            original = cve == "CVE-2026-87491" and name == "chromium"
             findings.append(SecurityFinding(
                 rule_id="SEC-KNOWN-EXPLOITED-VERSION-LAG",
                 severity=Severity.HIGH,
                 category="vendor_emergency_advisory",
                 title=f"{name} is below a known-exploited vulnerability's upstream fix.",
-                summary=f"Captured installed version {version} is below Linux upstream fix {fixed} for {cve}; Google confirms exploitation and CISA lists it in KEV.",
-                why_it_matters="The V8 flaw can allow crafted HTML to execute code inside the browser sandbox. Version evidence does not establish exploitation on this host, Linux-specific targeting, sandbox escape, or a malicious package. Package origin and distribution backports have not been verified.",
-                recommended_action="Avoid untrusted browsing with this build until its patch status is verified. Use a verified distribution update containing the vendor fix when available; review package origin and any backport evidence.",
+                summary=(f"Captured installed version {version} is below Linux upstream fix {fixed} for {cve}; "
+                         + ("Google confirms exploitation and CISA lists it in KEV." if original else
+                            "the cited authority records known exploitation.")),
+                why_it_matters=("The V8 flaw can allow crafted HTML to execute code inside the browser sandbox. " if original else "")
+                    + "Version evidence does not establish exploitation on this host, Linux-specific targeting, sandbox escape, or a malicious package. Package origin and distribution backports have not been verified.",
+                recommended_action=("Avoid untrusted browsing with this build until its patch status is verified. " if original else "")
+                    + "Use a verified distribution update containing the vendor fix when available; review package origin and any backport evidence.",
                 package_name=name,
                 evidence=[f"installed={name} {version}", cve, f"upstream-fixed={fixed}",
-                          "known-exploited=true; authority=Google/CISA",
-                          f"advisory-reviewed={VENDOR_EMERGENCY_REVIEWED}", vendor, exploitation],
-                confidence="medium",
-                source="vendor_emergency_advisory",
+                          "known-exploited=true; authority=" + ("Google/CISA" if original else "cited references"),
+                          f"advisory-reviewed={reviewed}", vendor, exploitation],
+                confidence="medium", source="vendor_emergency_advisory", advisory=projection,
             ))
     return findings
 
@@ -1340,8 +1365,12 @@ def build_security_audit(
     include_arch_audit: bool = True,
     include_host_indicators: bool = True,
     urlopen: Callable = urllib_urlopen,
+    intelligence_snapshot: Optional[IntelligenceSnapshot] = None,
 ) -> SecurityAuditReport:
+    snapshot = intelligence_snapshot if intelligence_snapshot is not None else load_intelligence_snapshot()
     notes: List[str] = []
+    if snapshot.status == "stale":
+        notes.append("Previously verified runtime intelligence is stale; retained indicators remain active.")
     try:
         campaign, load_notes = load_campaign_intel(
             manifest_path=manifest_path,
@@ -1405,7 +1434,16 @@ def build_security_audit(
         notes.append(f"arch-audit did not complete: {arch_result.error}")
 
     upstream_findings = audit_codewhale_exposure(installed)
-    vendor_findings = audit_vendor_emergency_exposure(installed)
+    vendor_findings = audit_vendor_emergency_exposure(installed, snapshot)
+    if snapshot.coverage_error:
+        vendor_findings.append(SecurityFinding(
+            rule_id="INTELLIGENCE-UNAVAILABLE-001", severity=Severity.HIGH,
+            category="advisory_coverage", title="Runtime intelligence could not be verified.",
+            summary="Protected intelligence storage failed validation; advisory coverage is incomplete.",
+            why_it_matters="An unreadable or altered active generation cannot establish current detection coverage.",
+            recommended_action="Restore a verified intelligence bundle before relying on this audit.",
+            confidence="high", source="runtime-intelligence",
+        ))
     findings = campaign_findings + upstream_findings + vendor_findings + list(arch_result.findings)
     status = "ok"
     if campaign is None:
@@ -1425,6 +1463,7 @@ def build_security_audit(
         history_truncated=history_truncated,
         notes=notes,
         status=status,
+        intelligence=snapshot.metadata(),
     )
 
 

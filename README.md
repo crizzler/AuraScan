@@ -42,13 +42,13 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
-The [v0.10.9 release](docs/releases/v0.10.9.md) adds bounded Cursor rule,
-MCP and approval-setting review to Agent Instruction Guard, plus inert
-regressions preserving deterministic blockers across AI refusals and package
-provenance claims. It is package-only and retains the exact
-[v0.10.7 recovery image](docs/releases/v0.10.7.md); ISO and local-UKI gates
-were not rerun. That image's older application lacks the new Cursor coverage
-and the v0.10.8 Chromium advisory. No v0.10.9 recovery image is published.
+The [v0.10.10 release candidate](docs/releases/v0.10.10.md) adds signed
+runtime-intelligence support and tray controls for detection-data status,
+explicit refresh, and optional daily updates. Production feed and signing keys
+remain unconfigured; bundled detections continue to work. This is a
+recovery-bearing release: publication requires a fresh image and the applicable
+build, boot, privacy, source, package, and exact-ref CI gates recorded in its
+release note.
 
 ## What You Can Try Now
 
@@ -60,7 +60,7 @@ AuraScan currently provides ten practical entry points:
   pacman, AUR helper, known campaign, kernel/module, config drift, and AI-raised
   risks.
 - `aurascan security-audit` checks installed packages and pacman history against
-  validated AUR campaign intelligence, bundled emergency vendor advisories,
+  validated AUR campaign intelligence, reviewed emergency vendor advisories,
   and optional official Arch advisories.
 - `aurascan instruction-audit` reviews recognized Claude Code, `AGENTS.md`, and
   Agent Skill control files for suspicious content and unexpected changes.
@@ -75,6 +75,74 @@ AuraScan currently provides ten practical entry points:
 - `aurascan agent --latest` opens the optional foreground Policy-Gated Repair
   Agent. Its default `guarded` mode uses only AuraScan-owned probes/actions;
   command-enabled profiles remain a fail-closed local allowlist.
+
+## Independent security intelligence
+
+AuraScan can consume independently signed updates for its existing npm
+package/version, payload-hash, malicious-domain, and emergency vendor-advisory
+checks. New formats and behavior rules still require an application update.
+Normal scans remain local and use one captured intelligence version throughout
+their analysis. A signature authenticates the publisher; it does not prove
+that an indicator is correct or that package code executed.
+
+**The production feed and signing keys are not yet configured in v0.10.10.**
+Bundled detections continue to work. Refresh, import, and timer enablement
+deliberately refuse activation until a separately reviewed application release
+provisions that trust. Installing this version does not start downloads or
+enable automatic updates.
+
+After production provisioning, the interface is:
+
+```bash
+aurascan intelligence status --json
+sudo aurascan intelligence update
+sudo aurascan intelligence import /absolute/path/to/offline-bundle
+sudo aurascan intelligence auto-update enable
+sudo aurascan intelligence auto-update disable
+```
+
+The Updater tray's right-click menu also provides **Update detection data**,
+**Automatic detection updates**, and **Detection data status**. Updates and
+schedule changes request administrator authorization through the desktop's
+polkit agent. No password is collected by AuraScan. A desktop without an
+authentication agent can use the `sudo` commands above instead.
+
+Status shows the data sequence, content identity, review date, last successful
+activation, expiry, and observed timer/service state. Opening the menu or status
+does not download anything or enable automatic updates. The checkbox changes
+only after the local timer state confirms the request. Unconfigured feeds,
+expired data, and unavailable or inconsistent service state are explained;
+the update/enable actions remain unavailable until the feed is configured.
+An already enabled timer can still be disabled if feed configuration is missing.
+These entries manage AuraScan's signed indicators; ClamAV signatures and
+application upgrades remain separate. They become available in the tray after
+this application change is installed.
+
+Status is offline and unprivileged. Administrative actions manage one protected
+system-wide intelligence installation used by all users and package hooks.
+GnuPG is required to activate signed updates; bundled scanning does not require
+it. Automatic updates are disabled by default; opting in enables a daily timer
+with randomized delay. Package installation neither enables it nor downloads
+intelligence. No project configuration, AI credentials, scan results, or user
+files are sent to the feed.
+
+For local service details from a terminal, use
+`aurascan intelligence status --json --include-services`. Activation time is
+retained when the identical bundle is reimported; it is not a timestamp for
+every successful refresh check. Reported service state is not a durable history
+of update attempts.
+
+Failed refreshes retain previously verified intelligence. Expired intelligence
+continues detecting with a visible stale status and conservative scanning;
+expiry alone does not force manual installation approval. Corrupt active
+storage is an explicit coverage failure. Reports record the exact intelligence
+identity, and a changed generation invalidates cached shortcuts and earlier
+package review acceptance. Ordinary offline scans cannot establish whether a
+newer public bundle exists.
+
+The [publisher template](tools/intelligence_repository/README.md) documents
+rights review, signed corrections, and future GitHub distribution. It remains
+separate from research-data quarantine and is not installed as runtime tooling.
 
 ## Quickstart
 
@@ -686,7 +754,7 @@ default and official HIGH/CRITICAL advisories are raised only when the pending
 repository transaction does not already include a verifiably fixed version of
 the affected package.
 
-Bundled emergency vendor/KEV advisories also run offline and with
+Captured emergency vendor/KEV advisories also run offline and with
 `--no-arch-audit`. The initial curated entry checks the exact installed package
 name `chromium` against Linux upstream fix `153.0.8010.36` for
 [CVE-2026-87491](https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_0808145027.html),
@@ -698,8 +766,10 @@ Unknown/custom versions produce incomplete-coverage review. Epoch and package
 revision bumps do not establish an upstream fix, and an out-of-date flag alone
 never raises this finding.
 
-This small mapping is bundled, curated, and reviewed on 2026-09-11; `--refresh`
-does not update it. Captured names and versions cannot authenticate package
+The bundled baseline was reviewed on 2026-09-11; a verified intelligence update
+can independently replace it. Security-audit `--refresh` remains the separate
+legacy AUR campaign refresh and does not update this mapping. Captured names
+and versions cannot authenticate package
 origin or rule out downstream backports. A match does not establish exploitation
 on this host, Linux targeting, sandbox escape, or compromise. Other Chromium
 forks, user-local installs, and unlisted vulnerabilities remain outside this

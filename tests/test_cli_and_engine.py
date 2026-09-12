@@ -7,6 +7,7 @@ from aurascan.analyzers.source_metadata import SourceMetadataAnalyzer
 from aurascan.cli import build_parser
 from aurascan.core.cache import ScanCache
 from aurascan.core.engine import AuraScanEngine
+from aurascan.core.intelligence import bundled_snapshot
 from aurascan.core.install_hook import capture_package_scan_input
 import aurascan.core.engine as engine_module
 from aurascan.core.models import AnalysisResult, Confidence, EvidenceQuality, Finding, Phase, ScanReport, Severity, Source
@@ -631,7 +632,7 @@ def test_pkgbuild_cache_is_bound_to_exact_pkgbuild_and_install_hook_bytes(tmp_pa
     engine.cache = ScanCache(tmp_path / "cache")
     engine.analyzers = [analyzer]
 
-    assert engine.rule_version == "1.9.0"
+    assert engine.rule_version == "1.10.0"
     assert engine.scan_pkgbuild(str(pkgbuild)) is True
     first_digest = engine.last_scan_input_digest
     assert analyzer.pkgbuild_calls == 1
@@ -868,7 +869,7 @@ def accepted_history(tmp_path):
         BASE_UPDATE,
         repository_snapshot=scan_input.repository_snapshot,
     )
-    history.commit_pending_snapshots(scan_level="fast_default", scanner_version="test", rule_version="test")
+    history.commit_pending_snapshots(scan_level="fast_default", scanner_version="test", rule_version="test", intelligence_identity=bundled_snapshot().identity)
     return history
 
 

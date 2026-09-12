@@ -6,7 +6,28 @@ import uuid
 
 
 SCHEMA_VERSION = "1.0"
-SCANNER_VERSION = "2.5.0"
+SCANNER_VERSION = "2.6.0"
+
+
+def _bounded_intelligence_metadata(value: Any) -> Dict[str, Any]:
+    """Reports carry fixed metadata only, never intelligence records or prose."""
+    if not isinstance(value, dict):
+        return {}
+    limits = {
+        "schema_version": 16, "feed_id": 128, "source": 32,
+        "digest": 64, "manifest_digest": 64, "identity": 64,
+        "reviewed_at": 32, "status": 32, "expires_at": 32,
+        "coverage_error": 128,
+    }
+    result = {}
+    for key, limit in limits.items():
+        item = value.get(key)
+        if isinstance(item, str) and len(item) <= limit:
+            result[key] = item
+    sequence = value.get("sequence")
+    if type(sequence) is int and 0 <= sequence < 2 ** 63:
+        result["sequence"] = sequence
+    return result
 
 
 class Severity(Enum):
@@ -269,6 +290,7 @@ class ScanReport:
     previous_baseline_scan_level: Optional[str] = None
     baseline_update_policy: Optional[str] = None
     trusted_baseline_updated: bool = False
+    intelligence: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         data = {
@@ -279,6 +301,7 @@ class ScanReport:
             "findings": [finding.to_dict() for finding in self.findings],
             "messages": self.messages,
             "source_acquisition": self.source_acquisition,
+            "intelligence": _bounded_intelligence_metadata(self.intelligence),
         }
         if self.scan_policy is not None:
             data["scan_policy"] = self.scan_policy
@@ -365,6 +388,7 @@ class ScanReport:
             previous_baseline_scan_level=data.get("previous_baseline_scan_level"),
             baseline_update_policy=data.get("baseline_update_policy"),
             trusted_baseline_updated=bool(data.get("trusted_baseline_updated", False)),
+            intelligence=_bounded_intelligence_metadata(data.get("intelligence")),
         )
 
     def render_terminal(self, use_color: bool = True, verbose: bool = False) -> str:
@@ -391,6 +415,14 @@ class ScanReport:
 
         if not self.findings:
             lines.append("[INFO] No findings were produced. This is not proof the package is safe.")
+
+        if self.intelligence:
+            status = str(self.intelligence.get("status", "unknown"))
+            lines.append("Security intelligence: " + sanitize_terminal_text(status, max_chars=32))
+            if status == "stale":
+                lines.append("[WARNING] Security intelligence is stale; existing indicators remain active and update-scan shortcuts are disabled.")
+            elif status == "unavailable":
+                lines.append("[WARNING] Installed intelligence could not be validated; bundled detection is active with incomplete coverage.")
 
         if self.source_acquisition:
             counts: Dict[str, int] = {}

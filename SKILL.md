@@ -51,6 +51,19 @@ requirements regardless of the agent model.
   ownership. Changed annotations retain review and normal scanning; missing
   comments, pushes, restoration and adoption requests cannot establish adoption.
 - Add exposure and host checks in `aurascan/core/security_audit.py`.
+- For independently updated runtime indicators, follow the separate
+  [runtime contract](tools/intelligence_repository/SCHEMA.md) and
+  [publisher workflow](tools/intelligence_repository/README.md). Keep research
+  quarantine separate, rights fail-closed, and corrections explicit. Snapshot
+  intelligence once per operation; changed identities invalidate cache/history
+  shortcuts and package review acceptance. Preserve unprivileged download,
+  offline privileged verification, fixed trust, bounded no-follow transactions,
+  and disabled-by-default timers. Production key provisioning, publication and
+  installed-system updates remain separate authorized release work.
+  Tray controls must stay asynchronous, use fixed unprivileged service clients
+  and desktop authorization, and display validated local status. No menu/status
+  refresh may download, enable a timer, or render raw child output. Preserve
+  shared mutation/quit guards and verify observed state after requests.
 - Add bounded agent-control discovery, content correlations, integrity state,
   and disable receipts in `aurascan/core/instruction_guard.py`; add CLI and
   service consent behavior in `aurascan/core/instruction_cli.py`.

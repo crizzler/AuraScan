@@ -11,6 +11,7 @@ from aurascan.analyzers.history import HistoryAnalyzer
 from aurascan.analyzers.source_metadata import SourceMetadataAnalyzer
 from aurascan.core.cache import ScanCache
 from aurascan.core.engine import AuraScanEngine
+from aurascan.core.intelligence import bundled_snapshot
 from aurascan.core.install_hook import capture_package_scan_input
 from aurascan.core.trusted_tools import TrustedTool
 from aurascan.makepkg_wrapper import run as run_makepkg_wrapper
@@ -202,7 +203,7 @@ def test_curated_history_trust_diff_fixtures(manifest, tmp_path, capsys):
         install_hook_resolution=previous_input.install_hook,
         repository_snapshot=previous_input.repository_snapshot,
     )
-    history.commit_pending_snapshots(scan_level="fast_default", scanner_version="test", rule_version="test")
+    history.commit_pending_snapshots(scan_level="fast_default", scanner_version="test", rule_version="test", intelligence_identity=bundled_snapshot().identity)
 
     local_db = tmp_path / f"local-{manifest['scenario']}"
     write_local_db_entry(local_db, manifest["package_name"], manifest["installed_version"])

@@ -9,6 +9,7 @@ import pytest
 
 from aurascan.core import security_audit
 from aurascan.core.models import Severity
+from aurascan.core.intelligence import bundled_snapshot
 from aurascan.core.security_audit import (
     ArchAuditResult,
     SecurityAuditReport,
@@ -26,6 +27,12 @@ from aurascan.core.upgrade_preflight import (
 
 EXPOSURE_RULE = "SEC-KNOWN-EXPLOITED-VERSION-LAG"
 COVERAGE_RULE = "SEC-VENDOR-ADVISORY-VERSION-UNRESOLVED"
+
+
+@pytest.fixture(autouse=True)
+def isolated_runtime_intelligence(monkeypatch):
+    # Installed host intelligence must not affect captured-version regressions.
+    monkeypatch.setattr(security_audit, "load_intelligence_snapshot", bundled_snapshot)
 
 
 def forbidden_external_call(*_args, **_kwargs):

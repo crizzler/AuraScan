@@ -496,6 +496,15 @@ def _matching_scan_input(engine, pkgbuild_path: Path) -> Optional[PackageScanInp
         return None
     if current.input_digest != expected_digest:
         return None
+    # Read only the protected local intelligence generation after package
+    # capture, so an update during that capture cannot authorize this handoff.
+    revalidate_intelligence = getattr(engine, "revalidate_intelligence", None)
+    if revalidate_intelligence is not None:
+        try:
+            if not revalidate_intelligence():
+                return None
+        except Exception:
+            return None
     return current
 
 
@@ -507,7 +516,7 @@ def _emit_scan_input_changed(
     scan_warnings,
 ) -> int:
     error = (
-        "PKGBUILD, install-hook, package-repository, or pnpm build-tool evidence changed or became unavailable after scanning; "
+        "PKGBUILD, install-hook, package-repository, pnpm build-tool evidence, or security intelligence changed or became unavailable after scanning; "
         "makepkg was not invoked."
     )
     if options.json_output:
@@ -522,8 +531,8 @@ def _emit_scan_input_changed(
             warnings=scan_warnings,
         ))
     else:
-        print("[AuraScan] BLOCKED: package input changed after the scan.", file=stdout)
-        print("AuraScan did not invoke makepkg. Run the scan again on the stable files.", file=stdout)
+        print("[AuraScan] BLOCKED: package input or security intelligence changed after the scan.", file=stdout)
+        print("AuraScan did not invoke makepkg. Run the scan again with stable files and intelligence.", file=stdout)
     return EXIT_SCAN_BLOCKED
 
 
@@ -1025,6 +1034,7 @@ def _record_manual_review_acceptance(
                 review_decision_id=review_decision_id,
                 scanner_version=getattr(engine, "scanner_version", ""),
                 rule_version=getattr(engine, "rule_version", ""),
+                intelligence_identity=(report.get("intelligence") or {}).get("identity", ""),
                 trust_diff=trust_diff,
             )
 

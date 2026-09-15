@@ -9,6 +9,7 @@ from urllib.error import HTTPError
 import pytest
 
 from aurascan.core import ai_provider
+from aurascan.core import trusted_executable
 from aurascan.core import upgrade_preflight
 from aurascan.core.models import Severity
 from aurascan.core.upgrade_preflight import (
@@ -291,13 +292,35 @@ def test_trusted_executable_revalidation_rejects_inode_replacement(monkeypatch):
         0,
     ))
     monkeypatch.setattr(
-        upgrade_preflight,
-        "_trusted_executable_stat",
+        trusted_executable,
+        "trusted_executable_stat",
         lambda _name, _path, required_owner=0: replacement,
     )
 
     with pytest.raises(UnsafeUpgradeExecutable, match="changed after preflight"):
         REAL_REVALIDATE_TRUSTED_EXECUTABLE(executable)
+
+
+def test_upgrade_preflight_imports_the_shared_trust_primitives():
+    """The trust boundary lives in one module.
+
+    The upgrade module imports the boundary instead of defining it, and keeps
+    calling it through its own namespace so the autouse fixture above can still
+    substitute the trust check.
+    """
+
+    source = Path(upgrade_preflight.__file__).read_text(encoding="utf-8")
+
+    assert upgrade_preflight.TrustedExecutable is trusted_executable.TrustedExecutable
+    assert (
+        upgrade_preflight.UnsafeUpgradeExecutable
+        is trusted_executable.UnsafeUpgradeExecutable
+    )
+    assert "from aurascan.core.trusted_executable import" in source
+    assert "class TrustedExecutable" not in source
+    assert "class UnsafeUpgradeExecutable" not in source
+    assert "def capture_trusted_executable" not in source
+    assert "def revalidate_trusted_executable" not in source
 
 
 def test_upgrade_options_default_to_enabled_and_read_env():

@@ -55,3 +55,6 @@ jobs:
 
       - name: Audit MEDIUM-or-higher presenter coverage
         run: python tools/audit_presenter_coverage.py --strict-medium
+
+      - name: Audit architecture invariants
+        run: python tools/architecture_audit.py --strict

@@ -76,6 +76,30 @@ AuraScan currently provides ten practical entry points:
   Agent. Its default `guarded` mode uses only AuraScan-owned probes/actions;
   command-enabled profiles remain a fail-closed local allowlist.
 
+## Feature areas
+
+AuraScan is one defense-in-depth system made of five areas. Every area inspects
+untrusted input before it gains authority, and every area keeps deterministic
+policy authoritative over optional AI.
+
+| Area | What it covers |
+| --- | --- |
+| Core protection | Package and install-hook review, bounded repository provenance, upgrade preflight, `makepkg` wrapper handoff |
+| Intelligence | Independently signed detection data, reviewed advisories, one captured snapshot per operation |
+| Endpoint monitoring | Configuration-drift review, security audit of installed state and package history, hardware and module health signals |
+| Response and recovery | Incident diagnosis, guarded repair planning, optional recovery boot environment |
+| Interface | CLI, tray, setup wizard and doctor, guided triage, contextual follow-up |
+
+The trust model is static-first: AuraScan reads untrusted package, source, and
+agent-control content without executing it, reports what it could and could not
+inspect, and never turns a clean result into a safety guarantee. AI is a
+separate opt-in advisory layer that can raise a deterministic finding's severity
+but never lower, clear, or replace one.
+
+Where trust boundaries and side effects live is documented in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
+[`docs/SECURITY_BOUNDARIES.md`](docs/SECURITY_BOUNDARIES.md).
+
 ## Independent security intelligence
 
 AuraScan can consume independently signed updates for its existing npm

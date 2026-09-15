@@ -329,6 +329,49 @@ fallback presenter wording.
 useful before release tuning, while the default audit remains advisory so
 low-risk fallback notes do not block routine development.
 
+## Architecture audit
+
+Architecture facts are measured, not estimated. `tools/architecture_audit.py`
+parses the package with `ast` and reports module responsibilities, coupling, side
+effect capabilities, import cycles and architecture invariant results.
+
+The tool is passive and offline: it never imports `aurascan`, never executes
+package or candidate content, never runs a package manager and never uses the
+network. It assigns layers from repository structure and derives capabilities
+from call sites resolved through each module's own import aliases.
+
+```bash
+python tools/architecture_audit.py                 # human-readable report
+python tools/architecture_audit.py --top 40
+python tools/architecture_audit.py --format json    # machine-readable inventory
+python tools/architecture_audit.py --format markdown
+python tools/architecture_audit.py --strict         # CI gate
+```
+
+`--strict` fails only on architecture invariant violations. Module size is
+**never** a failure: the responsibility budget is advisory and prints warnings
+for unusually mixed modules so a reviewer can look, not so a build can break.
+
+Invariants are the narrow, mechanically checkable subset of the repository
+contract: analyzers must not execute processes, production code must not use
+`shell=True`, import training or research modules, or use undeclared third-party
+dependencies, deterministic policy must not depend on AI providers, domain and
+catalog modules must stay side-effect free and depend only downward, UI entry
+points must not contain rule IDs, and TLS verification must not be disabled.
+
+When a change legitimately needs an exception, add an entry to
+`INVARIANT_ALLOWLIST` in the tool with a written reason; never weaken the check
+silently. When a genuinely new capability owner appears (a new module that
+executes a process or opens a socket), update the pinned lists in
+`tests/test_architecture_audit.py` and the tables in `docs/ARCHITECTURE.md` in
+the same change.
+
+Decompose modules by responsibility, not by line count. A module that mixes
+policy with I/O, or UI with security decisions, is the signal to look for; a
+long cohesive module is not. Prefer behaviour-preserving extraction with a
+compatibility import so existing callers and test substitution seams keep
+working, and pin the moved responsibility with a test that fails if it returns.
+
 ## First-run setup and doctor
 
 `aurascan init` is the interactive setup path for user-level configuration. It

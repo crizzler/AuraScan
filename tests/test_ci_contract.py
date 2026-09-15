@@ -39,6 +39,7 @@ def test_ci_workflow_keeps_all_release_test_gates():
         "python -m pytest -q",
         "python tools/audit_presenter_coverage.py --strict",
         "python tools/audit_presenter_coverage.py --strict-medium",
+        "python tools/architecture_audit.py --strict",
     )
 
     for command in required_commands:

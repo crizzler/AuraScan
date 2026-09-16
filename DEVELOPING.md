@@ -1023,9 +1023,14 @@ signatures, or a currently empty `arch-audit` result.
 The upgrade consumer may suppress this HIGH warning only for a supported,
 exact mapped repository candidate reaching the floor, preserving the original
 audit evidence. An AUR candidate, epoch-only bump, custom version, or unrelated
-update cannot do so. Upgrade snapshots currently collect package names only;
-without captured versions this check remains unresolved coverage. Adding
-version collection there is deferred. Full system audit collects versions.
+update cannot do so. Upgrade snapshots capture installed name/version pairs from
+the local pacman database through the same resolved trusted identity as their
+other queries, bounded by query size and record count. Every installed name
+keeps an entry: a name whose version was missing, invalid, conflicting,
+oversized or unqueryable carries an empty value and stays unresolved coverage,
+never absence and never a fabricated version string. The local database
+establishes only what it reports; it does not authenticate package origin,
+repository integrity or a downstream backport.
 
 Security audits are regenerated, not package-scan cache entries. The report
 remains schema 1.0 with additive intelligence identity metadata,

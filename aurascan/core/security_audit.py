@@ -28,6 +28,8 @@ CAMPAIGN_PACKAGES_ASSET = "aur-campaign-2026-06-11-packages.txt"
 MAX_CAMPAIGN_BYTES = 2 * 1024 * 1024
 MAX_CAMPAIGN_PACKAGES = 20_000
 MAX_PACMAN_LOG_BYTES = 4 * 1024 * 1024
+MAX_INSTALLED_QUERY_BYTES = 4 * 1024 * 1024
+MAX_INSTALLED_RECORDS = 20_000
 MAX_CACHE_ENTRIES = 10_000
 DEFAULT_FEED_TIMEOUT = 20
 MAX_HOST_INDICATOR_BYTES = 128 * 1024
@@ -35,6 +37,10 @@ MAX_HOST_INDICATOR_ENTRIES = 4096
 EXIT_SECURITY_ALERT = 1
 EXIT_SECURITY_AUDIT_UNAVAILABLE = 2
 PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9@._+][A-Za-z0-9@._+:-]{0,254}$")
+INSTALLED_QUERY_SIZE_NOTE = "installed package metadata exceeded the bounded query size"
+INSTALLED_QUERY_RECORD_NOTE = "installed package metadata exceeded the bounded record count"
+INSTALLED_QUERY_RECORD_INVALID_NOTE = "installed package metadata contains an invalid record"
+INSTALLED_QUERY_VERSION_NOTE = "installed package metadata has missing or duplicate version evidence"
 PACMAN_HISTORY_RE = re.compile(
     r"^\[(?P<timestamp>[^\]]+)\]\s+\[ALPM\]\s+"
     r"(?P<action>installed|upgraded|downgraded|reinstalled|removed)\s+"
@@ -545,6 +551,12 @@ def collect_installed_packages(
     runner: Callable = subprocess.run,
     root: Path = Path("/"),
 ) -> Tuple[Dict[str, str], str]:
+    """Capture bounded installed name/version evidence from the local database.
+
+    The second value is a coverage note: an empty string means the query
+    succeeded within the bounds, while any other value means the evidence is
+    incomplete and must not be read as "no affected package is installed".
+    """
     command = ["pacman"]
     if root != Path("/"):
         command.extend(["--root", str(root), "--dbpath", str(root / "var/lib/pacman")])
@@ -555,21 +567,28 @@ def collect_installed_packages(
         return {}, str(exc)
     if int(getattr(result, "returncode", 0)) != 0:
         return {}, str(getattr(result, "stderr", "") or "pacman package query failed").strip()
+    text = str(getattr(result, "stdout", "") or "")
+    if len(text.encode("utf-8", "replace")) > MAX_INSTALLED_QUERY_BYTES:
+        # The captured query output is bounded before it is parsed or retained;
+        # an oversized database is unavailable evidence, not a partial answer.
+        return {}, INSTALLED_QUERY_SIZE_NOTE
     packages: Dict[str, str] = {}
     collection_error = ""
-    for line in str(getattr(result, "stdout", "") or "").splitlines():
+    for line in text.splitlines():
         parts = line.split(None, 1)
         if not parts:
             continue
+        if len(packages) >= MAX_INSTALLED_RECORDS:
+            return packages, INSTALLED_QUERY_RECORD_NOTE
         if not PACKAGE_NAME_RE.fullmatch(parts[0]):
-            collection_error = "installed package metadata contains an invalid record"
+            collection_error = INSTALLED_QUERY_RECORD_INVALID_NOTE
             continue
         name = parts[0]
         if len(parts) != 2 or name in packages:
             # Missing versions and duplicate identities must not turn into
             # absence or let the last (possibly fixed-looking) version win.
             packages[name] = ""
-            collection_error = "installed package metadata has missing or duplicate version evidence"
+            collection_error = INSTALLED_QUERY_VERSION_NOTE
         else:
             packages[name] = parts[1].strip()
     return packages, collection_error

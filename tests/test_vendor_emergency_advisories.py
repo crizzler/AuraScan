@@ -19,8 +19,12 @@ from aurascan.core.security_audit import (
     parse_arch_audit_json,
     run_security_audit,
 )
-from aurascan.core.upgrade_models import UpgradePackage, UpgradePlan
-from aurascan.core.upgrade_preflight import security_audit_upgrade_findings
+from aurascan.core.upgrade_models import SystemSnapshot, UpgradePackage, UpgradePlan
+from aurascan.core.upgrade_preflight import (
+    UpgradePreflightReport,
+    installed_version_evidence,
+    security_audit_upgrade_findings,
+)
 
 
 EXPOSURE_RULE = "SEC-KNOWN-EXPLOITED-VERSION-LAG"
@@ -322,10 +326,7 @@ def test_invalid_collected_package_record_is_partial_without_raw_output_echo(tmp
 
 
 def test_upgrade_snapshot_without_version_retains_coverage_even_with_pending_fixed_package(tmp_path):
-    report = offline_report(
-        tmp_path, "installed version not collected by upgrade snapshot",
-        include_arch_audit=False,
-    )
+    report = offline_report(tmp_path, "", include_arch_audit=False)
     plan = UpgradePlan(repo_packages=[UpgradePackage(name="chromium", new_version="153.0.8010.36-1")])
 
     findings = security_audit_upgrade_findings(report, plan, version_compare=forbidden_external_call)
@@ -399,3 +400,139 @@ def test_planned_fix_does_not_silence_uncertain_installed_identity():
     findings = security_audit_upgrade_findings(report, plan, version_compare=forbidden_external_call)
 
     assert [item.rule_id for item in findings] == [COVERAGE_RULE]
+
+
+def upgrade_evidence_snapshot(installed_versions, names=None, *, complete=True):
+    return SystemSnapshot(
+        installed_packages=list(names if names is not None else installed_versions),
+        installed_package_versions=dict(installed_versions),
+        installed_versions_complete=complete,
+    )
+
+
+def upgrade_evidence_findings(tmp_path, snapshot, plan):
+    report = build_security_audit(
+        root=tmp_path / "root", home=tmp_path / "home", state_root=tmp_path / "state",
+        installed_packages=installed_version_evidence(snapshot),
+        log_paths=[], runner=forbidden_external_call, which=forbidden_external_call,
+        urlopen=forbidden_external_call, include_arch_audit=False,
+        include_host_indicators=False, offline=True,
+    )
+    return report, security_audit_upgrade_findings(
+        report, plan, version_compare=forbidden_external_call,
+    )
+
+
+def upgrade_action(snapshot, findings, plan):
+    upgrade_report = UpgradePreflightReport(plan=plan, snapshot=snapshot, findings=findings)
+    return upgrade_report.risk_summary()["action"]
+
+
+def test_captured_upgrade_versions_raise_the_existing_high_lag_finding(tmp_path):
+    """Captured local versions now reach the upgrade advisory evaluation."""
+    snapshot = upgrade_evidence_snapshot({"chromium": "152.0.7977.82-1"})
+    plan = UpgradePlan()
+
+    report, findings = upgrade_evidence_findings(tmp_path, snapshot, plan)
+
+    assert [item.rule_id for item in findings] == [EXPOSURE_RULE]
+    assert findings[0].severity == Severity.HIGH
+    assert findings[0].blocking is False
+    assert COVERAGE_RULE not in {item.rule_id for item in report.findings}
+    assert report.has_alert
+    assert upgrade_action(snapshot, findings, plan) == "confirm"
+
+
+@pytest.mark.parametrize("version", ["153.0.8010.36-1", "154.0.0.0-1", "4:153.0.8010.36-2.1"])
+def test_captured_upgrade_version_at_or_above_floor_has_no_finding(tmp_path, version):
+    snapshot = upgrade_evidence_snapshot({"chromium": version})
+    plan = UpgradePlan()
+
+    report, findings = upgrade_evidence_findings(tmp_path, snapshot, plan)
+
+    assert findings == []
+    assert report.findings == []
+    assert report.status == "ok"
+    assert not report.has_alert
+    assert upgrade_action(snapshot, findings, plan) == "continue"
+
+
+def test_captured_below_floor_version_stays_suppressed_by_pending_repository_fix(tmp_path):
+    snapshot = upgrade_evidence_snapshot({"chromium": "152.0.7977.82-1"})
+    plan = UpgradePlan(repo_packages=[UpgradePackage(name="chromium", new_version="153.0.8010.36-1")])
+
+    report, findings = upgrade_evidence_findings(tmp_path, snapshot, plan)
+
+    # The installed-state report keeps the exposure; the verified handoff resolves it.
+    assert [item.rule_id for item in report.findings] == [EXPOSURE_RULE]
+    assert findings == []
+    assert upgrade_action(snapshot, findings, plan) == "continue"
+
+
+def test_unavailable_upgrade_version_evidence_remains_unresolved_coverage(tmp_path):
+    snapshot = upgrade_evidence_snapshot({}, names=["chromium"], complete=False)
+    plan = UpgradePlan()
+
+    assert installed_version_evidence(snapshot) == {"chromium": ""}
+    report, findings = upgrade_evidence_findings(tmp_path, snapshot, plan)
+
+    assert [item.rule_id for item in findings] == [COVERAGE_RULE]
+    assert findings[0].severity == Severity.MEDIUM
+    assert EXPOSURE_RULE not in {item.rule_id for item in report.findings}
+    assert not report.has_alert
+    assert upgrade_action(snapshot, findings, plan) == "continue"
+
+
+def test_unrelated_installed_versions_produce_no_advisory_finding(tmp_path):
+    snapshot = upgrade_evidence_snapshot({"linux": "7.1.3-1", "glibc": "2.42-1"})
+    plan = UpgradePlan()
+
+    report, findings = upgrade_evidence_findings(tmp_path, snapshot, plan)
+
+    assert findings == []
+    assert report.findings == []
+    assert report.status == "ok"
+
+
+def test_valid_installed_query_captures_name_version_pairs():
+    calls = []
+
+    def captured_query(command, **_kwargs):
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=0, stdout="package-a 1.2.3-1\npackage-b 4.5.6-2\n", stderr="",
+        )
+
+    packages, note = security_audit.collect_installed_packages(runner=captured_query)
+
+    assert calls == [["pacman", "-Q"]]
+    assert packages == {"package-a": "1.2.3-1", "package-b": "4.5.6-2"}
+    assert note == ""
+
+
+def test_oversized_installed_query_is_bounded_unavailable_evidence():
+    def captured_query(_command, **_kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout="".join(f"package-{index} 1.0.0-1\n" for index in range(300_000)),
+            stderr="",
+        )
+
+    packages, note = security_audit.collect_installed_packages(runner=captured_query)
+
+    assert packages == {}
+    assert note == security_audit.INSTALLED_QUERY_SIZE_NOTE
+
+
+def test_excessive_installed_record_count_is_bounded_partial_evidence():
+    def captured_query(_command, **_kwargs):
+        records = "".join(
+            f"package-{index:05d} 1.0.0-1\n"
+            for index in range(security_audit.MAX_INSTALLED_RECORDS + 5)
+        )
+        return SimpleNamespace(returncode=0, stdout=records, stderr="")
+
+    packages, note = security_audit.collect_installed_packages(runner=captured_query)
+
+    assert note == security_audit.INSTALLED_QUERY_RECORD_NOTE
+    assert len(packages) == security_audit.MAX_INSTALLED_RECORDS

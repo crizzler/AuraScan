@@ -14,6 +14,7 @@ from aurascan.core import repository_state
 from aurascan.core import trusted_executable
 from aurascan.core import upgrade_preflight
 from aurascan.core.models import Severity
+from aurascan.core.security_audit import SecurityAuditReport
 from aurascan.core.upgrade_preflight_presenter import render_upgrade_preflight
 from aurascan.core.upgrade_models import ForeignPackageInfo, SystemSnapshot, UpgradePackage, UpgradePlan
 from aurascan.core.upgrade_preflight import (
@@ -36,6 +37,7 @@ from aurascan.core.upgrade_preflight import (
     build_upgrade_ai_prompt,
     build_upgrade_plan,
     collect_foreign_package_info,
+    collect_system_snapshot,
     diagnose_upgrade_failure,
     foreign_package_dependency_issues,
     helper_upgrade_command,
@@ -325,6 +327,119 @@ def test_upgrade_preflight_imports_the_shared_trust_primitives():
     assert "class UnsafeUpgradeExecutable" not in source
     assert "def capture_trusted_executable" not in source
     assert "def revalidate_trusted_executable" not in source
+
+
+def test_upgrade_snapshot_does_not_fabricate_installed_versions():
+    """Installed advisory evidence must come from the local package database."""
+
+    source = Path(upgrade_preflight.__file__).read_text(encoding="utf-8")
+
+    assert "not collected by upgrade snapshot" not in source
+    assert "collect_installed_packages" in source
+
+
+def test_snapshot_captures_installed_versions_through_the_trusted_identity(tmp_path):
+    runner = FakeRunner(responses={
+        (PACMAN_PATH, "-Qq"): completed("chromium\nlinux\n"),
+        (PACMAN_PATH, "-Q"): completed("chromium 152.0.7977.82-1\nlinux 7.1.3-1-cachyos\n"),
+    })
+
+    snapshot = collect_system_snapshot(
+        runner=runner,
+        etc_root=tmp_path,
+        trusted_executables={"pacman": fake_trusted_executable("pacman", PACMAN_PATH)},
+    )
+
+    # The version query uses the captured absolute identity, never a bare name.
+    assert [PACMAN_PATH, "-Q"] in runner.calls
+    assert not any(call and call[0] == "pacman" for call in runner.calls)
+    assert snapshot.installed_package_versions == {
+        "chromium": "152.0.7977.82-1",
+        "linux": "7.1.3-1-cachyos",
+    }
+    assert snapshot.installed_versions_complete is True
+    assert upgrade_preflight.installed_version_evidence(snapshot) == {
+        "chromium": "152.0.7977.82-1",
+        "linux": "7.1.3-1-cachyos",
+    }
+    assert snapshot.to_dict()["installed_version_evidence"] == {"collected": 2, "complete": True}
+
+
+def test_snapshot_version_query_failure_keeps_explicit_coverage(tmp_path):
+    runner = FakeRunner(responses={
+        (PACMAN_PATH, "-Qq"): completed("chromium\n"),
+        (PACMAN_PATH, "-Q"): completed("", returncode=1, stderr="INJECTED_QUERY_NOISE"),
+    })
+
+    snapshot = collect_system_snapshot(
+        runner=runner,
+        etc_root=tmp_path,
+        trusted_executables={"pacman": fake_trusted_executable("pacman", PACMAN_PATH)},
+    )
+
+    assert snapshot.installed_package_versions == {}
+    assert snapshot.installed_versions_complete is False
+    # An installed name with unavailable version evidence stays unresolved
+    # coverage: never absence, and never a fabricated version string.
+    assert upgrade_preflight.installed_version_evidence(snapshot) == {"chromium": ""}
+    serialized = json.dumps(snapshot.to_dict())
+    assert "INJECTED_QUERY_NOISE" not in serialized
+    assert "not collected by upgrade snapshot" not in serialized
+    assert snapshot.to_dict()["installed_version_evidence"] == {"collected": 0, "complete": False}
+
+
+def test_snapshot_without_trusted_pacman_identity_skips_version_queries(tmp_path, monkeypatch):
+    def refuse(_name, _path):
+        raise UnsafeUpgradeExecutable("trusted pacman identity is unavailable")
+
+    monkeypatch.setattr(upgrade_preflight, "capture_trusted_executable", refuse)
+    runner = FakeRunner()
+
+    snapshot = collect_system_snapshot(runner=runner, etc_root=tmp_path)
+
+    assert snapshot.installed_packages == []
+    assert snapshot.installed_package_versions == {}
+    assert snapshot.installed_versions_complete is False
+    assert not any(call and call[0] == PACMAN_PATH for call in runner.calls)
+
+
+def test_upgrade_preflight_audit_receives_captured_versions(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_audit(**kwargs):
+        captured.update(kwargs)
+        return SecurityAuditReport(campaign=None, findings=[])
+
+    monkeypatch.setattr(upgrade_preflight, "build_security_audit", fake_audit)
+    runner = FakeRunner(responses={
+        tuple(preview_cmd()): completed(""),
+        (PACMAN_PATH, "-Qq"): completed("chromium\nlinux\n"),
+        (PACMAN_PATH, "-Q"): completed("chromium 152.0.7977.82-1\n"),
+    })
+    snapshot = collect_system_snapshot(
+        runner=runner,
+        etc_root=tmp_path,
+        trusted_executables={"pacman": fake_trusted_executable("pacman", PACMAN_PATH)},
+    )
+    options = UpgradeOptions(
+        dry_run=True, no_ai=True, aur_helper="none", kernel_module_autopilot_enabled=False,
+    )
+
+    report = upgrade_preflight.run_upgrade_preflight(
+        options,
+        runner=runner,
+        which=lambda _name: None,
+        snapshot=snapshot,
+        modules_root=tmp_path,
+        pacman_conf_path=tmp_path / "pacman.conf",
+        progress=lambda _message: None,
+    )
+
+    # Captured versions reach the audit; a name without version evidence keeps an
+    # empty value instead of a fabricated placeholder string.
+    assert captured["installed_packages"] == {"chromium": "152.0.7977.82-1", "linux": ""}
+    assert captured["pending_package_names"] == []
+    assert "not collected by upgrade snapshot" not in json.dumps(report.to_dict())
 
 
 def test_upgrade_options_default_to_enabled_and_read_env():

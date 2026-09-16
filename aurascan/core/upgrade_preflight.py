@@ -51,7 +51,8 @@ from aurascan.core.repository_state import (
     resolve_pacman_include_path,
 )
 from aurascan.core.security_audit import (
-    SecurityAuditReport, build_security_audit, vendor_emergency_version_status,
+    SecurityAuditReport, build_security_audit, collect_installed_packages,
+    vendor_emergency_version_status,
 )
 from aurascan.core.text_safety import (
     load_strict_json_object,
@@ -143,6 +144,29 @@ UPGRADE_AI_UNSUPPORTED_CONCLUSION_RE = re.compile(
 ProgressReporter = Callable[[str], None]
 
 
+def _trusted_pacman_query_runner(executable: TrustedExecutable, runner: Callable) -> Callable:
+    """Bind a collector's ``pacman`` argv to an already-resolved identity.
+
+    Downstream collectors build ``pacman`` argument vectors without knowing how
+    the workflow resolved the executable, so argv[0] is replaced with the
+    captured absolute file before the trusted command helper revalidates and
+    runs it. A bare name never reaches a real runner.
+    """
+
+    def bound_runner(command, **kwargs):
+        argv = list(command)
+        if argv and argv[0] in {"pacman", TRUSTED_PACMAN_PATH}:
+            return run_trusted_command(
+                [executable.path] + argv[1:],
+                [executable],
+                runner=runner,
+                **kwargs,
+            )
+        return runner(argv, **kwargs)
+
+    return bound_runner
+
+
 def _trusted_upgrade_query_runner(plan: "UpgradePlan", runner: Callable) -> Callable:
     """Wrap downstream collectors so their pacman queries use the bound file."""
 
@@ -152,12 +176,7 @@ def _trusted_upgrade_query_runner(plan: "UpgradePlan", runner: Callable) -> Call
             pacman = plan.trusted_executables.get("pacman")
             if pacman is None:
                 raise UnsafeUpgradeExecutable("trusted pacman identity is unavailable")
-            return run_trusted_command(
-                [pacman.path] + argv[1:],
-                [pacman],
-                runner=runner,
-                **kwargs,
-            )
+            return _trusted_pacman_query_runner(pacman, runner)(argv, **kwargs)
         return runner(argv, **kwargs)
 
     return trusted_runner
@@ -199,6 +218,13 @@ def collect_system_snapshot(
             pacman = None
     installed_packages = _trusted_command_lines(runner, pacman, ["-Qq"]) if pacman else []
     foreign_packages = _trusted_command_lines(runner, pacman, ["-Qqem"]) if pacman else []
+    installed_package_versions: Dict[str, str] = {}
+    installed_versions_complete = False
+    if pacman is not None:
+        installed_package_versions, version_error = collect_installed_packages(
+            runner=_trusted_pacman_query_runner(pacman, runner)
+        )
+        installed_versions_complete = not version_error
     ignored_packages = _command_lines(runner, ["pacman-conf", "IgnorePkg"])
     ignored_groups = _command_lines(runner, ["pacman-conf", "IgnoreGroup"])
     boot_paths = [str(path) for path in (Path("/boot"), Path("/boot/efi")) if path.exists()]
@@ -226,7 +252,24 @@ def collect_system_snapshot(
         pacnew_count=pacnew_count,
         pacsave_count=pacsave_count,
         pacnew_scan_truncated=truncated,
+        installed_package_versions=installed_package_versions,
+        installed_versions_complete=installed_versions_complete,
     )
+
+
+def installed_version_evidence(snapshot: SystemSnapshot) -> Dict[str, str]:
+    """Installed-name evidence for advisory evaluation from captured state.
+
+    Every installed name keeps an entry, so a name whose version was missing,
+    invalid or conflicting carries an empty value and is reported as unresolved
+    coverage instead of package absence. The local pacman database establishes
+    only what it reports: it does not authenticate package origin, repository
+    integrity or downstream backport equivalence.
+    """
+    return {
+        name: str(snapshot.installed_package_versions.get(name, "") or "")
+        for name in snapshot.installed_packages
+    }
 
 
 @dataclass
@@ -1463,7 +1506,7 @@ def run_upgrade_preflight(
             security_report = build_security_audit(
                 runner=trusted_query_runner,
                 which=which,
-                installed_packages={name: "installed version not collected by upgrade snapshot" for name in system_snapshot.installed_packages},
+                installed_packages=installed_version_evidence(system_snapshot),
                 pending_package_names=[pkg.name for pkg in plan.aur_packages],
                 home=None,
                 include_host_indicators=False,

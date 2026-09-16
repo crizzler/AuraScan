@@ -130,12 +130,22 @@ class SystemSnapshot:
     pacnew_count: int = 0
     pacsave_count: int = 0
     pacnew_scan_truncated: bool = False
+    # Inert captured local package evidence: name -> version as reported by the
+    # local pacman database. An empty value means the version could not be
+    # established for an installed name, which later advisory checks report as
+    # unresolved coverage instead of package absence.
+    installed_package_versions: Dict[str, str] = field(default_factory=dict)
+    installed_versions_complete: bool = True
 
     def to_dict(self) -> Dict[str, object]:
         return {
             "running_kernel": self.running_kernel,
             "distro": dict(self.distro_info),
             "installed_package_count": len(self.installed_packages),
+            "installed_version_evidence": {
+                "collected": len(self.installed_package_versions),
+                "complete": bool(self.installed_versions_complete),
+            },
             "foreign_packages": list(self.foreign_packages),
             "foreign_package_info": [item.to_dict() for item in self.foreign_package_info],
             "package_info": [item.to_dict() for item in self.package_info],

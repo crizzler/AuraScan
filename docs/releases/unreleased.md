@@ -2,6 +2,26 @@
 
 Changes after v0.10.10:
 
+Upgrade advisory evidence (product fix):
+
+- `aurascan upgrade` now evaluates installed-version advisories from captured
+  local package evidence instead of a placeholder value. The snapshot captures
+  `pacman -Q` name/version pairs through the same resolved trusted pacman
+  identity as its other queries, within a bounded query size and record count.
+- An installed package below a verified advisory floor now raises the existing
+  HIGH `SEC-KNOWN-EXPLOITED-VERSION-LAG` finding and can require the normal
+  high-risk confirmation, where the earlier placeholder evidence could only
+  produce MEDIUM unresolved coverage. An exact mapped repository candidate that
+  reaches the floor still suppresses the warning.
+- Missing, invalid, conflicting, oversized or unqueryable version evidence keeps
+  the existing `SEC-VENDOR-ADVISORY-VERSION-UNRESOLVED` unresolved-coverage
+  outcome for that installed name. Unknown evidence is never read as absence,
+  and no fabricated version string is used. Rule IDs, severities, blocking
+  semantics, AI authority and the network/privilege surface are unchanged.
+- Installed versions are what the local pacman database reports. They do not
+  authenticate package origin, repository integrity, or downstream backport
+  equivalence.
+
 Architecture stabilization stage 14 closeout (documentation only, no behavior change):
 
 - The Stage 14 reassessment re-measured every property of Stages 8–13 from the

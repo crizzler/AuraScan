@@ -1,7 +1,7 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "feed_id": "aurascan-intelligence",
-  "reviewed_at": "2026-09-11",
+  "reviewed_at": "2026-09-16",
   "npm_campaigns": [
     {
       "id": "NPM-2026-09-07-SHAI-HULUD",
@@ -99,9 +99,58 @@
       "fixed_floor": "153.0.8010.36",
       "comparator": "chromium_four_part",
       "known_exploited": true,
+      "vendor_severity": "critical",
       "vendor_reference": "https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_0808145027.html",
       "exploitation_reference": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2026-87491",
       "reviewed_at": "2026-09-11",
+      "rights": {
+        "redistribution": "permitted",
+        "basis": "AuraScan-maintained factual indicators and original metadata; source references only, without upstream payloads or copied advisory prose."
+      }
+    },
+    {
+      "id": "CVE-2026-91749-chromium",
+      "cve": "CVE-2026-91749",
+      "package": "chromium",
+      "fixed_floor": "153.0.8010.47",
+      "comparator": "chromium_four_part",
+      "known_exploited": false,
+      "vendor_severity": "critical",
+      "vendor_reference": "https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_0541751186.html",
+      "exploitation_reference": null,
+      "reviewed_at": "2026-09-16",
+      "rights": {
+        "redistribution": "permitted",
+        "basis": "AuraScan-maintained factual indicators and original metadata; source references only, without upstream payloads or copied advisory prose."
+      }
+    },
+    {
+      "id": "CVE-2026-92035-firefox",
+      "cve": "CVE-2026-92035",
+      "package": "firefox",
+      "fixed_floor": "156.0",
+      "comparator": "numeric_dotted_upstream",
+      "known_exploited": false,
+      "vendor_severity": "high",
+      "vendor_reference": "https://www.mozilla.org/security/advisories/mfsa2026-90/",
+      "exploitation_reference": null,
+      "reviewed_at": "2026-09-16",
+      "rights": {
+        "redistribution": "permitted",
+        "basis": "AuraScan-maintained factual indicators and original metadata; source references only, without upstream payloads or copied advisory prose."
+      }
+    },
+    {
+      "id": "CVE-2026-92018-thunderbird",
+      "cve": "CVE-2026-92018",
+      "package": "thunderbird",
+      "fixed_floor": "156.0",
+      "comparator": "numeric_dotted_upstream",
+      "known_exploited": false,
+      "vendor_severity": "high",
+      "vendor_reference": "https://www.mozilla.org/security/advisories/mfsa2026-94/",
+      "exploitation_reference": null,
+      "reviewed_at": "2026-09-16",
       "rights": {
         "redistribution": "permitted",
         "basis": "AuraScan-maintained factual indicators and original metadata; source references only, without upstream payloads or copied advisory prose."

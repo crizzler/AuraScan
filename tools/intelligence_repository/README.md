@@ -8,7 +8,10 @@ service. There is no configured production feed or trusted production key yet.
 Use a pinned compatible AuraScan checkout or isolated developer installation.
 `bundle.py` deliberately imports the exact runtime contract instead of keeping a
 second, potentially divergent validator. The first supported schema and engine
-capability are both `1.0`. Publish the pinned validating revision in the eventual
+capability are both `1.0`; the current schema and capability are both `2.0`,
+which adds the exploitation state, vendor severity and the
+`numeric_dotted_upstream` comparator to vendor advisories. Publish the pinned
+validating revision in the eventual
 repository's contributor documentation. Updating that pin is a reviewed change.
 
 ## Admission and corrections
@@ -16,8 +19,9 @@ repository's contributor documentation. Updating that pin is a reviewed change.
 Only human-reviewed, source-attributed runtime intelligence enters a bundle:
 exact npm package/version observations, explicitly established broader package
 advisories, captured payload SHA-256 indicators, malicious domains, and vendor
-advisories understood by application-owned comparators. The current comparator
-is `chromium_four_part`. Supported records cannot select rules, severity,
+advisories understood by application-owned comparators. The supported
+comparators are `chromium_four_part` and `numeric_dotted_upstream`. Supported
+records cannot select rules, severity,
 commands, parsers, regular expressions, or policies.
 
 Follow [the runtime contract](SCHEMA.md). A redistribution decision must be

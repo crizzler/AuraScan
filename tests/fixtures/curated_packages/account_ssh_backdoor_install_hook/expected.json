@@ -1,0 +1,17 @@
+{
+  "scenario": "account_ssh_backdoor_install_hook",
+  "category": "malicious_defanged",
+  "scan_modes": ["fast", "wrapper"],
+  "package_name": "curated-account-ssh-backdoor",
+  "package_version": "1.0",
+  "expected_rule_ids": ["PRIV-ACCOUNT-BACKDOOR-001", "PRIV-ACCOUNT-CREDENTIAL-001"],
+  "expected_phases": ["install_hook_static"],
+  "expected_min_severity": "CRITICAL",
+  "expected_action": "block",
+  "expected_hard_blocker": true,
+  "expected_makepkg_invoked": false,
+  "expected_wrapper_action": "scan_blocked",
+  "expected_terminal_contains": [
+    "Package creates a password-authenticated privileged account with SSH exposure."
+  ]
+}

@@ -15,8 +15,8 @@ from typing import Any, Dict, Mapping, Optional
 from urllib.parse import urlsplit
 
 
-SCHEMA_VERSION = "1.0"
-ENGINE_CAPABILITY = "1.0"
+SCHEMA_VERSION = "2.0"
+ENGINE_CAPABILITY = "2.0"
 FEED_ID = "aurascan-intelligence"
 MANIFEST_FILENAME = "manifest.json"
 SIGNATURE_FILENAME = "manifest.json.asc"
@@ -30,7 +30,21 @@ MAX_CLOCK_SKEW = timedelta(minutes=5)
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}\Z")
 _PACKAGE = re.compile(r"(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*\Z", re.I)
-_FLOOR = re.compile(r"(?:0|[1-9][0-9]{0,8})(?:\.(?:0|[1-9][0-9]{0,8})){3}\Z")
+# Version floors are product-specific, so the comparator declares the numeric
+# semantics the application owns. `chromium_four_part` keeps the original
+# exactly-four-component Chromium shape; `numeric_dotted_upstream` accepts the
+# two-to-four-component upstream releases that other vendors publish and
+# compares them with zero padding. Unsupported comparators, component shapes
+# and non-numeric or prerelease versions stay unresolved rather than assumed
+# safe. An unsupported comparator requires an application update, published as
+# a new schema/engine capability.
+VENDOR_COMPARATOR_FLOORS = {
+    "chromium_four_part": re.compile(r"(?:0|[1-9][0-9]{0,8})(?:\.(?:0|[1-9][0-9]{0,8})){3}\Z"),
+    "numeric_dotted_upstream": re.compile(r"(?:0|[1-9][0-9]{0,8})(?:\.(?:0|[1-9][0-9]{0,8})){1,3}\Z"),
+}
+# Vendor ratings are recorded exactly as the vendor states them and mapped to a
+# finding severity by the application, never by the feed.
+VENDOR_SEVERITIES = ("critical", "high", "moderate", "low")
 
 
 class IntelligenceError(ValueError):
@@ -193,16 +207,22 @@ def validate_payload(payload: bytes) -> Dict[str, Any]:
     _unique(campaign_ids)
     advisory_ids = []
     for advisory in _list(data["vendor_advisories"]):
-        _keys(advisory, ("id", "cve", "package", "fixed_floor", "comparator", "known_exploited", "vendor_reference", "exploitation_reference", "reviewed_at", "rights"))
+        _keys(advisory, ("id", "cve", "package", "fixed_floor", "comparator", "known_exploited", "vendor_severity", "vendor_reference", "exploitation_reference", "reviewed_at", "rights"))
         advisory_ids.append(_identity(advisory["id"]))
         if not re.fullmatch(r"CVE-[0-9]{4}-[0-9]{4,12}", _text(advisory["cve"], 32)):
             raise IntelligenceError("intelligence CVE identity is malformed")
         if not re.fullmatch(r"[a-z0-9][a-z0-9@._+-]{0,213}", _text(advisory["package"], 214)):
             raise IntelligenceError("intelligence Arch package identity is malformed")
-        if advisory["comparator"] != "chromium_four_part" or not _FLOOR.fullmatch(_text(advisory["fixed_floor"], 64)) or advisory["known_exploited"] is not True:
-            raise IntelligenceError("intelligence version or exploitation profile is unsupported")
+        floor_pattern = VENDOR_COMPARATOR_FLOORS.get(_text(advisory["comparator"], 64))
+        if floor_pattern is None or not floor_pattern.fullmatch(_text(advisory["fixed_floor"], 64)):
+            raise IntelligenceError("intelligence version or comparator semantics are unsupported")
+        if not isinstance(advisory["known_exploited"], bool) or advisory["vendor_severity"] not in VENDOR_SEVERITIES:
+            raise IntelligenceError("intelligence exploitation or severity profile is unsupported")
         _uri(advisory["vendor_reference"])
-        _uri(advisory["exploitation_reference"])
+        if advisory["known_exploited"]:
+            _uri(advisory["exploitation_reference"])
+        elif advisory["exploitation_reference"] is not None:
+            raise IntelligenceError("intelligence exploitation reference contradicts its exploitation profile")
         _date(advisory["reviewed_at"])
         _rights(advisory["rights"])
     _unique(advisory_ids)
@@ -292,7 +312,8 @@ def record_identities(data: Mapping[str, Any]) -> Dict[str, str]:
         for domain in campaign["malicious_domains"]:
             add("domain", [campaign["id"], domain], "domain")
     for advisory in data["vendor_advisories"]:
-        claim = [advisory[key] for key in ("id", "package", "cve", "comparator", "fixed_floor")]
+        claim = [advisory[key] for key in ("id", "package", "cve", "comparator", "fixed_floor",
+                                          "known_exploited", "vendor_severity")]
         add("vendor", claim, "vendor_advisory")
     return records
 

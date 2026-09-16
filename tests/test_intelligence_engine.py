@@ -25,7 +25,7 @@ BUILD = "pkgname=intelligence-fixture\npkgver=1\npkgrel=1\nbuild() { npm install
 
 def snapshot(*, indicator=False, sequence=1, status="current"):
     data = {
-        "schema_version": "1.0", "feed_id": "aurascan-intelligence",
+        "schema_version": "2.0", "feed_id": "aurascan-intelligence",
         "reviewed_at": "2026-09-12", "npm_campaigns": [],
         "vendor_advisories": [], "withdrawals": [],
     }

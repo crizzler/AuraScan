@@ -35,7 +35,7 @@ def test_status_is_offline_and_identifies_unconfigured_channel(monkeypatch, caps
     result = json.loads(capsys.readouterr().out)
     assert result["source"] == "bundled"
     assert result["update_channel"] == "unconfigured"
-    assert result["schema_version"] == "1.0"
+    assert result["schema_version"] == "2.0"
 
 
 def test_dispatch_never_loads_dotenv_or_ai_config(monkeypatch):

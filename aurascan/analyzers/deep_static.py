@@ -25,7 +25,13 @@ from aurascan.analyzers.python_bytecode import (
 from aurascan.analyzers.python_bytecode_execution import (
     analyze_precompiled_execution, is_precompiled_control_script,
 )
-from aurascan.analyzers.remote_access import find_remote_access_backdoor_signals
+from aurascan.analyzers.remote_access import (
+    ACCOUNT_CREDENTIAL_KINDS,
+    ACCOUNT_PRIVILEGE_KINDS,
+    ACCOUNT_SSH_EXPOSURE_KINDS,
+    find_account_backdoor_signals,
+    find_remote_access_backdoor_signals,
+)
 from aurascan.analyzers.remote_stage import (
     analyze_carrier_execution,
     analyze_remote_stage_execution,
@@ -350,6 +356,23 @@ class DeepStaticAnalyzer(BaseAnalyzer):
                 "Correlated signals: " + "; ".join(signal.label for signal in signals),
                 EvidenceQuality.confirmed_static_pattern,
                 min(signal.line_number for signal in signals),
+            ))
+
+        account_signals = find_account_backdoor_signals(active_text)
+        account_kinds = {signal.kind for signal in account_signals}
+        if (account_kinds.intersection(ACCOUNT_CREDENTIAL_KINDS)
+                and account_kinds.intersection(ACCOUNT_PRIVILEGE_KINDS)
+                and account_kinds.intersection(ACCOUNT_SSH_EXPOSURE_KINDS)):
+            findings.append(self._finding(
+                "DEEPSTATIC-PRIV-ACCOUNT-BACKDOOR-001",
+                str(path),
+                Severity.CRITICAL,
+                "Acquired source combines a literal account credential, a privilege grant, and SSH exposure.",
+                "Do not build this source revision. Review prior installations from trusted recovery media.",
+                True,
+                "Correlated signals: " + "; ".join(signal.label for signal in account_signals),
+                EvidenceQuality.confirmed_static_pattern,
+                min(signal.line_number for signal in account_signals),
             ))
 
         remote_stage_analysis = analyze_remote_stage_execution(text)

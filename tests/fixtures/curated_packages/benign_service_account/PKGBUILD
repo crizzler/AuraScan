@@ -1,0 +1,15 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-benign-service-account
+pkgver=1.0
+pkgrel=1
+pkgdesc="Benign locked service-account fixture without SSH exposure"
+arch=("x86_64")
+url="https://example.invalid/curated-benign-service-account"
+license=("MIT")
+install=curated-benign-service-account.install
+source=("https://example.invalid/curated-benign-service-account-1.0.tar.gz")
+sha256sums=("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+
+package() {
+  echo "defanged package step"
+}

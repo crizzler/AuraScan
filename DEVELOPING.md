@@ -851,6 +851,36 @@ or anti-forensics behavior, retain exact incident indicators as separate rules,
 and emit secret-free evidence labels. Test the malicious chain, ordinary tool
 usage, comments/messages, missing-anchor combinations, and auth-key redaction.
 
+Package-created privileged accounts are a separate correlation, not another
+anchor for `REMOTE-ADMIN-BACKDOOR-001`. `PRIV-ACCOUNT-BACKDOOR-001` requires
+three independent behaviors in the same package-controlled text: a literal
+account credential, a privilege grant, and SSH exposure. The credential half is
+read only from shell command position with the raw arguments, so piped
+`chpasswd`, an explicit password flag and a heredoc body count, while a
+generated password, a shell variable or quoted documentation does not.
+`PRIV-ACCOUNT-CREDENTIAL-001` reports that credential behavior alone as
+reviewable HIGH, and `PRIV-SUDO-ADMIN-GROUP-001` covers an administrative-group
+sudo policy that does not use `NOPASSWD` and therefore escalates on a known
+password instead of no password at all. `DEEPSTATIC-PRIV-ACCOUNT-BACKDOOR-001`
+is the acquired-source counterpart of the correlated rule.
+
+Ordinary service accounts stay negative cases: created with `--system`, carrying
+no interactive password, gaining no administrative group, and never exposed over
+SSH. Without that separation this rule family would eventually flag most daemons
+for having a user at all. Labels are fixed strings; the observed account name,
+password, hash and policy line never reach a finding, and the correlated rule is
+not weakened by the presence or absence of `NOPASSWD`.
+
+The motivating AUR incident is the 2026-09-14 aur-general report about the
+removed package `x11-qemu-validation`
+(<https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/thread/VITHDRLMBF6GVNBMBZEI3Z56RC4LZAC3/>),
+whose postinstall hook was reported to add a sudo-capable user with a hardcoded
+password and to install, enable and start `sshd` with `PasswordAuthentication
+yes`. That thread is the reviewed primary source. Third-party summaries also
+circulate a specific account name and password; those values were not
+established from the primary source, are irrelevant to behavior correlation,
+and must not be encoded as indicators or fixtures.
+
 Host-indicator tests must use an injected temporary root. Keep reads bounded,
 refuse symlinked indicator files, never execute an artifact, and distinguish an
 exact path match from content-validated or multi-artifact correlation. A host
@@ -1010,11 +1040,16 @@ comparison and use inert local tarballs; neither pnpm nor package code runs.
 vendor-advisory mapping from the operation's captured runtime-intelligence
 snapshot for gaps before distribution advisories arrive. It uses captured
 installed package names/versions, never executes the installed browser or
-fetches a feed, and remains active with `--offline` and `--no-arch-audit`. Entries need an exact Arch package mapping, a verified
-Linux upstream fixed floor, authoritative exploitation evidence, references,
-and a review date. The initial comparator supports only canonical four-part
-numeric Chromium releases; adding other products requires explicit review of
-their version semantics and finding descriptions. The curated baseline ships
+fetches a feed, and remains active with `--offline` and `--no-arch-audit`.
+Entries need an exact Arch package mapping, a verified vendor fixed floor, the
+vendor's own severity rating, an explicit exploitation state, references, and a
+review date. Each entry names the version comparator the application owns:
+`chromium_four_part` keeps the original exactly-four-component Chromium shape,
+and `numeric_dotted_upstream` accepts two-to-four-component vendor releases and
+compares them with zero padding. Unsupported comparators, component shapes, and
+non-numeric or prerelease versions stay unresolved, so adding a product still
+requires an application update instead of feed-supplied matching logic. The
+curated baseline ships
 in `aurascan/assets/runtime-intelligence.json`; separately signed updates can
 replace its reviewed records only after production trust is provisioned.
 Normal audits never fetch or reload intelligence within an operation.
@@ -1033,15 +1068,51 @@ established. Do not mechanically import the inconsistent structured interval.
 Google rates the issue Medium; AuraScan's HIGH prioritization reflects the
 confirmed exploitation evidence, not an attributed Google severity rating.
 
-Keep `SEC-KNOWN-EXPLOITED-VERSION-LAG` separate from distribution-feed findings
-and malware incidents. Supported versions at/above the floor mean only that
-this advisory did not match. Unknown/missing versions require
+Keep `SEC-KNOWN-EXPLOITED-VERSION-LAG` (the cited authority records
+exploitation) separate from `SEC-VENDOR-SECURITY-FLOOR-LAG` (a verified vendor
+floor with no exploitation evidence) and from distribution-feed findings and
+malware incidents. Vendor severity maps to finding severity in the application
+— critical and high to HIGH, moderate to MEDIUM, low to LOW — and a feed cannot
+select a rule, severity, or policy. Supported versions at/above the floor mean
+only that this advisory did not match. Unknown/missing versions require
 `SEC-VENDOR-ADVISORY-VERSION-UNRESOLVED` and partial coverage without echoing
-untrusted version text. Package-query failures must also keep coverage partial.
+untrusted version text; one package with several reviewed advisories produces a
+single coverage warning for the same missing evidence. Package-query failures
+must also keep coverage partial.
 Epoch/pkgrel cannot override an upstream range, and package names/versions
 cannot establish official origin, signatures, backports, or exploitation.
 Do not discount findings based on repository presence, out-of-date flags,
 signatures, or a currently empty `arch-audit` result.
+
+On 2026-09-15 the [Chrome stable release](https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_0541751186.html)
+shipped `153.0.8010.47` with the Critical `CVE-2026-91749` (use-after-free in
+Workers). It is recorded as a separate floor because no exploitation evidence
+exists for it. Mozilla's
+[MFSA 2026-90](https://www.mozilla.org/security/advisories/mfsa2026-90/) fixed
+Firefox 156 (rated high, including the Graphics sandbox escape
+`CVE-2026-92035`) and
+[MFSA 2026-94](https://www.mozilla.org/security/advisories/mfsa2026-94/) fixed
+Thunderbird 156 (rated high, including the DOM sandbox escape
+`CVE-2026-92018`). Those records were reviewed on 2026-09-16; archlinux.org
+reported `chromium 153.0.8010.36-1`, `firefox 155.0.1-1` and
+`thunderbird 155.0.1-1` in `[extra]`, each flagged out of date, and Arch's
+Security Tracker had no entry for any of the three CVEs. Those are dated
+observations, not runtime checks: a verified vendor floor is evaluated from
+captured installed evidence whether or not the distribution feed agrees.
+
+Vendor detection identity is the exact Arch package name, so a floor is never
+applied to a derived or forked package by version similarity. LibreWolf, Zen
+Browser and Floorp display Firefox-like versions and can backport fixes without
+changing that number, so they need their own reviewed mapping and upstream
+confirmation rather than version arithmetic.
+
+Exploitation state, vendor severity, and the comparator set are part of the wire
+contract, so this revision publishes intelligence schema and engine capability
+`2.0`. A `1.0` payload, manifest, or stored generation is rejected rather than
+reinterpreted: the operator refreshes against a `2.0` bundle and the bundled
+`2.0` baseline remains available meanwhile. A changed exploitation state or
+vendor severity for the same advisory ID, package, CVE, comparator and floor is
+a changed claim and requires its own source-attributed withdrawal.
 
 The upgrade consumer may suppress this HIGH warning only for a supported,
 exact mapped repository candidate reaching the floor, preserving the original

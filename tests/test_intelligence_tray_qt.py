@@ -77,7 +77,7 @@ def short_cancel_timeout(process, timeout, callback):
 controller.schedule_timeout = short_cancel_timeout
 payload = {
     "status_schema": "intelligence-status/1.0",
-    "schema_version": "1.0", "feed_id": "aurascan-intelligence",
+    "schema_version": "2.0", "feed_id": "aurascan-intelligence",
     "source": "bundled", "status": "bundled", "sequence": 0,
     "digest": "a" * 64, "reviewed_at": "2026-09-12",
     "activated_at": "", "expires_at": "",

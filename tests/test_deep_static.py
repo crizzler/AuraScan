@@ -465,6 +465,42 @@ def test_correlated_remote_admin_backdoor_in_source_is_blocked(tmp_path: Path):
     assert "fixture-only" not in backdoor.evidence_snippet
 
 
+def test_correlated_privileged_account_backdoor_in_source_is_blocked(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    script = source / "fixture-provision.sh"
+    script.write_text(
+        "#!/bin/bash\n"
+        "/usr/bin/useradd -m -G wheel -s /bin/bash fixture-operator\n"
+        "printf 'fixture-operator:fixture-only-password\\n' | /usr/bin/chpasswd\n"
+        "/usr/bin/systemctl enable --now sshd\n"
+    )
+    script.chmod(0o644)
+
+    findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
+
+    backdoor = next(f for f in findings if f.rule_id == "DEEPSTATIC-PRIV-ACCOUNT-BACKDOOR-001")
+    assert backdoor.severity == Severity.CRITICAL
+    assert backdoor.blocks_installation is True
+    assert "fixture-only-password" not in backdoor.evidence_snippet
+
+
+def test_locked_service_account_in_source_is_not_a_privileged_account_backdoor(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    script = source / "fixture-provision.sh"
+    script.write_text(
+        "#!/bin/bash\n"
+        "/usr/bin/useradd --system --no-create-home --shell /usr/bin/nologin fixture-daemon\n"
+        "/usr/bin/passwd -l fixture-daemon\n"
+    )
+    script.chmod(0o644)
+
+    findings = DeepStaticAnalyzer(clamav=FakeClamAV()).inspect_source_tree(source)
+
+    assert not any(f.rule_id == "DEEPSTATIC-PRIV-ACCOUNT-BACKDOOR-001" for f in findings)
+
+
 def test_non_executable_extensionless_shebang_source_is_inspected(tmp_path: Path):
     source = tmp_path / "source"
     source.mkdir()

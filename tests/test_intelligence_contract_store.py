@@ -39,12 +39,14 @@ def store(tmp_path, *, clock=lambda: NOW, verifier=lambda *_args: KEY.fingerprin
 
 
 @pytest.mark.parametrize("change", [
-    lambda x: x.update(schema_version="2.0"),
+    lambda x: x.update(schema_version="3.0"),
     lambda x: x.update(feed_id="another-feed"),
     lambda x: x.update(command="inert unsupported authority"),
     lambda x: x["npm_campaigns"][0]["rights"].update(redistribution="unknown"),
     lambda x: x["npm_campaigns"][0].pop("rights"),
     lambda x: x["vendor_advisories"][0].update(comparator="arbitrary-python"),
+    lambda x: x["vendor_advisories"][0].update(vendor_severity="unsupported-rating"),
+    lambda x: x["vendor_advisories"][0].update(known_exploited="true"),
     lambda x: x["vendor_advisories"][0].update(known_exploited=False),
     lambda x: x["npm_campaigns"][0]["packages"].append(x["npm_campaigns"][0]["packages"][0]),
     lambda x: x["npm_campaigns"][0]["payload_sha256"].append(x["npm_campaigns"][0]["payload_sha256"][0]),
@@ -74,7 +76,7 @@ def test_snapshot_cannot_be_mutated_through_nested_records():
 @pytest.mark.parametrize("change", [
     lambda x: x.update(sequence=True),
     lambda x: x.update(sequence=0),
-    lambda x: x.update(engine_capability="2.0"),
+    lambda x: x.update(engine_capability="3.0"),
     lambda x: x.update(expires_at="2026-10-13T12:00:00Z"),
     lambda x: x.update(issued_at="2026-09-12T12:06:00Z"),
     lambda x: x.update(expires_at="2026-09-12T12:00:00Z"),

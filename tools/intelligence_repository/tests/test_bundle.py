@@ -12,7 +12,7 @@ from tools.intelligence_repository.bundle import main, prepare_bundle, read_payl
 
 def payload():
     return {
-        "schema_version": "1.0", "feed_id": "aurascan-intelligence", "reviewed_at": "2026-09-12",
+        "schema_version": "2.0", "feed_id": "aurascan-intelligence", "reviewed_at": "2026-09-12",
         "npm_campaigns": [{"id": "inert-regression", "reviewed_at": "2026-09-12",
                            "references": ["https://example.invalid/advisory"],
                            "rights": {"redistribution": "permitted", "basis": "Test author created these inert indicators."},

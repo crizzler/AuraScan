@@ -1,0 +1,22 @@
+{
+  "scenario": "benign_service_account",
+  "category": "benign",
+  "scan_modes": ["fast", "wrapper"],
+  "package_name": "curated-benign-service-account",
+  "package_version": "1.0",
+  "expected_rule_ids": [],
+  "expected_absent_rule_ids": [
+    "PRIV-ACCOUNT-BACKDOOR-001",
+    "PRIV-ACCOUNT-CREDENTIAL-001",
+    "PRIV-SUDO-ADMIN-GROUP-001",
+    "PRIV-SUDOERS-DROPIN-001",
+    "PRIV-SUDOERS-NOPASSWD-001",
+    "REMOTE-ADMIN-BACKDOOR-001",
+    "SYS-SYSTEMD-AUTO-001"
+  ],
+  "expected_phases": [],
+  "expected_min_severity": "LOW",
+  "expected_action": "allow",
+  "expected_makepkg_invoked": true,
+  "expected_wrapper_action": "makepkg_invoked"
+}

@@ -3,6 +3,7 @@
 import datetime
 import json
 
+from aurascan.core.intelligence import FEED_ID, SCHEMA_VERSION
 from aurascan.core.trusted_tools import (
     TrustedToolError, capture_trusted_system_tool, revalidate_trusted_system_tool,
 )
@@ -70,7 +71,7 @@ def parse_status(raw):
     data = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
     if not isinstance(data, dict) or data.get("status_schema") != "intelligence-status/1.0":
         raise ValueError("unsupported status")
-    if data.get("schema_version") != "1.0" or data.get("feed_id") != "aurascan-intelligence":
+    if data.get("schema_version") != SCHEMA_VERSION or data.get("feed_id") != FEED_ID:
         raise ValueError("unsupported intelligence")
     choices = {
         "source": {"bundled", "installed", "bundled-fallback"},

@@ -28,7 +28,12 @@ from aurascan.core.upgrade_preflight import (
 
 
 EXPOSURE_RULE = "SEC-KNOWN-EXPLOITED-VERSION-LAG"
+FLOOR_RULE = "SEC-VENDOR-SECURITY-FLOOR-LAG"
 COVERAGE_RULE = "SEC-VENDOR-ADVISORY-VERSION-UNRESOLVED"
+# Chromium carries two reviewed floors: the known-exploited fix and the later
+# critical vendor floor. A release below both raises both findings, and a
+# pending repository release that clears only the first floor keeps the second.
+CHROMIUM_OLD_RULES = [EXPOSURE_RULE, FLOOR_RULE]
 
 
 @pytest.fixture(autouse=True)
@@ -68,7 +73,7 @@ def offline_report(tmp_path, version, **kwargs):
 def test_older_upstream_release_is_high_even_with_larger_epoch_or_pkgrel(version):
     findings = audit_vendor_emergency_exposure({"chromium": version})
 
-    assert len(findings) == 1
+    assert [item.rule_id for item in findings] == CHROMIUM_OLD_RULES
     finding = findings[0]
     assert finding.rule_id == EXPOSURE_RULE
     assert finding.severity == Severity.HIGH
@@ -88,11 +93,30 @@ def test_older_upstream_release_is_high_even_with_larger_epoch_or_pkgrel(version
     "0:153.0.8010.36-1",
     "4:153.0.8010.36-2.1",
     "153.0.8010.37-1",
+])
+def test_release_between_the_two_chromium_floors_matches_only_the_later_floor(version):
+    findings = audit_vendor_emergency_exposure({"chromium": version})
+
+    assert [item.rule_id for item in findings] == [FLOOR_RULE]
+    floor_finding = findings[0]
+    assert floor_finding.severity == Severity.HIGH
+    assert floor_finding.confidence == "medium"
+    serialized = json.dumps(floor_finding.to_dict())
+    assert "CVE-2026-91749" in serialized
+    assert "153.0.8010.47" in serialized
+    assert "CVE-2026-87491" not in serialized
+
+
+@pytest.mark.parametrize("version", [
+    "153.0.8010.47",
+    "153.0.8010.47-1",
+    "0:153.0.8010.47-1",
     "153.0.8011.0-1",
     "153.1.0.0-1",
     "154.0.0.0-1",
+    "154.0.0.0-20",
 ])
-def test_fixed_floor_or_later_has_no_match_for_this_advisory(version):
+def test_release_at_or_above_every_captured_floor_has_no_match(version):
     assert audit_vendor_emergency_exposure({"chromium": version}) == []
 
 
@@ -154,10 +178,10 @@ def test_offline_emergency_advisory_remains_enabled_without_arch_audit(tmp_path)
 
     assert report.has_alert
     assert report.arch_audit.status == "disabled"
-    assert [item.rule_id for item in report.vendor_emergency_findings] == [EXPOSURE_RULE]
+    assert [item.rule_id for item in report.vendor_emergency_findings] == CHROMIUM_OLD_RULES
     assert report.official_vulnerability_findings == []
     assert report.campaign_findings == []
-    assert report.to_dict()["risk_summary"]["vendor_emergency_findings"] == 1
+    assert report.to_dict()["risk_summary"]["vendor_emergency_findings"] == 2
     terminal = render_security_audit(report, verbose=True, use_color=False)
     assert "Treat the matched evidence as an incident" not in terminal
     assert "investigate from trusted media" not in terminal
@@ -168,7 +192,7 @@ def test_offline_arch_audit_skip_does_not_skip_bundled_emergency_mapping(tmp_pat
     report = offline_report(tmp_path, "152.0.7977.82-1", include_arch_audit=True)
 
     assert report.arch_audit.status == "skipped_offline"
-    assert [item.rule_id for item in report.vendor_emergency_findings] == [EXPOSURE_RULE]
+    assert [item.rule_id for item in report.vendor_emergency_findings] == CHROMIUM_OLD_RULES
 
 
 def test_unknown_installed_release_keeps_advisory_coverage_partial(tmp_path):
@@ -198,11 +222,11 @@ def test_official_and_vendor_advisory_authorities_remain_independent(tmp_path, m
 
     report = offline_report(tmp_path, "152.0.7977.82-1", include_arch_audit=True)
 
-    assert len(report.vendor_emergency_findings) == 1
+    assert len(report.vendor_emergency_findings) == 2
     assert len(report.official_vulnerability_findings) == 1
     assert {item.source for item in report.findings} == {"vendor_emergency_advisory", "arch-audit"}
     assert report.to_dict()["risk_summary"]["official_vulnerability_findings"] == 1
-    assert report.to_dict()["risk_summary"]["vendor_emergency_findings"] == 1
+    assert report.to_dict()["risk_summary"]["vendor_emergency_findings"] == 2
 
 
 def test_offline_cli_exposes_warning_with_no_arch_audit_or_external_call(tmp_path, monkeypatch):
@@ -228,7 +252,7 @@ def test_offline_cli_exposes_warning_with_no_arch_audit_or_external_call(tmp_pat
 
     data = json.loads(stdout.getvalue())
     assert status == 1
-    assert data["risk_summary"]["vendor_emergency_findings"] == 1
+    assert data["risk_summary"]["vendor_emergency_findings"] == 2
     assert data["risk_summary"]["severity"] == "HIGH"
     assert data["risk_summary"]["clean_proof"] is False
     assert data["arch_audit"]["status"] == "disabled"
@@ -305,7 +329,7 @@ def test_invalid_collected_package_record_is_partial_without_raw_output_echo(tmp
         assert str(tmp_path / "root") in command
         return SimpleNamespace(
             returncode=0,
-            stdout="bad/package FAKE_SECRET=fixture-only\nchromium 153.0.8010.36-1\n",
+            stdout="bad/package FAKE_SECRET=fixture-only\nchromium 153.0.8010.47-1\n",
             stderr="",
         )
 
@@ -339,8 +363,7 @@ def test_upgrade_snapshot_without_version_retains_coverage_even_with_pending_fix
 
 
 @pytest.mark.parametrize("version", [
-    "153.0.8010.36-1", "153.0.8010.37-1", "154.0.0.0-1",
-    "0:153.0.8010.36-1", "4:153.0.8010.36-2.1",
+    "153.0.8010.47-1", "154.0.0.0-1",
 ])
 def test_pending_exact_repo_package_at_fixed_floor_resolves_warning_without_vercmp(version):
     report = SecurityAuditReport(
@@ -353,7 +376,23 @@ def test_pending_exact_repo_package_at_fixed_floor_resolves_warning_without_verc
         report, plan, version_compare=forbidden_external_call,
     ) == []
     # Pending transaction filtering must not erase the installed-state report.
-    assert [item.rule_id for item in report.findings] == [EXPOSURE_RULE]
+    assert [item.rule_id for item in report.findings] == CHROMIUM_OLD_RULES
+
+
+@pytest.mark.parametrize("version", [
+    "153.0.8010.36-1", "153.0.8010.37-1",
+    "0:153.0.8010.36-1", "4:153.0.8010.36-2.1",
+])
+def test_pending_release_clearing_only_the_older_floor_keeps_the_later_alert(version):
+    report = SecurityAuditReport(
+        campaign=None,
+        findings=audit_vendor_emergency_exposure({"chromium": "9:152.0.7977.82-99"}),
+    )
+    plan = UpgradePlan(repo_packages=[UpgradePackage(name="chromium", new_version=version)])
+
+    findings = security_audit_upgrade_findings(report, plan, version_compare=forbidden_external_call)
+
+    assert [item.rule_id for item in findings] == [FLOOR_RULE]
 
 
 @pytest.mark.parametrize("version", [
@@ -369,7 +408,7 @@ def test_old_or_uncertain_pending_repo_release_never_resolves_warning(version):
 
     findings = security_audit_upgrade_findings(report, plan, version_compare=forbidden_external_call)
 
-    assert [item.rule_id for item in findings] == [EXPOSURE_RULE]
+    assert [item.rule_id for item in findings] == CHROMIUM_OLD_RULES
 
 
 @pytest.mark.parametrize("plan", [
@@ -387,7 +426,7 @@ def test_other_packages_aur_replacements_or_removal_do_not_establish_verified_fi
 
     findings = security_audit_upgrade_findings(report, plan, version_compare=forbidden_external_call)
 
-    assert [item.rule_id for item in findings] == [EXPOSURE_RULE]
+    assert [item.rule_id for item in findings] == CHROMIUM_OLD_RULES
 
 
 def test_planned_fix_does_not_silence_uncertain_installed_identity():
@@ -435,7 +474,7 @@ def test_captured_upgrade_versions_raise_the_existing_high_lag_finding(tmp_path)
 
     report, findings = upgrade_evidence_findings(tmp_path, snapshot, plan)
 
-    assert [item.rule_id for item in findings] == [EXPOSURE_RULE]
+    assert [item.rule_id for item in findings] == CHROMIUM_OLD_RULES
     assert findings[0].severity == Severity.HIGH
     assert findings[0].blocking is False
     assert COVERAGE_RULE not in {item.rule_id for item in report.findings}
@@ -443,7 +482,7 @@ def test_captured_upgrade_versions_raise_the_existing_high_lag_finding(tmp_path)
     assert upgrade_action(snapshot, findings, plan) == "confirm"
 
 
-@pytest.mark.parametrize("version", ["153.0.8010.36-1", "154.0.0.0-1", "4:153.0.8010.36-2.1"])
+@pytest.mark.parametrize("version", ["153.0.8010.47-1", "154.0.0.0-1"])
 def test_captured_upgrade_version_at_or_above_floor_has_no_finding(tmp_path, version):
     snapshot = upgrade_evidence_snapshot({"chromium": version})
     plan = UpgradePlan()
@@ -457,14 +496,25 @@ def test_captured_upgrade_version_at_or_above_floor_has_no_finding(tmp_path, ver
     assert upgrade_action(snapshot, findings, plan) == "continue"
 
 
+@pytest.mark.parametrize("version", ["153.0.8010.36-1", "153.0.8010.37-1", "4:153.0.8010.36-2.1"])
+def test_captured_version_between_the_floors_keeps_the_later_alert(tmp_path, version):
+    snapshot = upgrade_evidence_snapshot({"chromium": version})
+    plan = UpgradePlan()
+
+    report, findings = upgrade_evidence_findings(tmp_path, snapshot, plan)
+
+    assert [item.rule_id for item in findings] == [FLOOR_RULE]
+    assert report.has_alert
+
+
 def test_captured_below_floor_version_stays_suppressed_by_pending_repository_fix(tmp_path):
     snapshot = upgrade_evidence_snapshot({"chromium": "152.0.7977.82-1"})
-    plan = UpgradePlan(repo_packages=[UpgradePackage(name="chromium", new_version="153.0.8010.36-1")])
+    plan = UpgradePlan(repo_packages=[UpgradePackage(name="chromium", new_version="153.0.8010.47-1")])
 
     report, findings = upgrade_evidence_findings(tmp_path, snapshot, plan)
 
     # The installed-state report keeps the exposure; the verified handoff resolves it.
-    assert [item.rule_id for item in report.findings] == [EXPOSURE_RULE]
+    assert [item.rule_id for item in report.findings] == CHROMIUM_OLD_RULES
     assert findings == []
     assert upgrade_action(snapshot, findings, plan) == "continue"
 

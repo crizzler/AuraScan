@@ -1,8 +1,8 @@
-# Runtime intelligence schema 1.0
+# Runtime intelligence schema 2.0
 
 This public runtime contract is independent of `security-data/1.0`, whose records
 are research candidates and cannot be published automatically. Both the payload
-and signed manifest require `schema_version: "1.0"` and the fixed
+and signed manifest require `schema_version: "2.0"` and the fixed
 `feed_id: "aurascan-intelligence"`. Unknown fields, duplicate JSON keys,
 non-finite numbers, unsupported capabilities, and incomplete records fail
 validation. The application validator is normative.
@@ -20,11 +20,12 @@ execution rights.
 | --- | --- |
 | npm campaign | `id`, `reviewed_at`, HTTPS `references`, `rights`, `packages`, `payload_sha256`, `malicious_domains`. Campaign identity scopes the claims; a future campaign never inherits another campaign's attribution. |
 | npm package | `name`, exact `versions`, `advisory_ids`, HTTPS `references`, `broad_advisory` (`none` or `all_versions`). Exact observations do not establish maliciousness for unlisted versions. Broader coverage requires the corresponding authoritative advisory. |
-| Vendor advisory | `id`, `cve`, Arch `package`, `fixed_floor`, `comparator` (`chromium_four_part`), `known_exploited: true`, HTTPS `vendor_reference` and `exploitation_reference`, `reviewed_at`, `rights`. Unsupported version semantics require an application update. |
+| Vendor advisory | `id`, `cve`, Arch `package`, `fixed_floor`, `comparator` (`chromium_four_part` or `numeric_dotted_upstream`), `known_exploited` (boolean), `vendor_severity` (`critical`, `high`, `moderate`, `low`), HTTPS `vendor_reference`, `exploitation_reference` (an HTTPS reference only when `known_exploited` is true, otherwise `null`), `reviewed_at`, `rights`. `chromium_four_part` requires an exactly four-component floor; `numeric_dotted_upstream` accepts two to four components. Unsupported version semantics require an application update. |
 | Withdrawal | `id`, `reason`, `reviewed_at`, HTTPS `references`, `rights`. The ID is the exact previous detection identity returned by the validator's `record_identities()`, not an instruction or a severity override. |
 
-Vendor detection identities include the advisory ID, package, CVE, comparator
-and fixed floor. Each altered claim therefore requires its own source-attributed
+Vendor detection identities include the advisory ID, package, CVE, comparator,
+fixed floor, exploitation state and vendor severity. Each altered claim
+therefore requires its own source-attributed
 withdrawal. Retain prior withdrawal IDs. Removing a reintroduced indicator
 requires renewing its reason, source references or later review date; an unchanged
 earlier correction, a rights-only edit, cosmetic whitespace or reordered
@@ -40,10 +41,18 @@ signatures bind the payload bytes through the digest and size. Neither manifest
 nor payload may supply signing keys, URLs for key retrieval, alternate download
 destinations, executable matchers, or settings.
 
-This unpublished format begins at `1.0`. Any incompatible field, semantic,
-comparator, or permission change requires a new schema/capability version and a
-reviewed application migration. Clients reject unknown versions rather than
-guessing. Migrations must preserve attribution, rights, withdrawals, and
-rollback state; missing rights never become permission. Editorial documentation
-changes alone do not change the wire format. No previous public schema exists
-and no migration from a purported `2.0` is provided.
+This unpublished format is at `2.0`. `1.0` required every vendor advisory to
+declare confirmed exploitation and supported only the `chromium_four_part`
+comparator, so it could not represent a critical vendor floor without
+exploitation evidence. That is an incompatible semantic and comparator change,
+so a `1.0` payload, manifest, or stored generation is rejected rather than
+reinterpreted and no `1.0` detection is silently carried into `2.0`. The
+reviewed migration is to rebaseline on the bundled `2.0` payload and refresh a
+`2.0` bundle; until then the bundled baseline stays available and the stored
+generation reports unavailable coverage instead of a verified update. Any
+incompatible field, semantic, comparator, or permission change requires another
+new schema/capability version and a reviewed application migration. Clients
+reject unknown versions rather than guessing. Migrations must preserve
+attribution, rights, withdrawals, and rollback state; missing rights never
+become permission. Editorial documentation changes alone do not change the wire
+format.

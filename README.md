@@ -784,27 +784,44 @@ default and official HIGH/CRITICAL advisories are raised only when the pending
 repository transaction does not already include a verifiably fixed version of
 the affected package.
 
-Captured emergency vendor/KEV advisories also run offline and with
-`--no-arch-audit`. The initial curated entry checks the exact installed package
-name `chromium` against Linux upstream fix `153.0.8010.36` for
-[CVE-2026-87491](https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_0808145027.html),
-whose exploitation is confirmed by Google and
-[CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2026-87491).
-Below-floor versions raise HIGH with source/category
+Captured emergency vendor security floors also run offline and with
+`--no-arch-audit`. Each curated entry maps one exact Arch package name to a
+verified vendor fixed version, and the check compares the captured installed
+version against it. Below-floor versions raise HIGH with source/category
 `vendor_emergency_advisory`, separate from `arch-audit` and AUR incidents.
+`SEC-KNOWN-EXPLOITED-VERSION-LAG` is used when the cited authority records
+exploitation; `SEC-VENDOR-SECURITY-FLOOR-LAG` is used when it does not, so a
+critical vulnerability exposure is never presented as a known-exploited one.
 Unknown/custom versions produce incomplete-coverage review. Epoch and package
 revision bumps do not establish an upstream fix, and an out-of-date flag alone
 never raises this finding.
 
-The bundled baseline was reviewed on 2026-09-11; a verified intelligence update
+The curated entries are: `chromium` below Linux upstream fix `153.0.8010.36` for
+[CVE-2026-87491](https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_0808145027.html),
+whose exploitation is confirmed by Google and
+[CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2026-87491);
+`chromium` below `153.0.8010.47` for
+[CVE-2026-91749](https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_0541751186.html);
+`firefox` below `156.0` for
+[MFSA 2026-90](https://www.mozilla.org/security/advisories/mfsa2026-90/); and
+`thunderbird` below `156.0` for
+[MFSA 2026-94](https://www.mozilla.org/security/advisories/mfsa2026-94/). The
+three later entries were reviewed on 2026-09-16 and record no exploitation
+evidence. A build between two Chromium floors is clean for the known-exploited
+entry and still below the later one.
+
+The bundled baseline was reviewed on 2026-09-16; a verified intelligence update
 can independently replace it. Security-audit `--refresh` remains the separate
 legacy AUR campaign refresh and does not update this mapping. Captured names
 and versions cannot authenticate package
 origin or rule out downstream backports. A match does not establish exploitation
-on this host, Linux targeting, sandbox escape, or compromise. Other Chromium
-forks, user-local installs, and unlisted vulnerabilities remain outside this
-check; no match is not a safety guarantee. The check does not query current
-repository availability or recommend an automatic package replacement.
+on this host, Linux targeting, sandbox escape, or compromise. Floors map to
+exact Arch package names, so browser forks such as LibreWolf, Zen Browser and
+Floorp are never matched by version similarity — they can backport fixes while
+displaying a Firefox-like version. User-local installs and unlisted
+vulnerabilities remain outside this check; no match is not a safety guarantee.
+The check does not query current repository availability or recommend an
+automatic package replacement.
 
 A package-name-only match is MEDIUM because cleaned packages can later be
 legitimate. A matching pacman transaction inside the campaign window,

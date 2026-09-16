@@ -6,6 +6,11 @@ from typing import List
 from aurascan.analyzers.base import BaseAnalyzer
 from aurascan.analyzers.aur_propagation import find_aur_repository_propagation_signals
 from aurascan.analyzers.remote_access import (
+    ACCOUNT_CREDENTIAL_KINDS,
+    ACCOUNT_PRIVILEGE_KINDS,
+    ACCOUNT_SSH_EXPOSURE_KINDS,
+    ADMIN_GROUP_SUDO_POLICY_PATTERN,
+    find_account_backdoor_signals,
     find_remote_access_backdoor_signals,
     mask_shell_quoted_text,
     shell_command_pattern,
@@ -74,6 +79,13 @@ RULES = [
         False,
     ),
     Rule(
+        "PRIV-SUDO-ADMIN-GROUP-001",
+        ADMIN_GROUP_SUDO_POLICY_PATTERN,
+        Severity.HIGH,
+        "Package logic grants an administrative group a sudo policy entry.",
+        False,
+    ),
+    Rule(
         "SYS-SYSTEMD-USER-001",
         r"(\$HOME|~|/home/[^/\s]+)?/\.config/systemd/user|systemctl\s+--user\s+(enable|start)",
         Severity.HIGH,
@@ -123,6 +135,7 @@ COMMENT_FILTERED_RULE_IDS = {
     "SUPPLYCHAIN-AUR-JS-20260611",
     "PRIV-SUDOERS-NOPASSWD-001",
     "PRIV-SUDOERS-DROPIN-001",
+    "PRIV-SUDO-ADMIN-GROUP-001",
     "SYS-SYSTEMD-USER-001",
     "SYS-SYSTEMD-AUTO-001",
     "SYS-SYSTEMD-UNIT-001",
@@ -134,6 +147,8 @@ COMMENT_FILTERED_RULE_IDS = {
 SECRET_FREE_EVIDENCE = {
     "PRIV-SUDOERS-NOPASSWD-001": "sudoers policy grants passwordless execution",
     "PRIV-SUDOERS-DROPIN-001": "package logic targets a sudoers policy path",
+    "PRIV-SUDO-ADMIN-GROUP-001": "sudo policy grants an administrative group privileged execution",
+    "PRIV-ACCOUNT-CREDENTIAL-001": "package logic assigns a local account a literal password",
 }
 
 _SUDO_COMMAND = shell_command_pattern("sudo")
@@ -256,6 +271,68 @@ class DeterministicAnalyzer(BaseAnalyzer):
                 requires_manual_review=False,
                 evidence_snippet="Correlated signals: " + "; ".join(signal.label for signal in signals),
                 line_number=min(signal.line_number for signal in signals),
+            ))
+        account_signals = find_account_backdoor_signals(active_content)
+        account_kinds = {signal.kind for signal in account_signals}
+        if account_kinds.intersection(ACCOUNT_CREDENTIAL_KINDS):
+            findings.append(Finding(
+                rule_id="PRIV-ACCOUNT-CREDENTIAL-001",
+                package_name=pkg_name,
+                package_version=pkg_ver,
+                phase=phase,
+                source=Source.deterministic_rule,
+                severity=Severity.HIGH,
+                confidence=Confidence.CONFIRMED,
+                evidence_quality=EvidenceQuality.confirmed_static_pattern,
+                file_path=pkg_path,
+                explanation=(
+                    "Package logic assigns a local account a password the package itself carries, "
+                    "so anyone who can read the package knows that credential."
+                ),
+                recommendation=(
+                    "Do not install this revision unless the account and credential are explained by "
+                    "the package's declared purpose and the affected account is not a human login."
+                ),
+                blocks_installation=False,
+                requires_manual_review=True,
+                false_positive_notes=(
+                    "A literal password value can also appear in documentation, examples, or a "
+                    "fixture-only build step; the finding shows the assignment was present in "
+                    "package-controlled text, not that the account was created."
+                ),
+                evidence_snippet=SECRET_FREE_EVIDENCE["PRIV-ACCOUNT-CREDENTIAL-001"],
+                line_number=min(signal.line_number for signal in account_signals),
+            ))
+        if (account_kinds.intersection(ACCOUNT_CREDENTIAL_KINDS)
+                and account_kinds.intersection(ACCOUNT_PRIVILEGE_KINDS)
+                and account_kinds.intersection(ACCOUNT_SSH_EXPOSURE_KINDS)):
+            findings.append(Finding(
+                rule_id="PRIV-ACCOUNT-BACKDOOR-001",
+                package_name=pkg_name,
+                package_version=pkg_ver,
+                phase=phase,
+                source=Source.deterministic_rule,
+                severity=Severity.CRITICAL,
+                confidence=Confidence.CONFIRMED,
+                evidence_quality=EvidenceQuality.confirmed_static_pattern,
+                file_path=pkg_path,
+                explanation=(
+                    "Package logic combines a literal account credential, a privilege grant, and "
+                    "SSH exposure, which recreates a remote root-equivalent login without any "
+                    "downloader, obfuscation, or embedded payload."
+                ),
+                recommendation=(
+                    "Do not build or install this revision. If it was already installed, review "
+                    "local account, sudo, and SSH policy from trusted recovery media rather than "
+                    "assuming removal of the package reverses the change."
+                ),
+                blocks_installation=True,
+                requires_manual_review=False,
+                evidence_snippet=(
+                    "Correlated signals: "
+                    + "; ".join(signal.label for signal in account_signals)
+                ),
+                line_number=min(signal.line_number for signal in account_signals),
             ))
         remote_stage_analysis = analyze_remote_stage_execution(content)
         remote_stage_signals = remote_stage_analysis.signals

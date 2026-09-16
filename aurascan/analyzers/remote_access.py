@@ -10,6 +10,33 @@ class RemoteAccessSignal(NamedTuple):
     remote_anchor: bool
 
 
+class AccountBackdoorSignal(NamedTuple):
+    """One independent behavior in a package-controlled account chain.
+
+    ``kind`` drives correlation only; ``label`` is a fixed, secret-free string
+    so no package-controlled password or user name reaches a report.
+    """
+
+    kind: str
+    label: str
+    line_number: int
+    remote_anchor: bool
+
+
+# Shared sudoers policy shapes. The per-line package rules and the correlated
+# account detector import these strings so both surfaces agree on the exact
+# policy text they treat as a privileged grant.
+ADMIN_GROUP_SUDO_POLICY_PATTERN = (
+    r"(?:^|['\"])[ \t]*%(?:wheel|sudo|admin)\b[ \t]+[^\s=]+[ \t]*="
+    r"(?![^\n]*NOPASSWD[ \t]*:)[^\n]*"
+)
+SUDO_POLICY_GRANT_PATTERN = (
+    r"(?:^|['\"])[ \t]*(?:%?[A-Za-z_][A-Za-z0-9_.-]*|ALL)[ \t]+[^\s=]+[ \t]*=[ \t]*"
+    r"(?:\([^\n)]*\)[ \t]*)?(?:NOPASSWD[ \t]*:[ \t]*)?(?:ALL\b|/[^\s,]+)"
+)
+ROOT_ACCOUNT_CREDENTIAL_PATTERN = r"(?:^|[\s'\"=])root:[^\s:'\"$`]{1,128}"
+
+
 _COMMAND_SUBSTITUTION_BOUNDARY = "\x1f"
 _COMMAND_PREFIX = (
     r"(?:^|[;&|]|\$\(|" + re.escape(_COMMAND_SUBSTITUTION_BOUNDARY) + r")\s*"
@@ -225,6 +252,50 @@ _HOURLY_ROOT_SYSTEMD_EVENTS = re.compile(
     re.IGNORECASE,
 )
 
+_CREDENTIAL_COMMAND = shell_command_pattern(
+    "chpasswd", "usermod", "useradd", "adduser", "passwd",
+)
+_GROUP_MEMBERSHIP_COMMAND = shell_command_pattern("useradd", "adduser", "usermod", "gpasswd")
+_SYSTEMCTL_COMMAND = shell_command_pattern("systemctl")
+_MESSAGE_COMMAND = shell_command_pattern("echo", "printf", "msg", "msg2", "warn", "warning")
+# A literal account name and password pair, or an explicit password value.
+# Variable references and command substitutions are excluded on purpose: only a
+# credential the package itself carries counts as exposed.
+_LITERAL_ACCOUNT_CREDENTIAL = re.compile(
+    r"(?:^|[\s'\"=])(?:[A-Za-z_][A-Za-z0-9_.-]{0,31}):(?P<pair>[^\s:'\"$`]{1,128})"
+    r"|(?:^|\s)-p[ \t]*['\"]?(?P<short>[^\s'\"]{1,128})"
+    r"|(?:^|\s)--password(?:=|[ \t]+)['\"]?(?P<long>[^\s'\"]{1,128})",
+    re.IGNORECASE,
+)
+_ROOT_ACCOUNT_CREDENTIAL = re.compile(ROOT_ACCOUNT_CREDENTIAL_PATTERN, re.IGNORECASE)
+_HEREDOC_MARKER = re.compile(r"<<-?[ \t]*['\"]?(?P<marker>[A-Za-z_][A-Za-z0-9_]{0,31})")
+_MAX_HEREDOC_LINES = 16
+_ADMINISTRATIVE_GROUP = re.compile(r"\b(?:wheel|sudo|admin)\b", re.IGNORECASE)
+_SSH_SERVICE_ARGUMENT = re.compile(
+    r"\b(?:enable|reenable|start|restart)\b[^\n;|&]*"
+    r"(?<![\w.-])(?:sshd|ssh)(?:\.service|\.socket)?\b",
+    re.IGNORECASE,
+)
+_SSH_PASSWORD_AUTHENTICATION = re.compile(
+    r"\bPasswordAuthentication\b[^\n]{0,64}?\byes\b",
+    re.IGNORECASE,
+)
+_SSHD_CONFIG_WRITE = re.compile(
+    r"\b(?:install|cp|mv|tee|chmod|chown|cat)\b[^\n]{0,200}?"
+    r"(?:\$pkgdir|\$\{pkgdir\})?/etc/ssh/sshd_config(?:\.d(?:/[^\s'\"]*)?)?(?=[\s'\"]|$)"
+    r"|>>?[ \t]*['\"]?(?:\$pkgdir|\$\{pkgdir\})?/etc/ssh/sshd_config(?:\.d(?:/[^\s'\"]*)?)?"
+    r"|/etc/ssh/sshd_config(?:\.d(?:/[^\s'\"]*)?)?[^\n]{0,80}?<<",
+    re.IGNORECASE,
+)
+_ADMIN_GROUP_SUDO_POLICY = re.compile(
+    ADMIN_GROUP_SUDO_POLICY_PATTERN,
+    re.IGNORECASE | re.MULTILINE,
+)
+_SUDO_POLICY_GRANT = re.compile(
+    SUDO_POLICY_GRANT_PATTERN,
+    re.IGNORECASE | re.MULTILINE,
+)
+
 
 def _shell_segment_end(masked_line: str, command_end: int) -> int:
     separator = re.search(r"[;|&)]", masked_line[command_end:])
@@ -372,3 +443,141 @@ def find_remote_access_backdoor_signals(text: str) -> List[RemoteAccessSignal]:
             False,
         ))
     return signals
+
+
+def _first_matching_line(text: str, pattern: re.Pattern) -> Optional[int]:
+    match = pattern.search(text)
+    return None if match is None else text[:match.start()].count("\n") + 1
+
+
+def _line_emits_message(lines: List[str], line_number: int) -> bool:
+    """Report whether a line is documentation rather than active configuration."""
+
+    if line_number < 1 or line_number > len(lines):
+        return False
+    return _MESSAGE_COMMAND.search(mask_shell_quoted_text(lines[line_number - 1])) is not None
+
+
+def _first_config_line(text: str, pattern: re.Pattern) -> Optional[int]:
+    """Find the first matching line that is not echoed or printed as a message."""
+
+    lines = text.splitlines()
+    for match in pattern.finditer(text):
+        line_number = text[:match.start()].count("\n") + 1
+        if not _line_emits_message(lines, line_number):
+            return line_number
+    return None
+
+
+def _heredoc_body(lines: List[str], start: int, marker: str) -> str:
+    """Return the bounded body lines of a heredoc, without executing anything."""
+
+    body: List[str] = []
+    for line in lines[start:start + _MAX_HEREDOC_LINES]:
+        if line.strip() == marker:
+            break
+        body.append(line)
+    return "\n".join(body)
+
+
+def _literal_credential_event(text: str) -> Tuple[Optional[int], bool]:
+    """Find package-controlled assignment of a literal account password.
+
+    The command must appear in shell command position in the quote-masked view
+    so documentation is never treated as an assignment, while the credential
+    itself is read from the raw line. A ``chpasswd`` heredoc body counts as part
+    of the same command. Returns the one-based line and whether the credential
+    targets the ``root`` account.
+    """
+
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        masked_line = mask_shell_quoted_text(line)
+        if _CREDENTIAL_COMMAND.search(masked_line) is None:
+            continue
+        region = line
+        if _LITERAL_ACCOUNT_CREDENTIAL.search(region) is None:
+            marker = _HEREDOC_MARKER.search(line)
+            if marker is None:
+                continue
+            region = _heredoc_body(lines, index + 1, marker.group("marker"))
+            if _LITERAL_ACCOUNT_CREDENTIAL.search(region) is None:
+                continue
+        return index + 1, _ROOT_ACCOUNT_CREDENTIAL.search(region) is not None
+    return None, False
+
+
+def find_account_backdoor_signals(text: str) -> List[AccountBackdoorSignal]:
+    """Return secret-free behaviors of a package-controlled privileged account.
+
+    A package that creates a system account is ordinary. Creating an
+    interactive account with a password the package itself carries, granting it
+    privilege, and exposing SSH is a different semantic event, so the behaviors
+    are reported separately and correlated by the caller. Command-shaped
+    behaviors must appear in shell command position, and configuration values
+    are ignored when the line only prints a message. Labels are fixed strings:
+    no observed account name, password, or hash is ever included.
+    """
+
+    text = _strip_shell_comments(text)
+    signals: List[AccountBackdoorSignal] = []
+
+    credential_line, targets_root = _literal_credential_event(text)
+    if credential_line is not None:
+        signals.append(AccountBackdoorSignal(
+            "privileged_credential" if targets_root else "account_credential",
+            "package-controlled account password is set to a literal value",
+            credential_line,
+            False,
+        ))
+
+    group_line = _find_command_behavior(text, _GROUP_MEMBERSHIP_COMMAND, _ADMINISTRATIVE_GROUP)
+    if group_line is not None:
+        signals.append(AccountBackdoorSignal(
+            "administrative_group",
+            "package-controlled account gains administrative group membership",
+            group_line,
+            False,
+        ))
+
+    grant_line = _first_matching_line(text, _SUDO_POLICY_GRANT)
+    if grant_line is not None:
+        signals.append(AccountBackdoorSignal(
+            "sudo_grant",
+            "package logic contains a sudo policy grant",
+            grant_line,
+            False,
+        ))
+
+    service_line = _find_command_behavior(text, _SYSTEMCTL_COMMAND, _SSH_SERVICE_ARGUMENT)
+    if service_line is not None:
+        signals.append(AccountBackdoorSignal(
+            "ssh_service",
+            "package enables or starts the SSH service",
+            service_line,
+            True,
+        ))
+
+    password_line = _first_config_line(text, _SSH_PASSWORD_AUTHENTICATION)
+    if password_line is not None:
+        signals.append(AccountBackdoorSignal(
+            "ssh_password_auth",
+            "package enables SSH password authentication",
+            password_line,
+            True,
+        ))
+
+    config_line = _first_matching_line(text, _SSHD_CONFIG_WRITE)
+    if config_line is not None:
+        signals.append(AccountBackdoorSignal(
+            "ssh_config_write",
+            "package writes SSH daemon configuration",
+            config_line,
+            True,
+        ))
+    return signals
+
+
+ACCOUNT_CREDENTIAL_KINDS = ("account_credential", "privileged_credential")
+ACCOUNT_PRIVILEGE_KINDS = ("administrative_group", "sudo_grant", "privileged_credential")
+ACCOUNT_SSH_EXPOSURE_KINDS = ("ssh_service", "ssh_password_auth", "ssh_config_write")

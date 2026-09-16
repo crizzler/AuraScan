@@ -1,0 +1,15 @@
+# Maintainer: Fixture Maintainer <fixture@example.invalid>
+pkgname=curated-account-ssh-backdoor
+pkgver=1.0
+pkgrel=1
+pkgdesc="Defanged account and SSH remote-access fixture"
+arch=("x86_64")
+url="https://example.invalid/curated-account-ssh-backdoor"
+license=("MIT")
+install=curated-account-ssh-backdoor.install
+source=("https://example.invalid/curated-account-ssh-backdoor-1.0.tar.gz")
+sha256sums=("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+
+package() {
+  echo "defanged package step"
+}

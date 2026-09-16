@@ -13,6 +13,10 @@ from tests.helpers.intelligence_fixtures import bundled_payload
 
 def selected_data():
     data = bundled_payload()
+    # Keep the fixture independent of how many reviewed advisories the bundled
+    # baseline carries: this regression is about identity collision, so it uses
+    # exactly one npm release and one vendor advisory.
+    data["vendor_advisories"] = data["vendor_advisories"][:1]
     campaign = data["npm_campaigns"][0]
     campaign.update(id="vendor/x", payload_sha256=[], malicious_domains=[])
     campaign["packages"] = [{

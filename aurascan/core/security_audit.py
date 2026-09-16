@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen as urllib_urlopen
 
 from aurascan.core.intelligence import (
-    IntelligenceSnapshot, bundled_snapshot, load_intelligence_snapshot,
+    IntelligenceSnapshot, VENDOR_COMPARATOR_FLOORS, bundled_snapshot, load_intelligence_snapshot,
 )
 from aurascan.core.models import SCANNER_VERSION, Severity
 
@@ -47,14 +47,32 @@ PACMAN_HISTORY_RE = re.compile(
     r"(?P<package>\S+)\s+\((?P<version>[^)]*)\)"
 )
 SEVERITY_ORDER = [Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL]
-# This is a narrow numeric Chromium release comparator, not Arch vercmp or a
-# general SemVer implementation. Epoch and pkgrel cannot establish an upstream
-# fix; custom suffixes, abbreviated and prerelease versions remain unresolved.
+# This is a narrow numeric release comparator, not Arch vercmp or a general
+# SemVer implementation. Epoch and pkgrel cannot establish an upstream fix;
+# custom suffixes, abbreviated and prerelease versions remain unresolved. Each
+# comparator is owned by the application, so a feed can only select version
+# semantics this revision already implements.
 VENDOR_EMERGENCY_ARCH_VERSION_RE = re.compile(
     r"(?:(?:0|[1-9][0-9]*):)?"
     r"(?P<upstream>(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){3})"
     r"(?:-[1-9][0-9]*(?:\.[0-9]+)*)?\Z"
 )
+VENDOR_DOTTED_ARCH_VERSION_RE = re.compile(
+    r"(?:(?:0|[1-9][0-9]*):)?"
+    r"(?P<upstream>(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){1,3})"
+    r"(?:-[1-9][0-9]*(?:\.[0-9]+)*)?\Z"
+)
+VENDOR_COMPARATOR_VERSIONS = {
+    "chromium_four_part": VENDOR_EMERGENCY_ARCH_VERSION_RE,
+    "numeric_dotted_upstream": VENDOR_DOTTED_ARCH_VERSION_RE,
+}
+# Vendor ratings are mapped here, never by the feed.
+VENDOR_SEVERITY_FINDING = {
+    "critical": Severity.HIGH,
+    "high": Severity.HIGH,
+    "moderate": Severity.MEDIUM,
+    "low": Severity.LOW,
+}
 # Snapshot verified against the maintainer advisories and GitHub's reviewed
 # metadata on 2026-09-09. The two sources agree below the legacy rename but
 # disagree about Rust deepseek-tui 0.8.41; do not invent a patched legacy floor.
@@ -1217,20 +1235,32 @@ def vendor_emergency_version_status(package_name: str, version: object, *,
         if any(status != "at_or_above_floor" for status in statuses):
             return "unresolved"
         return "at_or_above_floor"
-    if (advisory.get("package") != package_name
-            or advisory.get("comparator") != "chromium_four_part"
+    version_pattern = VENDOR_COMPARATOR_VERSIONS.get(advisory.get("comparator"))
+    floor_pattern = VENDOR_COMPARATOR_FLOORS.get(advisory.get("comparator"))
+    if (advisory.get("package") != package_name or version_pattern is None
             or not isinstance(advisory.get("id"), str) or not advisory.get("id")):
         return "unresolved"
     floor = advisory.get("fixed_floor")
     if (not isinstance(floor, str) or len(floor) > 128
-            or not re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){3}", floor)):
+            or not floor_pattern.fullmatch(floor)):
         return "unresolved"
-    match = (VENDOR_EMERGENCY_ARCH_VERSION_RE.fullmatch(version)
+    match = (version_pattern.fullmatch(version)
              if isinstance(version, str) and len(version) <= 128 else None)
     if match is None:
         return "unresolved"
-    upstream = tuple(int(part) for part in match.group("upstream").split("."))
-    return "affected" if upstream < tuple(int(part) for part in floor.split(".")) else "at_or_above_floor"
+    return ("affected" if _compare_upstream(match.group("upstream"), floor) < 0
+            else "at_or_above_floor")
+
+
+def _compare_upstream(version: str, floor: str) -> int:
+    """Compare numeric dotted upstream releases with zero padding."""
+
+    left = [int(part) for part in version.split(".")]
+    right = [int(part) for part in floor.split(".")]
+    width = max(len(left), len(right))
+    left.extend([0] * (width - len(left)))
+    right.extend([0] * (width - len(right)))
+    return (left > right) - (left < right)
 
 
 def audit_vendor_emergency_exposure(installed_packages: Mapping[str, str],
@@ -1238,6 +1268,7 @@ def audit_vendor_emergency_exposure(installed_packages: Mapping[str, str],
     """Match one captured snapshot independently of Arch's advisory feed."""
     snapshot = intelligence_snapshot if intelligence_snapshot is not None else bundled_snapshot()
     findings: List[SecurityFinding] = []
+    covered: Set[str] = set()
     for entry in snapshot.payload["vendor_advisories"]:
         name = entry["package"]
         if name not in installed_packages:
@@ -1245,45 +1276,99 @@ def audit_vendor_emergency_exposure(installed_packages: Mapping[str, str],
         version = installed_packages[name]
         status = vendor_emergency_version_status(name, version, advisory=entry)
         cve, fixed = entry["cve"], entry["fixed_floor"]
-        vendor, exploitation = entry["vendor_reference"], entry["exploitation_reference"]
+        vendor = entry["vendor_reference"]
+        exploitation_reference = entry["exploitation_reference"]
+        exploited = entry["known_exploited"]
+        severity = VENDOR_SEVERITY_FINDING.get(entry["vendor_severity"], Severity.MEDIUM)
+        vendor_severity = entry["vendor_severity"]
         reviewed = entry["reviewed_at"]
         projection = {key: entry[key] for key in ("id", "package", "comparator", "fixed_floor")}
         projection["intelligence_identity"] = snapshot.identity
         if status == "unresolved":
+            # One package with several reviewed advisories produces one coverage
+            # warning: the missing or unsupported version evidence is the same.
+            if name in covered:
+                continue
+            covered.add(name)
             findings.append(SecurityFinding(
                 rule_id="SEC-VENDOR-ADVISORY-VERSION-UNRESOLVED",
                 severity=Severity.MEDIUM,
                 category="advisory_coverage",
-                title=f"{name} needs emergency-advisory version verification.",
+                title=f"{name} needs vendor advisory version verification.",
                 summary="The captured installed version is missing or is not a supported numeric upstream release.",
                 why_it_matters="The captured vendor advisory cannot be evaluated from this version evidence. This is incomplete coverage, not a vulnerability or exploitation finding.",
                 recommended_action="Verify the installed upstream revision and distribution patch provenance against the cited vendor advisory before relying on a fixed-version claim.",
                 package_name=name,
                 evidence=[f"installed-package={name}", cve, f"upstream-fixed={fixed}",
-                          f"advisory-reviewed={reviewed}", vendor, exploitation],
+                          f"advisory-reviewed={reviewed}", vendor]
+                    + ([exploitation_reference] if exploitation_reference else []),
                 confidence="high", source="vendor_emergency_advisory", advisory=projection,
             ))
         elif status == "affected":
-            original = cve == "CVE-2026-87491" and name == "chromium"
-            findings.append(SecurityFinding(
-                rule_id="SEC-KNOWN-EXPLOITED-VERSION-LAG",
-                severity=Severity.HIGH,
-                category="vendor_emergency_advisory",
-                title=f"{name} is below a known-exploited vulnerability's upstream fix.",
-                summary=(f"Captured installed version {version} is below Linux upstream fix {fixed} for {cve}; "
-                         + ("Google confirms exploitation and CISA lists it in KEV." if original else
-                            "the cited authority records known exploitation.")),
-                why_it_matters=("The V8 flaw can allow crafted HTML to execute code inside the browser sandbox. " if original else "")
-                    + "Version evidence does not establish exploitation on this host, Linux-specific targeting, sandbox escape, or a malicious package. Package origin and distribution backports have not been verified.",
-                recommended_action=("Avoid untrusted browsing with this build until its patch status is verified. " if original else "")
-                    + "Use a verified distribution update containing the vendor fix when available; review package origin and any backport evidence.",
-                package_name=name,
-                evidence=[f"installed={name} {version}", cve, f"upstream-fixed={fixed}",
-                          "known-exploited=true; authority=" + ("Google/CISA" if original else "cited references"),
-                          f"advisory-reviewed={reviewed}", vendor, exploitation],
-                confidence="medium", source="vendor_emergency_advisory", advisory=projection,
+            findings.append(_vendor_floor_finding(
+                name=name, version=version, cve=cve, fixed=fixed, vendor=vendor,
+                exploitation_reference=exploitation_reference, exploited=exploited,
+                severity=severity, vendor_severity=vendor_severity, reviewed=reviewed,
+                projection=projection,
             ))
     return findings
+
+
+def _vendor_floor_finding(*, name: str, version: object, cve: str, fixed: str, vendor: str,
+                          exploitation_reference: Optional[str], exploited: bool,
+                          severity: Severity, vendor_severity: str, reviewed: str,
+                          projection: Mapping[str, str]) -> SecurityFinding:
+    """Describe a verified vendor security floor without claiming exploitation."""
+
+    exploitation_evidence = (f"known-exploited=true; authority={exploitation_reference}"
+                             if exploited else
+                             "known-exploited=false; no exploitation evidence recorded")
+    common_evidence = [f"installed={name} {version}", cve, f"upstream-fixed={fixed}",
+                       exploitation_evidence, f"advisory-reviewed={reviewed}", vendor]
+    if exploited:
+        return SecurityFinding(
+            rule_id="SEC-KNOWN-EXPLOITED-VERSION-LAG",
+            severity=severity,
+            category="vendor_emergency_advisory",
+            title=f"{name} is below a known-exploited vulnerability's upstream fix.",
+            summary=(f"Captured installed version {version} is below vendor fixed version {fixed} "
+                     f"for {cve}, and the cited authority records known exploitation."),
+            why_it_matters=(
+                "A known-exploited flaw is being used in the wild and the installed package predates "
+                "the vendor fix. Version evidence does not establish exploitation on this host, "
+                "platform-specific targeting, or a malicious package, and package origin and "
+                "distribution backports have not been verified."
+            ),
+            recommended_action=(
+                "Use a verified distribution update containing the vendor fix when available; review "
+                "package origin and any backport evidence, and avoid using the affected component with "
+                "untrusted input until its patch status is verified."
+            ),
+            package_name=name,
+            evidence=common_evidence,
+            confidence="medium", source="vendor_emergency_advisory", advisory=projection,
+        )
+    return SecurityFinding(
+        rule_id="SEC-VENDOR-SECURITY-FLOOR-LAG",
+        severity=severity,
+        category="vendor_emergency_advisory",
+        title=f"{name} is below a verified vendor security floor.",
+        summary=(f"Captured installed version {version} is below vendor fixed version {fixed} "
+                 f"for {cve}; the vendor rates the fixed release {vendor_severity}."),
+        why_it_matters=(
+            "The vendor established a fixed version, and the installed package predates it. "
+            "Exploitation is not established for this advisory. Version evidence does not prove that "
+            "this host was targeted, that a flaw is reachable, or that the package is unsafe in any "
+            "other way; package origin and distribution backports have not been verified."
+        ),
+        recommended_action=(
+            "Update to a verified distribution package containing the vendor fix when it is available. "
+            "Do not substitute an unreviewed repository or an unverified upstream build."
+        ),
+        package_name=name,
+        evidence=common_evidence,
+        confidence="medium", source="vendor_emergency_advisory", advisory=projection,
+    )
 
 
 def build_security_audit(

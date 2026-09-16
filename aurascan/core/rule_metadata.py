@@ -41,6 +41,11 @@ RULE_METADATA: Dict[str, RuleMetadata] = {
         Severity.HIGH, "vendor-emergency-version", 95, True, "finding_fields",
         "Captured installed package version is below a curated known-exploited vendor fix; origin, backports and host exploitation remain unverified.",
     ),
+    "SEC-VENDOR-SECURITY-FLOOR-LAG": RuleMetadata(
+        "SEC-VENDOR-SECURITY-FLOOR-LAG", RuleCategory.history_supply_chain,
+        Severity.HIGH, "vendor-emergency-version", 90, True, "finding_fields",
+        "Captured installed package version is below a verified multi-vendor security floor; exploitation is not established.",
+    ),
     "SEC-VENDOR-ADVISORY-VERSION-UNRESOLVED": RuleMetadata(
         "SEC-VENDOR-ADVISORY-VERSION-UNRESOLVED", RuleCategory.history_supply_chain,
         Severity.MEDIUM, "vendor-emergency-coverage", 75, True, "finding_fields",
@@ -421,6 +426,10 @@ RULE_METADATA: Dict[str, RuleMetadata] = {
     "EXEC-INSTALL-HOOK-SUDO-001": RuleMetadata("EXEC-INSTALL-HOOK-SUDO-001", RuleCategory.deterministic_static, Severity.CRITICAL, "privileged-install-hook", 100, True, "deterministic", "Runs sudo directly from an already-privileged package install hook."),
     "PRIV-SUDOERS-NOPASSWD-001": RuleMetadata("PRIV-SUDOERS-NOPASSWD-001", RuleCategory.persistence, Severity.CRITICAL, "privileged-sudo-policy", 100, True, "deterministic", "Grants passwordless sudo execution."),
     "PRIV-SUDOERS-DROPIN-001": RuleMetadata("PRIV-SUDOERS-DROPIN-001", RuleCategory.persistence, Severity.HIGH, "privileged-sudo-policy", 85, True, "deterministic", "Installs or references a sudoers policy file."),
+    "PRIV-SUDO-ADMIN-GROUP-001": RuleMetadata("PRIV-SUDO-ADMIN-GROUP-001", RuleCategory.persistence, Severity.HIGH, "privileged-sudo-policy", 84, True, "deterministic", "Grants an administrative group a sudo policy entry without passwordless execution."),
+    "PRIV-ACCOUNT-CREDENTIAL-001": RuleMetadata("PRIV-ACCOUNT-CREDENTIAL-001", RuleCategory.persistence, Severity.HIGH, "privileged-account-credential", 90, True, "deterministic", "Assigns a local account a password the package itself carries."),
+    "PRIV-ACCOUNT-BACKDOOR-001": RuleMetadata("PRIV-ACCOUNT-BACKDOOR-001", RuleCategory.network_behavior, Severity.CRITICAL, "privileged-account-backdoor", 100, True, "deterministic", "Correlates a literal account credential, a privilege grant, and SSH exposure."),
+    "DEEPSTATIC-PRIV-ACCOUNT-BACKDOOR-001": RuleMetadata("DEEPSTATIC-PRIV-ACCOUNT-BACKDOOR-001", RuleCategory.network_behavior, Severity.CRITICAL, "privileged-account-backdoor", 100, True, "deterministic", "Finds a correlated privileged-account remote-access chain in acquired source text."),
     "REMOTE-ADMIN-BACKDOOR-001": RuleMetadata("REMOTE-ADMIN-BACKDOOR-001", RuleCategory.network_behavior, Severity.CRITICAL, "remote-admin-backdoor", 100, True, "deterministic", "Correlates remote-access behavior with privilege, persistence, or anti-forensics."),
     "DEEPSTATIC-REMOTE-ADMIN-BACKDOOR-001": RuleMetadata("DEEPSTATIC-REMOTE-ADMIN-BACKDOOR-001", RuleCategory.network_behavior, Severity.CRITICAL, "remote-admin-backdoor", 100, True, "deterministic", "Finds a correlated root remote-access backdoor chain in acquired source text."),
     "SEC-AUR-CAMPAIGN-BPF-PERSISTENCE": RuleMetadata("SEC-AUR-CAMPAIGN-BPF-PERSISTENCE", RuleCategory.persistence, Severity.CRITICAL, "known-aur-campaign-host-indicator", 100, True, "finding_fields", "Finds a campaign-associated eBPF persistence marker."),

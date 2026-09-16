@@ -1420,7 +1420,6 @@ def security_audit_upgrade_findings(
     findings: List[UpgradeFinding] = []
     for item in security_report.findings:
         if (item.category == "vendor_emergency_advisory"
-                and item.rule_id == "SEC-KNOWN-EXPLOITED-VERSION-LAG"
                 and item.source == "vendor_emergency_advisory"
                 and bool(item.advisory.get("intelligence_identity"))
                 and vendor_emergency_version_status(item.package_name, pending_repo.get(item.package_name),

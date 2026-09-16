@@ -1,0 +1,10 @@
+# Defanged fixture only. AuraScan scans this file as text; tests never run it,
+# never create the account, never apply sudo policy, and never start SSH.
+# The credential below is an inert example string, not a working password.
+post_install() {
+  /usr/bin/useradd -m -G wheel -s /bin/bash fixture-operator
+  echo 'fixture-operator:fixture-only-password' | /usr/bin/chpasswd
+  /usr/bin/systemctl enable --now sshd
+  printf 'PasswordAuthentication yes\n' >> /etc/ssh/sshd_config
+  echo "Defanged fixture: no account, sudo, or SSH change was applied."
+}

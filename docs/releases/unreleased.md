@@ -2,6 +2,61 @@
 
 Changes after v0.10.10:
 
+AUR account/SSH backdoor detection (new rules):
+
+- `PRIV-ACCOUNT-BACKDOOR-001` is a CRITICAL blocking correlation: the same
+  package-controlled text sets an account password to a literal value, grants
+  that account privilege, and exposes SSH. It catches a remote root-equivalent
+  login assembled from ordinary account, sudo and SSH facilities, with no
+  downloader, obfuscation or embedded payload to detect.
+- `PRIV-ACCOUNT-CREDENTIAL-001` reports the literal-credential behavior alone as
+  HIGH needing review, `PRIV-SUDO-ADMIN-GROUP-001` reports an
+  administrative-group sudo policy that does not use `NOPASSWD`, and
+  `DEEPSTATIC-PRIV-ACCOUNT-BACKDOOR-001` covers the same chain in acquired
+  source.
+- The credential half is read only from shell command position: piped
+  `chpasswd`, an explicit password flag, and a `chpasswd` heredoc body count,
+  while a generated password, a shell variable and quoted documentation do not.
+  Ordinary locked service accounts (`useradd --system`, no interactive password,
+  no administrative group, no SSH exposure) stay negative cases, so daemons are
+  not flagged merely for owning a user.
+- Evidence labels are fixed strings, so the observed account name, password,
+  hash and policy line never appear in a report. The motivating incident is the
+  2026-09-14 aur-general report about the removed package `x11-qemu-validation`;
+  the account name and password circulated by third-party summaries were not
+  established from the primary source and are not encoded anywhere.
+
+Vendor security floors are multi-product and exploitation-aware (intelligence 2.0):
+
+- Vendor advisories now record the vendor's own severity and an explicit
+  exploitation state, and the comparator is declared per entry
+  (`chromium_four_part`, or the new `numeric_dotted_upstream` for
+  two-to-four-component vendor releases). Vendor severity maps to finding
+  severity in the application; a feed still cannot select a rule or policy.
+- `SEC-VENDOR-SECURITY-FLOOR-LAG` is the new HIGH rule for a verified vendor
+  floor whose exploitation is not established. `SEC-KNOWN-EXPLOITED-VERSION-LAG`
+  keeps the exploited case, so critical vulnerability exposure is no longer
+  presented as known exploitation.
+- Added `chromium` below `153.0.8010.47` (Critical CVE-2026-91749), `firefox`
+  below `156.0` (MFSA 2026-90) and `thunderbird` below `156.0` (MFSA 2026-94),
+  reviewed on 2026-09-16 with no exploitation evidence. A build between the two
+  Chromium floors is clean for the known-exploited entry and still below the
+  later one; a release at or above every captured floor matches nothing.
+- Floors map to exact Arch package names, so browser forks (LibreWolf, Zen
+  Browser, Floorp) are never matched by version similarity. Unsupported version
+  shapes keep unresolved coverage, now with a single warning per package instead
+  of one per advisory.
+- The runtime intelligence wire contract moves to schema and engine capability
+  `2.0`, because the exploitation state, vendor severity and comparator set are
+  part of the reviewed format. A `1.0` payload, manifest or stored generation is
+  rejected rather than reinterpreted: refresh against a `2.0` bundle, and the
+  bundled `2.0` baseline stays available meanwhile. A `1.0` detection is never
+  carried over silently. The general-purpose security-audit report schema is
+  unchanged at `1.0`; only the intelligence contract changed.
+- No detection, blocking behavior, AI authority, or network/privilege surface is
+  otherwise changed, and no browser, package payload, or live feed is contacted
+  to evaluate a captured floor.
+
 Deep-static Git object signature evidence (observational):
 
 - Explicit `--deep-static` acquisition now reports the signature state of the

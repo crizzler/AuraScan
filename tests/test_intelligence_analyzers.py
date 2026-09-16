@@ -139,6 +139,9 @@ def test_lifecycle_new_host_uses_same_snapshot_and_does_not_attribute_campaign(t
 
 def test_same_package_multiple_advisories_keep_distinct_originating_floors(monkeypatch):
     data = bundled_payload()
+    # Start from exactly one chromium advisory so the regression measures the
+    # multiple-floor behavior rather than the bundled record count.
+    data["vendor_advisories"] = data["vendor_advisories"][:1]
     second = dict(data["vendor_advisories"][0])
     second.update(id="INERT-SECOND-CHROMIUM-FLOOR", cve="CVE-2099-10001", fixed_floor="154.0.0.0",
                   vendor_reference=REFERENCE, exploitation_reference=REFERENCE)
@@ -185,6 +188,6 @@ def test_audit_reports_explicit_snapshot_status_without_loading_another(tmp_path
     assert report.intelligence["identity"] == intelligence.identity
     assert report.to_dict()["intelligence"]["status"] == status
     assert "Runtime intelligence: " + status in render_security_audit(report, use_color=False)
-    assert len(report.vendor_emergency_findings) == 1
+    assert len(report.vendor_emergency_findings) == 2
     assert bool(any(item.rule_id == "INTELLIGENCE-UNAVAILABLE-001" for item in report.findings)) is bool(error)
     assert report.status == ("partial" if error else "ok")

@@ -1181,3 +1181,167 @@ def test_numeric_suid_mode_is_blocked():
     findings = analyze_text('chmod 4755 "$target"\n')
 
     assert finding(findings, "SYS-CHMOD-001").blocks_installation is True
+
+
+LITERAL_CREDENTIAL = "fixture-operator:fixture-only-password"
+ACCOUNT_HOOK = Phase.install_hook_static
+
+
+def test_literal_account_password_requires_review_but_does_not_block():
+    findings = analyze_text(
+        "post_install() {\n"
+        "  /usr/bin/useradd -m -s /bin/bash fixture-operator\n"
+        f"  echo '{LITERAL_CREDENTIAL}' | /usr/bin/chpasswd\n"
+        "}\n",
+        phase=ACCOUNT_HOOK,
+    )
+
+    credential = finding(findings, "PRIV-ACCOUNT-CREDENTIAL-001")
+    assert credential.severity == Severity.HIGH
+    assert credential.requires_manual_review is True
+    assert credential.blocks_installation is False
+    assert credential.line_number == 3
+    assert "PRIV-ACCOUNT-BACKDOOR-001" not in rule_ids(findings)
+
+
+def test_generated_account_password_is_not_a_literal_credential():
+    findings = analyze_text(
+        "post_install() {\n"
+        '  printf "%s:%s\\n" "$fixture_user" "$(head -c 16 /dev/urandom)" | chpasswd\n'
+        "  systemctl enable sshd\n"
+        "}\n",
+        phase=ACCOUNT_HOOK,
+    )
+
+    assert "PRIV-ACCOUNT-CREDENTIAL-001" not in rule_ids(findings)
+    assert "PRIV-ACCOUNT-BACKDOOR-001" not in rule_ids(findings)
+
+
+def test_quoted_password_examples_are_not_credential_assignments():
+    findings = analyze_text(
+        "post_install() {\n"
+        "  echo \"Never run: echo 'svc:hardcoded' | chpasswd\"\n"
+        "  echo \"Do not set PasswordAuthentication yes\"\n"
+        "  echo \"See /etc/ssh/sshd_config for defaults\"\n"
+        "  echo \"systemctl enable sshd is not performed here\"\n"
+        "}\n",
+        phase=ACCOUNT_HOOK,
+    )
+
+    assert "PRIV-ACCOUNT-CREDENTIAL-001" not in rule_ids(findings)
+    assert "PRIV-ACCOUNT-BACKDOOR-001" not in rule_ids(findings)
+
+
+def test_locked_system_account_is_not_a_credential_or_backdoor():
+    findings = analyze_text(
+        "post_install() {\n"
+        "  /usr/bin/useradd --system --no-create-home --shell /usr/bin/nologin fixture-daemon || true\n"
+        "  /usr/bin/passwd -l fixture-daemon || true\n"
+        "}\n",
+        phase=ACCOUNT_HOOK,
+    )
+
+    assert rule_ids(findings) == set()
+
+
+def test_privileged_password_account_with_ssh_exposure_blocks():
+    findings = analyze_text(
+        "post_install() {\n"
+        "  /usr/bin/useradd -m -G wheel -s /bin/bash fixture-operator\n"
+        f"  echo '{LITERAL_CREDENTIAL}' | /usr/bin/chpasswd\n"
+        "  /usr/bin/systemctl enable --now sshd\n"
+        "}\n",
+        phase=ACCOUNT_HOOK,
+    )
+
+    backdoor = finding(findings, "PRIV-ACCOUNT-BACKDOOR-001")
+    assert backdoor.severity == Severity.CRITICAL
+    assert backdoor.blocks_installation is True
+    assert backdoor.requires_manual_review is False
+    assert backdoor.line_number == 2
+    assert LITERAL_CREDENTIAL not in backdoor.evidence_snippet
+    assert backdoor.evidence_snippet.startswith("Correlated signals: ")
+
+
+def test_root_password_assignment_with_ssh_start_blocks():
+    findings = analyze_text(
+        "post_install() {\n"
+        "  echo 'root:fixture-only-password' | chpasswd\n"
+        "  /usr/bin/systemctl restart sshd\n"
+        "}\n",
+        phase=ACCOUNT_HOOK,
+    )
+
+    backdoor = finding(findings, "PRIV-ACCOUNT-BACKDOOR-001")
+    assert backdoor.blocks_installation is True
+    assert "fixture-only-password" not in str(backdoor.evidence_snippet)
+
+
+def test_account_password_without_ssh_exposure_is_not_a_remote_backdoor():
+    findings = analyze_text(
+        "post_install() {\n"
+        "  /usr/bin/useradd -m -G wheel -s /bin/bash fixture-operator\n"
+        f"  echo '{LITERAL_CREDENTIAL}' | /usr/bin/chpasswd\n"
+        "}\n",
+        phase=ACCOUNT_HOOK,
+    )
+
+    assert "PRIV-ACCOUNT-BACKDOOR-001" not in rule_ids(findings)
+    assert "PRIV-ACCOUNT-CREDENTIAL-001" in rule_ids(findings)
+
+
+def test_ssh_activation_without_account_credential_is_not_an_account_backdoor():
+    findings = analyze_text(
+        "post_install() {\n"
+        "  /usr/bin/systemctl enable --now sshd\n"
+        "  printf 'PasswordAuthentication yes\\n' >> /etc/ssh/sshd_config\n"
+        "}\n",
+        phase=ACCOUNT_HOOK,
+    )
+
+    assert "PRIV-ACCOUNT-BACKDOOR-001" not in rule_ids(findings)
+    assert "PRIV-ACCOUNT-CREDENTIAL-001" not in rule_ids(findings)
+
+
+def test_heredoc_chpasswd_body_is_a_literal_credential():
+    findings = analyze_text(
+        "post_install() {\n"
+        "  chpasswd <<'FIXTURE'\n"
+        f"{LITERAL_CREDENTIAL}\n"
+        "FIXTURE\n"
+        "}\n",
+        phase=ACCOUNT_HOOK,
+    )
+
+    credential = finding(findings, "PRIV-ACCOUNT-CREDENTIAL-001")
+    assert credential.line_number == 2
+    assert LITERAL_CREDENTIAL not in str(credential.evidence_snippet)
+
+
+def test_administrative_group_sudo_policy_requires_review_without_blocking():
+    findings = analyze_text(
+        'install -Dm440 fixture "$pkgdir/etc/sudoers.d/fixture"\n'
+        "cat > /etc/sudoers.d/fixture <<'EOF'\n"
+        "%wheel ALL=(ALL:ALL) ALL\n"
+        "EOF\n",
+    )
+
+    policy = finding(findings, "PRIV-SUDO-ADMIN-GROUP-001")
+    assert policy.severity == Severity.HIGH
+    assert policy.requires_manual_review is True
+    assert policy.blocks_installation is False
+    assert policy.line_number == 3
+    assert "%wheel" not in policy.evidence_snippet
+
+
+def test_passwordless_administrative_group_policy_stays_the_blocking_rule():
+    findings = analyze_text("%wheel ALL=(ALL) NOPASSWD: /usr/bin/fixture-helper\n")
+
+    assert finding(findings, "PRIV-SUDOERS-NOPASSWD-001").blocks_installation is True
+    assert "PRIV-SUDO-ADMIN-GROUP-001" not in rule_ids(findings)
+
+
+def test_wheel_policy_word_in_package_description_is_not_a_policy_change():
+    findings = analyze_text('pkgdesc="Installs %wheel ALL=(ALL:ALL) ALL sample policy"\n')
+
+    assert "PRIV-SUDO-ADMIN-GROUP-001" not in rule_ids(findings)

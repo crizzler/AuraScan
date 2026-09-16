@@ -10,6 +10,7 @@ so these tests stay offline, deterministic and rootless.
 """
 
 import ast
+import builtins
 import importlib.util
 import json
 import sys
@@ -903,12 +904,11 @@ def test_incident_family_left_the_planner_component():
 
     assert "aurascan.core.upgrade_preflight" not in cycles
     assert "aurascan.core.upgrade_models" not in cycles
-    # The generic follow-up framework, the agent and config drift still call each
-    # other through supplied providers; the incident family no longer takes part.
+    # The agent and the generic follow-up framework still call each other; the
+    # incident family and (since Stage 11) config drift no longer take part.
     planner = next(component for component in result.cycles if "aurascan.core.followup" in component)
     assert sorted(planner) == [
         "aurascan.core.agent",
-        "aurascan.core.config_drift",
         "aurascan.core.followup",
     ]
     incident_component = next(
@@ -947,3 +947,180 @@ def test_incident_lifecycle_providers_are_supplied_not_imported():
     agent_source = (ROOT / "aurascan" / "core" / "agent.py").read_text(encoding="utf-8")
     assert "context_from_saved_incident" not in agent_source
     assert "incident_context_provider=incident_context_provider" in agent_source
+
+def test_config_drift_left_the_planner_component():
+    """Stage 11 topology: the lifecycle drives follow-up, never the reverse."""
+
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    cycles = {module for component in result.cycles for module in component}
+
+    assert "aurascan.core.config_drift" not in cycles
+    assert "aurascan.core.config_drift_presenter" not in cycles
+    assert "aurascan.core.followup" in cycles, "the remaining agent cycle is expected"
+
+    module = {info.name: info for info in result.modules}
+    assert "aurascan.core.followup" in module["aurascan.core.config_drift"].internal_imports
+    for name in (
+        "aurascan.core.config_drift",
+        "aurascan.core.config_drift_presenter",
+    ):
+        assert name not in module["aurascan.core.followup"].internal_imports, name
+
+
+def test_config_drift_followup_adapters_are_owned_by_the_lifecycle():
+    """Stage 11: the framework never imports or re-implements drift behavior."""
+
+    followup_source = (ROOT / "aurascan" / "core" / "followup.py").read_text(encoding="utf-8")
+    for name in (
+        "aurascan.core.config_drift",
+        "config_drift_presenter",
+        "context_from_config_drift",
+        "build_config_drift_runtime",
+        "prepare_config_drift_remediation",
+    ):
+        assert name not in followup_source, name
+    # The framework only calls the operations the lifecycle supplies.
+    assert "config_drift_runtime_provider(" in followup_source
+    assert "config_drift_remediation_provider(" in followup_source
+
+    drift_source = (ROOT / "aurascan" / "core" / "config_drift.py").read_text(encoding="utf-8")
+    for name in (
+        "def context_from_config_drift(",
+        "def build_config_drift_runtime(",
+        "def prepare_config_drift_remediation(",
+    ):
+        assert name in drift_source, name
+
+
+def test_config_drift_providers_are_supplied_by_the_callers_that_own_them():
+    """Both entry points and the upgrade workflow pass the drift providers in."""
+
+    cli_source = (ROOT / "aurascan" / "cli.py").read_text(encoding="utf-8")
+    assert "config_drift_runtime_provider=build_config_drift_runtime" in cli_source
+    assert "config_drift_remediation_provider=prepare_config_drift_remediation" in cli_source
+
+    agent_source = (ROOT / "aurascan" / "core" / "agent.py").read_text(encoding="utf-8")
+    assert "config_drift_runtime_provider=config_drift_runtime_provider" in agent_source
+    assert "config_drift_remediation_provider=config_drift_remediation_provider" in agent_source
+
+    # Every upgrade-runtime site in the workflow supplies the prepared fix.
+    upgrade_source = (ROOT / "aurascan" / "core" / "upgrade_preflight.py").read_text(encoding="utf-8")
+    assert upgrade_source.count(
+        "config_drift_remediation_provider=prepare_config_drift_remediation"
+    ) == 3
+    assert "from aurascan.core.config_drift import (" in upgrade_source
+    assert "    prepare_config_drift_remediation," in upgrade_source
+
+def _module_bindings(tree) -> set:
+    """Names a module has bound by the time its top-level `def`s run."""
+
+    names = {"__name__", "__file__", "__doc__", "__package__", "__builtins__"}
+
+    def collect(body) -> None:
+        for node in body:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    names.add((alias.asname or alias.name).split(".")[0])
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.add(node.name)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    collect_target(target)
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                collect_target(node.target)
+            elif isinstance(node, (ast.For, ast.AsyncFor, ast.With, ast.AsyncWith)):
+                collect_target(getattr(node, "target", None) or node.optional_vars)
+                collect(node.body)
+                collect(node.orelse)
+            elif isinstance(node, ast.If):
+                collect(node.body)
+                collect(node.orelse)
+            elif isinstance(node, (ast.Try, ast.TryStar)):
+                collect(node.body)
+                collect(node.orelse)
+                collect(node.finalbody)
+                for handler in node.handlers:
+                    collect(handler.body)
+
+    def collect_target(target) -> None:
+        if isinstance(target, ast.Name):
+            names.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                collect_target(element)
+
+    collect(tree.body)
+    return names
+
+
+def _unresolved_annotations(source: str):
+    """Annotation names a Python 3.8 interpreter could not resolve at `def` time."""
+
+    tree = ast.parse(source)
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            if any(alias.name == "annotations" for alias in node.names):
+                return []
+    available = _module_bindings(tree) | set(dir(builtins))
+    problems = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        annotations = [
+            argument.annotation
+            for argument in (
+                node.args.args + node.args.kwonlyargs + node.args.posonlyargs
+            )
+        ]
+        annotations.append(node.returns)
+        for annotation in annotations:
+            if annotation is None or isinstance(annotation, ast.Constant):
+                continue
+            for inner in ast.walk(annotation):
+                if isinstance(inner, ast.Name) and inner.id not in available:
+                    problems.append((node.name, inner.id))
+    return problems
+
+
+def test_annotations_resolve_at_definition_time_on_python_38():
+    """Stage 11: a lazily imported name may not appear as a bare annotation.
+
+    The provider seam imports the framework inside the functions that need it.
+    Python 3.8 evaluates every parameter and return annotation when the `def`
+    runs, so an unquoted lazily imported name is a NameError there. CPython 3.14
+    defers annotations and hides the defect locally, so it needs a static rule.
+    """
+
+    checked = 0
+    for path in sorted((ROOT / "aurascan").rglob("*.py")):
+        problems = _unresolved_annotations(path.read_text(encoding="utf-8"))
+        assert problems == [], (path.name, problems)
+        checked += 1
+
+    assert checked > 80
+
+
+def test_annotation_checker_flags_a_lazily_imported_framework_name():
+    """The rule above is exercised against a fixture so it cannot silently pass."""
+
+    broken = """
+class FollowUpRuntime:
+    pass
+
+
+def build_config_drift_runtime(context: FollowUpContext, *, runner=None) -> FollowUpRuntime:
+    from aurascan.core.followup import FollowUpContext
+    return runner(context)
+"""
+    quoted = """
+class FollowUpRuntime:
+    pass
+
+
+def build_config_drift_runtime(context: "FollowUpContext", *, runner=None) -> FollowUpRuntime:
+    from aurascan.core.followup import FollowUpContext
+    return runner(context)
+"""
+
+    assert _unresolved_annotations(broken) == [("build_config_drift_runtime", "FollowUpContext")]
+    assert _unresolved_annotations(quoted) == []

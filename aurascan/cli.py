@@ -6,7 +6,11 @@ from typing import List
 
 from aurascan.core.agent import run_agent
 from aurascan.core.config import load_env, user_env_path
-from aurascan.core.config_drift import run_config_drift
+from aurascan.core.config_drift import (
+    build_config_drift_runtime,
+    prepare_config_drift_remediation,
+    run_config_drift,
+)
 from aurascan.core.engine import AuraScanEngine
 from aurascan.core.followup import run_ask
 from aurascan.core.incident_followup import (
@@ -191,6 +195,8 @@ def main(argv=None):
             refresh_upgrade_report=refresh_upgrade_preflight,
             incident_context_provider=load_incident_followup_context,
             incident_runtime_provider=build_incident_followup_runtime,
+            config_drift_runtime_provider=build_config_drift_runtime,
+            config_drift_remediation_provider=prepare_config_drift_remediation,
         ))
     if raw_argv and raw_argv[0] == "agent":
         sys.exit(run_agent(
@@ -198,6 +204,8 @@ def main(argv=None):
             refresh_upgrade_report=refresh_upgrade_preflight,
             incident_context_provider=load_incident_followup_context,
             incident_runtime_provider=build_incident_followup_runtime,
+            config_drift_runtime_provider=build_config_drift_runtime,
+            config_drift_remediation_provider=prepare_config_drift_remediation,
         ))
     if raw_argv and raw_argv[0] == "instruction-audit":
         sys.exit(run_instruction_audit(raw_argv[1:]))

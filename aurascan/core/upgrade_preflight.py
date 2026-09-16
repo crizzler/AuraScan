@@ -22,6 +22,7 @@ from aurascan.core.ai_provider import parse_bool as parse_config_bool
 from aurascan.core.config_drift import (
     CONFIG_DRIFT_AI_DIFFS_ENV,
     CONFIG_DRIFT_ENABLED_ENV,
+    prepare_config_drift_remediation,
     resolve_config_drift_config,
     run_config_drift,
 )
@@ -568,6 +569,7 @@ def run_upgrade(
             urlopen=urlopen,
             context_root=followup_context_root,
             refresh_report=refresh_upgrade_preflight,
+            config_drift_remediation_provider=prepare_config_drift_remediation,
         )
 
     if not report.plan.available:
@@ -581,6 +583,7 @@ def run_upgrade(
                 urlopen=urlopen,
                 context_root=followup_context_root,
                 refresh_report=refresh_upgrade_preflight,
+                config_drift_remediation_provider=prepare_config_drift_remediation,
             )
             _offer_upgrade_followup(
                 followup_context,
@@ -838,6 +841,7 @@ def _offer_upgrade_followup_outcome(
         urlopen=urlopen,
         context_root=context_root,
         refresh_report=refresh_upgrade_preflight,
+        config_drift_remediation_provider=prepare_config_drift_remediation,
     )
     offer_followup(
         context,

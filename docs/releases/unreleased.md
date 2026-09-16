@@ -70,6 +70,37 @@ Architecture stabilization stage 4 (no behavior change):
   subsystem engines also use, with equality assertions so the wording cannot
   drift.
 
+Architecture stabilization stage 11 (no behavior change):
+
+- Moved the config-drift follow-up adapters out of the generic framework and back
+  into the lifecycle that owns drift policy: `context_from_config_drift` and
+  `build_config_drift_runtime` now live in `core/config_drift.py`, and
+  `followup` no longer imports `config_drift` or its presenter at all. The two
+  moved functions are AST-identical to the originals apart from their import
+  statements and the `FollowUpContext`/`FollowUpRuntime` annotations, which
+  became strings: Python 3.8 evaluates annotations when the `def` runs, so an
+  unquoted lazily imported name is a `NameError` there even though CPython 3.14
+  defers annotations. A static architecture test now fails on any production
+  annotation a module has not bound, and is itself exercised against a fixture.
+- The one piece of drift behavior the framework still hosted — re-deriving the
+  fix an upgrade session may apply and deciding whether it can be a safe default
+  — became `config_drift.prepare_config_drift_remediation`, which returns a
+  prepared `ConfigDriftRemediation` and applies it by running the existing
+  guarded assistant command unchanged.
+- The framework now receives those operations from its callers:
+  `build_default_runtime`, `run_ask`, `run_agent` and `build_upgrade_runtime`
+  accept `config_drift_runtime_provider` / `config_drift_remediation_provider`;
+  the CLI supplies both and the upgrade preflight supplies the remediation
+  provider at its three runtime sites.
+- Without the runtime provider a config-drift context degrades to facts only, and
+  without the remediation provider the upgrade session drops the drift action
+  instead of applying state it cannot re-verify. Both fail-closed paths and the
+  prepared-fix path are covered by tests.
+- `core/config_drift.py` left the planner component: the strongly connected
+  component dropped from three members to two and the remaining cycle is
+  `{agent, followup}`. `core/followup.py` is now 2066 lines with three concern
+  tags and has left the advisory size budget.
+
 Architecture stabilization stage 10 (no behavior change):
 
 - Moved the incident-family follow-up adapters out of the generic framework into

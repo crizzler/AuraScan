@@ -13,6 +13,7 @@ from aurascan.core import upgrade_preflight
 from aurascan.core.config_drift import (
     build_config_drift_report,
     config_drift_action_id,
+    context_from_config_drift,
     run_config_drift,
 )
 from aurascan.core.followup import (
@@ -30,7 +31,6 @@ from aurascan.core.followup import (
     FollowUpRuntime,
     ask_followup_ai,
     build_followup_ai_prompt,
-    context_from_config_drift,
     context_from_maintenance,
     followup_available,
     latest_followup_context,
@@ -1280,3 +1280,136 @@ def test_retained_incident_context_needs_the_supplied_loader(tmp_path):
 
     assert status == EXIT_FOLLOWUP_UNAVAILABLE
     assert latest_followup_context(tmp_path / "contexts") is None
+
+def test_config_drift_action_needs_the_lifecycle_provider(tmp_path):
+    """Stage 11: the framework never fabricates a config-drift fix itself.
+
+    The config-drift runtime is built by the lifecycle that owns drift policy and
+    supplied in. Without it the session degrades to facts only: the requested
+    drift action is not executable from the retained context and no command runs.
+    """
+
+    root = tmp_path / "etc"
+    root.mkdir()
+    (root / "mirrorlist").write_text("old mirror\n", encoding="utf-8")
+    (root / "mirrorlist.pacnew").write_text("new mirror\n", encoding="utf-8")
+    item = context_from_config_drift(build_config_drift_report(root), ai_diffs_allowed=False)
+    contexts = tmp_path / "contexts"
+    persist_followup_context(item, contexts)
+    ran = []
+
+    def runner(command, **_kwargs):
+        ran.append(list(command))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    answers = iter(["Apply the listed fix.", ""])
+    stdout = io.StringIO()
+    status = run_ask(
+        [item.context_id],
+        input_func=lambda _prompt: next(answers),
+        stdout=stdout,
+        stderr=stdout,
+        env=ai_env(tmp_path),
+        runner=runner,
+        context_root=contexts,
+        force_interactive=True,
+        urlopen=lambda _request, timeout: provider_response({
+            "answer": "The packaged mirror list differs from the active one.",
+            "referenced_fact_ids": ["config-drift-summary"],
+            "requested_probe_ids": [],
+            "requested_action_ids": [item.actions[0].action_id],
+        }),
+    )
+
+    assert status == 0
+    assert ran == []
+    assert "not executable from this retained context" in stdout.getvalue()
+
+
+def test_upgrade_session_applies_the_prepared_config_drift_fix(tmp_path):
+    """Stage 11: the lifecycle hands the session a prepared, verified fix."""
+
+    from aurascan.core.followup import (
+        FOLLOWUP_ACTION_CONFIG_DRIFT,
+        build_upgrade_runtime,
+        context_from_upgrade,
+    )
+
+    report = UpgradePreflightReport(plan=UpgradePlan(), snapshot=SystemSnapshot(pacnew_count=3))
+    item = context_from_upgrade(report, phase="action_revalidation", metadata={"selected_helper": "none"})
+    prepared_calls = []
+    applied = []
+
+    class Prepared:
+        action_ids = ["cfg-verified"]
+        safe = True
+
+        def apply(self, *, input_func, stdout, stderr, runner):
+            applied.append((input_func, stdout, stderr, runner))
+            return 0
+
+    def prepare(root, *, stdout):
+        prepared_calls.append((root, stdout))
+        return Prepared()
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    runtime = build_upgrade_runtime(
+        item,
+        runner="injected-runner",
+        which=None,
+        urlopen=None,
+        context_root=tmp_path,
+        refresh_report=lambda _context, **_kwargs: report,
+        config_drift_remediation_provider=prepare,
+    )
+    outcome = runtime.run_actions(
+        item,
+        [FOLLOWUP_ACTION_CONFIG_DRIFT],
+        lambda _prompt: "y",
+        stdout,
+        stderr,
+    )
+
+    # The lifecycle prepares the fix for its own root with the session's stream.
+    assert [(str(root), stream) for root, stream in prepared_calls] == [("/etc", stdout)]
+    # The session runs the prepared fix with its own hooks and reports success.
+    assert len(applied) == 1
+    assert applied[0][1] is stdout
+    assert applied[0][3] == "injected-runner"
+    assert outcome.applied is True
+
+
+def test_upgrade_session_without_a_config_drift_provider_applies_nothing(tmp_path):
+    """Stage 11: a missing provider drops the fix instead of applying stale state."""
+
+    from aurascan.core.followup import (
+        FOLLOWUP_ACTION_CONFIG_DRIFT,
+        build_upgrade_runtime,
+        context_from_upgrade,
+    )
+
+    report = UpgradePreflightReport(plan=UpgradePlan(), snapshot=SystemSnapshot(pacnew_count=3))
+    item = context_from_upgrade(report, phase="action_revalidation", metadata={"selected_helper": "none"})
+    stdout = io.StringIO()
+    runtime = build_upgrade_runtime(
+        item,
+        runner="injected-runner",
+        which=None,
+        urlopen=None,
+        context_root=tmp_path,
+        refresh_report=lambda _context, **_kwargs: report,
+    )
+    outcome = runtime.run_actions(
+        item,
+        [FOLLOWUP_ACTION_CONFIG_DRIFT],
+        lambda _prompt: "y",
+        stdout,
+        io.StringIO(),
+    )
+
+    assert outcome.attempted is True
+    assert outcome.applied is not True
+    assert "could not be re-prepared" in outcome.message
+    # Nothing was planned or applied, so the session never claimed success.
+    assert stdout.getvalue() == ""

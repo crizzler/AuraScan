@@ -318,11 +318,7 @@ def run_config_drift(
     followup_runtime = None
     followup_disabled = options.json_output or options.yes or options.explicit_no_ai
     if not followup_disabled:
-        from aurascan.core.followup import (
-            FollowUpRuntime,
-            build_config_drift_runtime,
-            context_from_config_drift,
-        )
+        from aurascan.core.followup import FollowUpRuntime
 
         followup_context = context_from_config_drift(
             report,
@@ -442,11 +438,7 @@ def _offer_config_followup_after_apply(
     context_root: Optional[Path],
     force_interactive: Optional[bool],
 ) -> None:
-    from aurascan.core.followup import (
-        build_config_drift_runtime,
-        context_from_config_drift,
-        offer_followup,
-    )
+    from aurascan.core.followup import offer_followup
 
     refreshed_report = build_config_drift_report(options.root)
     context = context_from_config_drift(
@@ -1078,3 +1070,216 @@ def _path_uid_gid(path: Path) -> Optional[Tuple[int, int]]:
     except OSError:
         return None
     return stat.st_uid, stat.st_gid
+
+
+def context_from_config_drift(
+    report,
+    *,
+    context_id: str = "",
+    ai_diffs_allowed: bool = False,
+    metadata: Optional[Mapping[str, object]] = None,
+) -> "FollowUpContext":
+    from aurascan.core.followup import (
+        FollowUpAction,
+        FollowUpContext,
+        FollowUpFact,
+        ensure_hardware_health_probe,
+        followup_context_fingerprint,
+        make_context_id,
+        stable_followup_id,
+    )
+
+    facts = [
+        FollowUpFact(
+            "config-drift-summary",
+            "summary",
+            f"{len(report.files)} drift file(s), {len(report.apply_actions)} planned fix(es), and {len(report.manual_actions)} manual item(s).",
+            f"Scan truncated: {report.scan_truncated}; errors: {len(report.errors)}; AI diffs allowed: {ai_diffs_allowed}.",
+            "MEDIUM" if report.files else "LOW",
+        )
+    ]
+    for index, action in enumerate(report.actions[:100]):
+        diff_note = ""
+        if ai_diffs_allowed:
+            redacted_diff = redacted_preview_diff(
+                action.drift_file.target_path,
+                action.drift_file.path,
+                max_chars=2000,
+            )
+            if redacted_diff:
+                diff_note = f" Redacted diff preview:\n{redacted_diff}"
+        facts.append(FollowUpFact(
+            stable_followup_id("fuf-drift-", index, str(action.drift_file.path), action.action),
+            "config_drift",
+            f"{action.drift_file.path}: {action.action}",
+            (
+                f"{action.summary} Risk: {action.drift_file.risk}; "
+                f"sensitive: {action.drift_file.sensitive}; applies: {action.applies}."
+                f"{diff_note}"
+            ),
+            "HIGH" if action.drift_file.sensitive and not action.applies else "MEDIUM",
+        ))
+    actions = [
+        FollowUpAction(
+            config_drift_action_id(item),
+            f"Apply {item.action} to {item.drift_file.path}",
+            item.summary,
+            "HIGH" if item.drift_file.sensitive else "MEDIUM",
+            item.applies,
+            item.backup_required,
+        )
+        for item in report.apply_actions[:30]
+    ]
+    context = FollowUpContext(
+        context_id=context_id or make_context_id("config-drift", report.root),
+        source_type="config_drift",
+        source_id=stable_followup_id("config-", report.root, int(time.time())),
+        phase="config_drift",
+        title="AuraScan Config Drift",
+        facts=facts,
+        probes=[],
+        actions=actions,
+        metadata={
+            "root": report.root,
+            "ai_diffs_allowed": bool(ai_diffs_allowed),
+            "scan_truncated": report.scan_truncated,
+            **dict(metadata or {}),
+        },
+        privacy_mode="redacted" if ai_diffs_allowed else "facts-only",
+    )
+    ensure_hardware_health_probe(context)
+    context.source_fingerprint = followup_context_fingerprint(context)
+    return context
+
+
+def build_config_drift_runtime(
+    initial_context: "FollowUpContext",
+    *,
+    runner: Callable,
+    context_root: Optional[Path],
+    defer_actions: bool = False,
+) -> "FollowUpRuntime":
+    from aurascan.core.followup import (
+        FollowUpAction,
+        FollowUpActionOutcome,
+        FollowUpRuntime,
+        _confirm_action_plan,
+        _print_action_plan,
+        persist_followup_context,
+        with_hardware_health_runtime,
+    )
+
+    def actions_callback(
+        current: "FollowUpContext",
+        action_ids: Sequence[str],
+        input_func: Callable[[str], str],
+        stdout,
+        stderr,
+    ) -> "FollowUpActionOutcome":
+        root = Path(str(current.metadata.get("root") or "/etc"))
+        report = build_config_drift_report(root)
+        by_id = {config_drift_action_id(item): item for item in report.apply_actions}
+        selected_ids = [item for item in action_ids if item in by_id]
+        if not selected_ids:
+            refreshed = context_from_config_drift(
+                report,
+                context_id=current.context_id,
+                ai_diffs_allowed=bool(current.metadata.get("ai_diffs_allowed", False)),
+            )
+            persist_followup_context(refreshed, context_root)
+            return FollowUpActionOutcome(
+                attempted=True,
+                source_changed=True,
+                message="AuraScan refreshed the config state; the requested fix is no longer verified or required.",
+            )
+        selected = [
+            FollowUpAction(
+                item,
+                f"Apply {by_id[item].action} to {by_id[item].drift_file.path}",
+                by_id[item].summary,
+                "HIGH" if by_id[item].drift_file.sensitive else "MEDIUM",
+                True,
+                by_id[item].backup_required,
+            )
+            for item in selected_ids
+        ]
+        _print_action_plan(selected, stdout)
+        safe_default = bool(
+            not report.errors
+            and not report.scan_truncated
+            and all(by_id[item].applies for item in selected_ids)
+            and not any(by_id[item].drift_file.sensitive for item in selected_ids)
+            and all(by_id[item].backup_required for item in selected_ids)
+        )
+        if not _confirm_action_plan(input_func, safe_default):
+            return FollowUpActionOutcome(attempted=True, message="[AuraScan] Follow-up config fix was not applied.")
+        args = ["--root", str(root), "--no-ai", "--yes"]
+        for action_id in selected_ids:
+            args.extend(["--action-id", action_id])
+        status = run_config_drift(
+            args,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+            runner=runner,
+        )
+        return FollowUpActionOutcome(
+            attempted=True,
+            applied=status == 0,
+            failed=status != 0,
+            source_changed=True,
+            message=(
+                "[AuraScan] The selected config drift fix completed with backups."
+                if status == 0
+                else "[AuraScan] The selected config drift fix failed or was refused after fresh validation."
+            ),
+        )
+
+    return with_hardware_health_runtime(
+        initial_context,
+        FollowUpRuntime(run_actions=actions_callback, defer_actions=defer_actions),
+        runner=runner,
+    )
+
+
+class ConfigDriftRemediation:
+    """A prepared config-drift fix, ready to apply after confirmation."""
+
+    def __init__(self, action_ids: List[str], safe: bool) -> None:
+        self.action_ids = list(action_ids)
+        self.safe = bool(safe)
+
+    def apply(self, *, input_func, stdout, stderr, runner) -> int:
+        args = ["--no-ai", "--yes"]
+        for action_id in self.action_ids:
+            args.extend(["--action-id", action_id])
+        return run_config_drift(
+            args,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+            runner=runner,
+        )
+
+
+def prepare_config_drift_remediation(root: Path, *, stdout) -> ConfigDriftRemediation:
+    """Re-derive the config-drift fixes that are still verified and required.
+
+    The upgrade lifecycle calls this through a supplied provider instead of
+    importing config-drift behavior itself. Rendering the refreshed plan and
+    deciding whether the fixes are safe to offer both stay here, with the
+    lifecycle that owns drift policy.
+    """
+    report = build_config_drift_report(root)
+    action_ids = [config_drift_action_id(item) for item in report.apply_actions]
+    if action_ids:
+        from aurascan.core.config_drift_presenter import render_config_drift
+
+        print(render_config_drift(report), file=stdout)
+    safe = bool(
+        not report.errors
+        and not report.scan_truncated
+        and not report.manual_actions
+        and not any(item.drift_file.sensitive for item in report.apply_actions)
+    )
+    return ConfigDriftRemediation(action_ids, safe)

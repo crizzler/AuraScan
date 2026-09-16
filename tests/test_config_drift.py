@@ -11,11 +11,15 @@ from aurascan.core.config_drift import (
     apply_ai_config_drift_review,
     apply_config_drift_actions,
     build_config_drift_report,
+    build_config_drift_runtime,
     classify_config_drift_file,
+    config_drift_action_id,
     config_drift_options_from_args,
+    context_from_config_drift,
     discover_config_drift_files,
     drift_target_path,
     plan_config_drift_action,
+    prepare_config_drift_remediation,
     redact_text,
     redacted_preview_diff,
     run_config_drift,
@@ -561,3 +565,128 @@ def test_config_drift_options_read_env_defaults():
     assert options.enabled is True
     assert options.no_ai is True
     assert options.root == config_drift.Path("/tmp/etc")
+
+def test_config_drift_runtime_applies_through_the_lifecycle_owned_seam(tmp_path, monkeypatch):
+    """Stage 11: the lifecycle builds its own follow-up runtime and command."""
+
+    root = tmp_path / "etc"
+    root.mkdir()
+    target = root / "mirrorlist"
+    drift = root / "mirrorlist.pacnew"
+    target.write_text("old\n", encoding="utf-8")
+    drift.write_text("new\n", encoding="utf-8")
+    item = context_from_config_drift(build_config_drift_report(root), ai_diffs_allowed=False)
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((list(args), kwargs))
+        return 0
+
+    monkeypatch.setattr(config_drift, "run_config_drift", fake_run)
+    runtime = build_config_drift_runtime(
+        item,
+        runner="injected-runner",
+        context_root=tmp_path / "contexts",
+    )
+    outcome = runtime.run_actions(
+        item,
+        [item.actions[0].action_id],
+        lambda _prompt: "y",
+        io.StringIO(),
+        io.StringIO(),
+    )
+
+    # The lifecycle re-derives the fix for its own root and runs the guarded
+    # assistant with explicit roots and action IDs, never with AI enabled.
+    assert outcome.applied is True
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == [
+        "--root",
+        str(root),
+        "--no-ai",
+        "--yes",
+        "--action-id",
+        item.actions[0].action_id,
+    ]
+    assert kwargs["runner"] == "injected-runner"
+    assert target.read_text(encoding="utf-8") == "old\n"
+
+
+def test_config_drift_runtime_refuses_a_fix_that_is_no_longer_verified(tmp_path, monkeypatch):
+    """A fix that disappeared since the last scan never reaches the assistant."""
+
+    root = tmp_path / "etc"
+    root.mkdir()
+    target = root / "mirrorlist"
+    drift = root / "mirrorlist.pacnew"
+    target.write_text("old\n", encoding="utf-8")
+    drift.write_text("new\n", encoding="utf-8")
+    item = context_from_config_drift(build_config_drift_report(root), ai_diffs_allowed=False)
+    action_id = item.actions[0].action_id
+    drift.unlink()
+    calls = []
+    monkeypatch.setattr(config_drift, "run_config_drift", lambda *args, **kwargs: calls.append(args))
+
+    runtime = build_config_drift_runtime(
+        item,
+        runner="injected-runner",
+        context_root=tmp_path / "contexts",
+    )
+    outcome = runtime.run_actions(
+        item,
+        [action_id],
+        lambda _prompt: "y",
+        io.StringIO(),
+        io.StringIO(),
+    )
+
+    assert calls == []
+    assert outcome.applied is not True
+    assert outcome.source_changed is True
+    assert "no longer verified" in outcome.message
+
+
+def test_prepare_config_drift_remediation_renders_and_gates_verified_fixes(tmp_path, monkeypatch):
+    """The upgrade lifecycle receives one prepared, reasoned fix decision."""
+
+    root = tmp_path / "etc"
+    root.mkdir()
+    target = root / "mirrorlist"
+    drift = root / "mirrorlist.pacnew"
+    target.write_text("old\n", encoding="utf-8")
+    drift.write_text("new\n", encoding="utf-8")
+    expected = [config_drift_action_id(item) for item in build_config_drift_report(root).apply_actions]
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+        return 0
+
+    monkeypatch.setattr(config_drift, "run_config_drift", fake_run)
+    stdout = io.StringIO()
+
+    prepared = prepare_config_drift_remediation(root, stdout=stdout)
+
+    assert prepared.action_ids == expected
+    assert prepared.safe is True
+    assert "mirrorlist" in stdout.getvalue()
+    assert prepared.apply(
+        input_func=lambda _prompt: "y",
+        stdout=stdout,
+        stderr=stdout,
+        runner="injected-runner",
+    ) == 0
+    assert calls == [["--no-ai", "--yes", "--action-id", expected[0]]]
+
+
+def test_prepare_config_drift_remediation_withholds_sensitive_drift(tmp_path):
+    """Sensitive drift never becomes an upgrade session's safe-default fix."""
+
+    root = tmp_path / "etc"
+    root.mkdir()
+    (root / "pacman.conf.pacnew").write_text("[options]\n", encoding="utf-8")
+
+    prepared = prepare_config_drift_remediation(root, stdout=io.StringIO())
+
+    assert prepared.safe is False

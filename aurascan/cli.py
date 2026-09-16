@@ -13,7 +13,7 @@ from aurascan.core.incident_cli import run_incident_command
 from aurascan.core.instruction_cli import run_instruction_audit
 from aurascan.core.recovery_cli import run_recovery
 from aurascan.core.security_audit import run_security_audit
-from aurascan.core.upgrade_preflight import run_upgrade
+from aurascan.core.upgrade_preflight import refresh_upgrade_preflight, run_upgrade
 from aurascan.core.updater_tray import run_updater
 from aurascan.setup_wizard import run_doctor, run_init
 
@@ -182,9 +182,9 @@ def main(argv=None):
     if raw_argv and raw_argv[0] == "updater":
         sys.exit(run_updater(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "ask":
-        sys.exit(run_ask(raw_argv[1:]))
+        sys.exit(run_ask(raw_argv[1:], refresh_upgrade_report=refresh_upgrade_preflight))
     if raw_argv and raw_argv[0] == "agent":
-        sys.exit(run_agent(raw_argv[1:]))
+        sys.exit(run_agent(raw_argv[1:], refresh_upgrade_report=refresh_upgrade_preflight))
     if raw_argv and raw_argv[0] == "instruction-audit":
         sys.exit(run_instruction_audit(raw_argv[1:]))
 

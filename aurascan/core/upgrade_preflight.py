@@ -689,6 +689,7 @@ def run_upgrade(
             which=which,
             urlopen=urlopen,
             context_root=followup_context_root,
+            refresh_report=refresh_upgrade_preflight,
         )
 
     if not report.plan.available:
@@ -701,6 +702,7 @@ def run_upgrade(
                 which=which,
                 urlopen=urlopen,
                 context_root=followup_context_root,
+                refresh_report=refresh_upgrade_preflight,
             )
             _offer_upgrade_followup(
                 followup_context,
@@ -866,6 +868,34 @@ def run_upgrade(
     return result_code
 
 
+def refresh_upgrade_preflight(
+    context,
+    *,
+    runner: Callable,
+    which: Callable,
+    urlopen: Optional[Callable] = None,
+) -> UpgradePreflightReport:
+    """Re-derive the deterministic upgrade preflight for a follow-up context.
+
+    The follow-up framework revalidates retained support actions against fresh
+    state, and for the upgrade lifecycle that state is a new preflight. The
+    lifecycle supplies this operation to the framework instead of the framework
+    importing this module, so the upgrade workflow stays the only owner of how a
+    preflight is produced.
+    """
+    helper = str(context.metadata.get("selected_helper") or "auto")
+    args = build_upgrade_parser().parse_args(["--dry-run", "--no-ai", "--aur-helper", helper])
+    options = options_from_args(args)
+    return run_upgrade_preflight(
+        options,
+        runner=runner,
+        which=which,
+        snapshot=SystemSnapshot.collect(runner=runner),
+        urlopen=urlopen,
+        progress=lambda _message: None,
+    )
+
+
 def _offer_upgrade_followup(
     context,
     *,
@@ -929,6 +959,7 @@ def _offer_upgrade_followup_outcome(
         which=which,
         urlopen=urlopen,
         context_root=context_root,
+        refresh_report=refresh_upgrade_preflight,
     )
     offer_followup(
         context,

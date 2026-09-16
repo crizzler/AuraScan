@@ -778,3 +778,66 @@ def test_network_capability_stays_with_the_upgrade_workflow():
     assert "network" in module["aurascan.core.upgrade_preflight"].capabilities
     assert "network" not in module["aurascan.core.repository_state"].capabilities
     assert "network" not in module["aurascan.core.repository_repair"].capabilities
+
+
+def test_followup_framework_does_not_import_the_upgrade_workflow():
+    """Stage 8 regression: the refresh capability is supplied, not imported.
+
+    The follow-up framework imports the lifecycles whose retained contexts it
+    serves, but the upgrade lifecycle supplies its own refresh operation so the
+    framework and the upgrade workflow do not call each other.
+    """
+
+    source = (ROOT / "aurascan" / "core" / "followup.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    imported = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    imported |= {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+
+    assert "aurascan.core.upgrade_preflight" not in imported
+    assert not any(name.startswith("aurascan.core.upgrade_preflight.") for name in imported)
+
+
+def test_upgrade_refresh_is_owned_by_the_upgrade_lifecycle():
+    """The lifecycle defines the refresh operation and supplies it everywhere."""
+
+    upgrade_source = (ROOT / "aurascan" / "core" / "upgrade_preflight.py").read_text(encoding="utf-8")
+    upgrade_tree = ast.parse(upgrade_source)
+    defined = {
+        node.name
+        for node in upgrade_tree.body
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+    }
+    assert "refresh_upgrade_preflight" in defined
+
+    # Both upgrade-runtime build sites in the workflow supply the provider.
+    assert upgrade_source.count("refresh_report=refresh_upgrade_preflight") == 3
+
+    cli_source = (ROOT / "aurascan" / "cli.py").read_text(encoding="utf-8")
+    assert "refresh_upgrade_preflight" in cli_source
+    assert "run_ask(raw_argv[1:], refresh_upgrade_report=refresh_upgrade_preflight)" in cli_source
+    assert "run_agent(raw_argv[1:], refresh_upgrade_report=refresh_upgrade_preflight)" in cli_source
+
+
+def test_upgrade_preflight_and_followup_are_only_mutually_reachable_through_incidents():
+    """Stage 8 topology: the direct reciprocal edge is gone."""
+
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    module = {info.name: info for info in result.modules}
+
+    followup = module["aurascan.core.followup"]
+    assert "aurascan.core.upgrade_preflight" not in followup.internal_imports
+    assert "aurascan.core.followup" in module["aurascan.core.upgrade_preflight"].internal_imports
+    # The remaining route runs through the incident workflow, which is the next
+    # seam; it must stay explicit rather than silently reintroduced.
+    assert "aurascan.core.incidents" in followup.internal_imports
+    assert "aurascan.core.upgrade_preflight" in module["aurascan.core.incidents"].internal_imports

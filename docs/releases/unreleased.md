@@ -70,6 +70,21 @@ Architecture stabilization stage 4 (no behavior change):
   subsystem engines also use, with equality assertions so the wording cannot
   drift.
 
+Architecture stabilization stage 8 (no behavior change):
+
+- The upgrade lifecycle now owns its own follow-up refresh operation:
+  `core.upgrade_preflight.refresh_upgrade_preflight` replaces the private helper
+  that `core/followup.py` used to build by importing `run_upgrade_preflight`.
+- `build_upgrade_runtime`, `build_default_runtime`, `run_ask` and `run_agent`
+  accept the provider (`refresh_report` / `refresh_upgrade_report`) and `cli.py`
+  supplies it, so the follow-up framework no longer imports the upgrade workflow
+  and the two no longer call each other in both directions.
+- Without a provider the refresh probe fails and the support actions refuse
+  instead of acting on stale state; every production caller supplies one, so no
+  user-visible behavior changes.
+- The planner component is still seven modules: the remaining route between the
+  two subsystems is `followup -> incidents -> upgrade_preflight`.
+
 Architecture stabilization stage 7 (no behavior change):
 
 - Extracted repository interpretation from `core/upgrade_preflight.py` into

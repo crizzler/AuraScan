@@ -62,7 +62,7 @@ Two rules hold across every plane:
 Layers are assigned from repository structure by the audit tool. They describe
 dependency direction; they are not a package reorganisation.
 
-Current measurement: **89 modules, 71,894 physical lines.**
+Current measurement: **89 modules, 71,925 physical lines.**
 
 | Layer | Modules | Contents |
 | --- | ---: | --- |
@@ -184,7 +184,7 @@ known decision rather than a surprise.
 
 | Cycle | Modules | Assessment |
 | --- | --- | --- |
-| Recovery planner | `core.agent`, `core.config_drift`, `core.followup`, `core.incident_automation`, `core.incident_diagnostics`, `core.incidents`, `core.upgrade_preflight` | Seven members, down from eight. Stages 5 and 6 removed the dispatch and the shared vocabulary/infrastructure edges; Stage 7 moved repository interpretation below both planners, which finally removed `incident_repairs` from the component. What remains is planner-to-planner coupling around upgrade preflight, repository repair and follow-up. |
+| Recovery planner | `core.agent`, `core.config_drift`, `core.followup`, `core.incident_automation`, `core.incident_diagnostics`, `core.incidents`, `core.upgrade_preflight` | Seven members. Stages 5–7 removed the dispatch, shared-vocabulary and repository-interpretation edges; Stage 8 removed the direct `followup -> upgrade_preflight` refresh import, so the two are now mutually reachable only through `followup -> incidents -> upgrade_preflight`. The remaining coupling is workflow orchestration plus the value-type/analyzer borrow that `incidents` takes from the upgrade workflow. |
 | Intelligence | `core.intelligence`, `core.intelligence_crypto`, `core.intelligence_store` | Expected: snapshot identity, verification and storage are one transaction. |
 | Install-hook / provenance | `analyzers.repository_provenance`, `core.install_hook`, `core.source_acquisition` | Expected: declared-source filtering needs the hook reader and the acquisition snapshot. |
 
@@ -242,19 +242,55 @@ Reported by the audit, never fatal:
 - modules with more than 5 concern tags.
 
 Current warnings: `core/instruction_guard.py` (8760 lines),
-`analyzers/repository_provenance.py` (4555), `core/agent.py` (3741),
-`core/incidents.py` (3241), `core/upgrade_preflight.py` (2694 lines, 6 concern
-tags), `core/followup.py` (2585), `core/source_acquisition.py` (2554),
+`analyzers/repository_provenance.py` (4555), `core/agent.py` (3743),
+`core/incidents.py` (3241), `core/upgrade_preflight.py` (2725 lines, 6 concern
+tags), `core/followup.py` (2604), `core/source_acquisition.py` (2554),
 `setup_wizard.py` (2521), `core/updater_tray.py` (6 concern tags).
 
 ## Decomposition log
 
-**Resolved in Stage 7:** the planner component finally shrank. `incident_repairs`
-imported repository knowledge from the upgrade-preflight workflow; extracting
-repository *interpretation* below both planners removed that edge, and the
-strongly connected component went from eight members to seven. The repair planner
-has no path to the upgrade workflow at all now, and no module in the cycle reaches
-it.
+**Resolved in Stage 8:** the direct reciprocal dependency between the upgrade
+workflow and the follow-up framework. `followup` no longer imports
+`upgrade_preflight`; the upgrade lifecycle supplies its own refresh operation and
+the presentation layer hands it to the follow-up entry points. The planner
+component is still seven members, but the upgrade/follow-up lifecycle is now
+directional: `upgrade_preflight -> followup`, never the reverse.
+
+### Stage 8 — the upgrade lifecycle supplies its own follow-up refresh
+
+`followup` imported `upgrade_preflight` in exactly one place: the upgrade
+lifecycle adapter `build_upgrade_runtime` re-ran `run_upgrade_preflight` inside
+its `refreshed_report()` helper, so that the follow-up session could revalidate
+retained support actions against fresh state. The reverse direction is
+deliberate orchestration: `run_upgrade` builds the follow-up context and offers
+or embeds the session at four decision points, which is the same pattern
+`incidents` and `config_drift` use.
+
+| Direction | Kind | Why it existed | Outcome |
+| --- | --- | --- | --- |
+| `upgrade_preflight -> followup` | orchestration | the upgrade workflow offers and embeds the follow-up session (`context_from_upgrade`, `build_upgrade_runtime`, `offer_followup`, `prompt_with_followup`) | kept: it is the lifecycle owner driving the shared session |
+| `followup -> upgrade_preflight` | refresh / revalidation | `build_upgrade_runtime` re-ran the preflight to refresh retained state before acting | removed: the refresh operation is now a function-valued parameter |
+
+- **What moved:** `refresh_upgrade_preflight(context, *, runner, which, urlopen)`
+  now lives in `upgrade_preflight` with the exact body of the old
+  `refreshed_report()`; `build_upgrade_runtime` takes
+  `refresh_report: Optional[Callable]` and calls it with the session's own hooks;
+  `build_default_runtime`, `run_ask` and `run_agent` pass an optional
+  `refresh_upgrade_report`, which `cli.py` supplies as
+  `refresh_upgrade_preflight`. The returned `options` value was unused, so the
+  contract carries only the report.
+- **Fail closed by construction:** without a provider the refresh probe fails and
+  the support actions refuse with `source_changed=True` instead of acting on
+  stale state. Every production caller supplies one, so no user-visible behavior
+  changes.
+- **No new invariant:** the follow-up framework legitimately imports the
+  lifecycles whose retained contexts it serves (`incidents`, `config_drift`), so
+  a layer rule would be false. The no-import property is enforced by a targeted
+  regression test on `followup.py` plus an ownership test for
+  `refresh_upgrade_preflight`.
+- **Not selected:** the `incidents -> upgrade_preflight` edge (value types and
+  the upgrade risk analyzer borrowed for incident findings). It is now the only
+  non-presentation incoming edge of the upgrade workflow and is the Stage 9 seam.
 
 ### Stage 7 — repository interpretation left the upgrade workflow
 
@@ -578,26 +614,25 @@ as the next seam.
 
 ## Next targets
 
-1. The eight-member planner component (`agent`, `config_drift`, `followup`,
+1. The seven-member planner component (`agent`, `config_drift`, `followup`,
    `incidents`, `incident_*`, `upgrade_preflight`): give it a narrow interface so
-   the cycle can be reviewed as a group rather than as eight mutual imports.
-   Stage 6 removed the vocabulary and infrastructure half of the
-   `incidents <-> incident_repairs` pair, so the remaining reachability runs
-   through `incident_repairs -> upgrade_preflight -> followup -> incidents`.
-   `upgrade_preflight` is therefore the next cycle edge worth separating: its
-   mirror/repository repair capability is what pulls two planners into the loop.
-   The planner/executor split inside `incident_repairs` is *not* recommended yet
-   — see the classification above; it does not create the cycle.
+   the cycle can be reviewed as a group rather than as seven mutual imports.
+   Stages 5–8 removed the dispatch, shared-vocabulary, repository-interpretation
+   and follow-up-refresh edges. The one non-presentation incoming edge of
+   `upgrade_preflight` left is the borrow that `incidents` takes
+   (`SystemSnapshot`, `UpgradePlan` and the upgrade risk analyzer for incident
+   findings); extracting that lower is the next cycle seam.
 2. **Partially done:** Stages 5 and 6 moved the `incidents` CLI runner and the
    shared helper ownership out of subsystem modules. `config_drift`,
    `security_audit` and `upgrade_preflight` still reach their presenter from
    inside their own CLI entry points. That edge is one-way and cycle-free, but
    it means CLI printing still lives in subsystem modules.
-3. `core/upgrade_preflight.py` (3044 lines, 6 concern tags — the top hotspot):
-   split mirror/repository repair (I/O plus privileged commands) from output
-   parsing (pure functions). This is also the edge that keeps the planner cycle
-   closed (`incident_repairs -> upgrade_preflight -> followup -> incidents`), so
-   it is now both the largest hotspot and the highest-value next seam.
+3. `core/upgrade_preflight.py` (2725 lines, 6 concern tags — the top hotspot)
+   now holds upgrade planning, the handoff, kernel-module aftercare, config
+   drift, security-audit findings, AI advisory, failure diagnosis, the follow-up
+   refresh operation and its CLI. AI advisory plus failure diagnosis is the
+   largest single block left, but it does not participate in the planner cycle:
+   it is a size seam, not a cycle seam.
 4. Five duplicate implementations of the two concerns Stage 6 extracted:
    `followup.redact_followup_text`/`redact_followup_structure`/`correlation_token`,
    `config_drift.redact_text`, `recovery_boot.atomic_write`,

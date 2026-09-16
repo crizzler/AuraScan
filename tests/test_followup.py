@@ -52,6 +52,8 @@ from aurascan.core.upgrade_preflight import (
     PACMAN_PRINT_FORMAT,
     SystemSnapshot,
     TrustedExecutable,
+    UpgradePlan,
+    UpgradePreflightReport,
     run_upgrade,
 )
 
@@ -1146,3 +1148,75 @@ def test_manual_maintenance_offers_one_followup_prompt(monkeypatch, tmp_path):
 
     assert status == 0
     assert prompts == ["Ask AuraScan about this result, or press Enter to finish: "]
+
+
+def test_upgrade_runtime_uses_the_refresh_provider_supplied_by_its_lifecycle(tmp_path):
+    """Stage 8: the lifecycle supplies refresh; the framework never imports it."""
+
+    from aurascan.core.followup import (
+        FOLLOWUP_PROBE_UPGRADE_REFRESH,
+        build_upgrade_runtime,
+        context_from_upgrade,
+    )
+
+    report = UpgradePreflightReport(plan=UpgradePlan(), snapshot=SystemSnapshot())
+    item = context_from_upgrade(report, phase="refreshed_preflight", metadata={"selected_helper": "none"})
+    calls = []
+
+    def refresh_provider(context, *, runner, which, urlopen=None):
+        calls.append((context.context_id, urlopen))
+        return report
+
+    runtime = build_upgrade_runtime(
+        item,
+        runner=None,
+        which=None,
+        urlopen="session-opener",
+        context_root=tmp_path,
+        refresh_report=refresh_provider,
+    )
+
+    refreshed, results = runtime.run_probes(item, [FOLLOWUP_PROBE_UPGRADE_REFRESH])
+
+    # The provider is called with the session's own hooks, not the caller's.
+    assert calls == [(item.context_id, "session-opener")]
+    assert [result.status for result in results] == ["ok"]
+    assert results[0].probe_id == FOLLOWUP_PROBE_UPGRADE_REFRESH
+    assert refreshed.source_type == "upgrade"
+
+
+def test_upgrade_runtime_fails_closed_without_a_refresh_provider(tmp_path):
+    """No provider means no stale-state action: the probe and actions fail closed."""
+
+    from aurascan.core.followup import (
+        FOLLOWUP_PROBE_UPGRADE_REFRESH,
+        build_upgrade_runtime,
+        context_from_upgrade,
+    )
+
+    report = UpgradePreflightReport(plan=UpgradePlan(), snapshot=SystemSnapshot())
+    item = context_from_upgrade(report, phase="refreshed_preflight", metadata={"selected_helper": "none"})
+    runtime = build_upgrade_runtime(
+        item,
+        runner=None,
+        which=None,
+        urlopen=None,
+        context_root=tmp_path,
+    )
+
+    refreshed, results = runtime.run_probes(item, [FOLLOWUP_PROBE_UPGRADE_REFRESH])
+    outcome = runtime.run_actions(
+        item,
+        [action.action_id for action in item.actions],
+        lambda _prompt: "y",
+        io.StringIO(),
+        io.StringIO(),
+    )
+
+    assert refreshed.context_id == item.context_id
+    assert [result.status for result in results] == ["failed"]
+    assert "cannot be refreshed" in results[0].summary
+    assert outcome.attempted is True
+    assert outcome.failed is True
+    assert outcome.source_changed is True
+    assert "no support action was applied" in outcome.message

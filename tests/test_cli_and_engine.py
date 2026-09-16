@@ -215,7 +215,7 @@ def test_config_drift_subcommand_dispatches_before_scan_parser(monkeypatch):
 def test_ask_subcommand_dispatches_before_scan_parser(monkeypatch):
     calls = []
     monkeypatch.setattr(cli, "load_env", lambda: None)
-    monkeypatch.setattr(cli, "run_ask", lambda argv: calls.append(argv) or 0)
+    monkeypatch.setattr(cli, "run_ask", lambda argv, **_kwargs: calls.append(argv) or 0)
 
     try:
         cli.main(["ask", "--latest"])
@@ -228,7 +228,7 @@ def test_ask_subcommand_dispatches_before_scan_parser(monkeypatch):
 def test_agent_subcommand_dispatches_before_scan_parser(monkeypatch):
     calls = []
     monkeypatch.setattr(cli, "load_env", lambda: None)
-    monkeypatch.setattr(cli, "run_agent", lambda argv: calls.append(argv) or 0)
+    monkeypatch.setattr(cli, "run_agent", lambda argv, **_kwargs: calls.append(argv) or 0)
 
     try:
         cli.main(["agent", "--latest", "--access", "guarded"])

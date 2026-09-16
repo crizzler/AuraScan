@@ -3483,6 +3483,7 @@ def run_agent(
     runtime_root: Path = AGENT_RUNTIME_ROOT,
     root_audit_root: Path = AGENT_ROOT_AUDIT_ROOT,
     force_interactive: Optional[bool] = None,
+    refresh_upgrade_report: Optional[Callable] = None,
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -3632,6 +3633,7 @@ def run_agent(
         context_root=root,
         incident_root=incident_root,
         system_root=system_root,
+        refresh_upgrade_report=refresh_upgrade_report,
     )
     if requested_access == "guarded":
         from aurascan.core.followup import run_followup_session

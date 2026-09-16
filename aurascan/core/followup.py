@@ -1609,6 +1609,7 @@ def run_ask(
     incident_root: Optional[Path] = None,
     system_root: Optional[Path] = None,
     force_interactive: Optional[bool] = None,
+    refresh_upgrade_report: Optional[Callable] = None,
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -1667,6 +1668,7 @@ def run_ask(
         context_root=root,
         incident_root=incident_root,
         system_root=system_root,
+        refresh_upgrade_report=refresh_upgrade_report,
     )
     result = run_followup_session(
         context,
@@ -1736,6 +1738,7 @@ def build_default_runtime(
     context_root: Optional[Path] = None,
     incident_root: Optional[Path] = None,
     system_root: Optional[Path] = None,
+    refresh_upgrade_report: Optional[Callable] = None,
 ) -> FollowUpRuntime:
     if context.source_type == "incident":
         return build_incident_runtime(
@@ -1760,6 +1763,7 @@ def build_default_runtime(
             which=which,
             urlopen=urlopen,
             context_root=context_root,
+            refresh_report=refresh_upgrade_report,
         )
     if context.source_type == "maintenance":
         return build_maintenance_runtime(
@@ -2119,6 +2123,7 @@ def build_upgrade_runtime(
     urlopen: Optional[Callable],
     context_root: Optional[Path],
     defer_actions: bool = False,
+    refresh_report: Optional[Callable] = None,
 ) -> FollowUpRuntime:
     from aurascan.core.config_drift import (
         build_config_drift_report,
@@ -2127,25 +2132,23 @@ def build_upgrade_runtime(
     )
     from aurascan.core.kernel_module_autopilot import kernel_module_fix_command
     from aurascan.core.repository_repair import apply_repository_health_repairs
-    from aurascan.core.upgrade_preflight import (
-        SystemSnapshot,
-        build_upgrade_parser,
-        options_from_args,
-        run_upgrade_preflight,
-    )
 
     def refreshed_report():
-        helper = str(initial_context.metadata.get("selected_helper") or "auto")
-        args = build_upgrade_parser().parse_args(["--dry-run", "--no-ai", "--aur-helper", helper])
-        options = options_from_args(args)
-        return run_upgrade_preflight(
-            options,
+        """Return fresh upgrade state, supplied by the upgrade lifecycle.
+
+        The framework does not import the upgrade workflow: the caller that owns
+        the preflight passes ``refresh_report`` and this runtime calls it with the
+        session's own hooks. Without it the refresh probe and the support actions
+        fail closed instead of acting on stale state.
+        """
+        if refresh_report is None:
+            return None
+        return refresh_report(
+            initial_context,
             runner=runner,
             which=which,
-            snapshot=SystemSnapshot.collect(runner=runner),
             urlopen=urlopen,
-            progress=lambda _message: None,
-        ), options
+        )
 
     def probes_callback(
         current: FollowUpContext,
@@ -2153,7 +2156,16 @@ def build_upgrade_runtime(
     ) -> Tuple[FollowUpContext, Sequence[FollowUpProbeResult]]:
         if FOLLOWUP_PROBE_UPGRADE_REFRESH not in probe_ids:
             return current, []
-        report, _options = refreshed_report()
+        report = refreshed_report()
+        if report is None:
+            return current, [
+                FollowUpProbeResult(
+                    FOLLOWUP_PROBE_UPGRADE_REFRESH,
+                    "failed",
+                    "The upgrade preflight cannot be refreshed in this session; rerun the upgrade preflight.",
+                    [],
+                )
+            ]
         refreshed = context_from_upgrade(
             report,
             phase="refreshed_preflight",
@@ -2180,7 +2192,14 @@ def build_upgrade_runtime(
         stdout,
         stderr,
     ) -> FollowUpActionOutcome:
-        report, options = refreshed_report()
+        report = refreshed_report()
+        if report is None:
+            return FollowUpActionOutcome(
+                attempted=True,
+                failed=True,
+                source_changed=True,
+                message="[AuraScan] The upgrade preflight cannot be refreshed in this session; no support action was applied.",
+            )
         refreshed = context_from_upgrade(
             report,
             phase="action_revalidation",

@@ -14,6 +14,12 @@ from aurascan.core.install_hook import (
     PackageScanInputError,
     capture_package_scan_input,
 )
+from aurascan.core.research_evidence import (
+    EvidenceError,
+    adjudication_record,
+    append_adjudication,
+    evidence_root,
+)
 
 
 class ReviewDecisionStatus(Enum):
@@ -232,6 +238,8 @@ class ReviewDecisionStore:
         accepted_by: Optional[str] = None,
         now: Optional[float] = None,
         expires_at: Optional[float] = None,
+        adjudication_label: str = "",
+        intelligence_identity: str = "",
     ) -> ReviewDecision:
         now = time.time() if now is None else now
         decision_id = hashlib.sha256(
@@ -267,6 +275,7 @@ class ReviewDecisionStore:
             used_at=now if not remember else None,
         )
         self._save(decision)
+        self._capture_adjudication(decision, adjudication_label, intelligence_identity)
         return decision
 
     def decision_for_token(self, review_token: str) -> Optional[ReviewDecision]:
@@ -311,7 +320,31 @@ class ReviewDecisionStore:
                 "UPDATE review_decisions SET decision_status = ?, revoked_at = ? WHERE decision_id = ?",
                 (ReviewDecisionStatus.revoked.value, now, decision_id),
             )
-            return cur.rowcount > 0
+            revoked = cur.rowcount > 0
+        if revoked:
+            decision = self.decision_by_id(decision_id)
+            if decision is not None:
+                # A revocation withdraws the judgment instead of keeping a stale one.
+                self._capture_adjudication(decision, "", "")
+        return revoked
+
+    def _capture_adjudication(self, decision: ReviewDecision, label: str,
+                              intelligence_identity: str) -> None:
+        """Record the local research-evidence adjudication, best effort only.
+
+        This is an audit trail of a human decision, never a gate: a store that
+        cannot be written must not block a review acceptance, a scan, or a
+        package build.
+        """
+
+        try:
+            append_adjudication(
+                evidence_root(self.db_path),
+                adjudication_record(decision, label,
+                                    intelligence_identity=intelligence_identity),
+            )
+        except (EvidenceError, OSError, ValueError):
+            return
 
     def _save(self, decision: ReviewDecision) -> None:
         data = decision.to_dict()

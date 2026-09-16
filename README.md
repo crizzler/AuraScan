@@ -823,6 +823,16 @@ vulnerabilities remain outside this check; no match is not a safety guarantee.
 The check does not query current repository availability or recommend an
 automatic package replacement.
 
+AuraScan records the review decisions you make at the makepkg handoff in a
+private local log, so a finding you judged benign stays distinguishable from one
+you accepted without any judgment. That log is never exported automatically:
+`aurascan evidence status` shows what was captured, `aurascan evidence consent
+--purpose <purpose> --confirm <purpose>` records consent for one named purpose,
+and `aurascan evidence export` then writes quarantine candidates for separate
+review. Exports carry hashes and review metadata only - never package bytes,
+host paths or your notes - and no export can admit data, grant rights or train
+anything.
+
 A package-name-only match is MEDIUM because cleaned packages can later be
 legitimate. A matching pacman transaction inside the campaign window,
 including a later removal, is CRITICAL exposure evidence, but still not proof

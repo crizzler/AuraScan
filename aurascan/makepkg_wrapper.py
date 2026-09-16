@@ -23,6 +23,7 @@ from aurascan.core.trusted_tools import (
     capture_trusted_system_tool,
     revalidate_trusted_system_tool,
 )
+from aurascan.core.research_evidence import ADJUDICATION_LABELS
 from aurascan.core.review import (
     ReviewDecision,
     ReviewDecisionStatus,
@@ -61,6 +62,7 @@ _VALUE_FLAGS = {
     "--aurascan-trusted-key-dir": "trusted_key_dirs",
     "--aurascan-accept-review": "accept_review",
     "--aurascan-review-reason": "review_reason",
+    "--aurascan-adjudication": "adjudication_label",
     "--aurascan-review-db": "review_db_path",
     "--aurascan-revoke-review": "revoke_review",
     "--aurascan-review-package": "review_package",
@@ -113,6 +115,7 @@ class MakepkgWrapperOptions:
     json_output: bool = False
     verbose: bool = False
     accept_review: str = ""
+    adjudication_label: str = ""
     review_reason: str = ""
     remember_review: bool = False
     review_once: bool = False
@@ -377,6 +380,8 @@ def run(
             reason=options.review_reason,
             remember=options.remember_review and not options.review_once,
             expires_at=_review_expires_at(options),
+            adjudication_label=_adjudication_label(options.adjudication_label),
+            intelligence_identity=_report_intelligence_identity(report),
         )
         annotate_report_for_review(
             report,
@@ -578,6 +583,10 @@ def parse_args(argv: List[str]) -> MakepkgWrapperOptions:
     if options.review_status and options.review_status not in _REVIEW_STATUSES:
         raise WrapperArgumentError(
             "--aurascan-review-status must be one of accepted_once, accepted_persistent_for_exact_scan, revoked, expired, used"
+        )
+    if options.adjudication_label and options.adjudication_label not in ADJUDICATION_LABELS:
+        raise WrapperArgumentError(
+            "--aurascan-adjudication must be one of " + ", ".join(ADJUDICATION_LABELS)
         )
     if options.review_once:
         options.remember_review = False
@@ -903,6 +912,9 @@ def _print_manual_review_with_token(stream: TextIO, review_token: str) -> None:
     print("Recommended action: Review the findings. If you understand and accept the risk for this exact scan, rerun with the review acceptance token shown below.", file=stream)
     print(f"Review token: {review_token}", file=stream)
     print(f"Example: aurascan-makepkg --aurascan-accept-review {review_token} [makepkg args...]", file=stream)
+    print("Optional: add --aurascan-adjudication <label> to record your judgment "
+          "(" + ", ".join(ADJUDICATION_LABELS) + ") for later review. "
+          "It is local, optional and never changes this scan result.", file=stream)
 
 
 def _print_invalid_review(stream: TextIO, reason: str) -> None:
@@ -985,6 +997,23 @@ def _scan_config_hash(options: MakepkgWrapperOptions) -> str:
 
 def json_hash(data) -> str:
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _adjudication_label(value: str) -> str:
+    """Return an allowlisted review judgment, or an explicit empty label."""
+
+    return value if value in ADJUDICATION_LABELS else ""
+
+
+def _report_intelligence_identity(report) -> str:
+    """Capture the bounded intelligence identity when the report carries one."""
+
+    try:
+        metadata = report.get("intelligence") or {}
+    except AttributeError:
+        return ""
+    identity = metadata.get("identity") if isinstance(metadata, dict) else ""
+    return identity if isinstance(identity, str) and len(identity) <= 128 else ""
 
 
 def _review_expires_at(options: MakepkgWrapperOptions) -> Optional[float]:

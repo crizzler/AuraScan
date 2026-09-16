@@ -47,6 +47,8 @@ OFFLINE_AGENT_HELPER_FLAGS = {
 def load_command_environment(raw_argv: List[str]) -> None:
     if raw_argv and raw_argv[0] == "intelligence":
         return
+    if raw_argv and raw_argv[0] == "evidence":
+        return
     if raw_argv and raw_argv[0] == "recovery":
         recovery_args = set(raw_argv[1:])
         if recovery_args & {"--runtime", "--refresh-from-hook"}:
@@ -92,6 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  aurascan intelligence  Inspect or explicitly update signed intelligence.\n\n"
             "Agent file security command:\n"
             "  aurascan instruction-audit  Audit AI-agent control files without executing them.\n\n"
+            "Research evidence command:\n"
+            "  aurascan evidence   Inspect consent-gated review adjudications and export candidates.\n\n"
             "Follow-up command:\n"
             "  aurascan ask        Ask AI about the latest retained AuraScan result.\n\n"
             "Repair agent command:\n"
@@ -173,6 +177,9 @@ def main(argv=None):
     if raw_argv and raw_argv[0] == "intelligence":
         from aurascan.core.intelligence_cli import run_intelligence
         sys.exit(run_intelligence(raw_argv[1:]))
+    if raw_argv and raw_argv[0] == "evidence":
+        from aurascan.core.evidence_cli import run_evidence
+        sys.exit(run_evidence(raw_argv[1:]))
     load_command_environment(raw_argv)
     if raw_argv and raw_argv[0] == "init":
         sys.exit(run_init(raw_argv[1:]))

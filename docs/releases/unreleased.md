@@ -2,6 +2,34 @@
 
 Changes after v0.10.10:
 
+Consent-gated review adjudication capture and export (opt-in research plumbing):
+
+- Review acceptances now also capture a local, append-only record that binds the
+  operator's judgment to the exact PKGBUILD, install-hook and source-metadata
+  hashes, the scan fingerprint, the finding identities and the scanner, rule and
+  intelligence provenance. Capture is best effort: it can never block a scan, a
+  review acceptance or a build.
+- The judgment is an allowlisted label supplied with
+  `--aurascan-adjudication` (`benign_false_positive`, `benign_expected_behavior`,
+  `suspicious_unconfirmed`, `confirmed_malicious`). Without a label the record
+  stays unlabeled, which is not a training target, and an unrecognized label is
+  rejected instead of being silently dropped. Free-text review reasons are never
+  copied into the record, and a revocation or relabel supersedes the earlier
+  judgment while the original stays in the log.
+- `aurascan evidence status` reports capture counts, labels and consent state;
+  `aurascan evidence consent --purpose P --confirm P` records consent for one
+  named purpose (`analysis`, `training`, `commercial_training`,
+  `redistribution`), and consent for one purpose never authorizes another;
+  `aurascan evidence export --purpose P --out FILE` writes quarantine candidates
+  and refuses without that consent or without labeled records.
+- Exported candidates are never admitted: they carry `partition: quarantine`,
+  `admission: not_admitted`, unresolved rights for every purpose, a
+  hash-only content binding and a derivation-family token. Raw package bytes,
+  host paths, operator identity and free-text notes are excluded, so binding
+  real content stays a separate offline intake step under its own consent and
+  admission review. Nothing on this path can admit data, grant rights, choose a
+  split, contact a network, or train a model, and AI credentials are not read.
+
 AUR account/SSH backdoor detection (new rules):
 
 - `PRIV-ACCOUNT-BACKDOOR-001` is a CRITICAL blocking correlation: the same

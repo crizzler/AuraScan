@@ -285,6 +285,26 @@ def test_parse_args_strips_aurascan_flags_and_preserves_makepkg_args():
     assert options.makepkg_args == ["--syncdeps", "--", "--aurascan-json"]
 
 
+def test_adjudication_label_flag_is_validated_and_optional():
+    options = parse_args(["--aurascan-adjudication", "benign_false_positive", "--syncdeps"])
+
+    assert options.adjudication_label == "benign_false_positive"
+    assert options.makepkg_args == ["--syncdeps"]
+    # Absent by default: no judgment is recorded unless the operator states one.
+    assert parse_args(["--syncdeps"]).adjudication_label == ""
+
+
+# An empty value is the documented "no judgment recorded" default, not a typo.
+@pytest.mark.parametrize("label", ["benign", "confirmed", "malicious", "BENIGN_FALSE_POSITIVE"])
+def test_unknown_adjudication_labels_are_rejected(label):
+    with pytest.raises(makepkg_wrapper.WrapperArgumentError):
+        parse_args(["--aurascan-adjudication", label, "--syncdeps"])
+
+
+def test_empty_adjudication_label_means_unlabeled():
+    assert parse_args(["--aurascan-adjudication", "", "--syncdeps"]).adjudication_label == ""
+
+
 @pytest.mark.parametrize(
     "arguments",
     [

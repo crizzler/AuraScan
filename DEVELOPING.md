@@ -1132,6 +1132,41 @@ remains schema 1.0 with additive intelligence identity metadata,
 on findings. Tests use injected package maps, temporary roots, and fake
 runners; no browser, package payload, real host scan, or live feed is needed.
 
+### Human adjudication capture and consented research export
+
+`aurascan/core/research_evidence.py` records what an operator decided about a
+reviewed finding set, and nothing else. Capture is local, append-only and best
+effort: it is an audit trail of a decision the operator already made, so a store
+that cannot be written never blocks a scan, a review acceptance or a package
+build.
+
+- Review acceptance captures a bounded record keyed by the review decision: the
+exact PKGBUILD, install-hook and source-metadata hashes, the scan fingerprint,
+the finding identities, and the scanner/rule/intelligence provenance. A
+revocation captures an unlabeled record that withdraws the judgment instead of
+leaving a stale one, and a relabel supersedes the earlier record while the
+original stays in the log.
+- The judgment itself is an allowlisted label (`benign_false_positive`,
+`benign_expected_behavior`, `suspicious_unconfirmed`, `confirmed_malicious`)
+supplied through `--aurascan-adjudication`. Without it the record is unlabeled,
+which is not a training target. Free-text review reasons are never copied into
+the record, and an unknown label is rejected rather than silently dropped.
+- Research use stays off until an operator records consent for one named purpose
+(`analysis`, `training`, `commercial_training`, `redistribution`), and consent
+for one purpose never authorizes another. `aurascan evidence consent` requires
+the exact purpose string as its confirmation.
+- `aurascan evidence export` refuses without that consent and without labeled
+records. It writes quarantine candidates only: `partition: quarantine`,
+`admission: not_admitted`, unresolved rights for every purpose,
+`content_binding: hash_only`, and a derivation-family token. Raw package bytes,
+host paths, operator identity and free-text notes are excluded, so binding real
+content remains a separate offline intake step under its own consent and
+admission review.
+- Nothing on this path can admit data, grant rights, choose a split, or train a
+model, and no feed, model, network or AI credential is involved. Tests use a
+temporary review store and must never read or write a developer's real home
+state.
+
 ### npm campaign intelligence and lifecycle correlations
 
 Keep the runtime baseline in `aurascan/assets/runtime-intelligence.json` and

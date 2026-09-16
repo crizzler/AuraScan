@@ -22,6 +22,7 @@ from aurascan.core.trusted_tools import (
     TrustedToolError,
     capture_trusted_system_tool,
     revalidate_trusted_system_tool,
+    run_bounded_trusted_tool,
 )
 from aurascan.core.research_evidence import ADJUDICATION_LABELS
 from aurascan.core.review import (
@@ -41,6 +42,15 @@ EXIT_SCAN_BLOCKED = 17
 EXIT_MANUAL_REVIEW = 18
 EXIT_REVIEW_NOT_FOUND = 19
 EXIT_MAKEPKG_NOT_FOUND = 127
+
+# Cached sudo credentials are an execution primitive for package code that
+# escapes static detection, so the handoff removes them first.
+SUDO_INVALIDATION_NOT_REQUESTED = "not_requested"
+SUDO_INVALIDATION_ABSENT = "absent"
+SUDO_INVALIDATION_INVALIDATED = "invalidated"
+SUDO_INVALIDATION_UNCONFIRMED = "unconfirmed"
+SUDO_INVALIDATION_UNTRUSTED = "untrusted"
+SUDO_INVALIDATION_TIMEOUT = 15.0
 WRAPPER_VERSION = "1.0"
 
 _BOOL_FLAGS = {
@@ -101,6 +111,73 @@ class WrapperArgumentError(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class SudoInvalidation:
+    status: str
+    detail: str = ""
+
+
+def _sudo_invalidation_not_requested() -> SudoInvalidation:
+    """No-op seam so in-process callers never mutate the host by accident.
+
+    Clearing cached sudo credentials changes the operator's live state, so it
+    is enabled by the real entry point only (`main`). A library or test caller
+    that does not ask for it must not be able to trigger `sudo -k`.
+    """
+
+    return SudoInvalidation(SUDO_INVALIDATION_NOT_REQUESTED, "")
+
+
+def invalidate_cached_sudo(
+    *,
+    tool_capture: Optional[Callable[..., Optional[TrustedTool]]] = None,
+    tool_revalidate: Optional[Callable[[TrustedTool], None]] = None,
+    runner: Optional[Callable[..., object]] = None,
+) -> SudoInvalidation:
+    """Drop any cached sudo timestamp immediately before the makepkg handoff.
+
+    A timestamp the user created while running their helper is a valid
+    credential for package code that static rules did not catch, so it is
+    removed before the build starts. The step reports rather than blocks: a
+    user who may not run sudo has no cached timestamp to remove, and refusing
+    every build for that reason would be wrong. Static build-phase privilege
+    rules remain the enforcement layer, and an unusable sudo binary is never
+    executed.
+    """
+
+    capture = tool_capture or capture_trusted_system_tool
+    revalidate = tool_revalidate or revalidate_trusted_system_tool
+    execute = runner or run_bounded_trusted_tool
+    try:
+        tool = capture("sudo")
+    except (OSError, TypeError, TrustedToolError):
+        return SudoInvalidation(
+            SUDO_INVALIDATION_UNTRUSTED,
+            "The sudo executable could not be trusted, so cached sudo credentials were not cleared.",
+        )
+    if tool is None:
+        return SudoInvalidation(SUDO_INVALIDATION_ABSENT, "")
+    try:
+        revalidate(tool)
+        result = execute(
+            [tool.path, "-k"],
+            capture_output=True,
+            text=True,
+            timeout=SUDO_INVALIDATION_TIMEOUT,
+        )
+    except (OSError, TypeError, TrustedToolError):
+        return SudoInvalidation(
+            SUDO_INVALIDATION_UNCONFIRMED,
+            "Cached sudo credentials could not be cleared before the build; run 'sudo -k' yourself if you authenticated recently.",
+        )
+    if int(getattr(result, "returncode", 1)) != 0:
+        return SudoInvalidation(
+            SUDO_INVALIDATION_UNCONFIRMED,
+            "Cached sudo credentials could not be cleared before the build; run 'sudo -k' yourself if you authenticated recently.",
+        )
+    return SudoInvalidation(SUDO_INVALIDATION_INVALIDATED, "")
+
+
 @dataclass
 class MakepkgWrapperOptions:
     makepkg_args: List[str] = field(default_factory=list)
@@ -129,7 +206,9 @@ class MakepkgWrapperOptions:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    return run(argv)
+    # The packaged entry point requests the sudo hygiene step explicitly; the
+    # `run` default is a no-op so nothing else can clear credentials silently.
+    return run(argv, sudo_invalidator=invalidate_cached_sudo)
 
 
 def run(
@@ -141,6 +220,7 @@ def run(
     makepkg_tool_capture: Callable[..., Optional[TrustedTool]] = None,
     makepkg_tool_revalidate: Callable[[TrustedTool], None] = None,
     subprocess_run: Callable[..., object] = subprocess.run,
+    sudo_invalidator: Optional[Callable[[], SudoInvalidation]] = None,
     review_store: Optional[ReviewDecisionStore] = None,
     stdout: TextIO = None,
     stderr: TextIO = None,
@@ -151,6 +231,7 @@ def run(
     makepkg_locator = makepkg_locator or locate_real_makepkg
     makepkg_tool_capture = makepkg_tool_capture or capture_trusted_system_tool
     makepkg_tool_revalidate = makepkg_tool_revalidate or revalidate_trusted_system_tool
+    sudo_invalidator = sudo_invalidator or _sudo_invalidation_not_requested
     raw_argv = list(argv if argv is not None else sys.argv[1:])
     json_requested = _argv_requests_json(raw_argv)
 
@@ -425,6 +506,12 @@ def run(
         )
     if not options.json_output:
         _print_passed(stdout)
+    # Remove the user's cached sudo credentials as the last step before package
+    # code runs. This cannot fail the build by itself; an unconfirmed step is
+    # reported so the residual primitive is never silently ignored.
+    sudo_invalidation = sudo_invalidator()
+    if sudo_invalidation.detail:
+        scan_warnings = list(scan_warnings) + [sudo_invalidation.detail]
     result = subprocess_run(
         [makepkg_tool.path] + options.makepkg_args,
         cwd=str(cwd_path),
@@ -449,6 +536,7 @@ def run(
             makepkg_exit_code=makepkg_exit_code,
             review_decision=decision,
             warnings=scan_warnings,
+            sudo_cache_invalidation=sudo_invalidation.status,
         ))
     return makepkg_exit_code
 
@@ -822,6 +910,7 @@ def _wrapper_envelope(
     review_decisions: Optional[List[dict]] = None,
     errors: Optional[List[str]] = None,
     warnings: Optional[List[str]] = None,
+    sudo_cache_invalidation: str = "",
 ) -> dict:
     data = {
         "schema_version": "1.0",
@@ -841,6 +930,8 @@ def _wrapper_envelope(
     }
     if review_decisions is not None:
         data["review_decisions"] = review_decisions
+    if sudo_cache_invalidation:
+        data["sudo_cache_invalidation"] = sudo_cache_invalidation
     return data
 
 

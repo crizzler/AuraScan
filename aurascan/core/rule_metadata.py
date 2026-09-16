@@ -46,6 +46,11 @@ RULE_METADATA: Dict[str, RuleMetadata] = {
         Severity.HIGH, "vendor-emergency-version", 90, True, "finding_fields",
         "Captured installed package version is below a verified multi-vendor security floor; exploitation is not established.",
     ),
+    "SEC-VENDOR-ADVISORY-DERIVED-PACKAGE-UNMAPPED": RuleMetadata(
+        "SEC-VENDOR-ADVISORY-DERIVED-PACKAGE-UNMAPPED", RuleCategory.history_supply_chain,
+        Severity.MEDIUM, "vendor-emergency-coverage", 74, True, "finding_fields",
+        "An installed declared derivative of a mapped product has no reviewed fixed version, so the upstream floor cannot be evaluated for it.",
+    ),
     "SEC-VENDOR-ADVISORY-VERSION-UNRESOLVED": RuleMetadata(
         "SEC-VENDOR-ADVISORY-VERSION-UNRESOLVED", RuleCategory.history_supply_chain,
         Severity.MEDIUM, "vendor-emergency-coverage", 75, True, "finding_fields",
@@ -424,6 +429,7 @@ RULE_METADATA: Dict[str, RuleMetadata] = {
     "INSTALL-HOOK-UNINSPECTED-001": RuleMetadata("INSTALL-HOOK-UNINSPECTED-001", RuleCategory.deterministic_static, Severity.HIGH, "install-hook-inspection", 100, True, "deterministic", "A declared package install hook could not be resolved and inspected safely."),
     "PACKAGE-INSTALL-HOOK-UNINSPECTED-001": RuleMetadata("PACKAGE-INSTALL-HOOK-UNINSPECTED-001", RuleCategory.deterministic_static, Severity.HIGH, "package-install-hook-inspection", 100, True, "deterministic", "A built package install hook could not be read and inspected safely."),
     "EXEC-INSTALL-HOOK-SUDO-001": RuleMetadata("EXEC-INSTALL-HOOK-SUDO-001", RuleCategory.deterministic_static, Severity.CRITICAL, "privileged-install-hook", 100, True, "deterministic", "Runs sudo directly from an already-privileged package install hook."),
+    "PRIV-BUILD-PRIVILEGE-ELEVATION-001": RuleMetadata("PRIV-BUILD-PRIVILEGE-ELEVATION-001", RuleCategory.deterministic_static, Severity.CRITICAL, "privileged-build-elevation", 100, True, "deterministic", "Invokes a privilege-elevation command from package build or install-hook logic."),
     "PRIV-SUDOERS-NOPASSWD-001": RuleMetadata("PRIV-SUDOERS-NOPASSWD-001", RuleCategory.persistence, Severity.CRITICAL, "privileged-sudo-policy", 100, True, "deterministic", "Grants passwordless sudo execution."),
     "PRIV-SUDOERS-DROPIN-001": RuleMetadata("PRIV-SUDOERS-DROPIN-001", RuleCategory.persistence, Severity.HIGH, "privileged-sudo-policy", 85, True, "deterministic", "Installs or references a sudoers policy file."),
     "PRIV-SUDO-ADMIN-GROUP-001": RuleMetadata("PRIV-SUDO-ADMIN-GROUP-001", RuleCategory.persistence, Severity.HIGH, "privileged-sudo-policy", 84, True, "deterministic", "Grants an administrative group a sudo policy entry without passwordless execution."),

@@ -1,3 +1,5 @@
+import pytest
+
 from aurascan.analyzers.deterministic import DeterministicAnalyzer
 from aurascan.core.models import Phase, Severity
 
@@ -1345,3 +1347,84 @@ def test_wheel_policy_word_in_package_description_is_not_a_policy_change():
     findings = analyze_text('pkgdesc="Installs %wheel ALL=(ALL:ALL) ALL sample policy"\n')
 
     assert "PRIV-SUDO-ADMIN-GROUP-001" not in rule_ids(findings)
+
+
+BUILD_ELEVATION = "PRIV-BUILD-PRIVILEGE-ELEVATION-001"
+
+
+@pytest.mark.parametrize("command", ["sudo", "doas", "pkexec", "su", "run0"])
+def test_build_phase_privilege_elevation_is_blocked(command):
+    findings = analyze_text(
+        f"build() {{\n  {command} true\n}}\n",
+    )
+
+    elevation = finding(findings, BUILD_ELEVATION)
+    assert elevation.severity == Severity.CRITICAL
+    assert elevation.blocks_installation is True
+    assert elevation.requires_manual_review is False
+    assert elevation.phase == Phase.pkgbuild_static
+    assert elevation.line_number == 2
+    # Evidence must stay secret-free and must not echo the command arguments.
+    assert elevation.evidence_snippet == "build logic invokes a privilege-elevation command"
+
+
+@pytest.mark.parametrize("command", ["doas", "pkexec", "su", "run0"])
+def test_install_hook_non_sudo_elevation_is_blocked(command):
+    findings = analyze_text(
+        f"post_install() {{\n  {command} true\n}}\n",
+        Phase.install_hook_static,
+    )
+
+    elevation = finding(findings, BUILD_ELEVATION)
+    assert elevation.phase == Phase.install_hook_static
+    assert elevation.blocks_installation is True
+    # sudo keeps its own install-hook rule, so the family rule must not double.
+    assert "EXEC-INSTALL-HOOK-SUDO-001" not in rule_ids(findings)
+
+
+def test_install_hook_sudo_keeps_its_dedicated_rule():
+    findings = analyze_text(
+        "post_install() {\n  sudo -n true\n}\n",
+        Phase.install_hook_static,
+    )
+
+    assert "EXEC-INSTALL-HOOK-SUDO-001" in rule_ids(findings)
+    assert BUILD_ELEVATION not in rule_ids(findings)
+
+
+def test_build_sudo_with_explicit_non_root_user_is_not_blocked():
+    findings = analyze_text("build() {\n  sudo -u fixture-builder make install\n}\n")
+
+    assert BUILD_ELEVATION not in rule_ids(findings)
+    assert "EXEC-INSTALL-HOOK-SUDO-001" not in rule_ids(findings)
+
+
+def test_build_elevation_written_as_arguments_or_messages_is_not_a_command():
+    inert = (
+        "build() {\n  echo sudo make install\n}\n",
+        "build() {\n  printf 'doas make\\n'\n}\n",
+        "build() {\n  # su -c 'make install'\n}\n",
+        'build() {\n  commands=(pkexec true)\n}\n',
+        "build() {\n  msg=\"run su -c make\"\n}\n",
+    )
+    for content in inert:
+        assert BUILD_ELEVATION not in rule_ids(analyze_text(content))
+
+
+def test_ordinary_build_steps_are_not_privilege_elevation():
+    findings = analyze_text(
+        "build() {\n"
+        "  make\n"
+        "  cmake -B build\n"
+        "  install -Dm644 fixture \"$pkgdir/usr/share/fixture\"\n"
+        "  ./configure --prefix=/usr\n"
+        "}\n",
+    )
+
+    assert BUILD_ELEVATION not in rule_ids(findings)
+
+
+def test_build_elevation_inside_command_substitution_is_blocked():
+    findings = analyze_text('build() {\n  version="$(sudo fixture-helper --version)"\n}\n')
+
+    assert BUILD_ELEVATION in rule_ids(findings)

@@ -1269,8 +1269,47 @@ def audit_vendor_emergency_exposure(installed_packages: Mapping[str, str],
     snapshot = intelligence_snapshot if intelligence_snapshot is not None else bundled_snapshot()
     findings: List[SecurityFinding] = []
     covered: Set[str] = set()
+    derived_covered: Set[Tuple[str, str]] = set()
     for entry in snapshot.payload["vendor_advisories"]:
         name = entry["package"]
+        projection = {key: entry[key] for key in ("id", "package", "comparator", "fixed_floor")}
+        projection["intelligence_identity"] = snapshot.identity
+        # A declared derivative is never matched by version similarity. Its own
+        # fixed version is unknown, so it only produces coverage.
+        for derived_name in entry.get("derived_packages", []):
+            if derived_name not in installed_packages:
+                continue
+            key = (derived_name, entry["id"])
+            if key in derived_covered:
+                continue
+            derived_covered.add(key)
+            findings.append(SecurityFinding(
+                rule_id="SEC-VENDOR-ADVISORY-DERIVED-PACKAGE-UNMAPPED",
+                severity=Severity.MEDIUM,
+                category="advisory_coverage",
+                title=f"{derived_name} is a derived package with no reviewed vendor mapping.",
+                summary=(
+                    f"The installed {derived_name} is a declared derivative of {name}, and AuraScan "
+                    f"has no reviewed fixed version for it, so the {entry['cve']} floor "
+                    f"({entry['fixed_floor']}) cannot be evaluated for this package."
+                ),
+                why_it_matters=(
+                    "A derivative can follow, lag, or backport upstream fixes independently, so its "
+                    "security state cannot be inferred from the upstream floor. This is incomplete "
+                    "coverage for this package, not a vulnerability, an exposure, or an exploitation "
+                    "finding, and no version comparison was performed."
+                ),
+                recommended_action=(
+                    f"Check {derived_name}'s own release notes or advisory for its version and patch "
+                    f"state, and treat the {name} floor as unverified for it."
+                ),
+                package_name=derived_name,
+                evidence=[f"installed-package={derived_name}", f"derived-from={name}", entry["cve"],
+                          f"upstream-fixed={entry['fixed_floor']}",
+                          f"advisory-reviewed={entry['reviewed_at']}", entry["vendor_reference"]],
+                confidence="high", source="vendor_emergency_advisory",
+                advisory=projection,
+            ))
         if name not in installed_packages:
             continue
         version = installed_packages[name]
@@ -1282,8 +1321,6 @@ def audit_vendor_emergency_exposure(installed_packages: Mapping[str, str],
         severity = VENDOR_SEVERITY_FINDING.get(entry["vendor_severity"], Severity.MEDIUM)
         vendor_severity = entry["vendor_severity"]
         reviewed = entry["reviewed_at"]
-        projection = {key: entry[key] for key in ("id", "package", "comparator", "fixed_floor")}
-        projection["intelligence_identity"] = snapshot.identity
         if status == "unresolved":
             # One package with several reviewed advisories produces one coverage
             # warning: the missing or unsupported version evidence is the same.

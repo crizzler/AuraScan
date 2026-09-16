@@ -1428,6 +1428,13 @@ def security_audit_upgrade_findings(
             # A pkgrel/epoch bump alone cannot prove this upstream fix. Only
             # an exact mapped repository candidate can resolve this warning;
             # keep the installed-exposure evidence in the original audit.
+            # An unmapped derivative is addressed by updating that exact
+            # package, which is the only available remedy; AuraScan still
+            # cannot evaluate it, so the installed-state audit keeps the note.
+            continue
+        if (item.rule_id == "SEC-VENDOR-ADVISORY-DERIVED-PACKAGE-UNMAPPED"
+                and item.category == "advisory_coverage"
+                and item.package_name in pending_repo):
             continue
         if item.category == "official_vulnerability":
             planned_version = pending_repo.get(item.package_name, "")

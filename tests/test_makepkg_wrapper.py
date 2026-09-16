@@ -2041,3 +2041,195 @@ def test_review_store_uses_restrictive_db_file_permissions(tmp_path):
     mode = os.stat(store.db_path).st_mode & 0o777
 
     assert mode == 0o600
+
+
+def _sudo_tool():
+    return TrustedTool("sudo", "/usr/bin/sudo", 1, 2, 0, 0, 0o100755)
+
+
+def _completed(returncode):
+    class Result:
+        pass
+
+    result = Result()
+    result.returncode = returncode
+    return result
+
+
+def test_cached_sudo_invalidation_reports_each_outcome():
+    calls = []
+    invalidated = makepkg_wrapper.invalidate_cached_sudo(
+        tool_capture=lambda _name: _sudo_tool(),
+        tool_revalidate=lambda _tool: None,
+        runner=lambda argv, **kwargs: calls.append((argv, kwargs)) or _completed(0),
+    )
+    assert invalidated.status == makepkg_wrapper.SUDO_INVALIDATION_INVALIDATED
+    assert invalidated.detail == ""
+    assert calls[0][0] == ["/usr/bin/sudo", "-k"]
+    assert calls[0][1]["timeout"] == makepkg_wrapper.SUDO_INVALIDATION_TIMEOUT
+    assert calls[0][1]["capture_output"] is True
+
+    absent = makepkg_wrapper.invalidate_cached_sudo(tool_capture=lambda _name: None)
+    assert absent.status == makepkg_wrapper.SUDO_INVALIDATION_ABSENT
+    assert absent.detail == ""
+
+    refused = makepkg_wrapper.invalidate_cached_sudo(
+        tool_capture=lambda _name: _sudo_tool(),
+        runner=lambda argv, **kwargs: _completed(1),
+    )
+    assert refused.status == makepkg_wrapper.SUDO_INVALIDATION_UNCONFIRMED
+    assert "sudo -k" in refused.detail
+
+    def untrusted(_name):
+        raise TrustedToolError("fixture untrusted sudo")
+
+    unrecognized = makepkg_wrapper.invalidate_cached_sudo(tool_capture=untrusted)
+    assert unrecognized.status == makepkg_wrapper.SUDO_INVALIDATION_UNTRUSTED
+    assert "sudo" in unrecognized.detail
+
+    def exploding(argv, **kwargs):
+        raise OSError("fixture runner failure")
+
+    failed = makepkg_wrapper.invalidate_cached_sudo(
+        tool_capture=lambda _name: _sudo_tool(),
+        runner=exploding,
+    )
+    assert failed.status == makepkg_wrapper.SUDO_INVALIDATION_UNCONFIRMED
+
+    def changed(_tool):
+        raise TrustedToolError("fixture tool changed")
+
+    revalidated_failure = makepkg_wrapper.invalidate_cached_sudo(
+        tool_capture=lambda _name: _sudo_tool(),
+        tool_revalidate=changed,
+        runner=lambda argv, **kwargs: _completed(0),
+    )
+    assert revalidated_failure.status == makepkg_wrapper.SUDO_INVALIDATION_UNCONFIRMED
+
+
+def test_default_run_never_clears_cached_sudo_credentials(tmp_path):
+    work = copy_fixture(tmp_path, "benign")
+    local_db = tmp_path / "local"
+    local_db.mkdir()
+    factory, _created = real_engine_factory(
+        tmp_path, analyzers=[DeterministicAnalyzer()], local_db=local_db)
+    stdout = io.StringIO()
+
+    code = run(
+        ["--aurascan-json", "--syncdeps"],
+        cwd=work,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner([], []),
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    data = json.loads(stdout.getvalue())
+    assert code == 0
+    assert data["sudo_cache_invalidation"] == makepkg_wrapper.SUDO_INVALIDATION_NOT_REQUESTED
+
+
+def test_requested_invalidation_is_reported_before_the_handoff(tmp_path):
+    work = copy_fixture(tmp_path, "benign")
+    local_db = tmp_path / "local"
+    local_db.mkdir()
+    factory, _created = real_engine_factory(
+        tmp_path, analyzers=[DeterministicAnalyzer()], local_db=local_db)
+    makepkg_calls = []
+    order = []
+
+    def runner(argv, **kwargs):
+        order.append("makepkg")
+        makepkg_calls.append(argv)
+        return Completed(0)
+
+    stdout = io.StringIO()
+    code = run(
+        ["--aurascan-json", "--syncdeps"],
+        cwd=work,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=runner,
+        sudo_invalidator=lambda: (
+            order.append("sudo"), makepkg_wrapper.SudoInvalidation(
+                makepkg_wrapper.SUDO_INVALIDATION_INVALIDATED))[1],
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    data = json.loads(stdout.getvalue())
+    assert code == 0
+    assert makepkg_calls
+    assert order == ["sudo", "makepkg"]
+    assert data["sudo_cache_invalidation"] == "invalidated"
+
+
+def test_unconfirmed_invalidation_warns_without_blocking_the_build(tmp_path):
+    work = copy_fixture(tmp_path, "benign")
+    local_db = tmp_path / "local"
+    local_db.mkdir()
+    factory, _created = real_engine_factory(
+        tmp_path, analyzers=[DeterministicAnalyzer()], local_db=local_db)
+    makepkg_calls = []
+    stdout = io.StringIO()
+
+    code = run(
+        ["--aurascan-json", "--syncdeps"],
+        cwd=work,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner([], makepkg_calls),
+        sudo_invalidator=lambda: makepkg_wrapper.SudoInvalidation(
+            makepkg_wrapper.SUDO_INVALIDATION_UNCONFIRMED, "fixture residual primitive"),
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    data = json.loads(stdout.getvalue())
+    assert code == 0
+    assert makepkg_calls
+    assert data["sudo_cache_invalidation"] == "unconfirmed"
+    assert "fixture residual primitive" in data["warnings"]
+
+
+def test_build_privilege_elevation_blocks_before_makepkg_and_before_sudo_cleanup(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "PKGBUILD").write_text(
+        "pkgname=fixture-sudo-build\n"
+        "pkgver=1.0\n"
+        "pkgrel=1\n"
+        "arch=('x86_64')\n"
+        "source=('https://example.invalid/fixture-sudo-build-1.0.tar.gz')\n"
+        "sha256sums=('ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff')\n"
+        "build() {\n"
+        "  sudo -n true\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    local_db = tmp_path / "local"
+    local_db.mkdir()
+    factory, created = real_engine_factory(
+        tmp_path, analyzers=[DeterministicAnalyzer()], local_db=local_db)
+    makepkg_calls = []
+    invalidations = []
+
+    code = run(
+        ["--syncdeps"],
+        cwd=work,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner([], makepkg_calls),
+        sudo_invalidator=lambda: invalidations.append("called"),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    findings = created[0].last_report.get("findings", [])
+    assert code == EXIT_SCAN_BLOCKED
+    assert "PRIV-BUILD-PRIVILEGE-ELEVATION-001" in {item["rule_id"] for item in findings}
+    # A build that tries to escalate never reaches makepkg, so a cached sudo
+    # timestamp can never be used by it.
+    assert not makepkg_calls
+    assert not invalidations

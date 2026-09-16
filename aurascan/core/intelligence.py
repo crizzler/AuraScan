@@ -45,6 +45,15 @@ VENDOR_COMPARATOR_FLOORS = {
 # Vendor ratings are recorded exactly as the vendor states them and mapped to a
 # finding severity by the application, never by the feed.
 VENDOR_SEVERITIES = ("critical", "high", "moderate", "low")
+# A reviewed derivative declaration names exact Arch packages that follow a
+# mapped product. It is deliberately optional so every previously valid payload
+# stays valid, and it only ever produces a coverage signal: a derivative can
+# lag or backport independently, so its state is never inferred from the floor.
+VENDOR_ADVISORY_KEYS = ("id", "cve", "package", "fixed_floor", "comparator",
+                        "known_exploited", "vendor_severity", "vendor_reference",
+                        "exploitation_reference", "reviewed_at", "rights")
+VENDOR_ADVISORY_DERIVED_KEY = "derived_packages"
+MAX_DERIVED_PACKAGES = 32
 
 
 class IntelligenceError(ValueError):
@@ -207,7 +216,10 @@ def validate_payload(payload: bytes) -> Dict[str, Any]:
     _unique(campaign_ids)
     advisory_ids = []
     for advisory in _list(data["vendor_advisories"]):
-        _keys(advisory, ("id", "cve", "package", "fixed_floor", "comparator", "known_exploited", "vendor_severity", "vendor_reference", "exploitation_reference", "reviewed_at", "rights"))
+        keys = set(advisory) if isinstance(advisory, dict) else set()
+        if keys not in (set(VENDOR_ADVISORY_KEYS),
+                        set(VENDOR_ADVISORY_KEYS) | {VENDOR_ADVISORY_DERIVED_KEY}):
+            raise IntelligenceError("intelligence record fields are unsupported or incomplete")
         advisory_ids.append(_identity(advisory["id"]))
         if not re.fullmatch(r"CVE-[0-9]{4}-[0-9]{4,12}", _text(advisory["cve"], 32)):
             raise IntelligenceError("intelligence CVE identity is malformed")
@@ -225,6 +237,11 @@ def validate_payload(payload: bytes) -> Dict[str, Any]:
             raise IntelligenceError("intelligence exploitation reference contradicts its exploitation profile")
         _date(advisory["reviewed_at"])
         _rights(advisory["rights"])
+        derived = advisory.get(VENDOR_ADVISORY_DERIVED_KEY, [])
+        for name in _list(derived, MAX_DERIVED_PACKAGES):
+            if not re.fullmatch(r"[a-z0-9][a-z0-9@._+-]{0,213}", _text(name, 214)):
+                raise IntelligenceError("intelligence derived Arch package identity is malformed")
+        _unique(derived)
     _unique(advisory_ids)
     record_count += len(advisory_ids)
     withdrawals = []
@@ -314,6 +331,7 @@ def record_identities(data: Mapping[str, Any]) -> Dict[str, str]:
     for advisory in data["vendor_advisories"]:
         claim = [advisory[key] for key in ("id", "package", "cve", "comparator", "fixed_floor",
                                           "known_exploited", "vendor_severity")]
+        claim.append(list(advisory.get(VENDOR_ADVISORY_DERIVED_KEY, [])))
         add("vendor", claim, "vendor_advisory")
     return records
 

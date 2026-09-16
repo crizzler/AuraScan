@@ -29,6 +29,7 @@ from aurascan.core.upgrade_preflight import (
 
 EXPOSURE_RULE = "SEC-KNOWN-EXPLOITED-VERSION-LAG"
 FLOOR_RULE = "SEC-VENDOR-SECURITY-FLOOR-LAG"
+DERIVED_RULE = "SEC-VENDOR-ADVISORY-DERIVED-PACKAGE-UNMAPPED"
 COVERAGE_RULE = "SEC-VENDOR-ADVISORY-VERSION-UNRESOLVED"
 # Chromium carries two reviewed floors: the known-exploited fix and the later
 # critical vendor floor. A release below both raises both findings, and a
@@ -161,12 +162,51 @@ def test_unknown_or_malformed_version_is_coverage_never_fixed_or_secret_echo(ver
 
 
 @pytest.mark.parametrize("name", [
-    "chromium-bin", "chromium-git", "chromium-dev", "ungoogled-chromium",
+    "chromium-bin", "chromium-git", "chromium-dev",
     "chromium-docs", "chromium-widevine", "google-chrome", "Chromium",
     "extra/chromium", "not-chromium", "ordinary-outdated-package",
 ])
 def test_package_name_similarity_or_outdated_status_does_not_establish_exposure(name):
     assert audit_vendor_emergency_exposure({name: "152.0.7977.82-1"}) == []
+
+
+def test_declared_derivative_produces_coverage_never_exposure():
+    # ungoogled-chromium is a reviewed derivative declaration, so it is reported
+    # as unevaluated coverage instead of being matched by version similarity.
+    findings = audit_vendor_emergency_exposure({"ungoogled-chromium": "152.0.7977.82-1"})
+
+    assert [item.rule_id for item in findings] == [DERIVED_RULE, DERIVED_RULE]
+    assert all(item.severity == Severity.MEDIUM for item in findings)
+    assert all(item.category == "advisory_coverage" for item in findings)
+    assert all(item.package_name == "ungoogled-chromium" for item in findings)
+    assert all(item.advisory.get("intelligence_identity") for item in findings)
+    serialized = json.dumps([item.to_dict() for item in findings])
+    assert "derived-from=chromium" in serialized
+    assert "153.0.8010.36" in serialized and "153.0.8010.47" in serialized
+    assert EXPOSURE_RULE not in serialized and FLOOR_RULE not in serialized
+
+
+def test_undeclared_lookalike_is_not_treated_as_a_derivative():
+    for name in ("chromium-bin", "ungoogled-chromium-git", "librewolf") :
+        findings = audit_vendor_emergency_exposure({name: "152.0.7977.82-1"})
+        if name == "librewolf":
+            assert [item.rule_id for item in findings] == [DERIVED_RULE]
+        else:
+            assert findings == []
+
+
+def test_derivative_coverage_is_resolved_by_updating_that_exact_package():
+    report = SecurityAuditReport(
+        campaign=None,
+        findings=audit_vendor_emergency_exposure({"ungoogled-chromium-bin": "152.0.7977.75-1"}),
+    )
+    plan = UpgradePlan(repo_packages=[UpgradePackage(name="ungoogled-chromium-bin",
+                                                     new_version="153.0.8010.47-1")])
+
+    assert security_audit_upgrade_findings(
+        report, plan, version_compare=forbidden_external_call) == []
+    # The installed-state audit keeps the coverage it captured.
+    assert [item.rule_id for item in report.findings] == [DERIVED_RULE, DERIVED_RULE]
 
 
 def test_absent_package_has_no_exposure_or_coverage_warning():

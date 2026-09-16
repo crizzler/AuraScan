@@ -511,6 +511,14 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
         "not_prove": "The inspection failure does not prove the package is malicious; it means privileged install code may remain unreviewed.",
         "action": "Do not install this archive. Obtain a valid unchanged package and scan it again, or inspect its structure from a trusted environment.",
     },
+    "PRIV-BUILD-PRIVILEGE-ELEVATION-001": {
+        "title": "Package build logic tries to elevate privilege.",
+        "summary": "Build or install-hook logic invokes a privilege-elevation command such as sudo, doas, pkexec, su or run0.",
+        "why": "A cached credential or an existing elevation rule can let that call act with authority the build step should never have; package builds run unprivileged by design.",
+        "checked": "AuraScan matched the command in shell command position as static text and did not run it.",
+        "not_prove": "The match does not identify the invoked program as malware, but a build step that escalates privilege has no ordinary packaging purpose.",
+        "action": "Do not build the package until the elevation step and every program it invokes have been reviewed.",
+    },
     "EXEC-INSTALL-HOOK-SUDO-001": {
         "title": "Install hook launches a command through sudo.",
         "summary": "The package install hook invokes sudo even though pacman install hooks already execute with package-manager privileges.",

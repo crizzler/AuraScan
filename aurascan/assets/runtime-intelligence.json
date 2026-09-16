@@ -98,6 +98,10 @@
       "package": "chromium",
       "fixed_floor": "153.0.8010.36",
       "comparator": "chromium_four_part",
+      "derived_packages": [
+        "ungoogled-chromium",
+        "ungoogled-chromium-bin"
+      ],
       "known_exploited": true,
       "vendor_severity": "critical",
       "vendor_reference": "https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_0808145027.html",
@@ -114,6 +118,10 @@
       "package": "chromium",
       "fixed_floor": "153.0.8010.47",
       "comparator": "chromium_four_part",
+      "derived_packages": [
+        "ungoogled-chromium",
+        "ungoogled-chromium-bin"
+      ],
       "known_exploited": false,
       "vendor_severity": "critical",
       "vendor_reference": "https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_0541751186.html",
@@ -130,6 +138,11 @@
       "package": "firefox",
       "fixed_floor": "156.0",
       "comparator": "numeric_dotted_upstream",
+      "derived_packages": [
+        "librewolf",
+        "zen-browser",
+        "floorp"
+      ],
       "known_exploited": false,
       "vendor_severity": "high",
       "vendor_reference": "https://www.mozilla.org/security/advisories/mfsa2026-90/",
@@ -146,6 +159,7 @@
       "package": "thunderbird",
       "fixed_floor": "156.0",
       "comparator": "numeric_dotted_upstream",
+      "derived_packages": [],
       "known_exploited": false,
       "vendor_severity": "high",
       "vendor_reference": "https://www.mozilla.org/security/advisories/mfsa2026-94/",

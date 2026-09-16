@@ -30,6 +30,37 @@ Consent-gated review adjudication capture and export (opt-in research plumbing):
   admission review. Nothing on this path can admit data, grant rights, choose a
   split, contact a network, or train a model, and AI credentials are not read.
 
+Build-time privilege elevation is now blocked and cached sudo is cleared:
+
+- `PRIV-BUILD-PRIVILEGE-ELEVATION-001` is a CRITICAL blocker for `sudo`, `doas`,
+  `pkexec`, `su` and `run0` in package build logic, and for the non-`sudo` family
+  in install hooks. `sudo` in an install hook keeps its existing
+  `EXEC-INSTALL-HOOK-SUDO-001` rule, and only `sudo -u <non-root user>` keeps the
+  narrow justification. A build step that tries to escalate never reaches
+  makepkg, so a cached sudo timestamp cannot be used by it.
+- Immediately before the makepkg handoff the packaged entry point now clears the
+  operator's cached sudo timestamp with the trusted absolute `sudo -k`. The step
+  reports rather than blocks, because a user who may not run sudo has no cached
+  timestamp to remove; the JSON envelope carries `sudo_cache_invalidation`
+  (`not_requested`, `absent`, `invalidated`, `unconfirmed`, `untrusted`) and an
+  unconfirmed step adds a warning instead of failing the build.
+- The hygiene step is requested only by the real entry point. `run()` defaults to
+  a no-op seam, so an in-process or test caller can never clear a developer's
+  credentials as a side effect.
+
+Declared derived packages now get honest coverage instead of silence:
+
+- A vendor advisory record may declare reviewed `derived_packages` (for example
+  `ungoogled-chromium` or `librewolf`). When one is installed,
+  `SEC-VENDOR-ADVISORY-DERIVED-PACKAGE-UNMAPPED` reports MEDIUM that the upstream
+  floor cannot be evaluated for it.
+- No version comparison is performed and the finding never claims exposure,
+  because a derivative can follow, lag or backport fixes independently. Its
+  recommended action is to check the derivative's own advisory. Undeclared
+  lookalike names still produce nothing, and a pending update of that exact
+  package suppresses the note from the upgrade summary while the installed-state
+  audit keeps it.
+
 AUR account/SSH backdoor detection (new rules):
 
 - `PRIV-ACCOUNT-BACKDOOR-001` is a CRITICAL blocking correlation: the same

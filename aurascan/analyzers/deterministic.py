@@ -149,9 +149,16 @@ SECRET_FREE_EVIDENCE = {
     "PRIV-SUDOERS-DROPIN-001": "package logic targets a sudoers policy path",
     "PRIV-SUDO-ADMIN-GROUP-001": "sudo policy grants an administrative group privileged execution",
     "PRIV-ACCOUNT-CREDENTIAL-001": "package logic assigns a local account a literal password",
+    "PRIV-BUILD-PRIVILEGE-ELEVATION-001": "build logic invokes a privilege-elevation command",
 }
 
 _SUDO_COMMAND = shell_command_pattern("sudo")
+# Build steps run unprivileged by design: makepkg refuses to run as root, and a
+# package build has no legitimate reason to escalate. The sudo rule keeps its
+# existing narrow "-u <non-root user>" justification; the other helpers have no
+# such packaging case, so they always need review.
+_ELEVATION_FAMILY = shell_command_pattern("sudo", "doas", "pkexec", "su", "run0")
+_ELEVATION_WITHOUT_SUDO = shell_command_pattern("doas", "pkexec", "su", "run0")
 _CHMOD_COMMAND = shell_command_pattern("chmod")
 _SUID_MODE = re.compile(r"(?:0?4[0-7]{3}|u\+s|\+s)", re.IGNORECASE)
 _SOURCE_ASSIGNMENT_START = re.compile(
@@ -462,9 +469,50 @@ class DeterministicAnalyzer(BaseAnalyzer):
                 ))
         if phase == Phase.install_hook_static:
             findings.extend(self._inspect_privileged_install_hook(pkg_path, lines, pkg_name, pkg_ver))
+        else:
+            findings.extend(self._inspect_build_privilege_elevation(pkg_path, lines, pkg_name, pkg_ver))
         return findings
 
+    def _inspect_build_privilege_elevation(self, pkg_path: str, lines: List[str],
+                                           pkg_name: str, pkg_ver: str) -> List[Finding]:
+        """Reject privilege elevation from package build logic."""
+
+        for index, line in enumerate(lines):
+            active_line = self._strip_shell_comment(line)
+            masked_line = mask_shell_quoted_text(active_line)
+            for match in _ELEVATION_FAMILY.finditer(masked_line):
+                segment_end = self._shell_segment_end(masked_line, match.end())
+                remainder = active_line[match.end():segment_end]
+                if (match.group(0).strip().endswith("sudo")
+                        and self._has_explicit_non_root_sudo_user(remainder)):
+                    continue
+                return [Finding(
+                    rule_id="PRIV-BUILD-PRIVILEGE-ELEVATION-001",
+                    package_name=pkg_name,
+                    package_version=pkg_ver,
+                    phase=Phase.pkgbuild_static,
+                    source=Source.deterministic_rule,
+                    severity=Severity.CRITICAL,
+                    confidence=Confidence.CONFIRMED,
+                    evidence_quality=EvidenceQuality.confirmed_static_pattern,
+                    file_path=pkg_path,
+                    explanation=(
+                        "Package build logic invokes a privilege-elevation command even though "
+                        "makepkg builds run unprivileged by design."
+                    ),
+                    recommendation=(
+                        "Do not build this revision. Packaging has no need to elevate privilege; "
+                        "review the build step and the invoked program before proceeding."
+                    ),
+                    blocks_installation=True,
+                    requires_manual_review=False,
+                    evidence_snippet=SECRET_FREE_EVIDENCE["PRIV-BUILD-PRIVILEGE-ELEVATION-001"],
+                    line_number=index + 1,
+                )]
+        return []
+
     def _inspect_privileged_install_hook(self, pkg_path: str, lines: List[str], pkg_name: str, pkg_ver: str) -> List[Finding]:
+        findings = self._install_hook_elevation_findings(pkg_path, lines, pkg_name, pkg_ver)
         for index, line in enumerate(lines):
             active_line = self._strip_shell_comment(line)
             masked_line = mask_shell_quoted_text(active_line)
@@ -473,7 +521,7 @@ class DeterministicAnalyzer(BaseAnalyzer):
                 remainder = active_line[match.end():segment_end]
                 if self._has_explicit_non_root_sudo_user(remainder):
                     continue
-                return [Finding(
+                return findings + [Finding(
                     rule_id="EXEC-INSTALL-HOOK-SUDO-001",
                     package_name=pkg_name,
                     package_version=pkg_ver,
@@ -488,6 +536,39 @@ class DeterministicAnalyzer(BaseAnalyzer):
                     blocks_installation=True,
                     requires_manual_review=False,
                     evidence_snippet="privileged sudo invocation in install hook",
+                    line_number=index + 1,
+                )]
+        return findings
+
+    def _install_hook_elevation_findings(self, pkg_path: str, lines: List[str],
+                                         pkg_name: str, pkg_ver: str) -> List[Finding]:
+        """Cover the non-sudo elevation family in install hooks."""
+
+        for index, line in enumerate(lines):
+            active_line = self._strip_shell_comment(line)
+            masked_line = mask_shell_quoted_text(active_line)
+            if _ELEVATION_WITHOUT_SUDO.search(masked_line):
+                return [Finding(
+                    rule_id="PRIV-BUILD-PRIVILEGE-ELEVATION-001",
+                    package_name=pkg_name,
+                    package_version=pkg_ver,
+                    phase=Phase.install_hook_static,
+                    source=Source.deterministic_rule,
+                    severity=Severity.CRITICAL,
+                    confidence=Confidence.CONFIRMED,
+                    evidence_quality=EvidenceQuality.confirmed_static_pattern,
+                    file_path=pkg_path,
+                    explanation=(
+                        "Install hook invokes a privilege-elevation command even though it already "
+                        "runs with package-manager privileges."
+                    ),
+                    recommendation=(
+                        "Do not install this package until the privileged hook and the invoked "
+                        "program have been fully reviewed."
+                    ),
+                    blocks_installation=True,
+                    requires_manual_review=False,
+                    evidence_snippet=SECRET_FREE_EVIDENCE["PRIV-BUILD-PRIVILEGE-ELEVATION-001"],
                     line_number=index + 1,
                 )]
         return []

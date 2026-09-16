@@ -1034,6 +1034,37 @@ This rule does not rely on Arch's tracker currently listing an issue and does
 not claim an AUR exploitation campaign. Tests inject database roots/version
 comparison and use inert local tarballs; neither pnpm nor package code runs.
 
+### Build-time privilege elevation and cached credentials
+
+Package build logic must not elevate privilege: makepkg refuses to run as root
+and a build step has no ordinary packaging reason to escalate.
+`PRIV-BUILD-PRIVILEGE-ELEVATION-001` therefore blocks `sudo`, `doas`, `pkexec`,
+`su` and `run0` found in shell command position in PKGBUILD control text, and in
+install-hook text for the non-`sudo` family. `sudo` in install hooks keeps its
+older `EXEC-INSTALL-HOOK-SUDO-001` rule so a hook is never reported twice, and
+only `sudo -u <non-root user>` keeps the narrow justification escape hatch.
+Quoted examples, messages, arrays and comments stay inert, and the finding
+evidence never echoes the command's arguments.
+
+Immediately before the makepkg handoff, the packed entry point also clears the
+operator's cached sudo timestamp with the trusted absolute `sudo -k`, because a
+timestamp created while running the helper is a valid credential for package
+code that static rules did not catch. That step is deliberately shaped this way:
+
+- It is requested only by the real entry point (`main`). `run()` defaults to a
+no-op seam, so an in-process or test caller can never clear a developer's
+credentials as a side effect, and tests that exercise it inject their own
+invalidator.
+- It reports instead of blocking. A user who may not run `sudo` has no cached
+timestamp to remove, so failing the build there would be wrong; the envelope
+carries `sudo_cache_invalidation` (`not_requested`, `absent`, `invalidated`,
+`unconfirmed`, `untrusted`) and an unconfirmed step adds a warning, so the
+residual primitive is never silently ignored. Static elevation rules remain the
+enforcement layer.
+- An untrusted sudo binary is never executed, and the step runs after the final
+scan-input recapture and before the handoff, so it cannot invalidate the
+package-state check.
+
 ### Emergency vendor advisory evidence
 
 `aurascan/core/security_audit.py` consumes the deliberately small reviewed
@@ -1105,6 +1136,17 @@ applied to a derived or forked package by version similarity. LibreWolf, Zen
 Browser and Floorp display Firefox-like versions and can backport fixes without
 changing that number, so they need their own reviewed mapping and upstream
 confirmation rather than version arithmetic.
+
+A record may instead declare `derived_packages`: reviewed exact Arch names that
+follow the mapped product. The field is optional, so every previously valid
+payload stays valid, and it produces coverage only. When a declared derivative
+is installed, `SEC-VENDOR-ADVISORY-DERIVED-PACKAGE-UNMAPPED` reports MEDIUM that
+the upstream floor cannot be evaluated for that package: no version comparison
+is performed, the finding never claims exposure, and its recommended action is to
+check the derivative's own advisory. The note is suppressed from an upgrade
+summary only when the pending transaction updates that exact package, because
+that update is the only available remedy while the installed-state audit keeps
+the coverage. Undeclared lookalike names produce nothing at all.
 
 Exploitation state, vendor severity, and the comparator set are part of the wire
 contract, so this revision publishes intelligence schema and engine capability

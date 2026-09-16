@@ -124,11 +124,59 @@ A presenter that would form a cycle with the object it renders imports that type
 under `if TYPE_CHECKING:` instead; the audit ignores type-checking blocks because
 they are never executed, so a hint cannot hide a runtime dependency.
 
+## Architecture stabilization baseline
+
+Architecture stabilization (Stages 1–14) is complete and the campaign is closed.
+The work was a sequence of ownership moves that made each lifecycle boundary
+one-way and each generic framework neutral; the decomposition log below records
+what moved and why.
+
+Current baseline: **92 modules, 72,340 physical lines, 19 architecture
+invariants with zero violations** and three deliberately retained components
+(the incident workflow, the intelligence snapshot transaction, and the
+install-hook/provenance walk). No planner component exists: `agent`, `followup`,
+`config_drift`, `upgrade_preflight`, `upgrade_followup` and `incident_repairs`
+are all cycle-free and directional.
+
+The campaign stopped because the condition it was started for is met: a reviewer
+can locate trust, policy, side effects and AI authority per subsystem by reading
+a small number of named modules, and the remaining large modules concentrate
+*responsibility*, not ambiguity. Further structure-only change would rearrange
+code without improving that.
+
+Enforced guarantees: no analyzer executes a process; no `shell=True`; production
+stays standard library plus declared extras; domain, risk and catalog modules
+stay pure and leaf-ward; presenters are cycle-free and side-effect free; platform
+adapters do not depend on application workflows (documented exceptions in
+`INVARIANT_ALLOWLIST`); a generic lifecycle framework imports no concrete
+lifecycle workflow and never sits inside an import cycle. The audit tool and its
+tests are the enforcing artifact, not this document.
+
+Reopen architecture work when a **trigger** fires rather than on a metric:
+
+- a module acquires a third dangerous capability (`network`, `process`,
+  `fs_write`, `privilege`, `sqlite`);
+- a new reciprocal dependency appears, or an existing component gains a member;
+- a module gains a second AI policy surface, or AI gains authority beyond
+  raising severity and adding explanatory prose;
+- a new privilege boundary appears, or a component member reaches repair
+  execution;
+- a module's fan-out or concern tags jump materially (the audit warns above
+  5 concerns and 2500 lines);
+- defects recur in one responsibility area of a module;
+- the `INV-017` allowlist grows instead of being shrunk by better layer
+  classification.
+
+Otherwise, change architecture only alongside a feature or a bug that exposes a
+boundary problem.
+
 ## Where side effects live
 
-Measured capability ownership. Each list is pinned by a regression test in
-`tests/test_architecture_audit.py`, so a new module that starts executing
-processes or opening sockets fails the test until this document is updated.
+Measured capability ownership. The table is computed by the audit tool, and the
+ownership assertions that changed during stabilization are pinned by regression
+tests in `tests/test_architecture_audit.py`, so a moved capability (for example
+network authority leaving `core/repository_state.py`) fails the suite until this
+document is updated.
 
 | Capability | Modules | Notes |
 | --- | ---: | --- |
@@ -137,7 +185,7 @@ processes or opening sockets fails the test until this document is updated.
 | Privilege-sensitive calls | 2 | `core/config.py`, `core/intelligence_cli.py` (ownership/UID lookups only, no privilege change) |
 | Archive extraction | 1 | `core/archive.py` (`SafeArchiveExtractor`, bounded by bytes and entries) |
 | SQLite state | 3 | `analyzers/history.py`, `core/cache.py`, `core/review.py` |
-| Filesystem writes | 27 | Widespread by design; each path is bounded and reviewed at its call site. Stage 6 added `core/state_file.py` as the reviewer-visible owner of the atomic state write those callers share. |
+| Filesystem writes | 28 | Widespread by design; each path is bounded and reviewed at its call site. Stage 6 added `core/state_file.py` as the reviewer-visible owner of the atomic state write those callers share. |
 
 **Capabilities trace call sites, not injected runners.** A module that receives
 its runner as a parameter (`runner: Callable = subprocess.run`) or calls a
@@ -848,7 +896,7 @@ Extracted `core/trusted_executable.py`: `TrustedExecutable`,
 | `core/instruction_guard.py` (8760) | Highest absolute risk: discovery, integrity manifests, private report state and triage UX in one file. Needs a characterisation-test layer over paging/enrollment state before any move. |
 | `analyzers/repository_provenance.py` (4555) | Splitting magic classification from correlation is plausible, but the bounded-walk coverage rules are subtle and the fixture matrix is the contract. |
 | `core/incidents.py` (3246) | Stage 5 removed its CLI dispatch and its automation edges, and Stage 10 removed the follow-up edges that also released `incident_repairs`, so what is left is the interactive workflow. Its remaining component with `incident_diagnostics` and `incident_automation` must be designed before another member moves. |
-| `core/agent.py` (3741) | Command allowlisting, consent and execution are one security boundary; separating them without a policy/adapter interface risks weakening the fail-closed path. |
+| `core/agent.py` (3850) | Command allowlisting, consent and execution are one security boundary; separating them without a policy/adapter interface risks weakening the fail-closed path. |
 
 #### Planning and execution inside the repair module
 

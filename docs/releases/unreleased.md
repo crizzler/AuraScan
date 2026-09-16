@@ -2,6 +2,21 @@
 
 Changes after v0.10.10:
 
+Architecture stabilization stage 14 closeout (documentation only, no behavior change):
+
+- The Stage 14 reassessment re-measured every property of Stages 8–13 from the
+  repository: domain leaves, follow-up neutrality and directionality, provider
+  supply, presenter rules, adapter direction and the framework invariants all
+  still hold, with 19 invariants and zero violations. The campaign is closed and
+  `docs/ARCHITECTURE.md` now records the baseline and the triggers that should
+  reopen architecture work.
+- Corrected stale measurement in the reference documents: the layer table
+  reported 91 modules / 72,084 lines / 25 application modules (current:
+  92 / 72,340 / 27, now naming the follow-up lifecycle adapters), and
+  `docs/SECURITY_BOUNDARIES.md` lists framework neutrality (INV-018/019) among
+  the prohibited capability combinations.
+- No production code changed; subsequent work is feature- and bug-driven.
+
 Architecture stabilization stage 1 (no behavior change):
 
 - Added `tools/architecture_audit.py`, an offline AST audit that reports module

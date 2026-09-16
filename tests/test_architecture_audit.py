@@ -824,8 +824,9 @@ def test_upgrade_refresh_is_owned_by_the_upgrade_lifecycle():
 
     cli_source = (ROOT / "aurascan" / "cli.py").read_text(encoding="utf-8")
     assert "refresh_upgrade_preflight" in cli_source
-    assert "run_ask(raw_argv[1:], refresh_upgrade_report=refresh_upgrade_preflight)" in cli_source
-    assert "run_agent(raw_argv[1:], refresh_upgrade_report=refresh_upgrade_preflight)" in cli_source
+    assert "refresh_upgrade_report=refresh_upgrade_preflight" in cli_source
+    assert "incident_context_provider=load_incident_followup_context" in cli_source
+    assert "incident_runtime_provider=build_incident_followup_runtime" in cli_source
 
 
 def test_upgrade_preflight_and_followup_direction_is_one_way():
@@ -894,16 +895,55 @@ def test_snapshot_collection_stays_with_the_workflow():
     assert "SystemSnapshot.collect(" not in workflow_source
 
 
-def test_upgrade_preflight_left_the_planner_component():
-    """Stage 9 topology: the upgrade workflow is no longer in a cycle."""
+def test_incident_family_left_the_planner_component():
+    """Stage 10 topology: the generic framework no longer cycles with incidents."""
 
     result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
     cycles = {module for component in result.cycles for module in component}
 
     assert "aurascan.core.upgrade_preflight" not in cycles
     assert "aurascan.core.upgrade_models" not in cycles
-    # The remaining component is the incident/agent/follow-up planner group.
+    # The generic follow-up framework, the agent and config drift still call each
+    # other through supplied providers; the incident family no longer takes part.
     planner = next(component for component in result.cycles if "aurascan.core.followup" in component)
-    assert len(planner) == 6
-    assert "aurascan.core.incidents" in planner
-    assert "aurascan.core.upgrade_preflight" not in planner
+    assert sorted(planner) == [
+        "aurascan.core.agent",
+        "aurascan.core.config_drift",
+        "aurascan.core.followup",
+    ]
+    incident_component = next(
+        component for component in result.cycles if "aurascan.core.incidents" in component
+    )
+    assert sorted(incident_component) == [
+        "aurascan.core.incident_automation",
+        "aurascan.core.incident_diagnostics",
+        "aurascan.core.incidents",
+    ]
+
+    module = {info.name: info for info in result.modules}
+    followup = module["aurascan.core.followup"]
+    for name in (
+        "aurascan.core.incidents",
+        "aurascan.core.incident_automation",
+        "aurascan.core.incident_diagnostics",
+        "aurascan.core.incident_repairs",
+    ):
+        assert name not in followup.internal_imports, name
+        assert name in module["aurascan.core.incident_followup"].internal_imports, name
+
+
+def test_incident_lifecycle_providers_are_supplied_not_imported():
+    """The incident adapters live outside the framework and are supplied in."""
+
+    followup_source = (ROOT / "aurascan" / "core" / "followup.py").read_text(encoding="utf-8")
+    assert "aurascan.core.incidents" not in followup_source
+    assert "build_incident_runtime" not in followup_source
+    assert "build_maintenance_runtime" not in followup_source
+
+    incidents_source = (ROOT / "aurascan" / "core" / "incidents.py").read_text(encoding="utf-8")
+    assert "aurascan.core.incident_followup" not in incidents_source
+    assert incidents_source.count("followup_runtime_provider(") == 4
+
+    agent_source = (ROOT / "aurascan" / "core" / "agent.py").read_text(encoding="utf-8")
+    assert "context_from_saved_incident" not in agent_source
+    assert "incident_context_provider=incident_context_provider" in agent_source

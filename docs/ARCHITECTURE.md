@@ -62,7 +62,7 @@ Two rules hold across every plane:
 Layers are assigned from repository structure by the audit tool. They describe
 dependency direction; they are not a package reorganisation.
 
-Current measurement: **90 modules, 71,978 physical lines.**
+Current measurement: **91 modules, 72,084 physical lines.**
 
 | Layer | Modules | Contents |
 | --- | ---: | --- |
@@ -184,7 +184,8 @@ known decision rather than a surprise.
 
 | Cycle | Modules | Assessment |
 | --- | --- | --- |
-| Engine and planners | `core.agent`, `core.config_drift`, `core.followup`, `core.incident_automation`, `core.incident_diagnostics`, `core.incidents` | Six members. Stages 5–8 removed the dispatch, shared-vocabulary, repository-interpretation and follow-up-refresh edges; Stage 9 moved the upgrade values those planners shared into the domain layer, so `upgrade_preflight` left the component. The remaining coupling is orchestration between the incident, follow-up, agent and config-drift workflows. |
+| Agent, config drift and follow-up | `core.agent`, `core.config_drift`, `core.followup` | Three members, down from six. Stages 5–9 removed the dispatch, vocabulary, repository-interpretation, follow-up-refresh and upgrade-value edges. Stage 10 moved the incident-family follow-up adapters out of the framework, which removed every `followup -> incident*` edge at once: the incident family separated into its own component. |
+| Incident planners | `core.incident_automation`, `core.incident_diagnostics`, `core.incidents` | Expected and deliberate: the incident workflow, its diagnostics planner and its automation layer share report state and repair vocabulary. Nothing outside that group needs to enter it. |
 | Intelligence | `core.intelligence`, `core.intelligence_crypto`, `core.intelligence_store` | Expected: snapshot identity, verification and storage are one transaction. |
 | Install-hook / provenance | `analyzers.repository_provenance`, `core.install_hook`, `core.source_acquisition` | Expected: declared-source filtering needs the hook reader and the acquisition snapshot. |
 
@@ -243,18 +244,59 @@ Reported by the audit, never fatal:
 - modules with more than 5 concern tags.
 
 Current warnings: `core/instruction_guard.py` (8760 lines),
-`analyzers/repository_provenance.py` (4555), `core/agent.py` (3743),
-`core/incidents.py` (3241), `core/upgrade_preflight.py` (2603 lines, 6 concern
-tags), `core/followup.py` (2604), `core/source_acquisition.py` (2554),
-`setup_wizard.py` (2521), `core/updater_tray.py` (6 concern tags).
+`analyzers/repository_provenance.py` (4555), `core/agent.py` (3747),
+`core/incidents.py` (3237), `core/upgrade_preflight.py` (2603 lines, 6 concern
+tags), `core/source_acquisition.py` (2554), `setup_wizard.py` (2521),
+`core/updater_tray.py` (6 concern tags).
 
 ## Decomposition log
 
-**Resolved in Stage 9:** the last non-presentation inbound edge of the upgrade
-workflow. Incident collection borrowed the upgrade *value types* to feed the
-kernel-module check, so `incidents` imported `upgrade_preflight`. Extracting those
-inert values into the domain layer let `upgrade_preflight` leave the planner
-component: the SCC dropped from seven members to six.
+**Resolved in Stage 10:** the generic follow-up framework no longer imports any
+incident module. The incident-family adapters moved into
+`core/incident_followup.py` and are supplied to the framework by its callers, so
+the incident planners left the planner component and the remaining cycle is
+`{agent, config_drift, followup}`.
+
+### Stage 10 — framework and lifecycle adapters separated
+
+`followup` imported the incident family in four places:
+`context_from_saved_incident` / `context_from_latest_saved_incident` (retained
+results), `build_incident_runtime` (fresh state, diagnostic probes, repair
+application, marker acknowledgement) and the incident half of
+`build_maintenance_runtime` (maintenance re-collects an incident report). Reading
+them showed the same shape every time: the *framework* hosted concrete lifecycle
+adapters, so the generic module needed the lifecycle workflows.
+
+| Direction | Kind | Outcome |
+| --- | --- | --- |
+| `incidents -> followup` | lifecycle orchestration | kept: the workflow offers and embeds its own session through the framework |
+| `followup -> incidents`, `-> incident_automation`, `-> incident_diagnostics`, `-> incident_repairs` | misplaced lifecycle adapters | removed: the adapters live in `core/incident_followup.py` |
+
+- **Moved verbatim:** `context_from_saved_incident`,
+  `context_from_latest_saved_incident`, `build_incident_runtime` and
+  `build_maintenance_runtime` (396 lines) now live in
+  `core/incident_followup.py`, together with `build_incident_followup_runtime`
+  (one entry point that dispatches incident vs maintenance) and
+  `load_incident_followup_context`. The module imports the incident workflow, its
+  diagnostics planner and its repair planner; none of them import it back.
+- **Supplied, not imported:** the framework's `run_ask`, `build_default_runtime`
+  and the agent take `incident_context_provider` and
+  `incident_runtime_provider`; `cli.py` supplies them for retained contexts and
+  `incident_cli.py` supplies the runtime provider for live sessions. This is the
+  same provider pattern Stage 8 introduced for the upgrade refresh.
+- **Fail closed:** without a provider the incident workflow builds no follow-up
+  context or runtime, and an incident context received by the framework degrades
+  to facts only — no probes and no repairs run from stale state. Two tests pin
+  both paths.
+- **Incident authority stayed put:** report collection, marker state, repair
+  planning/execution, eligibility and root checks are still owned by
+  `incidents`, `incident_diagnostics`, `incident_repairs` and
+  `incident_automation`; the framework only coordinates the operations they
+  supply.
+- **Not in scope, recorded:** `build_config_drift_runtime` and
+  `build_upgrade_runtime` remain in the framework, so `followup -> config_drift`
+  (and `-> repository_repair`) still exist. They are the remaining adapters of the
+  same shape and the Stage 11 seam.
 
 ### Stage 9 — the inert upgrade values became a domain module
 
@@ -647,15 +689,13 @@ as the next seam.
 
 ## Next targets
 
-1. The six-member planner component (`agent`, `config_drift`, `followup`,
-   `incidents`, `incident_automation`, `incident_diagnostics`): give it a
-   narrow interface so the cycle can be reviewed as a group rather than as six
-   mutual imports. Stages 5–9 removed the dispatch, shared-vocabulary,
-   repository-interpretation, follow-up-refresh and upgrade-value edges, and
-   `upgrade_preflight` has left the component. The remaining coupling is
-   orchestration among the incident, follow-up, agent and config-drift
-   workflows: the incident workflow offers follow-up sessions, follow-up builds
-   incident runtimes, and the agent drives both.
+1. The three-member component (`agent`, `config_drift`, `followup`) is the
+   remainder of the planner cycle. Stage 10 removed every `followup -> incident*`
+   edge, so the highest-leverage seam left is the same shape one level down:
+   `build_config_drift_runtime` and `build_upgrade_runtime` still live in the
+   framework and still import `config_drift`/`repository_repair`. Moving those
+   adapters beside `incident_followup` — or supplying them the way the upgrade
+   refresh already is — would leave `followup` a pure framework.
 2. **Partially done:** Stages 5 and 6 moved the `incidents` CLI runner and the
    shared helper ownership out of subsystem modules. `config_drift`,
    `security_audit` and `upgrade_preflight` still reach their presenter from

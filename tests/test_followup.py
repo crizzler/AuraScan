@@ -42,6 +42,10 @@ from aurascan.core.followup import (
     validate_followup_ai_response,
 )
 from aurascan.core.hardware_health import HARDWARE_HEALTH_PROBE_ID
+from aurascan.core.incident_followup import (
+    build_incident_followup_runtime,
+    load_incident_followup_context,
+)
 from aurascan.core.incident_models import IncidentEvidence, IncidentReport
 from aurascan.core.incidents import (
     persist_incident_report,
@@ -677,6 +681,8 @@ def test_run_ask_resolves_a_private_incident_id_directly(tmp_path):
         incident_root=report_root,
         system_root=tmp_path / "system",
         force_interactive=True,
+        incident_context_provider=load_incident_followup_context,
+        incident_runtime_provider=build_incident_followup_runtime,
         urlopen=lambda _request, timeout: provider_response({
             "answer": "One bounded journal failure was recorded.",
             "referenced_fact_ids": ["iev-direct"],
@@ -722,6 +728,8 @@ def test_run_ask_falls_back_to_latest_private_incident(tmp_path):
         incident_root=report_root,
         system_root=tmp_path / "system",
         force_interactive=True,
+        incident_context_provider=load_incident_followup_context,
+        incident_runtime_provider=build_incident_followup_runtime,
         urlopen=lambda _request, timeout: provider_response({
             "answer": "The latest retained result is one bounded incident.",
             "referenced_fact_ids": ["iev-latest"],
@@ -1103,6 +1111,7 @@ def test_incident_foreground_flow_offers_followup_but_service_capture_does_not(
         }),
         followup_context_root=tmp_path / "contexts",
         followup_interactive=True,
+        followup_runtime_provider=build_incident_followup_runtime,
     )
 
     assert status == 0
@@ -1143,6 +1152,7 @@ def test_manual_maintenance_offers_one_followup_prompt(monkeypatch, tmp_path):
         system_root=tmp_path / "system",
         followup_context_root=tmp_path / "contexts",
         followup_interactive=True,
+        followup_runtime_provider=build_incident_followup_runtime,
     )
 
     assert status == 0
@@ -1219,3 +1229,54 @@ def test_upgrade_runtime_fails_closed_without_a_refresh_provider(tmp_path):
     assert outcome.failed is True
     assert outcome.source_changed is True
     assert "no support action was applied" in outcome.message
+
+def test_incident_runtime_provider_is_required_for_live_sessions(tmp_path):
+    """Stage 10: without the incident provider the workflow offers no session.
+
+    The framework coordinates supplied operations only. A missing provider must
+    not fall back to cached incident state, so the incident workflow simply does
+    not build a follow-up context or runtime.
+    """
+
+    prompts = []
+
+    status = run_incidents(
+        ["--dry-run"],
+        input_func=lambda prompt: prompts.append(prompt) or "",
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        env={},
+        user_root=tmp_path / "incidents",
+        system_root=tmp_path / "system",
+        followup_context_root=tmp_path / "contexts",
+        followup_interactive=True,
+    )
+
+    assert status == 0
+    assert prompts == []
+    assert latest_followup_context(tmp_path / "contexts") is None
+
+
+def test_retained_incident_context_needs_the_supplied_loader(tmp_path):
+    """Stage 10: the framework cannot resolve incident state on its own."""
+
+    report_root = tmp_path / "incidents"
+    persist_incident_report(
+        IncidentReport("incident-orphan", "0", "manual", boot_id="c" * 32),
+        report_root,
+    )
+
+    status = run_ask(
+        ["incident-orphan"],
+        input_func=lambda _prompt: "",
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        env=ai_env(tmp_path),
+        context_root=tmp_path / "contexts",
+        incident_root=report_root,
+        system_root=tmp_path / "system",
+        force_interactive=True,
+    )
+
+    assert status == EXIT_FOLLOWUP_UNAVAILABLE
+    assert latest_followup_context(tmp_path / "contexts") is None

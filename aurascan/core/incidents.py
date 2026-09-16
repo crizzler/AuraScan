@@ -420,6 +420,7 @@ def run_incidents(
     urlopen: Optional[Callable] = None,
     followup_context_root: Optional[Path] = None,
     followup_interactive: Optional[bool] = None,
+    followup_runtime_provider: Optional[Callable] = None,
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -446,6 +447,7 @@ def run_incidents(
             which=which,
             stdout=stdout,
             stderr=stderr,
+            followup_runtime_provider=followup_runtime_provider,
         )
 
     if args.maintenance_status:
@@ -463,9 +465,9 @@ def run_incidents(
             and not options.json_output
             and not options.yes
             and not options.no_ai
+            and followup_runtime_provider is not None
         ):
             from aurascan.core.followup import (
-                build_maintenance_runtime,
                 context_from_maintenance,
                 offer_followup,
             )
@@ -484,7 +486,7 @@ def run_incidents(
             )
             marker = highest_priority_pending_marker(maintenance_markers)
             context = context_from_maintenance(maintenance_status, marker)
-            runtime = build_maintenance_runtime(
+            runtime = followup_runtime_provider(
                 context,
                 env=effective_env,
                 runner=runner,
@@ -650,11 +652,8 @@ def run_incidents(
         or options.capture_monitor
         or not options.config.ai_enabled
     )
-    if not followup_disabled:
-        from aurascan.core.followup import (
-            build_incident_runtime,
-            context_from_incident,
-        )
+    if not followup_disabled and followup_runtime_provider is not None:
+        from aurascan.core.followup import context_from_incident
 
         privacy_mode = "facts-only" if options.facts_only or options.config.ai_evidence == "facts-only" else "redacted"
         followup_context = context_from_incident(
@@ -662,7 +661,7 @@ def run_incidents(
             metadata={"resolve_pending": options.resolve_pending},
             privacy_mode=privacy_mode,
         )
-        followup_runtime = build_incident_runtime(
+        followup_runtime = followup_runtime_provider(
             followup_context,
             env=effective_env,
             runner=runner,
@@ -754,7 +753,6 @@ def run_incidents(
         )
         if followup_context is not None:
             from aurascan.core.followup import (
-                build_incident_runtime,
                 context_from_incident,
                 prompt_with_followup,
             )
@@ -765,7 +763,7 @@ def run_incidents(
                 metadata={"resolve_pending": options.resolve_pending},
                 privacy_mode=followup_context.privacy_mode,
             )
-            followup_runtime = build_incident_runtime(
+            followup_runtime = followup_runtime_provider(
                 followup_context,
                 env=effective_env,
                 runner=runner,
@@ -836,10 +834,7 @@ def run_incidents(
         remaining = len(report.post_repair.get("remaining_finding_keys", []))
         print(f"[AuraScan] Deterministic aftercare: {resolved} finding(s) resolved, {remaining} still observed.", file=stdout)
     if followup_context is not None and not options.json_output:
-        from aurascan.core.followup import (
-            build_incident_runtime,
-            context_from_incident,
-        )
+        from aurascan.core.followup import context_from_incident
 
         followup_context = context_from_incident(
             report,
@@ -847,7 +842,7 @@ def run_incidents(
             metadata={"resolve_pending": options.resolve_pending, "post_repair": True},
             privacy_mode=followup_context.privacy_mode,
         )
-        followup_runtime = build_incident_runtime(
+        followup_runtime = followup_runtime_provider(
             followup_context,
             env=effective_env,
             runner=runner,
@@ -2312,6 +2307,7 @@ def capture_incident_maintenance(
     stdout=None,
     stderr=None,
     now_usec: Optional[int] = None,
+    followup_runtime_provider: Optional[Callable] = None,
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr

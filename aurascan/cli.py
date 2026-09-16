@@ -9,6 +9,10 @@ from aurascan.core.config import load_env, user_env_path
 from aurascan.core.config_drift import run_config_drift
 from aurascan.core.engine import AuraScanEngine
 from aurascan.core.followup import run_ask
+from aurascan.core.incident_followup import (
+    build_incident_followup_runtime,
+    load_incident_followup_context,
+)
 from aurascan.core.incident_cli import run_incident_command
 from aurascan.core.instruction_cli import run_instruction_audit
 from aurascan.core.recovery_cli import run_recovery
@@ -182,9 +186,19 @@ def main(argv=None):
     if raw_argv and raw_argv[0] == "updater":
         sys.exit(run_updater(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "ask":
-        sys.exit(run_ask(raw_argv[1:], refresh_upgrade_report=refresh_upgrade_preflight))
+        sys.exit(run_ask(
+            raw_argv[1:],
+            refresh_upgrade_report=refresh_upgrade_preflight,
+            incident_context_provider=load_incident_followup_context,
+            incident_runtime_provider=build_incident_followup_runtime,
+        ))
     if raw_argv and raw_argv[0] == "agent":
-        sys.exit(run_agent(raw_argv[1:], refresh_upgrade_report=refresh_upgrade_preflight))
+        sys.exit(run_agent(
+            raw_argv[1:],
+            refresh_upgrade_report=refresh_upgrade_preflight,
+            incident_context_provider=load_incident_followup_context,
+            incident_runtime_provider=build_incident_followup_runtime,
+        ))
     if raw_argv and raw_argv[0] == "instruction-audit":
         sys.exit(run_instruction_audit(raw_argv[1:]))
 

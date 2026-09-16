@@ -70,6 +70,27 @@ Architecture stabilization stage 4 (no behavior change):
   subsystem engines also use, with equality assertions so the wording cannot
   drift.
 
+Architecture stabilization stage 10 (no behavior change):
+
+- Moved the incident-family follow-up adapters out of the generic framework into
+  `core/incident_followup.py`: loading a retained incident result
+  (`context_from_saved_incident`, `context_from_latest_saved_incident`) and
+  building the incident/maintenance runtimes (probe handling, verified repair
+  application, marker acknowledgement). `followup` no longer imports the
+  incident workflow, its diagnostics planner, its repair planner or its
+  automation layer.
+- The framework now receives those operations from its callers:
+  `run_ask`, `build_default_runtime` and the agent accept
+  `incident_context_provider` / `incident_runtime_provider`; the CLI supplies
+  them for retained results and the incident CLI supplies the runtime provider
+  for live sessions.
+- Without a provider the framework builds no incident runtime, so no probe or
+  repair runs from stale state; the incident workflow simply offers no session.
+  Both fail-closed paths are covered by tests.
+- The planner component drops from six modules to three
+  (`agent`, `config_drift`, `followup`); the incident workflow, diagnostics and
+  automation now form their own component.
+
 Architecture stabilization stage 9 (no behavior change):
 
 - Extracted the inert upgrade values into a new domain module,

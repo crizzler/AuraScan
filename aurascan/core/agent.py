@@ -40,8 +40,6 @@ from aurascan.core.followup import (
     FollowUpTurn,
     build_default_runtime,
     classify_followup_failure,
-    context_from_latest_saved_incident,
-    context_from_saved_incident,
     current_user_uid,
     ensure_hardware_health_probe,
     followup_context_fingerprint,
@@ -3440,22 +3438,24 @@ def _load_agent_context(
     env: Mapping[str, str],
     context_root: Path,
     incident_root: Optional[Path],
+    incident_context_provider: Optional[Callable] = None,
 ) -> Optional[FollowUpContext]:
     context = None
     if context_id and not latest:
         context = load_followup_context(context_id, context_root)
-        if context is None:
-            context = context_from_saved_incident(
+        if context is None and incident_context_provider is not None:
+            context = incident_context_provider(
                 context_id,
                 env=env,
                 incident_root=incident_root,
             )
     else:
         context = latest_followup_context(context_root)
-        if context is None:
-            context = context_from_latest_saved_incident(
+        if context is None and incident_context_provider is not None:
+            context = incident_context_provider(
                 env=env,
                 incident_root=incident_root,
+                latest=True,
             )
     if context is not None:
         persist_followup_context(context, context_root)
@@ -3484,6 +3484,8 @@ def run_agent(
     root_audit_root: Path = AGENT_ROOT_AUDIT_ROOT,
     force_interactive: Optional[bool] = None,
     refresh_upgrade_report: Optional[Callable] = None,
+    incident_context_provider: Optional[Callable] = None,
+    incident_runtime_provider: Optional[Callable] = None,
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -3620,6 +3622,7 @@ def run_agent(
         env=source,
         context_root=root,
         incident_root=incident_root,
+        incident_context_provider=incident_context_provider,
     )
     if context is None:
         print("[AuraScan] No retained AuraScan result is available for the agent.", file=stderr)
@@ -3634,6 +3637,7 @@ def run_agent(
         incident_root=incident_root,
         system_root=system_root,
         refresh_upgrade_report=refresh_upgrade_report,
+        incident_runtime_provider=incident_runtime_provider,
     )
     if requested_access == "guarded":
         from aurascan.core.followup import run_followup_session

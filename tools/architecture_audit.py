@@ -452,6 +452,7 @@ INVARIANT_ALLOWLIST: Dict[str, Dict[str, str]] = {
     "INV-010": {},
     "INV-011": {},
     "INV-012": {},
+    "INV-013": {},
 }
 
 RULE_ID_PATTERN = r"^[A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+$"
@@ -647,11 +648,18 @@ INVARIANTS: Tuple[Invariant, ...] = (
     ),
     Invariant(
         "INV-012",
-        "domain and catalog modules must depend only on domain and catalog",
-        "Evidence models, severity metadata and explanation templates sit at "
-        "the bottom of the dependency graph. An upward edge (for example a "
-        "model importing a renderer) is what created the models<->presenter "
-        "cycle reported by this audit.",
+        "catalog modules must depend only on domain and catalog",
+        "The rule catalog and its explanation templates may use the evidence "
+        "vocabulary and each other, but must not reach into analysis, "
+        "adapters, application, recovery or presentation code.",
+    ),
+    Invariant(
+        "INV-013",
+        "domain evidence modules must not depend on the catalog or presentation layers",
+        "The evidence model sits at the bottom of the graph. When "
+        "aurascan.core.models rendered its own terminal output, it imported "
+        "the rule presenter and formed a models<->presenter cycle. Domain "
+        "modules may import domain modules and the standard library only.",
     ),
 )
 
@@ -1009,6 +1017,7 @@ def assign_layer(module_name: str, relative_path: str) -> str:
             "instruction_cli",
             "intelligence_cli",
             "recovery_cli",
+            "scan_report_presenter",
         ):
             return "presentation"
         if name in (
@@ -1294,13 +1303,26 @@ def evaluate_invariants(infos: Sequence[ModuleInfo], package_name: str) -> List[
                             ),
                         )
                     )
+
+        if info.name in catalog_modules(package_name):
             for imported in info.internal_imports:
                 if imported not in pure:
                     violations.append(
                         _violation(
                             "INV-012",
                             info.path,
-                            "pure module depends upward on {0}".format(imported),
+                            "catalog module depends upward on {0}".format(imported),
+                        )
+                    )
+
+        if info.name in domain_modules(package_name):
+            for imported in info.internal_imports:
+                if imported not in domain_modules(package_name):
+                    violations.append(
+                        _violation(
+                            "INV-013",
+                            info.path,
+                            "domain module depends on {0}".format(imported),
                         )
                     )
 

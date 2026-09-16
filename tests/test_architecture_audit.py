@@ -70,13 +70,57 @@ def test_audit_covers_the_whole_package():
 def test_domain_and_catalog_layers_stay_pure():
     result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
     by_name = {info.name: info for info in result.modules}
+    domain = architecture_audit.domain_modules("aurascan")
+    pure = architecture_audit.pure_modules("aurascan")
 
-    for name in architecture_audit.pure_modules("aurascan"):
+    for name in domain:
         info = by_name[name]
         for imported in info.internal_imports:
-            assert imported in architecture_audit.pure_modules("aurascan")
+            assert imported in domain, "/".join([name, imported])
+
+    for name in architecture_audit.catalog_modules("aurascan"):
+        info = by_name[name]
+        for imported in info.internal_imports:
+            assert imported in pure, "/".join([name, imported])
+
+    for name in pure:
+        info = by_name[name]
         for category in ("process", "network", "fs_write", "privilege", "sqlite"):
             assert category not in info.capabilities
+
+
+def test_evidence_model_does_not_depend_on_presentation():
+    """The Stage 2 claim, pinned.
+
+    The core evidence model must not reach into the rule catalog or the
+    presentation layer. It previously imported the terminal presenter inside
+    ScanReport.render_terminal, which formed a models<->presenter cycle.
+    """
+
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    models = {info.name: info for info in result.modules}["aurascan.core.models"]
+
+    forbidden = set(architecture_audit.pure_modules("aurascan")) - set(
+        architecture_audit.domain_modules("aurascan")
+    )
+    assert set(models.internal_imports).isdisjoint(forbidden)
+    assert "aurascan.core.presenter" not in models.internal_imports
+    assert "aurascan.core.scan_report_presenter" not in models.internal_imports
+    assert "aurascan.core.text_safety" not in models.internal_imports
+    assert models.internal_imports == ["aurascan.core.risk"]
+
+
+def test_scan_report_rendering_lives_in_the_presentation_layer():
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    by_name = {info.name: info for info in result.modules}
+
+    renderer = by_name["aurascan.core.scan_report_presenter"]
+    assert renderer.layer == "presentation"
+    assert "render_scan_report" in renderer.public_symbols
+    assert "aurascan.core.models" in renderer.internal_imports
+
+    models = by_name["aurascan.core.models"]
+    assert "render_terminal" not in models.public_symbols
 
 
 def test_production_has_no_third_party_runtime_imports():
@@ -289,7 +333,7 @@ def test_import_cycles_are_detected(tmp_path):
     assert result.cycles == [["cyclepkg.alpha", "cyclepkg.beta"]]
 
 
-def test_upward_dependency_from_a_pure_module_is_reported(tmp_path):
+def test_upward_dependency_from_a_domain_module_is_reported(tmp_path):
     package_root = tmp_path / "purepkg"
     write_module(package_root, "__init__.py", "")
     write_module(package_root, "core/__init__.py", "")
@@ -299,8 +343,41 @@ def test_upward_dependency_from_a_pure_module_is_reported(tmp_path):
     result = run_tool(package_root, "purepkg")
     ids = {violation.invariant_id for violation in result.violations}
 
-    assert "INV-012" in ids
+    assert "INV-013" in ids
     assert "INV-007" not in ids
+
+
+def test_domain_module_importing_the_catalog_is_reported(tmp_path):
+    """Regression for the defect Stage 2 removed.
+
+    When the evidence model rendered its own terminal output it imported the
+    rule presenter, forming the models<->presenter cycle.
+    """
+
+    package_root = tmp_path / "regresspkg"
+    write_module(package_root, "__init__.py", "")
+    write_module(package_root, "core/__init__.py", "")
+    write_module(
+        package_root,
+        "core/models.py",
+        "def render(self):\n"
+        "    from regresspkg.core.presenter import FindingPresenter\n"
+        "    return FindingPresenter()\n",
+    )
+    write_module(package_root, "core/__init__.py", "")
+    write_module(
+        package_root,
+        "core/presenter.py",
+        "from regresspkg.core.models import ScanReport\n\n\nclass FindingPresenter:\n    pass\n",
+    )
+    write_module(package_root, "core/risk.py", "from regresspkg.core.models import ScanReport\n")
+
+    result = run_tool(package_root, "regresspkg")
+    by_id = {violation.invariant_id: violation for violation in result.violations}
+
+    assert "INV-013" in by_id
+    assert by_id["INV-013"].module == "regresspkg/core/models.py"
+    assert result.cycles == [["regresspkg.core.models", "regresspkg.core.presenter"]]
 
 
 def test_analysis_module_with_process_capability_is_reported(tmp_path):

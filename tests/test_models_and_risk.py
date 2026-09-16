@@ -9,6 +9,7 @@ from aurascan.core.models import (
     Source,
 )
 from aurascan.core.risk import RiskEngine
+from aurascan.core.scan_report_presenter import render_scan_report
 
 
 def make_finding(**overrides):
@@ -43,7 +44,7 @@ def test_scan_report_serialization_and_rendering():
 
     data = report.to_dict()
     restored = ScanReport.from_dict(data)
-    rendered = restored.render_terminal(use_color=False)
+    rendered = render_scan_report(restored, use_color=False)
 
     assert data["schema_version"] == "1.0"
     assert data["findings"][0]["rule_id"] == "TEST-001"
@@ -62,7 +63,7 @@ def test_terminal_rendering_strips_control_sequences_and_bidi_spoofing():
     report = ScanReport(PackageMetadata("pkg\x1b[2J", "1\u202e"), [finding])
     report.risk_summary = RiskEngine().evaluate([finding])
 
-    rendered = report.render_terminal(use_color=False, verbose=True)
+    rendered = render_scan_report(report, use_color=False, verbose=True)
 
     assert "\x1b" not in rendered
     assert "\u202e" not in rendered

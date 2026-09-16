@@ -1,6 +1,7 @@
 import pytest
 
 from aurascan.core.models import PackageMetadata, RecommendedAction, RiskSummary, ScanReport, Severity
+from aurascan.core.scan_report_presenter import render_scan_report
 from aurascan.core.context_provider import build_scan_context_proof
 from aurascan.core.update_policy import (
     ScanContext,
@@ -200,8 +201,8 @@ def test_terminal_output_explains_smart_fast_path_and_new_only_tradeoff():
         fast_path_decision=new_only.to_dict(),
     )
 
-    smart_output = smart_report.render_terminal(use_color=False)
-    new_only_output = new_only_report.render_terminal(use_color=False)
+    smart_output = render_scan_report(smart_report, use_color=False)
+    new_only_output = render_scan_report(new_only_report, use_color=False)
 
     assert "Smart update fast path selected." in smart_output
     assert "What AuraScan checked:" in smart_output

@@ -355,9 +355,17 @@ for unusually mixed modules so a reviewer can look, not so a build can break.
 Invariants are the narrow, mechanically checkable subset of the repository
 contract: analyzers must not execute processes, production code must not use
 `shell=True`, import training or research modules, or use undeclared third-party
-dependencies, deterministic policy must not depend on AI providers, domain and
-catalog modules must stay side-effect free and depend only downward, UI entry
-points must not contain rule IDs, and TLS verification must not be disabled.
+dependencies, deterministic policy must not depend on AI providers, domain
+modules must not depend on the catalog or presentation layers, catalog modules
+must depend only on domain and catalog, both must stay side-effect free, UI
+entry points must not contain rule IDs, and TLS verification must not be
+disabled.
+
+The domain/catalog split matters for reviewability: `core/models.py` is the
+evidence vocabulary that everything else imports. It must not render itself,
+format terminal output or reach for the rule presenter. Presentation lives in
+`core/presenter.py` (rule explanations) and `core/scan_report_presenter.py`
+(report rendering), and depends on the model, never the reverse.
 
 When a change legitimately needs an exception, add an entry to
 `INVARIANT_ALLOWLIST` in the tool with a written reason; never weaken the check

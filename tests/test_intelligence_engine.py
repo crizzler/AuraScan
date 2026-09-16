@@ -13,6 +13,7 @@ from aurascan.core.cache import ScanCache
 from aurascan.core.engine import AuraScanEngine
 from aurascan.core.intelligence import snapshot_from_payload
 from aurascan.core.models import AnalysisResult, PackageMetadata, ScanReport
+from aurascan.core.scan_report_presenter import render_scan_report
 from aurascan.core.review import (
     ReviewDecisionStore, build_scan_fingerprint, validate_review_token,
 )
@@ -119,7 +120,7 @@ def test_stale_intelligence_detects_without_new_review_gate_or_shortcuts(tmp_pat
     assert not report["risk_summary"]["requires_manual_review"]
     assert report["fast_path_decision"]["action"] == "use_full_scan"
     assert not report["trusted_baseline_updated"]
-    assert "stale" in ScanReport.from_dict(report).render_terminal(use_color=False)
+    assert "stale" in render_scan_report(ScanReport.from_dict(report), use_color=False)
     # Stale records continue to detect rather than disappearing on expiry.
     current[0] = snapshot(indicator=True, sequence=2, status="stale")
     assert not engine.scan_pkgbuild(str(path))

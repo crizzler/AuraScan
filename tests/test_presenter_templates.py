@@ -11,6 +11,7 @@ from aurascan.core.models import (
     Source,
 )
 from aurascan.core.risk import RiskEngine
+from aurascan.core.scan_report_presenter import render_scan_report
 
 
 def make_finding(rule_id, severity=Severity.MEDIUM, source=Source.history_analyzer, evidence="detail"):
@@ -35,7 +36,7 @@ def make_finding(rule_id, severity=Severity.MEDIUM, source=Source.history_analyz
 def render(findings, verbose=False):
     report = ScanReport(PackageMetadata("pkg", "1"), findings)
     report.risk_summary = RiskEngine().evaluate(findings)
-    return report.render_terminal(use_color=False, verbose=verbose)
+    return render_scan_report(report, use_color=False, verbose=verbose)
 
 
 def test_legacy_maintainer_template_does_not_claim_account_change():

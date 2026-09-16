@@ -6,6 +6,7 @@ import pytest
 from aurascan.analyzers.source_metadata import SourceMetadataAnalyzer
 from aurascan.core.models import PackageMetadata, ScanReport, Severity
 from aurascan.core.risk import RiskEngine
+from aurascan.core.scan_report_presenter import render_scan_report
 
 
 def findings_for(content: str):
@@ -206,7 +207,7 @@ def test_terminal_output_uses_plain_language_not_raw_rule_ids():
     report = ScanReport(PackageMetadata("pkg", "1"), findings)
     report.risk_summary = RiskEngine().evaluate(findings)
 
-    rendered = report.render_terminal(use_color=False)
+    rendered = render_scan_report(report, use_color=False)
 
     assert "Source uses plain HTTP" in rendered
     assert "SOURCE-META-HTTP-NOT-HTTPS" not in rendered
@@ -229,7 +230,7 @@ def test_verbose_terminal_output_includes_rule_ids_and_details():
     report = ScanReport(PackageMetadata("pkg", "1"), findings)
     report.risk_summary = RiskEngine().evaluate(findings)
 
-    rendered = report.render_terminal(use_color=False, verbose=True)
+    rendered = render_scan_report(report, use_color=False, verbose=True)
 
     assert "SOURCE-META-HTTP-NOT-HTTPS" in rendered
     assert "Technical details:" in rendered
@@ -240,7 +241,7 @@ def test_repeated_skip_notes_are_grouped_in_terminal():
     report = ScanReport(PackageMetadata("pkg", "1"), findings)
     report.risk_summary = RiskEngine().evaluate(findings)
 
-    rendered = report.render_terminal(use_color=False)
+    rendered = render_scan_report(report, use_color=False)
 
     assert rendered.count("Source archive has no checksum verification.") == 1
 
@@ -260,6 +261,6 @@ sha256sums=(SKIP SKIP SKIP abc SKIP)
     report = ScanReport(PackageMetadata("pkg", "1"), findings)
     report.risk_summary = RiskEngine().evaluate(findings)
 
-    rendered = report.render_terminal(use_color=False)
+    rendered = render_scan_report(report, use_color=False)
 
     assert "lower-risk" in rendered

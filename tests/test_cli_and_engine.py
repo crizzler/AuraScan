@@ -11,6 +11,7 @@ from aurascan.core.intelligence import bundled_snapshot
 from aurascan.core.install_hook import capture_package_scan_input
 import aurascan.core.engine as engine_module
 from aurascan.core.models import AnalysisResult, Confidence, EvidenceQuality, Finding, Phase, ScanReport, Severity, Source
+from aurascan.core.scan_report_presenter import render_scan_report
 from aurascan.core.package_archive import PackageIdentityCapture, PACKAGE_IDENTITY_RESOLVED
 from aurascan.core.update_policy import UpdateScanPolicy
 from pathlib import Path
@@ -1060,7 +1061,7 @@ def test_explicit_cli_update_context_without_opt_in_does_not_fast_path(tmp_path)
     assert cached["scan_context_authority"] == "user_asserted"
     assert cached["context_eligible_for_fast_path"] is False
     assert "user_asserted_context_requires_opt_in" in cached["context_proof_errors"]
-    output = ScanReport.from_dict(cached).render_terminal(use_color=False)
+    output = render_scan_report(ScanReport.from_dict(cached), use_color=False)
     assert "Update context was provided manually." in output
     assert "not verified by a package transaction provider" in output
 
@@ -1086,7 +1087,7 @@ def test_explicit_cli_update_context_with_opt_in_can_fast_path_but_warns(tmp_pat
     assert cached["fast_path_decision"]["action"] == "use_smart_fast_path"
     assert cached["scan_context_authority"] == "user_asserted"
     assert cached["context_eligible_for_fast_path"] is True
-    output = ScanReport.from_dict(cached).render_terminal(use_color=False)
+    output = render_scan_report(ScanReport.from_dict(cached), use_color=False)
     assert "Update context was provided manually." in output
 
 
@@ -1106,7 +1107,7 @@ def test_verified_provider_context_can_fast_path_and_reports_verification(tmp_pa
     assert cached["fast_path_decision"]["action"] == "use_smart_fast_path"
     assert cached["scan_context_authority"] == "verified_transaction_provider"
     assert cached["context_proof_errors"] == []
-    output = ScanReport.from_dict(cached).render_terminal(use_color=False)
+    output = render_scan_report(ScanReport.from_dict(cached), use_color=False)
     assert "Verified package update context." in output
 
 
@@ -1141,7 +1142,7 @@ def test_auto_context_verified_local_db_update_can_fast_path(tmp_path):
     assert cached["context_transaction_operation"] == "upgrade"
     assert cached["context_eligible_for_fast_path"] is True
     assert cached["fast_path_decision"]["action"] == "use_smart_fast_path"
-    output = ScanReport.from_dict(cached).render_terminal(use_color=False)
+    output = render_scan_report(ScanReport.from_dict(cached), use_color=False)
     assert "Package update verified locally" in output
     assert "This does not prove the package is safe. It only proves the scan context." in output
     assert "accepted_baseline" not in output
@@ -1198,7 +1199,7 @@ def test_auto_context_unknown_uses_normal_scan_and_plain_terminal(tmp_path):
     assert cached["context_eligible_for_fast_path"] is False
     assert "local_package_db_missing" in cached["context_proof_errors"]
     assert cached["fast_path_decision"]["action"] == "cannot_fast_path"
-    output = ScanReport.from_dict(cached).render_terminal(use_color=False)
+    output = render_scan_report(ScanReport.from_dict(cached), use_color=False)
     assert "Package update context could not be proven" in output
     assert "local_package_db_missing" not in output
 

@@ -34,6 +34,7 @@ from aurascan.core.models import (
     Source,
 )
 from aurascan.core.risk import RiskEngine
+from aurascan.core.scan_report_presenter import render_scan_report
 from aurascan.core.cache import ScanCache
 from aurascan.core.intelligence import load_intelligence_snapshot
 from aurascan.core.context_provider import build_scan_context_proof
@@ -131,7 +132,7 @@ class AuraScanEngine:
         if self.json_output:
             print(json.dumps(out_dict, indent=2))
         else:
-            print(report.render_terminal(verbose=self.verbose))
+            print(render_scan_report(report, verbose=self.verbose))
 
         if report.risk_summary.blocks_installation:
             log_audit(pkg_path, [f.explanation for f in all_findings if f.blocks_installation])
@@ -255,7 +256,7 @@ class AuraScanEngine:
             if self.json_output:
                 print(json.dumps(cached_res, indent=2))
             else:
-                print(ScanReport.from_dict(cached_res).render_terminal(verbose=self.verbose))
+                print(render_scan_report(ScanReport.from_dict(cached_res), verbose=self.verbose))
 
             risk = cached_res.get("risk_summary", {})
             is_safe = not risk.get("blocks_installation") and risk.get("action") != "BLOCKED"
@@ -324,7 +325,7 @@ class AuraScanEngine:
             if self.json_output:
                 print(json.dumps(out_dict, indent=2))
             else:
-                print(report.render_terminal(verbose=self.verbose))
+                print(render_scan_report(report, verbose=self.verbose))
             if cacheable:
                 self.cache.set_cached_result(
                     pkgbuild_path,
@@ -383,7 +384,7 @@ class AuraScanEngine:
         if self.json_output:
             print(json.dumps(out_dict, indent=2))
         else:
-            print(report.render_terminal(verbose=self.verbose))
+            print(render_scan_report(report, verbose=self.verbose))
 
         if cacheable:
             self.cache.set_cached_result(

@@ -3,6 +3,7 @@ import json
 import pytest
 
 from aurascan.core.models import PackageMetadata, RecommendedAction, RiskSummary, ScanReport, Severity
+from aurascan.core.scan_report_presenter import render_scan_report
 from aurascan.core.context_provider import build_scan_context_proof
 from aurascan.core.trust_diff import (
     TrustBoundaryClassification,
@@ -557,8 +558,8 @@ def test_terminal_and_json_render_normal_churn_without_raw_reason_codes_by_defau
         fast_path_decision=decision.to_dict(),
     )
 
-    default_output = report.render_terminal(use_color=False)
-    verbose_output = report.render_terminal(use_color=False, verbose=True)
+    default_output = render_scan_report(report, use_color=False)
+    verbose_output = render_scan_report(report, use_color=False, verbose=True)
     data = json.loads(report.to_json())
 
     assert "Update looks like normal version churn." in default_output
@@ -578,7 +579,7 @@ def test_terminal_render_trust_boundary_change_is_clear_and_actionable():
         fast_path_decision=decision.to_dict(),
     )
 
-    output = report.render_terminal(use_color=False)
+    output = render_scan_report(report, use_color=False)
 
     assert "Update changed an important trust boundary." in output
     assert "smart fast path should not be used" in output

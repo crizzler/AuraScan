@@ -104,6 +104,34 @@ UI_ENTRY_SUFFIXES = (
     "core.incident_cli",
 )
 
+# Generic lifecycle frameworks. They coordinate operations that the lifecycle
+# which owns them supplies explicitly (a provider parameter), so they never
+# import a concrete lifecycle workflow. Stage 11 removed the config-drift
+# adapters and Stage 12 removed the agent escalation command; this role is what
+# keeps that structure from being re-created.
+FRAMEWORK_SUFFIXES = ("core.followup",)
+
+# Modules that own a user-facing lifecycle workflow, one of its planners or
+# adapters, or its retained state. A generic framework must coordinate these
+# through supplied providers rather than depending on them.
+LIFECYCLE_WORKFLOW_SUFFIXES = (
+    "core.agent",
+    "core.config_drift",
+    "core.incident_automation",
+    "core.incident_diagnostics",
+    "core.incident_followup",
+    "core.incident_repairs",
+    "core.incidents",
+    "core.instruction_guard",
+    "core.intelligence",
+    "core.recovery",
+    "core.recovery_boot",
+    "core.recovery_network",
+    "core.recovery_repairs",
+    "core.security_audit",
+    "core.upgrade_preflight",
+)
+
 
 def _qualify(package_name: str, suffixes: Sequence[str]) -> Tuple[str, ...]:
     return tuple("{0}.{1}".format(package_name, suffix) for suffix in suffixes)
@@ -128,6 +156,14 @@ def pure_modules(package_name: str) -> Tuple[str, ...]:
 
 def ui_entry_modules(package_name: str) -> Tuple[str, ...]:
     return _qualify(package_name, UI_ENTRY_SUFFIXES)
+
+
+def framework_modules(package_name: str) -> Tuple[str, ...]:
+    return _qualify(package_name, FRAMEWORK_SUFFIXES)
+
+
+def lifecycle_workflow_modules(package_name: str) -> Tuple[str, ...]:
+    return _qualify(package_name, LIFECYCLE_WORKFLOW_SUFFIXES)
 
 # Third-party imports the production runtime is allowed to reference. AuraScan's
 # runtime dependency list is empty; only optional extras may appear, and each
@@ -471,6 +507,7 @@ INVARIANT_ALLOWLIST: Dict[str, Dict[str, str]] = {
     "INV-014": {},
     "INV-015": {},
     "INV-016": {},
+    "INV-018": {},
     # Adapters that legitimately reach into a higher layer. Each entry records
     # the current coupling; the goal is to make it visible, not to bless it.
     "INV-017": {
@@ -738,6 +775,15 @@ INVARIANTS: Tuple[Invariant, ...] = (
         "reachable, which is how the incident repair planner ended up inside "
         "the upgrade-preflight cycle. Recorded exceptions live in "
         "INVARIANT_ALLOWLIST with a reason each.",
+    ),
+    Invariant(
+        "INV-018",
+        "lifecycle frameworks must not import concrete lifecycle workflows",
+        "A generic framework coordinates the operations its callers supply: a "
+        "context loader, a runtime builder, a remediation provider, an "
+        "escalation command. Importing the workflow itself makes the framework "
+        "own policy it cannot verify and re-creates the planner import cycle "
+        "that Stages 8-12 removed one lifecycle at a time.",
     ),
 )
 
@@ -1327,6 +1373,8 @@ def evaluate_invariants(infos: Sequence[ModuleInfo], package_name: str) -> List[
     violations: List[Violation] = []
     pure = pure_modules(package_name)
     ui_entries = ui_entry_modules(package_name)
+    frameworks = framework_modules(package_name)
+    workflows = set(lifecycle_workflow_modules(package_name))
     by_module_name = {info.name: info for info in infos}
     for info in infos:
         allow = INVARIANT_ALLOWLIST
@@ -1458,6 +1506,20 @@ def evaluate_invariants(infos: Sequence[ModuleInfo], package_name: str) -> List[
                             "INV-014",
                             info.path,
                             "risk module depends on {0}".format(imported),
+                        )
+                    )
+
+        if info.name in frameworks:
+            for imported in info.internal_imports:
+                if imported in workflows and info.path not in allow["INV-018"]:
+                    violations.append(
+                        _violation(
+                            "INV-018",
+                            info.path,
+                            "lifecycle framework imports concrete lifecycle "
+                            "workflow {0}; supply it as a provider instead".format(
+                                imported
+                            ),
                         )
                     )
 

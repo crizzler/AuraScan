@@ -1171,6 +1171,7 @@ def run_followup_session(
     urlopen: Optional[Callable] = None,
     context_root: Optional[Path] = None,
     first_prompt: str = "Ask AuraScan about this result, or press Enter to finish: ",
+    agent_escalation_provider: Optional[Callable] = None,
 ) -> FollowUpSessionResult:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -1222,43 +1223,18 @@ def run_followup_session(
             )
             continue
         if question == "/agent" or question.startswith("/agent "):
-            from aurascan.core.agent import (
-                AGENT_ACCESS_ORDER,
-                AGENT_ACCESS_VALUES,
-                run_agent_session,
-                resolve_agent_config,
-            )
-
-            agent_config = resolve_agent_config(env)
-            requested_access = question.partition(" ")[2].strip() or agent_config.access
-            if agent_config.error:
-                print(f"[AuraScan] Repair Agent configuration error: {agent_config.error}.", file=stderr)
-                continue
-            if requested_access not in AGENT_ACCESS_VALUES:
+            # The agent lifecycle supplies this escalation. Without a provider the
+            # session refuses the command instead of starting an agent session
+            # through any other route.
+            if agent_escalation_provider is None:
                 print(
-                    "[AuraScan] Usage: /agent guarded|user-shell|root-shell",
-                    file=stdout,
-                )
-                continue
-            if requested_access == "guarded":
-                print(
-                    "[AuraScan] This follow-up session is already using guarded AuraScan tools.",
-                    file=stdout,
-                )
-                continue
-            if AGENT_ACCESS_ORDER[requested_access] > AGENT_ACCESS_ORDER[agent_config.access]:
-                print(
-                    f"[AuraScan] {requested_access} exceeds the configured access ceiling "
-                    f"{agent_config.access}. Change it through `aurascan init` first.",
+                    "[AuraScan] Repair Agent escalation is unavailable in this follow-up session.",
                     file=stderr,
                 )
                 continue
-            agent_result = run_agent_session(
+            escalation = agent_escalation_provider(
                 current,
-                access=requested_access,
-                approval=agent_config.approval,
-                output_sharing=agent_config.output_sharing,
-                session_timeout_minutes=agent_config.session_timeout_minutes,
+                question.partition(" ")[2].strip(),
                 runtime=runtime,
                 input_func=input_func,
                 stdout=stdout,
@@ -1268,10 +1244,17 @@ def run_followup_session(
                 urlopen=urlopen,
                 context_root=context_root,
             )
-            result.provider_requests += agent_result.provider_requests
-            result.action_outcome = agent_result.action_outcome
-            result.provider_failed = result.provider_failed or agent_result.provider_failed
-            if agent_result.action_outcome.applied or agent_result.action_outcome.source_changed:
+            # A provider that ran no session only reported why it refused.
+            agent_result = getattr(escalation, "result", None)
+            if not getattr(escalation, "session_ran", False) or agent_result is None:
+                continue
+            outcome = getattr(agent_result, "action_outcome", FollowUpActionOutcome())
+            result.provider_requests += int(getattr(agent_result, "provider_requests", 0))
+            result.action_outcome = outcome
+            result.provider_failed = result.provider_failed or bool(
+                getattr(agent_result, "provider_failed", False)
+            )
+            if outcome.applied or outcome.source_changed:
                 break
             prompt = "Ask another question, or press Enter to finish: "
             continue
@@ -1446,6 +1429,7 @@ def prompt_with_followup(
     urlopen: Optional[Callable] = None,
     context_root: Optional[Path] = None,
     force_interactive: Optional[bool] = None,
+    agent_escalation_provider: Optional[Callable] = None,
 ) -> Tuple[str, FollowUpSessionResult]:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -1482,6 +1466,7 @@ def prompt_with_followup(
             facts_only=facts_only,
             urlopen=urlopen,
             context_root=context_root,
+            agent_escalation_provider=agent_escalation_provider,
         )
         last_session = session
         if session.action_outcome.applied or session.action_outcome.source_changed:
@@ -1501,6 +1486,7 @@ def offer_followup(
     context_root: Optional[Path] = None,
     disabled: bool = False,
     force_interactive: Optional[bool] = None,
+    agent_escalation_provider: Optional[Callable] = None,
 ) -> FollowUpSessionResult:
     stdout = stdout or sys.stdout
     if not followup_available(
@@ -1520,6 +1506,7 @@ def offer_followup(
         facts_only=facts_only,
         urlopen=urlopen,
         context_root=context_root,
+        agent_escalation_provider=agent_escalation_provider,
     )
 
 
@@ -1542,6 +1529,7 @@ def run_ask(
     incident_runtime_provider: Optional[Callable] = None,
     config_drift_runtime_provider: Optional[Callable] = None,
     config_drift_remediation_provider: Optional[Callable] = None,
+    agent_escalation_provider: Optional[Callable] = None,
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -1616,6 +1604,7 @@ def run_ask(
         facts_only=bool(args.facts_only),
         urlopen=urlopen,
         context_root=root,
+        agent_escalation_provider=agent_escalation_provider,
     )
     if result.action_outcome.failed:
         return EXIT_FOLLOWUP_ACTION_FAILED

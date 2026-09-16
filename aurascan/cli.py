@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 from typing import List
 
-from aurascan.core.agent import run_agent
+from aurascan.core.agent import run_agent, run_agent_escalation
 from aurascan.core.config import load_env, user_env_path
 from aurascan.core.config_drift import (
     build_config_drift_runtime,
@@ -178,9 +178,9 @@ def main(argv=None):
     if raw_argv and raw_argv[0] == "doctor":
         sys.exit(run_doctor(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "upgrade":
-        sys.exit(run_upgrade(raw_argv[1:]))
+        sys.exit(run_upgrade(raw_argv[1:], agent_escalation_provider=run_agent_escalation))
     if raw_argv and raw_argv[0] == "config-drift":
-        sys.exit(run_config_drift(raw_argv[1:]))
+        sys.exit(run_config_drift(raw_argv[1:], agent_escalation_provider=run_agent_escalation))
     if raw_argv and raw_argv[0] == "incidents":
         sys.exit(run_incident_command(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "recovery":
@@ -197,6 +197,7 @@ def main(argv=None):
             incident_runtime_provider=build_incident_followup_runtime,
             config_drift_runtime_provider=build_config_drift_runtime,
             config_drift_remediation_provider=prepare_config_drift_remediation,
+            agent_escalation_provider=run_agent_escalation,
         ))
     if raw_argv and raw_argv[0] == "agent":
         sys.exit(run_agent(

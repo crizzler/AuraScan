@@ -421,6 +421,7 @@ def run_incidents(
     followup_context_root: Optional[Path] = None,
     followup_interactive: Optional[bool] = None,
     followup_runtime_provider: Optional[Callable] = None,
+    agent_escalation_provider: Optional[Callable] = None,
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -506,6 +507,7 @@ def run_incidents(
                 urlopen=urlopen,
                 context_root=followup_context_root,
                 force_interactive=followup_interactive,
+                agent_escalation_provider=agent_escalation_provider,
             )
         return maintenance_result
 
@@ -688,6 +690,7 @@ def run_incidents(
                 urlopen=urlopen,
                 context_root=followup_context_root,
                 force_interactive=followup_interactive,
+                agent_escalation_provider=agent_escalation_provider,
             )
         if should_acknowledge_resolution(options, report):
             acknowledge_incident_resolution(
@@ -717,6 +720,7 @@ def run_incidents(
                 urlopen=urlopen,
                 context_root=followup_context_root,
                 force_interactive=followup_interactive,
+                agent_escalation_provider=agent_escalation_provider,
             )
         return 0
 
@@ -733,6 +737,7 @@ def run_incidents(
                 urlopen=urlopen,
                 context_root=followup_context_root,
                 force_interactive=followup_interactive,
+                agent_escalation_provider=agent_escalation_provider,
             )
         if not report.eligible_actions:
             if should_acknowledge_resolution(options, report):
@@ -786,6 +791,7 @@ def run_incidents(
                 urlopen=urlopen,
                 context_root=followup_context_root,
                 force_interactive=followup_interactive,
+                agent_escalation_provider=agent_escalation_provider,
             )
             answer = answer.strip().lower()
         else:
@@ -863,6 +869,7 @@ def run_incidents(
             urlopen=urlopen,
             context_root=followup_context_root,
             force_interactive=followup_interactive,
+            agent_escalation_provider=agent_escalation_provider,
         )
     if ok and should_acknowledge_resolution(options, report):
         acknowledge_incident_resolution(
@@ -888,6 +895,7 @@ def _offer_incident_followup(
     urlopen: Optional[Callable],
     context_root: Optional[Path],
     force_interactive: Optional[bool],
+    agent_escalation_provider: Optional[Callable] = None,
 ) -> None:
     from aurascan.core.followup import offer_followup
 
@@ -902,6 +910,7 @@ def _offer_incident_followup(
         urlopen=urlopen,
         context_root=context_root,
         force_interactive=force_interactive,
+        agent_escalation_provider=agent_escalation_provider,
     )
 
 

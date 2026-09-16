@@ -202,7 +202,7 @@ def test_doctor_subcommand_dispatches_before_scan_parser(monkeypatch):
 def test_config_drift_subcommand_dispatches_before_scan_parser(monkeypatch):
     calls = []
     monkeypatch.setattr(cli, "load_env", lambda: None)
-    monkeypatch.setattr(cli, "run_config_drift", lambda argv: calls.append(argv) or 0)
+    monkeypatch.setattr(cli, "run_config_drift", lambda argv, **_kwargs: calls.append(argv) or 0)
 
     try:
         cli.main(["config-drift", "--dry-run"])

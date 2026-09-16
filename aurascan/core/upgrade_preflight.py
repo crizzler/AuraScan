@@ -476,6 +476,7 @@ def run_upgrade(
     repository_repair_backup_root: Path = REPOSITORY_HEALTH_BACKUP_ROOT,
     followup_context_root: Optional[Path] = None,
     followup_interactive: Optional[bool] = None,
+    agent_escalation_provider: Optional[Callable] = None,
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -594,6 +595,7 @@ def run_upgrade(
                 urlopen=urlopen,
                 context_root=followup_context_root,
                 force_interactive=followup_interactive,
+                agent_escalation_provider=agent_escalation_provider,
             )
         return EXIT_PREFLIGHT_UNAVAILABLE
     if options.dry_run:
@@ -611,6 +613,7 @@ def run_upgrade(
                 urlopen=urlopen,
                 context_root=followup_context_root,
                 force_interactive=followup_interactive,
+                agent_escalation_provider=agent_escalation_provider,
             )
         return 0
     if options.json_output and not options.yes:
@@ -653,6 +656,7 @@ def run_upgrade(
                 urlopen=urlopen,
                 context_root=followup_context_root,
                 force_interactive=followup_interactive,
+                agent_escalation_provider=agent_escalation_provider,
             )
             if session.action_outcome.source_changed:
                 print("[AuraScan] Upgrade support state changed; run a fresh preflight before upgrading.", file=stderr)
@@ -685,6 +689,7 @@ def run_upgrade(
                 urlopen=urlopen,
                 context_root=followup_context_root,
                 force_interactive=followup_interactive,
+                agent_escalation_provider=agent_escalation_provider,
             )
         return EXIT_UPGRADE_COMMAND_FAILED_TO_START
     result_code = int(getattr(result, "returncode", 0))
@@ -716,6 +721,7 @@ def run_upgrade(
                     urlopen=urlopen,
                     context_root=followup_context_root,
                     force_interactive=followup_interactive,
+                    agent_escalation_provider=agent_escalation_provider,
                 )
             return EXIT_UPGRADE_VERIFICATION_FAILED
         print_verified_upgrade_summary(report.plan, options, stdout=stdout, stderr=stderr)
@@ -745,6 +751,7 @@ def run_upgrade(
             urlopen=urlopen,
             context_root=followup_context_root,
             force_interactive=followup_interactive,
+            agent_escalation_provider=agent_escalation_provider,
         )
     return result_code
 
@@ -787,6 +794,7 @@ def _offer_upgrade_followup(
     urlopen: Optional[Callable],
     context_root: Optional[Path],
     force_interactive: Optional[bool],
+    agent_escalation_provider: Optional[Callable] = None,
 ) -> None:
     from aurascan.core.followup import offer_followup
 
@@ -799,6 +807,7 @@ def _offer_upgrade_followup(
         urlopen=urlopen,
         context_root=context_root,
         force_interactive=force_interactive,
+        agent_escalation_provider=agent_escalation_provider,
     )
 
 
@@ -816,6 +825,7 @@ def _offer_upgrade_followup_outcome(
     urlopen: Optional[Callable],
     context_root: Optional[Path],
     force_interactive: Optional[bool],
+    agent_escalation_provider: Optional[Callable] = None,
 ) -> None:
     from aurascan.core.followup import (
         build_upgrade_runtime,
@@ -852,6 +862,7 @@ def _offer_upgrade_followup_outcome(
         urlopen=urlopen,
         context_root=context_root,
         force_interactive=force_interactive,
+        agent_escalation_provider=agent_escalation_provider,
     )
 
 

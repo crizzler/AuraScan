@@ -158,10 +158,10 @@ order review, not to grade quality — a large cohesive module is not a defect.
 
 | Module | Lines | Capabilities | Concerns | Fan-in | Score |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `core/upgrade_preflight.py` | 2607 | 4 | 6 | 2 | 25 |
-| `core/agent.py` | 3751 | 4 | 5 | 3 | 23 |
+| `core/upgrade_preflight.py` | 2618 | 4 | 6 | 2 | 25 |
+| `core/agent.py` | 3848 | 4 | 5 | 3 | 23 |
 | `core/updater_tray.py` | 1540 | 3 | 6 | 2 | 21 |
-| `core/incidents.py` | 3237 | 3 | 5 | 7 | 20 |
+| `core/incidents.py` | 3246 | 3 | 5 | 7 | 20 |
 | `core/recovery.py` | 2303 | 3 | 5 | 4 | 20 |
 | `core/security_audit.py` | 1465 | 4 | 4 | 3 | 20 |
 | `core/incident_automation.py` | 707 | 3 | 5 | 5 | 19 |
@@ -184,10 +184,17 @@ known decision rather than a surprise.
 
 | Cycle | Modules | Assessment |
 | --- | --- | --- |
-| Agent and follow-up | `core.agent`, `core.followup` | Two members, down from six. Stages 5–9 removed the dispatch, vocabulary, repository-interpretation, follow-up-refresh and upgrade-value edges; Stage 10 moved the incident-family adapters out and Stage 11 moved the config-drift adapters out. What is left is bidirectional orchestration: the framework's in-session `/agent` escalation command imports the agent workflow, while the agent runs its sessions through the framework. |
 | Incident planners | `core.incident_automation`, `core.incident_diagnostics`, `core.incidents` | Expected and deliberate: the incident workflow, its diagnostics planner and its automation layer share report state and repair vocabulary. Nothing outside that group needs to enter it. |
 | Intelligence | `core.intelligence`, `core.intelligence_crypto`, `core.intelligence_store` | Expected: snapshot identity, verification and storage are one transaction. |
 | Install-hook / provenance | `analyzers.repository_provenance`, `core.install_hook`, `core.source_acquisition` | Expected: declared-source filtering needs the hook reader and the acquisition snapshot. |
+
+No planner cycle is left. Stages 5-12 removed the dispatch, vocabulary,
+repository-interpretation, follow-up-refresh, upgrade-value, incident-adapter,
+config-drift-adapter and agent-escalation edges, and the last component
+(`agent`, `followup`) dissolved in Stage 12 when `/agent` became a supplied
+capability. `agent`, `followup`, `config_drift`, `upgrade_preflight` and
+`incident_repairs` are all cycle-free, and a module that imports another module
+that imports it back is now a violation rather than a known exception.
 
 No cycle contains the evidence model, and the domain layer only ever depends on
 itself: five of its six modules import nothing from the package at all, and
@@ -230,6 +237,7 @@ reason.
 | INV-015 | Presentation modules must not participate in an import cycle |
 | INV-016 | Presentation rendering modules must not perform dangerous operations |
 | INV-017 | Platform adapters must not depend on application workflows |
+| INV-018 | Lifecycle frameworks must not import concrete lifecycle workflows |
 
 What the invariants deliberately do **not** do: fail on module size, forbid
 in-repo private names, or enforce a full layered architecture. The advisory
@@ -244,13 +252,62 @@ Reported by the audit, never fatal:
 - modules with more than 5 concern tags.
 
 Current warnings: `core/instruction_guard.py` (8760 lines),
-`analyzers/repository_provenance.py` (4555), `core/agent.py` (3751),
-`core/incidents.py` (3237), `core/upgrade_preflight.py` (2607 lines, 6 concern
+`analyzers/repository_provenance.py` (4555), `core/agent.py` (3848),
+`core/incidents.py` (3246), `core/upgrade_preflight.py` (2618 lines, 6 concern
 tags), `core/source_acquisition.py` (2554), `setup_wizard.py` (2521),
-`core/updater_tray.py` (6 concern tags). `core/followup.py` (2066) left this list
+`core/updater_tray.py` (6 concern tags). `core/followup.py` (2055) left this list
 in Stage 11.
 
 ## Decomposition log
+
+**Resolved in Stage 12:** the generic follow-up framework no longer imports the
+agent workflow. `/agent` in an interactive session is now a supplied capability
+(`agent_escalation_provider`) that the composition roots wire in, the agent
+lifecycle owns the whole policy and the session, and without a provider the
+command fails closed. The last planner component (`agent`, `followup`) is gone
+and INV-018 keeps it gone.
+
+### Stage 12 — the `/agent` escalation command became a supplied capability
+
+`followup` imported `agent` in exactly one place: the `/agent` command inside
+`run_followup_session`, which resolved the agent configuration, checked the
+access vocabulary and ceiling, and called `run_agent_session`. `agent` imports
+`followup` in nineteen names plus its guarded session host, so the two modules
+were mutually reachable.
+
+| Direction | Kind | Outcome |
+| --- | --- | --- |
+| `agent -> followup` | lifecycle uses the framework as a facility (context values, runtime, probes, retention, redaction, session hosting, audit) | kept: this is the legitimate direction |
+| `followup -> agent` | a concrete lifecycle's escalation workflow hosted by generic session code | removed: the agent lifecycle owns it and supplies it through a provider |
+
+- **One new lifecycle-owned entry point:** `agent.run_agent_escalation(context,
+  requested_access, ...)` resolves the configured access, applies the same
+  validation order and wording as before (configuration error, usage, already
+  guarded, access ceiling), and then runs the agent session. It returns
+  `AgentEscalationOutcome`, whose `result` is None when no session ran, so the
+  framework can merge a session exactly as it did before and otherwise do
+  nothing.
+- **Supplied, not imported:** `run_followup_session`, `offer_followup`,
+  `prompt_with_followup` and `run_ask` accept `agent_escalation_provider`.
+  `cli.py` supplies it to `ask`, `upgrade` and `config-drift`; `incident_cli.py`
+  supplies it to `incidents`; the agent supplies it to the guarded follow-up
+  session it hosts itself. The upgrade, config-drift and incident workflows
+  forward the capability to every interactive session site they open and never
+  import the agent module.
+- **Fail closed:** without a provider the session prints that Repair Agent
+  escalation is unavailable, generates no command and starts nothing; a provider
+  that reports no session leaves the framework's counters, outcome and prompt
+  unchanged. Both paths have tests, as does the real refusal wording through the
+  agent-owned policy.
+- **Agent authority stayed put:** access policy, consent prompts, snapshot and
+  rollback checks, per-command confirmation, command validation, execution,
+  audit persistence and grant revocation are all still inside `core/agent.py`.
+  The framework knows only that an optional escalation capability was supplied.
+- **Honest limit:** `followup` still hosts the upgrade session's repository and
+  kernel-module action adapters (`build_upgrade_runtime` imports
+  `repository_repair` and `kernel_module_autopilot`). Those edges are one-way and
+  cycle-free and are recorded below as remaining debt; INV-018 covers lifecycle
+  *workflows*, which those two adapters are not.
 
 **Resolved in Stage 11:** the generic follow-up framework no longer imports the
 config-drift lifecycle. `context_from_config_drift` and
@@ -723,7 +780,7 @@ Extracted `core/trusted_executable.py`: `TrustedExecutable`,
 | --- | --- |
 | `core/instruction_guard.py` (8760) | Highest absolute risk: discovery, integrity manifests, private report state and triage UX in one file. Needs a characterisation-test layer over paging/enrollment state before any move. |
 | `analyzers/repository_provenance.py` (4555) | Splitting magic classification from correlation is plausible, but the bounded-walk coverage rules are subtle and the fixture matrix is the contract. |
-| `core/incidents.py` (3237) | Stage 5 removed its CLI dispatch and its automation edges and Stage 10 removed its follow-up edges, so what is left is the interactive workflow. Its remaining cycle with `incident_repairs` and `incident_diagnostics` must be designed before another member moves. |
+| `core/incidents.py` (3246) | Stage 5 removed its CLI dispatch and its automation edges, and Stage 10 removed the follow-up edges that also released `incident_repairs`, so what is left is the interactive workflow. Its remaining component with `incident_diagnostics` and `incident_automation` must be designed before another member moves. |
 | `core/agent.py` (3741) | Command allowlisting, consent and execution are one security boundary; separating them without a policy/adapter interface risks weakening the fail-closed path. |
 
 #### Planning and execution inside the repair module
@@ -743,49 +800,52 @@ split was not what caused the cycle.
 
 Assessment: the mixture is a readability and review-size cost, not an authority
 problem. Authorization is checked at the entry points, eligibility is decided in
-planning, and execution only ever runs actions that planning produced. The cycle
-that keeps `incidents` and `incident_repairs` mutually reachable does not pass
-through this internal split. Splitting the file is therefore **not** recommended
-as the next seam.
+planning, and execution only ever runs actions that planning produced. The
+incident component does not pass through this internal split, so splitting the
+file is **not** recommended as the next seam. `incident_repairs` is cycle-free:
+it is the three-module planner group above, not this module, that remains
+connected.
 
 ## Next targets
 
-1. `{agent, followup}` is the last component left over from the planner cycle and
-   the only place where a generic framework and a lifecycle still call each other
-   in both directions. Two edges hold it open, and they are different in kind:
-   `followup -> agent` is the in-session `/agent` escalation command, which is the
-   same misplaced-adapter shape Stage 10 (incidents) and Stage 11 (config drift)
-   removed, and `agent -> followup` is the agent running its session through the
-   framework. Removing the first through a supplied escalation provider would
-   leave the agent dependency one-way and dissolve the cycle, and would be the
-   single highest-leverage change left. The same stage should finish the seam
-   started here: `build_upgrade_runtime` still hosts the repository and
-   kernel-module action adapters inside the framework, so an upgrade
-   `runtime_provider` would make `followup` a pure coordinator of supplied
-   operations.
-2. **Partially done:** Stages 5 and 6 moved the `incidents` CLI runner and the
+1. `followup` still hosts the upgrade session's lower-level action adapters:
+   `build_upgrade_runtime` imports `repository_repair` and
+   `kernel_module_autopilot` to apply repository and kernel-module fixes. Both
+   edges are one-way and cycle-free, they are adapters rather than lifecycle
+   workflows, and every other lifecycle adapter has already moved out (incidents,
+   config drift, agent escalation). Finishing that seam — an upgrade
+   `runtime_provider` supplied the way the refresh and remediation providers
+   already are — would make `followup` a pure coordinator of supplied
+   operations. It is an ownership cleanup, not a cycle fix.
+2. The incident planner component (`incidents`, `incident_diagnostics`,
+   `incident_automation`) is the largest remaining SCC and the only one whose
+   members are all application workflows rather than adapters or one
+   transaction. Breaking it needs report state, diagnostics planning and the
+   automation layer separated first, which is a design task rather than an
+   adapter move.
+3. **Partially done:** Stages 5 and 6 moved the `incidents` CLI runner and the
    shared helper ownership out of subsystem modules. `config_drift`,
    `security_audit` and `upgrade_preflight` still reach their presenter from
    inside their own CLI entry points. That edge is one-way and cycle-free, but
    it means CLI printing still lives in subsystem modules.
-3. `core/upgrade_preflight.py` (2607 lines, 6 concern tags — the top hotspot)
+4. `core/upgrade_preflight.py` (2618 lines, 6 concern tags — the top hotspot)
    now holds upgrade planning, the handoff, kernel-module aftercare, config
    drift, security-audit findings, AI advisory, failure diagnosis, the follow-up
    refresh operation and its CLI. AI advisory plus failure diagnosis is the
-   largest single block left, but it does not participate in the planner cycle:
-   it is a size seam, not a cycle seam.
-4. Five duplicate implementations of the two concerns Stage 6 extracted:
+   largest single block left, but it does not participate in any cycle: it is a
+   size seam, not a cycle seam.
+5. Five duplicate implementations of the two concerns Stage 6 extracted:
    `followup.redact_followup_text`/`redact_followup_structure`/`correlation_token`,
    `config_drift.redact_text`, `recovery_boot.atomic_write`,
    `recovery_repairs._atomic_json` and `followup.atomic_write_private_json`.
    They should converge on `core/redaction.py` and `core/state_file.py` when
    those modules are next changed.
-5. Move the security-audit recommended-action decision out of the presenter and
+6. Move the security-audit recommended-action decision out of the presenter and
    onto the report as a decided field.
-6. Dead helpers found in earlier stages:
+7. Dead helpers found in earlier stages:
    `AnalysisResult.get_highest_severity()`, `AnalysisResult.blocks_installation()`
    and `findings_from_results()` still have no callers.
-7. Characterise Instruction Guard state transitions, then decompose by
+8. Characterise Instruction Guard state transitions, then decompose by
    responsibility.
 
 ## Related documents

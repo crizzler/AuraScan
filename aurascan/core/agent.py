@@ -3431,6 +3431,102 @@ def run_agent_session(
     return result
 
 
+class AgentEscalationOutcome:
+    """What an in-session ``/agent`` escalation request produced.
+
+    ``result`` is None when no agent session ran: the configured access was
+    unavailable, the requested access value was unsupported, the request would
+    exceed the configured access ceiling, or guarded access was requested from a
+    session that already provides it. The lifecycle prints the message that
+    explains each refusal.
+    """
+
+    __slots__ = ("result",)
+
+    def __init__(self, result: Optional[AgentSessionResult] = None) -> None:
+        self.result = result
+
+    @property
+    def session_ran(self) -> bool:
+        return self.result is not None
+
+
+def run_agent_escalation(
+    context: FollowUpContext,
+    requested_access: str = "",
+    *,
+    runtime: Optional[FollowUpRuntime] = None,
+    input_func: Callable[[str], str] = input,
+    stdout=None,
+    stderr=None,
+    env: Optional[Mapping[str, str]] = None,
+    facts_only: bool = False,
+    urlopen: Optional[Callable] = None,
+    context_root: Optional[Path] = None,
+    audit_root: Optional[Path] = None,
+    helper: Path = Path("/usr/bin/aurascan"),
+    runner: Callable = subprocess.run,
+    which: Callable[[str], Optional[str]] = shutil.which,
+    popen_factory: Callable = subprocess.Popen,
+) -> AgentEscalationOutcome:
+    """Start a Repair Agent session for a retained follow-up context.
+
+    A follow-up session offers this capability through a supplied provider, so
+    the generic follow-up framework never imports this workflow. Access policy,
+    consent and the session stay here: the request only names one of the
+    configured access values, the ceiling is the configured access, and every
+    exact command still needs its own confirmation.
+    """
+    stdout = stdout or sys.stdout
+    stderr = stderr or sys.stderr
+    agent_config = resolve_agent_config(env)
+    requested = str(requested_access or "").strip() or agent_config.access
+    if agent_config.error:
+        print(f"[AuraScan] Repair Agent configuration error: {agent_config.error}.", file=stderr)
+        return AgentEscalationOutcome()
+    if requested not in AGENT_ACCESS_VALUES:
+        print(
+            "[AuraScan] Usage: /agent guarded|user-shell|root-shell",
+            file=stdout,
+        )
+        return AgentEscalationOutcome()
+    if requested == "guarded":
+        print(
+            "[AuraScan] This follow-up session is already using guarded AuraScan tools.",
+            file=stdout,
+        )
+        return AgentEscalationOutcome()
+    if AGENT_ACCESS_ORDER[requested] > AGENT_ACCESS_ORDER[agent_config.access]:
+        print(
+            f"[AuraScan] {requested} exceeds the configured access ceiling "
+            f"{agent_config.access}. Change it through `aurascan init` first.",
+            file=stderr,
+        )
+        return AgentEscalationOutcome()
+    return AgentEscalationOutcome(
+        run_agent_session(
+            context,
+            access=requested,
+            approval=agent_config.approval,
+            output_sharing=agent_config.output_sharing,
+            session_timeout_minutes=agent_config.session_timeout_minutes,
+            runtime=runtime,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            facts_only=facts_only,
+            urlopen=urlopen,
+            context_root=context_root,
+            audit_root=audit_root,
+            helper=helper,
+            runner=runner,
+            which=which,
+            popen_factory=popen_factory,
+        )
+    )
+
+
 def _load_agent_context(
     context_id: str,
     *,
@@ -3656,6 +3752,7 @@ def run_agent(
             facts_only=bool(args.facts_only),
             urlopen=urlopen,
             context_root=root,
+            agent_escalation_provider=run_agent_escalation,
         )
         if guarded.action_outcome.failed:
             return EXIT_FOLLOWUP_ACTION_FAILED

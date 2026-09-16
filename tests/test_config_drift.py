@@ -690,3 +690,44 @@ def test_prepare_config_drift_remediation_withholds_sensitive_drift(tmp_path):
     prepared = prepare_config_drift_remediation(root, stdout=io.StringIO())
 
     assert prepared.safe is False
+
+def test_config_drift_session_escalates_only_through_the_supplied_provider(monkeypatch, tmp_path):
+    """Stage 12: the workflow forwards the escalation capability it was given."""
+
+    for key, value in {
+        "AURASCAN_AI_ENABLED": "1",
+        "AURASCAN_AI_PROVIDER": "openai",
+        "AURASCAN_OPENAI_API_KEY": "fixture-key",
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+    }.items():
+        monkeypatch.setenv(key, value)
+    root = tmp_path / "etc"
+    root.mkdir()
+    (root / "mirrorlist").write_text("old\n", encoding="utf-8")
+    (root / "mirrorlist.pacnew").write_text("new\n", encoding="utf-8")
+    calls = []
+
+    class Provider:
+        session_ran = False
+        result = None
+
+        def __call__(self, context, requested_access, **kwargs):
+            calls.append((context.context_id, requested_access, kwargs["context_root"]))
+            return self
+
+    answers = iter(["/agent user-shell", ""])
+    stdout = io.StringIO()
+    status = run_config_drift(
+        ["--dry-run", "--root", str(root)],
+        input_func=lambda _prompt: next(answers),
+        stdout=stdout,
+        stderr=stdout,
+        followup_context_root=tmp_path / "contexts",
+        followup_interactive=True,
+        agent_escalation_provider=Provider(),
+    )
+
+    assert status == 0
+    assert [call[1] for call in calls] == ["user-shell"]
+    assert calls[0][2] == tmp_path / "contexts"
+    assert root.joinpath("mirrorlist.pacnew").exists()

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
 
 from aurascan.core.config import read_env_file, user_env_path
+from aurascan.core.agent import run_agent_escalation
 from aurascan.core.incident_followup import build_incident_followup_runtime
 from aurascan.core.incident_models import INCIDENT_SYSTEM_ROOT
 from aurascan.core.incidents import (
@@ -160,4 +161,5 @@ def run_incident_command(
         followup_context_root=followup_context_root,
         followup_interactive=followup_interactive,
         followup_runtime_provider=build_incident_followup_runtime,
+        agent_escalation_provider=run_agent_escalation,
     )

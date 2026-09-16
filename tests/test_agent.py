@@ -1614,6 +1614,7 @@ def test_followup_agent_command_cannot_exceed_configured_access(monkeypatch, tmp
         stderr=stdout,
         env=ai_env(tmp_path, AURASCAN_AGENT_ACCESS="user-shell"),
         context_root=tmp_path / "contexts",
+        agent_escalation_provider=agent.run_agent_escalation,
     )
 
     assert called == []
@@ -1657,3 +1658,77 @@ def test_new_root_session_cleanup_removes_only_expired_records(tmp_path):
     assert removed == 1
     assert not expired.exists()
     assert active.exists()
+
+def test_agent_escalation_owns_the_access_policy_and_refusals(monkeypatch, tmp_path):
+    """Stage 12: the agent lifecycle decides what /agent may start."""
+
+    started = []
+    monkeypatch.setattr(
+        agent,
+        "run_agent_session",
+        lambda _context, **kwargs: started.append(kwargs) or agent.AgentSessionResult(),
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    env = ai_env(tmp_path, AURASCAN_AGENT_ACCESS="user-shell")
+
+    guarded = agent.run_agent_escalation(context(), "guarded", stdout=stdout, stderr=stderr, env=env)
+    unknown = agent.run_agent_escalation(context(), "root", stdout=stdout, stderr=stderr, env=env)
+    # An empty argument uses the configured access, exactly as before.
+    configured = agent.run_agent_escalation(context(), "", stdout=stdout, stderr=stderr, env=env)
+
+    assert (guarded.session_ran, unknown.session_ran, configured.session_ran) == (False, False, True)
+    assert [call["access"] for call in started] == ["user-shell"]
+    assert started[0]["approval"] == "each-command"
+    assert started[0]["output_sharing"] == "redacted"
+    assert "already using guarded AuraScan tools" in stdout.getvalue()
+    assert "Usage: /agent guarded|user-shell|root-shell" in stdout.getvalue()
+
+
+def test_agent_escalation_reports_a_configuration_error_without_starting(monkeypatch, tmp_path):
+    started = []
+    monkeypatch.setattr(
+        agent,
+        "run_agent_session",
+        lambda _context, **kwargs: started.append(kwargs) or agent.AgentSessionResult(),
+    )
+    stderr = io.StringIO()
+
+    outcome = agent.run_agent_escalation(
+        context(),
+        "user-shell",
+        stdout=io.StringIO(),
+        stderr=stderr,
+        env=ai_env(tmp_path, AURASCAN_AGENT_ACCESS="not-a-profile"),
+    )
+
+    assert outcome.session_ran is False
+    assert started == []
+    assert "Repair Agent configuration error" in stderr.getvalue()
+
+
+def test_guarded_agent_session_can_still_escalate_through_its_own_provider(monkeypatch, tmp_path):
+    """The agent hosts a follow-up session and supplies the escalation itself."""
+
+    root = tmp_path / "contexts"
+    persist_followup_context(context(), root)
+    started = []
+    monkeypatch.setattr(
+        agent,
+        "run_agent_session",
+        lambda _context, **kwargs: started.append(kwargs) or agent.AgentSessionResult(),
+    )
+    prompts = iter(["/agent user-shell", ""])
+
+    status = run_agent(
+        ["--latest", "--access", "guarded"],
+        input_func=lambda _prompt: next(prompts),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        env=ai_env(tmp_path, AURASCAN_AGENT_ACCESS="user-shell"),
+        context_root=root,
+        force_interactive=True,
+    )
+
+    assert status == 0
+    assert [call["access"] for call in started] == ["user-shell"]

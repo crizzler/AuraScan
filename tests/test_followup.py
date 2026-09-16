@@ -1413,3 +1413,137 @@ def test_upgrade_session_without_a_config_drift_provider_applies_nothing(tmp_pat
     assert "could not be re-prepared" in outcome.message
     # Nothing was planned or applied, so the session never claimed success.
     assert stdout.getvalue() == ""
+
+class _EscalationProbe:
+    """Records the escalation requests a follow-up session forwards."""
+
+    def __init__(self, result=None, session_ran=False):
+        self.calls = []
+        self.result = result
+        self.session_ran = session_ran
+
+    def __call__(self, context, requested_access, **kwargs):
+        from aurascan.core.agent import AgentEscalationOutcome
+
+        self.calls.append((context.context_id, requested_access, kwargs))
+        return AgentEscalationOutcome(self.result if self.session_ran else None)
+
+
+class _AgentSessionResult:
+    def __init__(self, provider_requests=0, provider_failed=False, outcome=None):
+        from aurascan.core.followup import FollowUpActionOutcome
+
+        self.provider_requests = provider_requests
+        self.provider_failed = provider_failed
+        self.action_outcome = outcome or FollowUpActionOutcome()
+
+
+def test_followup_agent_escalation_is_unavailable_without_a_provider(tmp_path):
+    """Stage 12: the framework never starts the agent workflow on its own."""
+
+    prompts = iter(["/agent user-shell", "/agent root-shell", ""])
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    run_followup_session(
+        context(),
+        runtime=FollowUpRuntime(),
+        input_func=lambda _prompt: next(prompts),
+        stdout=stdout,
+        stderr=stderr,
+        env=ai_env(tmp_path),
+        context_root=tmp_path / "contexts",
+    )
+
+    assert stderr.getvalue().count("Repair Agent escalation is unavailable") == 2
+    assert "/agent" not in stdout.getvalue()
+    assert latest_followup_context(tmp_path / "contexts") is not None
+
+
+def test_followup_agent_escalation_forwards_the_session_to_the_provider(tmp_path):
+    """The supplied provider receives the command argument and the session hooks."""
+
+    probe = _EscalationProbe(
+        result=_AgentSessionResult(provider_requests=2),
+        session_ran=True,
+    )
+    prompts = iter(["/agent user-shell", ""])
+    stdout = io.StringIO()
+    env = {**ai_env(tmp_path), "AURASCAN_AGENT_ACCESS": "user-shell"}
+
+    result = run_followup_session(
+        context(),
+        runtime=FollowUpRuntime(),
+        input_func=lambda _prompt: next(prompts),
+        stdout=stdout,
+        stderr=stdout,
+        env=env,
+        facts_only=True,
+        context_root=tmp_path / "contexts",
+        agent_escalation_provider=probe,
+    )
+
+    assert [call[1] for call in probe.calls] == ["user-shell"]
+    assert probe.calls[0][2]["env"] == env
+    assert probe.calls[0][2]["facts_only"] is True
+    assert probe.calls[0][2]["context_root"] == tmp_path / "contexts"
+    # The agent session's provider budget counts toward the framework session.
+    assert result.provider_requests == 2
+
+
+def test_followup_agent_escalation_merges_an_applied_outcome(tmp_path):
+    """An escalation that changed local state ends the follow-up session."""
+
+    from aurascan.core.followup import FollowUpActionOutcome
+
+    probe = _EscalationProbe(
+        result=_AgentSessionResult(
+            provider_requests=1,
+            provider_failed=True,
+            outcome=FollowUpActionOutcome(attempted=True, applied=True, source_changed=True),
+        ),
+        session_ran=True,
+    )
+    prompts = iter(["/agent root-shell", "this question must never be asked", ""])
+    stdout = io.StringIO()
+
+    result = run_followup_session(
+        context(),
+        runtime=FollowUpRuntime(),
+        input_func=lambda _prompt: next(prompts),
+        stdout=stdout,
+        stderr=stdout,
+        env={**ai_env(tmp_path), "AURASCAN_AGENT_ACCESS": "root-shell"},
+        context_root=tmp_path / "contexts",
+        agent_escalation_provider=probe,
+    )
+
+    assert [call[1] for call in probe.calls] == ["root-shell"]
+    assert result.action_outcome.applied is True
+    assert result.provider_failed is True
+    assert result.questions == 0
+
+
+def test_followup_agent_escalation_stays_closed_for_a_malformed_provider(tmp_path):
+    """A provider that reports no session changes nothing in the framework state."""
+
+    def malformed(context, requested_access, **_kwargs):
+        return None
+
+    prompts = iter(["/agent user-shell", ""])
+    stdout = io.StringIO()
+
+    result = run_followup_session(
+        context(),
+        runtime=FollowUpRuntime(),
+        input_func=lambda _prompt: next(prompts),
+        stdout=stdout,
+        stderr=stdout,
+        env=ai_env(tmp_path),
+        context_root=tmp_path / "contexts",
+        agent_escalation_provider=malformed,
+    )
+
+    assert result.provider_requests == 0
+    assert result.action_outcome.attempted is False
+    assert result.questions == 0

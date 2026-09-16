@@ -70,6 +70,36 @@ Architecture stabilization stage 4 (no behavior change):
   subsystem engines also use, with equality assertions so the wording cannot
   drift.
 
+Architecture stabilization stage 12 (no behavior change):
+
+- Removed the last planner import cycle. The generic follow-up framework no
+  longer imports the agent workflow: the interactive `/agent ACCESS` command is
+  now a supplied capability, `agent_escalation_provider`, that the composition
+  roots wire in.
+- The agent lifecycle owns the whole escalation: `agent.run_agent_escalation`
+  resolves the configured access, applies the same validation order and wording
+  (configuration error, usage, already guarded, access ceiling) and runs the
+  session, returning `AgentEscalationOutcome` so the framework merges a real
+  session exactly as before and otherwise does nothing.
+- `cli.py` supplies the provider to `ask`, `upgrade` and `config-drift`,
+  `incident_cli.py` supplies it to `incidents`, and the agent supplies it to the
+  guarded follow-up session it hosts itself. The upgrade, config-drift and
+  incident workflows forward the capability to every interactive session site
+  and never import the agent module.
+- Without a provider the session reports that Repair Agent escalation is
+  unavailable, generates no command and starts nothing; a provider that reports
+  no session leaves the framework state untouched. Both paths, the agent-owned
+  refusal wording, the forward-only wiring and a real workflow session are
+  covered by tests.
+- Added INV-018, "lifecycle frameworks must not import concrete lifecycle
+  workflows", with the framework and lifecycle-workflow roles recorded in the
+  audit tool and negative fixtures for a framework importing the agent workflow
+  and any other concrete workflow.
+- No planner cycle is left: `agent`, `followup`, `config_drift`,
+  `upgrade_preflight` and `incident_repairs` are all cycle-free. The remaining
+  components are the incident planners, the intelligence snapshot transaction
+  and the install-hook/provenance group.
+
 Architecture stabilization stage 11 (no behavior change):
 
 - Moved the config-drift follow-up adapters out of the generic framework and back

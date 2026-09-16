@@ -283,6 +283,7 @@ def run_config_drift(
     backup_root: Path = CONFIG_DRIFT_BACKUP_ROOT,
     followup_context_root: Optional[Path] = None,
     followup_interactive: Optional[bool] = None,
+    agent_escalation_provider: Optional[Callable] = None,
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -350,6 +351,7 @@ def run_config_drift(
                 context_root=followup_context_root,
                 disabled=followup_disabled,
                 force_interactive=followup_interactive,
+                agent_escalation_provider=agent_escalation_provider,
             )
         return 0
     if options.json_output and not options.yes:
@@ -373,6 +375,7 @@ def run_config_drift(
                 urlopen=urlopen,
                 context_root=followup_context_root,
                 force_interactive=followup_interactive,
+                agent_escalation_provider=agent_escalation_provider,
             )
             answer = answer.strip().lower()
         else:
@@ -401,6 +404,7 @@ def run_config_drift(
                 context_id=followup_context.context_id,
                 context_root=followup_context_root,
                 force_interactive=followup_interactive,
+                agent_escalation_provider=agent_escalation_provider,
             )
         return sudo_status
 
@@ -422,6 +426,7 @@ def run_config_drift(
             context_id=followup_context.context_id,
             context_root=followup_context_root,
             force_interactive=followup_interactive,
+            agent_escalation_provider=agent_escalation_provider,
         )
     return 0 if ok else EXIT_CONFIG_DRIFT_APPLY_FAILED
 
@@ -437,6 +442,7 @@ def _offer_config_followup_after_apply(
     context_id: str,
     context_root: Optional[Path],
     force_interactive: Optional[bool],
+    agent_escalation_provider: Optional[Callable] = None,
 ) -> None:
     from aurascan.core.followup import offer_followup
 
@@ -461,6 +467,7 @@ def _offer_config_followup_after_apply(
         urlopen=urlopen,
         context_root=context_root,
         force_interactive=force_interactive,
+        agent_escalation_provider=agent_escalation_provider,
     )
 
 

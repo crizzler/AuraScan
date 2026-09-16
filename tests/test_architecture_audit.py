@@ -904,13 +904,11 @@ def test_incident_family_left_the_planner_component():
 
     assert "aurascan.core.upgrade_preflight" not in cycles
     assert "aurascan.core.upgrade_models" not in cycles
-    # The agent and the generic follow-up framework still call each other; the
-    # incident family and (since Stage 11) config drift no longer take part.
-    planner = next(component for component in result.cycles if "aurascan.core.followup" in component)
-    assert sorted(planner) == [
-        "aurascan.core.agent",
-        "aurascan.core.followup",
-    ]
+    # The agent and the generic follow-up framework no longer form a component
+    # either (Stage 12): the planner cycle is gone, and the incident family is
+    # the only workflow component left.
+    assert "aurascan.core.agent" not in cycles
+    assert "aurascan.core.followup" not in cycles
     incident_component = next(
         component for component in result.cycles if "aurascan.core.incidents" in component
     )
@@ -956,7 +954,6 @@ def test_config_drift_left_the_planner_component():
 
     assert "aurascan.core.config_drift" not in cycles
     assert "aurascan.core.config_drift_presenter" not in cycles
-    assert "aurascan.core.followup" in cycles, "the remaining agent cycle is expected"
 
     module = {info.name: info for info in result.modules}
     assert "aurascan.core.followup" in module["aurascan.core.config_drift"].internal_imports
@@ -965,6 +962,110 @@ def test_config_drift_left_the_planner_component():
         "aurascan.core.config_drift_presenter",
     ):
         assert name not in module["aurascan.core.followup"].internal_imports, name
+
+
+def test_planner_cycle_is_gone_and_agent_followup_is_directional():
+    """Stage 12 topology: the agent lifecycle depends on the framework, not both ways."""
+
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    cycles = {module for component in result.cycles for module in component}
+    module = {info.name: info for info in result.modules}
+
+    assert "aurascan.core.agent" not in cycles
+    assert "aurascan.core.followup" not in cycles
+    # The agent still uses the framework as a facility in that one direction.
+    assert "aurascan.core.followup" in module["aurascan.core.agent"].internal_imports
+    assert "aurascan.core.agent" not in module["aurascan.core.followup"].internal_imports
+
+
+def test_generic_followup_framework_owns_no_concrete_lifecycle():
+    """Stage 12: the framework runs supplied operations, not its own workflows.
+
+    Each lifecycle that may appear in a session owns the adapter and supplies it.
+    A framework import of a lifecycle workflow would re-open the planner cycle.
+    """
+
+    followup_source = (ROOT / "aurascan" / "core" / "followup.py").read_text(encoding="utf-8")
+    for name in (
+        "aurascan.core.agent",
+        "aurascan.core.incidents",
+        "aurascan.core.incident_automation",
+        "aurascan.core.incident_diagnostics",
+        "aurascan.core.incident_repairs",
+        "aurascan.core.incident_followup",
+        "aurascan.core.config_drift",
+        "aurascan.core.config_drift_presenter",
+        "aurascan.core.upgrade_preflight",
+        "aurascan.core.upgrade_preflight_presenter",
+        "aurascan.core.recovery",
+    ):
+        assert name not in followup_source, name
+    # Every concrete behavior arrives as a provider parameter.
+    for provider in (
+        "agent_escalation_provider",
+        "incident_runtime_provider",
+        "config_drift_runtime_provider",
+        "config_drift_remediation_provider",
+        "refresh_upgrade_report",
+    ):
+        assert provider in followup_source, provider
+
+
+def test_agent_escalation_is_supplied_by_the_wiring_owners():
+    """Stage 12: only the composition roots and the agent itself know /agent."""
+
+    cli_source = (ROOT / "aurascan" / "cli.py").read_text(encoding="utf-8")
+    assert "from aurascan.core.agent import run_agent, run_agent_escalation" in cli_source
+    assert cli_source.count("agent_escalation_provider=run_agent_escalation") == 3
+
+    incident_cli_source = (ROOT / "aurascan" / "core" / "incident_cli.py").read_text(encoding="utf-8")
+    assert "agent_escalation_provider=run_agent_escalation" in incident_cli_source
+
+    agent_source = (ROOT / "aurascan" / "core" / "agent.py").read_text(encoding="utf-8")
+    assert "def run_agent_escalation(" in agent_source
+    assert "agent_escalation_provider=run_agent_escalation" in agent_source
+
+    # The workflows receive the capability and pass it on; they never import it,
+    # and no interactive session site may silently drop it.
+    def session_calls(relative: str, names):
+        tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+        calls = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+            if name in names:
+                calls.append(
+                    (
+                        node.lineno,
+                        any(keyword.arg == "agent_escalation_provider" for keyword in node.keywords),
+                    )
+                )
+        return calls
+
+    for relative, names in (
+        (
+            "aurascan/core/followup.py",
+            {"run_followup_session"},
+        ),
+        (
+            "aurascan/core/upgrade_preflight.py",
+            {"offer_followup", "prompt_with_followup", "_offer_upgrade_followup", "_offer_upgrade_followup_outcome"},
+        ),
+        (
+            "aurascan/core/config_drift.py",
+            {"offer_followup", "prompt_with_followup", "_offer_config_followup_after_apply"},
+        ),
+        (
+            "aurascan/core/incidents.py",
+            {"offer_followup", "prompt_with_followup", "_offer_incident_followup"},
+        ),
+    ):
+        calls = session_calls(relative, names)
+        assert calls, relative
+        assert [line for line, forwards in calls if not forwards] == [], relative
+        if relative != "aurascan/core/followup.py":
+            assert "aurascan.core.agent" not in (ROOT / relative).read_text(encoding="utf-8"), relative
 
 
 def test_config_drift_followup_adapters_are_owned_by_the_lifecycle():
@@ -1124,3 +1225,85 @@ def build_config_drift_runtime(context: "FollowUpContext", *, runner=None) -> Fo
 
     assert _unresolved_annotations(broken) == [("build_config_drift_runtime", "FollowUpContext")]
     assert _unresolved_annotations(quoted) == []
+
+def test_lifecycle_framework_importing_a_workflow_is_reported(tmp_path):
+    """INV-018 negative fixture: the framework may not own a lifecycle workflow.
+
+    This is the Stage 12 regression: the generic follow-up framework importing
+    the agent workflow for its in-session escalation command put the two modules
+    in one import cycle.
+    """
+
+    package_root = tmp_path / "framepkg"
+    write_module(package_root, "__init__.py", "")
+    write_module(package_root, "core/__init__.py", "")
+    write_module(
+        package_root,
+        "core/followup.py",
+        "from framepkg.core.agent import run_agent_session\n\n\ndef escalate():\n    return run_agent_session\n",
+    )
+    # The agent genuinely uses the framework, so the framework importing it back
+    # is what forms the cycle INV-018 prevents.
+    write_module(
+        package_root,
+        "core/agent.py",
+        "from framepkg.core.followup import escalate\n\n\ndef run_agent_session():\n    return escalate\n",
+    )
+
+    result = run_tool(package_root, "framepkg")
+    by_id = {violation.invariant_id: violation for violation in result.violations}
+
+    assert "INV-018" in by_id
+    assert by_id["INV-018"].module == "framepkg/core/followup.py"
+    assert "framepkg.core.agent" in by_id["INV-018"].detail
+    assert {"framepkg.core.agent", "framepkg.core.followup"} <= {
+        module for component in result.cycles for module in component
+    }
+
+
+def test_lifecycle_framework_importing_any_workflow_is_reported(tmp_path):
+    """The rule is a role rule: any concrete lifecycle workflow counts."""
+
+    package_root = tmp_path / "framepkg"
+    write_module(package_root, "__init__.py", "")
+    write_module(package_root, "core/__init__.py", "")
+    write_module(
+        package_root,
+        "core/followup.py",
+        "from framepkg.core.config_drift import build_config_drift_report\n\n\ndef report():\n    return build_config_drift_report\n",
+    )
+    write_module(package_root, "core/config_drift.py", "def build_config_drift_report():\n    return None\n")
+
+    result = run_tool(package_root, "framepkg")
+    by_id = {violation.invariant_id: violation for violation in result.violations}
+
+    assert "INV-018" in by_id
+    assert by_id["INV-018"].module == "framepkg/core/followup.py"
+
+
+def test_lifecycle_framework_may_use_domain_and_adapter_modules(tmp_path):
+    """The invariant targets workflows: values, adapters and providers stay legal."""
+
+    package_root = tmp_path / "framepkg"
+    write_module(package_root, "__init__.py", "")
+    write_module(package_root, "core/__init__.py", "")
+    write_module(
+        package_root,
+        "core/followup.py",
+        (
+            "from framepkg.core.models import Severity\n"
+            "from framepkg.core.state_file import atomic_write_json\n"
+            "from framepkg.core.redaction import redact_text\n"
+            "\n"
+            "\n"
+            "def write(payload):\n"
+            "    return atomic_write_json, redact_text, Severity, payload\n"
+        ),
+    )
+    write_module(package_root, "core/models.py", "class Severity:\n    pass\n")
+    write_module(package_root, "core/state_file.py", "def atomic_write_json(*_args, **_kwargs):\n    return None\n")
+    write_module(package_root, "core/redaction.py", "def redact_text(value):\n    return value\n")
+
+    result = run_tool(package_root, "framepkg")
+
+    assert [violation.invariant_id for violation in result.violations] == []

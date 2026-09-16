@@ -508,6 +508,7 @@ INVARIANT_ALLOWLIST: Dict[str, Dict[str, str]] = {
     "INV-015": {},
     "INV-016": {},
     "INV-018": {},
+    "INV-019": {},
     # Adapters that legitimately reach into a higher layer. Each entry records
     # the current coupling; the goal is to make it visible, not to bless it.
     "INV-017": {
@@ -784,6 +785,16 @@ INVARIANTS: Tuple[Invariant, ...] = (
         "escalation command. Importing the workflow itself makes the framework "
         "own policy it cannot verify and re-creates the planner import cycle "
         "that Stages 8-12 removed one lifecycle at a time.",
+    ),
+    Invariant(
+        "INV-019",
+        "lifecycle frameworks must not participate in an import cycle",
+        "A framework that imports a lifecycle which imports it back is what the "
+        "planner cycle was: agent, follow-up, config drift and the incident "
+        "family were all reachable from each other through the session code "
+        "they shared. The framework role may sit below every lifecycle it "
+        "serves, never inside one of their components. This is the same defect "
+        "INV-015 catches for presentation, applied to the session framework.",
     ),
 )
 
@@ -1577,12 +1588,24 @@ def evaluate_invariants(infos: Sequence[ModuleInfo], package_name: str) -> List[
     for component in find_cycles(infos):
         for member in component:
             info = by_module.get(member)
-            if info is not None and info.layer == "presentation":
+            if info is None:
+                continue
+            if info.layer == "presentation":
                 violations.append(
                     _violation(
                         "INV-015",
                         info.path,
                         "presentation module is inside an import cycle with {0}".format(
+                            ", ".join(name for name in component if name != member)
+                        ),
+                    )
+                )
+            if info.name in frameworks and info.path not in allow["INV-019"]:
+                violations.append(
+                    _violation(
+                        "INV-019",
+                        info.path,
+                        "lifecycle framework is inside an import cycle with {0}".format(
                             ", ".join(name for name in component if name != member)
                         ),
                     )

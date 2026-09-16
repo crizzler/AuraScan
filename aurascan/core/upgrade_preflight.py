@@ -552,7 +552,7 @@ def run_upgrade(
     followup_runtime = None
     followup_disabled = options.json_output or options.yes or options.no_ai
     if not followup_disabled:
-        from aurascan.core.followup import build_upgrade_runtime, context_from_upgrade
+        from aurascan.core.upgrade_followup import build_upgrade_runtime, context_from_upgrade
 
         followup_context = context_from_upgrade(
             report,
@@ -575,7 +575,7 @@ def run_upgrade(
 
     if not report.plan.available:
         if followup_context is not None:
-            from aurascan.core.followup import build_upgrade_runtime
+            from aurascan.core.upgrade_followup import build_upgrade_runtime
 
             unavailable_runtime = build_upgrade_runtime(
                 followup_context,
@@ -827,10 +827,10 @@ def _offer_upgrade_followup_outcome(
     force_interactive: Optional[bool],
     agent_escalation_provider: Optional[Callable] = None,
 ) -> None:
-    from aurascan.core.followup import (
+    from aurascan.core.followup import offer_followup
+    from aurascan.core.upgrade_followup import (
         build_upgrade_runtime,
         context_from_upgrade,
-        offer_followup,
     )
 
     context = context_from_upgrade(

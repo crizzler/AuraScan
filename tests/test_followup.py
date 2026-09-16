@@ -1162,7 +1162,7 @@ def test_manual_maintenance_offers_one_followup_prompt(monkeypatch, tmp_path):
 def test_upgrade_runtime_uses_the_refresh_provider_supplied_by_its_lifecycle(tmp_path):
     """Stage 8: the lifecycle supplies refresh; the framework never imports it."""
 
-    from aurascan.core.followup import (
+    from aurascan.core.upgrade_followup import (
         FOLLOWUP_PROBE_UPGRADE_REFRESH,
         build_upgrade_runtime,
         context_from_upgrade,
@@ -1197,7 +1197,7 @@ def test_upgrade_runtime_uses_the_refresh_provider_supplied_by_its_lifecycle(tmp
 def test_upgrade_runtime_fails_closed_without_a_refresh_provider(tmp_path):
     """No provider means no stale-state action: the probe and actions fail closed."""
 
-    from aurascan.core.followup import (
+    from aurascan.core.upgrade_followup import (
         FOLLOWUP_PROBE_UPGRADE_REFRESH,
         build_upgrade_runtime,
         context_from_upgrade,
@@ -1329,7 +1329,7 @@ def test_config_drift_action_needs_the_lifecycle_provider(tmp_path):
 def test_upgrade_session_applies_the_prepared_config_drift_fix(tmp_path):
     """Stage 11: the lifecycle hands the session a prepared, verified fix."""
 
-    from aurascan.core.followup import (
+    from aurascan.core.upgrade_followup import (
         FOLLOWUP_ACTION_CONFIG_DRIFT,
         build_upgrade_runtime,
         context_from_upgrade,
@@ -1383,7 +1383,7 @@ def test_upgrade_session_applies_the_prepared_config_drift_fix(tmp_path):
 def test_upgrade_session_without_a_config_drift_provider_applies_nothing(tmp_path):
     """Stage 11: a missing provider drops the fix instead of applying stale state."""
 
-    from aurascan.core.followup import (
+    from aurascan.core.upgrade_followup import (
         FOLLOWUP_ACTION_CONFIG_DRIFT,
         build_upgrade_runtime,
         context_from_upgrade,
@@ -1547,3 +1547,71 @@ def test_followup_agent_escalation_stays_closed_for_a_malformed_provider(tmp_pat
     assert result.provider_requests == 0
     assert result.action_outcome.attempted is False
     assert result.questions == 0
+
+def test_upgrade_runtime_provider_is_required_for_a_live_session(tmp_path):
+    """Stage 13: the framework never builds upgrade support behavior itself."""
+
+    from aurascan.core.followup import build_default_runtime
+    from aurascan.core.upgrade_followup import (
+        FOLLOWUP_PROBE_UPGRADE_REFRESH,
+        context_from_upgrade,
+    )
+
+    report = UpgradePreflightReport(plan=UpgradePlan(), snapshot=SystemSnapshot(pacnew_count=3))
+    item = context_from_upgrade(report, phase="preflight", metadata={"selected_helper": "none"})
+
+    runtime = build_default_runtime(item, runner=None, which=None, context_root=tmp_path)
+    refreshed, results = runtime.run_probes(item, [FOLLOWUP_PROBE_UPGRADE_REFRESH])
+
+    # Facts only: no refresh, no actions, and nothing was executed.
+    assert runtime.run_actions is None
+    assert refreshed.context_id == item.context_id
+    assert results == []
+    assert item.actions
+
+
+def test_upgrade_runtime_provider_receives_the_session_hooks(tmp_path):
+    """Stage 13: the framework forwards its hooks and the supplied capabilities."""
+
+    from aurascan.core.followup import FollowUpRuntime, build_default_runtime
+    from aurascan.core.upgrade_followup import context_from_upgrade
+
+    report = UpgradePreflightReport(plan=UpgradePlan(), snapshot=SystemSnapshot())
+    item = context_from_upgrade(report, phase="preflight", metadata={"selected_helper": "none"})
+    calls = []
+
+    provided = FollowUpRuntime(defer_actions=True)
+
+    def provider(context, **kwargs):
+        calls.append((context.context_id, kwargs))
+        return provided
+
+    def refresh_provider(*_args, **_kwargs):
+        return report
+
+    def remediation_provider(*_args, **_kwargs):
+        return None
+
+    runtime = build_default_runtime(
+        item,
+        runner="injected-runner",
+        which="injected-which",
+        urlopen="injected-urlopen",
+        context_root=tmp_path,
+        refresh_upgrade_report=refresh_provider,
+        config_drift_remediation_provider=remediation_provider,
+        upgrade_runtime_provider=provider,
+    )
+
+    # The provider owns the runtime it returns, including its action mode.
+    assert runtime is provided
+    assert runtime.defer_actions is True
+    assert len(calls) == 1
+    context_id, kwargs = calls[0]
+    assert context_id == item.context_id
+    assert kwargs["runner"] == "injected-runner"
+    assert kwargs["which"] == "injected-which"
+    assert kwargs["urlopen"] == "injected-urlopen"
+    assert kwargs["context_root"] == tmp_path
+    assert kwargs["refresh_report"] is refresh_provider
+    assert kwargs["config_drift_remediation_provider"] is remediation_provider

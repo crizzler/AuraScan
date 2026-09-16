@@ -159,7 +159,7 @@ order review, not to grade quality — a large cohesive module is not a defect.
 | Module | Lines | Capabilities | Concerns | Fan-in | Score |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `core/upgrade_preflight.py` | 2618 | 4 | 6 | 2 | 25 |
-| `core/agent.py` | 3848 | 4 | 5 | 3 | 23 |
+| `core/agent.py` | 3850 | 4 | 5 | 3 | 23 |
 | `core/updater_tray.py` | 1540 | 3 | 6 | 2 | 21 |
 | `core/incidents.py` | 3246 | 3 | 5 | 7 | 20 |
 | `core/recovery.py` | 2303 | 3 | 5 | 4 | 20 |
@@ -188,13 +188,22 @@ known decision rather than a surprise.
 | Intelligence | `core.intelligence`, `core.intelligence_crypto`, `core.intelligence_store` | Expected: snapshot identity, verification and storage are one transaction. |
 | Install-hook / provenance | `analyzers.repository_provenance`, `core.install_hook`, `core.source_acquisition` | Expected: declared-source filtering needs the hook reader and the acquisition snapshot. |
 
-No planner cycle is left. Stages 5-12 removed the dispatch, vocabulary,
+No planner cycle is left. Stages 5-13 removed the dispatch, vocabulary,
 repository-interpretation, follow-up-refresh, upgrade-value, incident-adapter,
-config-drift-adapter and agent-escalation edges, and the last component
-(`agent`, `followup`) dissolved in Stage 12 when `/agent` became a supplied
-capability. `agent`, `followup`, `config_drift`, `upgrade_preflight` and
-`incident_repairs` are all cycle-free, and a module that imports another module
-that imports it back is now a violation rather than a known exception.
+config-drift-adapter, agent-escalation and upgrade-adapter edges, and the last
+component (`agent`, `followup`) dissolved in Stage 12 when `/agent` became a
+supplied capability. `agent`, `followup`, `config_drift`, `upgrade_preflight`,
+`upgrade_followup` and `incident_repairs` are all cycle-free, and a module that
+imports another module that imports it back is now a violation rather than a
+known exception. The three components that remain are deliberate:
+
+- the incident planners share report state and repair vocabulary;
+- the intelligence snapshot transaction spans identity, verification and
+  storage;
+- the install-hook reader and the acquisition snapshot are one bounded walk.
+
+They are cohesive subsystems rather than accidental cycles, and the framework
+role (INV-019) cannot re-enter any of them.
 
 No cycle contains the evidence model, and the domain layer only ever depends on
 itself: five of its six modules import nothing from the package at all, and
@@ -238,6 +247,7 @@ reason.
 | INV-016 | Presentation rendering modules must not perform dangerous operations |
 | INV-017 | Platform adapters must not depend on application workflows |
 | INV-018 | Lifecycle frameworks must not import concrete lifecycle workflows |
+| INV-019 | Lifecycle frameworks must not participate in an import cycle |
 
 What the invariants deliberately do **not** do: fail on module size, forbid
 in-repo private names, or enforce a full layered architecture. The advisory
@@ -252,13 +262,65 @@ Reported by the audit, never fatal:
 - modules with more than 5 concern tags.
 
 Current warnings: `core/instruction_guard.py` (8760 lines),
-`analyzers/repository_provenance.py` (4555), `core/agent.py` (3848),
+`analyzers/repository_provenance.py` (4555), `core/agent.py` (3850),
 `core/incidents.py` (3246), `core/upgrade_preflight.py` (2618 lines, 6 concern
 tags), `core/source_acquisition.py` (2554), `setup_wizard.py` (2521),
-`core/updater_tray.py` (6 concern tags). `core/followup.py` (2055) left this list
-in Stage 11.
+`core/updater_tray.py` (6 concern tags). `core/followup.py` (1741) left this list
+in Stage 11 and no longer owns any lifecycle adapter.
 
 ## Decomposition log
+
+**Resolved in Stage 13:** the generic follow-up framework no longer owns any
+upgrade behavior. The upgrade context builder and runtime adapter moved into
+`core/upgrade_followup.py`, the framework dispatches to a supplied
+`upgrade_runtime_provider` (failing closed without one), and `followup` now
+imports only `ai_provider`, `hardware_health` and `text_safety`. INV-019 keeps
+the framework out of every import cycle.
+
+### Stage 13 — the upgrade follow-up adapter moved to the upgrade lifecycle
+
+The generic framework hosted the upgrade session's runtime adapter:
+`build_upgrade_runtime` built the refresh probe and the repository, kernel-module
+and config-drift support actions, importing `repository_repair` and
+`kernel_module_autopilot` to execute the first two. `context_from_upgrade` in the
+same module built the retained upgrade context, including its probe and action
+set. The framework also defined the upgrade-only identifiers
+(`FOLLOWUP_ACTION_REPOSITORY`, `FOLLOWUP_ACTION_KERNEL`,
+`FOLLOWUP_ACTION_CONFIG_DRIFT`, `FOLLOWUP_PROBE_UPGRADE_REFRESH`).
+
+| Piece | Classification | Home after Stage 13 |
+| --- | --- | --- |
+| `context_from_upgrade` (upgrade facts, probe and action construction) | upgrade-specific | `core/upgrade_followup.py` |
+| `refreshed_report()` (calls the supplied refresh provider) | upgrade refresh wiring | `core/upgrade_followup.py` |
+| `probes_callback` (refresh probe, context re-derivation) | upgrade-specific | `core/upgrade_followup.py` |
+| `actions_callback` (revalidation, plan printing, confirmation, execution) | upgrade-specific | `core/upgrade_followup.py` |
+| repository repair call | repository execution, owned by `repository_repair` | called by the adapter |
+| kernel-module call | kernel policy owned by `kernel_module_autopilot`, execution through the supplied runner | called by the adapter |
+| config-drift remediation call | config-drift execution, owned by `config_drift` | called by the adapter |
+| session mechanics, contexts, persistence, redaction, hardware probe | generic framework | `core/followup.py` |
+
+- **Moved verbatim:** the two functions and the four constants. An AST comparison
+  against the pre-stage revision shows every non-import statement and annotation
+  unchanged; the only difference is that the two adapter imports moved from the
+  function body to module scope, where the owning module declares them.
+- **Supplied, not imported:** `build_default_runtime` and `run_ask` accept
+  `upgrade_runtime_provider`, and `run_agent` forwards it. `cli.py` supplies
+  `upgrade_followup.build_upgrade_runtime` for the `ask` and `agent` paths; the
+  upgrade workflow keeps calling its own adapter directly, and gained a new
+  import of the adapter module instead of reaching into the framework.
+- **Framework purity:** `followup` now imports only `ai_provider`,
+  `hardware_health` and `text_safety`, defines no upgrade vocabulary, and knows
+  the upgrade source type only as a dispatch branch. It forwards the refresh and
+  config-drift remediation providers its caller supplied without resolving them.
+- **Fail closed:** without an upgrade runtime provider an upgrade context degrades
+  to facts only — no refresh probe, no support action and no execution; a test
+  pins it, and another pins the hooks and capabilities the provider receives.
+- **Authority unchanged:** repository repair eligibility and execution stay in
+  `repository_repair`/`repository_state`, kernel-module policy in
+  `kernel_module_autopilot`, config-drift application in `config_drift`, and the
+  upgrade eligibility that gates an action stays with the preflight report. The
+  adapter decides nothing new; it re-derives state through the same callbacks and
+  prints the same plan and messages.
 
 **Resolved in Stage 12:** the generic follow-up framework no longer imports the
 agent workflow. `/agent` in an interactive session is now a supplied capability
@@ -307,7 +369,9 @@ were mutually reachable.
   kernel-module action adapters (`build_upgrade_runtime` imports
   `repository_repair` and `kernel_module_autopilot`). Those edges are one-way and
   cycle-free and are recorded below as remaining debt; INV-018 covers lifecycle
-  *workflows*, which those two adapters are not.
+  *workflows*, which those two adapters are not. **Resolved in Stage 13:** the
+  adapter moved to `core/upgrade_followup.py`, so the framework no longer hosts
+  them.
 
 **Resolved in Stage 11:** the generic follow-up framework no longer imports the
 config-drift lifecycle. `context_from_config_drift` and
@@ -366,7 +430,8 @@ generic framework hosted a concrete lifecycle's adapters.
   and kernel-module action adapters (`build_upgrade_runtime` imports
   `repository_repair` and `kernel_module_autopilot`), so `followup` is not yet a
   pure framework. Those edges stay one-way and cycle-free; they are the Stage 12
-  candidate together with `followup -> agent`.
+  candidate together with `followup -> agent`. **Resolved in Stage 13**, which
+  moved that adapter to `core/upgrade_followup.py`.
 
 **Resolved in Stage 10:** the generic follow-up framework no longer imports any
 incident module. The incident-family adapters moved into
@@ -808,32 +873,28 @@ connected.
 
 ## Next targets
 
-1. `followup` still hosts the upgrade session's lower-level action adapters:
-   `build_upgrade_runtime` imports `repository_repair` and
-   `kernel_module_autopilot` to apply repository and kernel-module fixes. Both
-   edges are one-way and cycle-free, they are adapters rather than lifecycle
-   workflows, and every other lifecycle adapter has already moved out (incidents,
-   config drift, agent escalation). Finishing that seam — an upgrade
-   `runtime_provider` supplied the way the refresh and remediation providers
-   already are — would make `followup` a pure coordinator of supplied
-   operations. It is an ownership cleanup, not a cycle fix.
-2. The incident planner component (`incidents`, `incident_diagnostics`,
+1. The incident planner component (`incidents`, `incident_diagnostics`,
    `incident_automation`) is the largest remaining SCC and the only one whose
-   members are all application workflows rather than adapters or one
-   transaction. Breaking it needs report state, diagnostics planning and the
-   automation layer separated first, which is a design task rather than an
-   adapter move.
-3. **Partially done:** Stages 5 and 6 moved the `incidents` CLI runner and the
+   members are all application workflows. Unlike the edges Stages 8-13 removed,
+   it is not a misplaced adapter: the three modules share incident report state,
+   the diagnostics planner and the automation layer by design. Before another
+   member moves, the shared state has to be identified and carried explicitly;
+   speculation about a seam here would be guessing.
+2. `core/upgrade_preflight.py` (2618 lines, 6 concern tags — the top hotspot)
+   holds upgrade planning, the handoff, kernel-module aftercare, config-drift
+   invocation, security-audit findings, AI advisory, failure diagnosis, the
+   follow-up refresh operation and its CLI. It does not participate in any cycle,
+   so this is a size and responsibility seam, not a topology one. AI advisory
+   plus failure diagnosis is the largest single block.
+3. Large cycle-free modules in the same shape: `instruction_guard.py` (8760,
+   discovery + integrity manifests + private reports + triage UX),
+   `repository_provenance.py` (4555, magic classification + correlation),
+   `agent.py` (3850) and `incidents.py` (3246).
+4. **Partially done:** Stages 5 and 6 moved the `incidents` CLI runner and the
    shared helper ownership out of subsystem modules. `config_drift`,
    `security_audit` and `upgrade_preflight` still reach their presenter from
    inside their own CLI entry points. That edge is one-way and cycle-free, but
    it means CLI printing still lives in subsystem modules.
-4. `core/upgrade_preflight.py` (2618 lines, 6 concern tags — the top hotspot)
-   now holds upgrade planning, the handoff, kernel-module aftercare, config
-   drift, security-audit findings, AI advisory, failure diagnosis, the follow-up
-   refresh operation and its CLI. AI advisory plus failure diagnosis is the
-   largest single block left, but it does not participate in any cycle: it is a
-   size seam, not a cycle seam.
 5. Five duplicate implementations of the two concerns Stage 6 extracted:
    `followup.redact_followup_text`/`redact_followup_structure`/`correlation_token`,
    `config_drift.redact_text`, `recovery_boot.atomic_write`,
@@ -845,8 +906,11 @@ connected.
 7. Dead helpers found in earlier stages:
    `AnalysisResult.get_highest_severity()`, `AnalysisResult.blocks_installation()`
    and `findings_from_results()` still have no callers.
-8. Characterise Instruction Guard state transitions, then decompose by
-   responsibility.
+8. Lifecycle-specific context builders still live in the framework:
+   `context_from_incident` and `context_from_maintenance` (the upgrade one moved
+   in Stage 13). They import nothing concrete and form no cycle, so they are the
+   same ownership shape one level down and belong to whichever lifecycle stage
+   next touches the incident or maintenance session.
 
 ## Related documents
 

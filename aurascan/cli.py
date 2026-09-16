@@ -21,6 +21,7 @@ from aurascan.core.incident_cli import run_incident_command
 from aurascan.core.instruction_cli import run_instruction_audit
 from aurascan.core.recovery_cli import run_recovery
 from aurascan.core.security_audit import run_security_audit
+from aurascan.core.upgrade_followup import build_upgrade_runtime
 from aurascan.core.upgrade_preflight import refresh_upgrade_preflight, run_upgrade
 from aurascan.core.updater_tray import run_updater
 from aurascan.setup_wizard import run_doctor, run_init
@@ -198,6 +199,7 @@ def main(argv=None):
             config_drift_runtime_provider=build_config_drift_runtime,
             config_drift_remediation_provider=prepare_config_drift_remediation,
             agent_escalation_provider=run_agent_escalation,
+            upgrade_runtime_provider=build_upgrade_runtime,
         ))
     if raw_argv and raw_argv[0] == "agent":
         sys.exit(run_agent(
@@ -207,6 +209,8 @@ def main(argv=None):
             incident_runtime_provider=build_incident_followup_runtime,
             config_drift_runtime_provider=build_config_drift_runtime,
             config_drift_remediation_provider=prepare_config_drift_remediation,
+            agent_escalation_provider=run_agent_escalation,
+            upgrade_runtime_provider=build_upgrade_runtime,
         ))
     if raw_argv and raw_argv[0] == "instruction-audit":
         sys.exit(run_instruction_audit(raw_argv[1:]))

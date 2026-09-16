@@ -3584,6 +3584,7 @@ def run_agent(
     incident_runtime_provider: Optional[Callable] = None,
     config_drift_runtime_provider: Optional[Callable] = None,
     config_drift_remediation_provider: Optional[Callable] = None,
+    upgrade_runtime_provider: Optional[Callable] = None,
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -3738,6 +3739,7 @@ def run_agent(
         incident_runtime_provider=incident_runtime_provider,
         config_drift_runtime_provider=config_drift_runtime_provider,
         config_drift_remediation_provider=config_drift_remediation_provider,
+        upgrade_runtime_provider=upgrade_runtime_provider,
     )
     if requested_access == "guarded":
         from aurascan.core.followup import run_followup_session

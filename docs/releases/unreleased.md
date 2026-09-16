@@ -70,6 +70,34 @@ Architecture stabilization stage 4 (no behavior change):
   subsystem engines also use, with equality assertions so the wording cannot
   drift.
 
+Architecture stabilization stage 13 (no behavior change):
+
+- Finished the framework ownership cleanup: the upgrade context builder and
+  runtime adapter moved out of `core/followup.py` into a new lifecycle-owned
+  module, `core/upgrade_followup.py`, together with the upgrade-only probe and
+  action identifiers. The generic framework no longer imports `repository_repair`
+  or `kernel_module_autopilot`, defines no upgrade vocabulary, and imports only
+  `ai_provider`, `hardware_health` and `text_safety`.
+- `build_default_runtime` and `run_ask` accept `upgrade_runtime_provider`, and
+  `run_agent` forwards it; `cli.py` supplies
+  `upgrade_followup.build_upgrade_runtime` for the `ask` and `agent` paths. The
+  upgrade workflow now imports its own adapter module instead of reaching into
+  the framework.
+- Without the provider an upgrade context degrades to facts only: no refresh
+  probe, no repository, kernel-module or config-drift action and no execution. A
+  second test pins the session hooks and capability providers the runtime
+  provider receives.
+- The moved functions are AST-identical to their previous definitions; the only
+  difference is that the two adapter imports moved from the function body to
+  module scope.
+- Added INV-019, "lifecycle frameworks must not participate in an import cycle",
+  derived from the same component analysis as INV-015 rather than from a name
+  list, with the Stage 12 cycle fixture extended to prove it fires. INV-018 was
+  not broadened to "or action adapters" because the adapters the framework used
+  are shared by the incident repair path too, not upgrade-specific.
+- No new cycle: the graph still has exactly the three deliberate components
+  (incident planners, intelligence, install-hook/provenance).
+
 Architecture stabilization stage 12 (no behavior change):
 
 - Removed the last planner import cycle. The generic follow-up framework no

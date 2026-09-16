@@ -1016,7 +1016,7 @@ def test_agent_escalation_is_supplied_by_the_wiring_owners():
 
     cli_source = (ROOT / "aurascan" / "cli.py").read_text(encoding="utf-8")
     assert "from aurascan.core.agent import run_agent, run_agent_escalation" in cli_source
-    assert cli_source.count("agent_escalation_provider=run_agent_escalation") == 3
+    assert cli_source.count("agent_escalation_provider=run_agent_escalation") == 4
 
     incident_cli_source = (ROOT / "aurascan" / "core" / "incident_cli.py").read_text(encoding="utf-8")
     assert "agent_escalation_provider=run_agent_escalation" in incident_cli_source
@@ -1080,9 +1080,11 @@ def test_config_drift_followup_adapters_are_owned_by_the_lifecycle():
         "prepare_config_drift_remediation",
     ):
         assert name not in followup_source, name
-    # The framework only calls the operations the lifecycle supplies.
+    # The framework only calls the operations the lifecycle supplies, and it
+    # forwards the capability providers a caller supplied to the provider that
+    # owns the source type.
     assert "config_drift_runtime_provider(" in followup_source
-    assert "config_drift_remediation_provider(" in followup_source
+    assert "config_drift_remediation_provider=config_drift_remediation_provider" in followup_source
 
     drift_source = (ROOT / "aurascan" / "core" / "config_drift.py").read_text(encoding="utf-8")
     for name in (
@@ -1259,6 +1261,11 @@ def test_lifecycle_framework_importing_a_workflow_is_reported(tmp_path):
     assert {"framepkg.core.agent", "framepkg.core.followup"} <= {
         module for component in result.cycles for module in component
     }
+    # Stage 13 adds the derived form of the same rule: a framework module may
+    # never sit inside a component, whichever direction opened it.
+    assert "INV-019" in by_id
+    assert by_id["INV-019"].module == "framepkg/core/followup.py"
+    assert "framepkg.core.agent" in by_id["INV-019"].detail
 
 
 def test_lifecycle_framework_importing_any_workflow_is_reported(tmp_path):
@@ -1307,3 +1314,80 @@ def test_lifecycle_framework_may_use_domain_and_adapter_modules(tmp_path):
     result = run_tool(package_root, "framepkg")
 
     assert [violation.invariant_id for violation in result.violations] == []
+
+def test_upgrade_followup_adapter_owns_the_upgrade_session_behavior():
+    """Stage 13: the upgrade runtime adapter lives with the upgrade lifecycle."""
+
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    module = {info.name: info for info in result.modules}
+    cycles = {name for component in result.cycles for name in component}
+
+    adapter = module["aurascan.core.upgrade_followup"]
+    assert adapter.layer == "application"
+    assert adapter.internal_imports == [
+        "aurascan.core.followup",
+        "aurascan.core.kernel_module_autopilot",
+        "aurascan.core.repository_repair",
+    ]
+    assert "aurascan.core.upgrade_followup" not in cycles
+    # Only the composition root and the upgrade workflow know the adapter.
+    assert sorted(adapter.imports_by) == ["aurascan.cli", "aurascan.core.upgrade_preflight"]
+
+    framework = module["aurascan.core.followup"]
+    # The framework keeps generic infrastructure only.
+    assert framework.internal_imports == [
+        "aurascan.core.ai_provider",
+        "aurascan.core.hardware_health",
+        "aurascan.core.text_safety",
+    ]
+
+
+def test_generic_followup_owns_no_upgrade_adapter_or_vocabulary():
+    """Stage 13: the framework neither imports nor defines upgrade behavior."""
+
+    followup_source = (ROOT / "aurascan" / "core" / "followup.py").read_text(encoding="utf-8")
+    for name in (
+        "repository_repair",
+        "kernel_module_autopilot",
+        "apply_repository_health_repairs",
+        "kernel_module_fix_command",
+        "context_from_upgrade",
+        "build_upgrade_runtime",
+        "FOLLOWUP_ACTION_REPOSITORY",
+        "FOLLOWUP_ACTION_KERNEL",
+        "FOLLOWUP_ACTION_CONFIG_DRIFT",
+        "FOLLOWUP_PROBE_UPGRADE_REFRESH",
+        "aurascan.core.upgrade_preflight",
+    ):
+        assert name not in followup_source, name
+    assert "upgrade_runtime_provider(" in followup_source
+
+    adapter_source = (ROOT / "aurascan" / "core" / "upgrade_followup.py").read_text(encoding="utf-8")
+    for name in (
+        "def context_from_upgrade(",
+        "def build_upgrade_runtime(",
+        "FOLLOWUP_ACTION_REPOSITORY",
+        "FOLLOWUP_ACTION_KERNEL",
+        "FOLLOWUP_ACTION_CONFIG_DRIFT",
+        "FOLLOWUP_PROBE_UPGRADE_REFRESH",
+    ):
+        assert name in adapter_source, name
+    # The adapter must not reach back into the framework's internals or the
+    # workflow that consumes it.
+    assert "aurascan.core.upgrade_preflight" not in adapter_source
+
+
+def test_upgrade_runtime_provider_is_supplied_by_its_callers():
+    """The adapter is supplied wherever a retained upgrade context is served."""
+
+    cli_source = (ROOT / "aurascan" / "cli.py").read_text(encoding="utf-8")
+    assert "from aurascan.core.upgrade_followup import build_upgrade_runtime" in cli_source
+    assert cli_source.count("upgrade_runtime_provider=build_upgrade_runtime") == 2
+
+    agent_source = (ROOT / "aurascan" / "core" / "agent.py").read_text(encoding="utf-8")
+    assert "upgrade_runtime_provider: Optional[Callable] = None" in agent_source
+    assert "upgrade_runtime_provider=upgrade_runtime_provider" in agent_source
+
+    framework_source = (ROOT / "aurascan" / "core" / "followup.py").read_text(encoding="utf-8")
+    assert "upgrade_runtime_provider: Optional[Callable] = None" in framework_source
+    assert "upgrade_runtime_provider=upgrade_runtime_provider" in framework_source

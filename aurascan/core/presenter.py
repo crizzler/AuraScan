@@ -755,7 +755,7 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
         "title": "Source was signed by an unexpected key.",
         "summary": "The source signature is valid, but it was not signed by one of the fingerprints declared in validpgpkeys.",
         "why": "This can happen after legitimate upstream key changes, but it can also indicate that the source came from a different signer than expected.",
-        "checked": "AuraScan verified the detached signature and compared the signer fingerprint with validpgpkeys.",
+        "checked": "AuraScan verified the source signature and compared the signer fingerprint with validpgpkeys.",
         "not_prove": "This does not prove the source is malicious; it means the signer trust anchor did not match the package metadata.",
         "action": "Review the upstream key change before installing.",
     },
@@ -929,11 +929,27 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
     },
     "SIGNATURE-VERIFICATION-UNAVAILABLE": {
         "title": "Signature verification is unavailable.",
-        "summary": "AuraScan could not verify the detached signature because the local verification tool is unavailable.",
+        "summary": "AuraScan could not verify the source signature because the local verification tool is unavailable.",
         "why": "Without a working verifier, AuraScan cannot confirm that the signature matches the source and expected signer.",
         "checked": "AuraScan checked whether signature verification tooling was available.",
         "not_prove": "This does not prove the package is malicious. It means this verification check could not be performed automatically.",
         "action": "Install GnuPG or manually verify the source signature.",
+    },
+    "SOURCE-GIT-SIGNATURE-INVALID": {
+        "title": "Git object signature did not verify.",
+        "summary": "A signature is present on the Git object AuraScan acquired for this source, but the trusted verifier did not accept it.",
+        "why": "A signature that does not verify means the object does not match what the signing key signed, or the local key material cannot establish that match.",
+        "checked": "AuraScan verified the acquired object with the trusted Git and GnuPG executables inside an isolated temporary GPG environment.",
+        "not_prove": "This does not prove malicious intent by itself, and a retired or rotated key can also fail; it means the signature is not usable as verified evidence.",
+        "action": "Do not rely on this signature. Verify the exact upstream revision and signing key independently.",
+    },
+    "SOURCE-GIT-SIGNATURE-UNVERIFIED": {
+        "title": "Git object signature could not be evaluated.",
+        "summary": "A signature is present on the acquired Git object, but AuraScan could not establish a verified signer fingerprint for it.",
+        "why": "Unsupported signature formats, expired or revoked signing keys, and unavailable machine status all leave the signer unverified.",
+        "checked": "AuraScan inspected the acquired object and attempted bounded verification with locally available key material only.",
+        "not_prove": "This does not mean the object is unsigned, and it does not mean the source is unsafe; it means no verified signer fingerprint was established.",
+        "action": "Verify the tag or commit signature manually before relying on it.",
     },
     "SOURCE-CHECKSUM-MISSING": {
         "title": "Source checksum is missing.",
@@ -946,7 +962,7 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
     "SOURCE-GIT-TAG": {
         "title": "Git source uses a tag.",
         "summary": "AuraScan found a Git source selecting a movable tag rather than a full commit hash.",
-        "why": "Tags can move; AuraScan has not verified tag protection or signatures.",
+        "why": "Tags can move; a tag signature, when present, is reported separately and never prevents a tag from being repointed.",
         "checked": "AuraScan inspected the declared Git source fragment during source acquisition.",
         "not_prove": "This does not prove the tag is unsafe; it means the source is less strict than a full commit pin.",
         "action": "Review the upstream tag or prefer a full commit hash for stronger reproducibility.",
@@ -977,9 +993,9 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
     },
     "SOURCE-SIGNATURE-WITHOUT-VALIDPGPKEYS": {
         "title": "Signature found, but expected signing key is not declared.",
-        "summary": "This package includes a detached signature, but it does not clearly declare which signing key AuraScan should expect.",
+        "summary": "A source signature is present, but the package does not clearly declare which signing key AuraScan should expect.",
         "why": "A signature is most useful when it can be matched to a known expected fingerprint.",
-        "checked": "AuraScan found signature metadata in the package.",
+        "checked": "AuraScan found signature evidence for a declared source.",
         "not_prove": "AuraScan did not confirm that the signature belongs to the intended upstream signer.",
         "action": "Review the package metadata or run --deep-static if verification data is available.",
     },
@@ -1001,11 +1017,11 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
     },
     "KEY_UNAVAILABLE": {
         "title": "Signing key could not be found.",
-        "summary": "This package declares a source signature, but AuraScan could not find the public key needed to verify it.",
+        "summary": "A source signature is present, but AuraScan could not find the public key needed to verify it.",
         "why": "Without the public key, AuraScan cannot confirm that the signature belongs to the expected signer.",
         "checked": "AuraScan looked for the key using the configured key sources and automatic key fetching policy.",
         "not_prove": "This does not prove the package is malicious. It means the signature could not be checked automatically.",
-        "action": "Use --deep-static again later, check your network or keyserver settings, or manually verify the upstream signing key.",
+        "action": "Run --deep-static again later, provide the signing key locally, or manually verify the upstream signing key.",
     },
 }
 

@@ -1290,16 +1290,23 @@ def test_git_fetch_keeps_supported_revisions_as_single_arguments(
     result = GitSourceFetcher(runner=fake_runner).fetch(refs[0], tmp_path)
 
     assert result.status == "acquired"
-    assert len(calls) == 4
     expected_selector = {
         "branch": "refs/remotes/origin/" + fragment_value,
         "tag": "refs/tags/" + fragment_value,
         "commit": fragment_value,
     }[fragment_type]
+    # Acquiring one revision is still clone, resolve, checkout, re-resolve, and
+    # one read-only object inspection for signature evidence.
+    assert len(calls) == 5
     assert calls[1][-4:] == ["rev-parse", "--verify", "--end-of-options", expected_selector + "^{commit}"]
     checkout_args = calls[2][calls[2].index("checkout") + 1:]
     assert checkout_args == ["--detach", result.resolved_revision, "--"]
     assert calls[3][-1] == "HEAD^{commit}"
+    assert calls[4][-3:] == ["cat-file", "-t", expected_selector]
+    # Signature evidence is observational: an unreadable object never changes
+    # acquisition status or blocking policy.
+    assert result.git_signature["verification_status"] == "inspection_failed"
+    assert not any(finding.blocks_installation for finding in result.findings)
 
 
 @pytest.mark.parametrize(

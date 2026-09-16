@@ -177,6 +177,29 @@ ref movement; do not invent history-rewrite findings from commit dates or
 hosting reputation. Git revision verification authenticates neither author nor
 content and does not prove the later makepkg build will use those bytes.
 
+Git object signatures are separate, observational evidence. After the bounded
+clone resolves the selector, AuraScan classifies the exact local object
+(annotated tag, lightweight tag or commit), detects whether it carries an
+OpenPGP, SSH/X.509 or no armored signature, and lets Git's own
+`verify-tag`/`verify-commit` decide validity with the trusted absolute Git and
+GnuPG files, a private temporary GnuPG home, locally available key material and
+a bounded deadline. This verifier is OpenPGP-scoped: another signature format is
+reported as unsupported, never as invalid and never as unsigned. Only
+machine-readable `VALIDSIG` status can establish a signer fingerprint;
+human-readable `GOODSIG`/UID text cannot, so an older Git without machine status
+leaves the fingerprint unavailable. Expired or revoked signing-key status stays
+distinct from an ordinary valid declared signer, and coverage (missing key,
+unavailable verifier, unsupported format, unavailable fingerprint) is reported
+as unresolved rather than inferred. A matching `validpgpkeys` entry is recorded
+only as `matched_declared_validpgpkey`, which is declared correlation: it never
+lowers a severity, never removes tag or branch mutability evidence, never
+bypasses deep-static analysis, never blocks or unblocks a handoff, and never
+establishes that the signer was authorized, that the origin is official, that
+the tree is benign, that upstream infrastructure was uncompromised or that later
+builds use those bytes. Verification never fetches keys implicitly; key material
+comes from the existing declared-file, trusted-directory or private-cache policy,
+so it still works offline when that material is already present.
+
 ## Recovery release disposition
 
 Every release must be classified in its release note and checklist as either

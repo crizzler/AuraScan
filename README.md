@@ -421,9 +421,15 @@ selector requires normal scanning; a branch name or short identifier cannot be
 presented as a full commit pin. Explicit deep-static acquisition resolves the
 selected Git namespace to a commit, checks out that commit and verifies the
 resulting HEAD, recording `resolved_revision`. It reacquires sources on every
-scan. Default local scans cannot observe remote branch/tag movement or prove
-that upstream history was not rewritten. Commit identity is not authenticity,
-and neither old timestamps nor a familiar hosting provider establish trust.
+scan. When the acquired object itself carries a signature, deep-static reports
+whether one is present, its format, a verified signer fingerprint (only from
+machine-readable verifier status) and whether that fingerprint matches a
+declared `validpgpkeys` entry; an unsupported format, missing key or unavailable
+verifier stays unresolved coverage rather than "unsigned". A valid signature is
+not proof of authorization, origin or safety. Default local scans cannot observe
+remote branch/tag movement or prove that upstream history was not rewritten.
+Commit identity is not authenticity, and neither old timestamps nor a familiar
+hosting provider establish trust.
 
 A literal local `install=` target is mandatory scan evidence, including a
 dot-prefixed hook. AuraScan will not call the package clear when that declared

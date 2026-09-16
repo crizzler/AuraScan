@@ -69,6 +69,20 @@ _GPG_STATUS_KEYWORDS = frozenset({
 })
 _GPG_STATUS_FINGERPRINT = re.compile(r"[0-9A-Fa-f]{16,64}\Z")
 _MAX_GPG_STATUS_LINES = 32
+_MAX_GIT_OBJECT_BYTES = 1024 * 1024
+# Git appends exactly one armored signature block to the object it signs, and
+# the trusted verifier reconstructs the signed payload itself.  This table only
+# classifies the *format* for reporting; it never reconstructs a payload and it
+# never decides validity.
+_GIT_SIGNATURE_ARMOR = (
+    ("openpgp", "-----BEGIN PGP SIGNATURE-----"),
+    ("ssh", "-----BEGIN SSH SIGNATURE-----"),
+    ("x509", "-----BEGIN SIGNED MESSAGE-----"),
+)
+_GIT_SIGNATURE_HEADER = re.compile(
+    r"^-----BEGIN [A-Z0-9 ]*(?:SIGNATURE|SIGNED MESSAGE)[A-Z0-9 ]*-----$"
+)
+_GIT_RAW_STATUS_UNSUPPORTED = re.compile(r"usage:|unknown option|unknown switch", re.I)
 
 
 @dataclass
@@ -103,6 +117,7 @@ class SourceAcquisitionResult:
     findings: List[Finding] = field(default_factory=list)
     pgp_verification: Optional[Dict[str, object]] = None
     resolved_revision: Optional[str] = None
+    git_signature: Optional[Dict[str, object]] = None
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -122,6 +137,7 @@ class SourceAcquisitionResult:
             "findings": [finding.to_dict() for finding in self.findings],
             "pgp_verification": self.pgp_verification,
             "resolved_revision": self.resolved_revision,
+            "git_signature": self.git_signature,
         }
 
 
@@ -1420,6 +1436,211 @@ class PgpVerificationResult:
         }
 
 
+@dataclass
+class GitSignatureVerification:
+    """Bounded observed facts about one acquired Git object's signature.
+
+    ``verification_status`` records what the trusted verifier established.
+    ``matched_declared_validpgpkey`` is a separate declared-correlation flag:
+    cryptographic validity is never presented as source trust, authorization or
+    safety, and an undeclared signer is never treated as trusted.
+    """
+
+    selector_kind: str = ""
+    object_type: str = ""
+    verified_object: str = ""
+    resolved_revision: str = ""
+    tag_object: Optional[str] = None
+    signature_present: bool = False
+    signature_format: str = "none"
+    verification_status: str = "unsigned"
+    status_reason: str = ""
+    signer_fingerprint: Optional[str] = None
+    normalized_validpgpkeys: List[str] = field(default_factory=list)
+    matched_declared_validpgpkey: bool = False
+    key_source: Optional[str] = None
+    gpg_status: str = ""
+    related_finding_ids: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "selector_kind": self.selector_kind,
+            "object_type": self.object_type,
+            "verified_object": self.verified_object,
+            "resolved_revision": self.resolved_revision,
+            "tag_object": self.tag_object,
+            "signature_present": self.signature_present,
+            "signature_format": self.signature_format,
+            "verification_status": self.verification_status,
+            "status_reason": self.status_reason,
+            "signer_fingerprint": self.signer_fingerprint,
+            "normalized_validpgpkeys": list(self.normalized_validpgpkeys),
+            "matched_declared_validpgpkey": self.matched_declared_validpgpkey,
+            "key_source": self.key_source,
+            "gpg_status": self.gpg_status,
+            "related_finding_ids": self.related_finding_ids,
+        }
+
+
+def _private_gpg_env(gnupg_home: Path) -> Dict[str, str]:
+    return {
+        "GNUPGHOME": str(gnupg_home),
+        "HOME": str(gnupg_home),
+        "GPG_TTY": "",
+    }
+
+
+def _sanitize_gpg_status(status: str) -> str:
+    # GnuPG status output may contain an attacker-controlled user ID after
+    # GOODSIG/BADSIG and its ordinary diagnostics can echo filenames or other
+    # package-controlled text.  Persist only allowlisted machine status names
+    # and an optional hexadecimal key identifier.  Never retain human-readable
+    # `gpg:` diagnostics or the remainder of a status line.
+    sanitized: List[str] = []
+    for line in status.splitlines():
+        if len(sanitized) >= _MAX_GPG_STATUS_LINES:
+            break
+        if not line.startswith("[GNUPG:] "):
+            continue
+        fields = line[len("[GNUPG:] "):].split()
+        if not fields or fields[0] not in _GPG_STATUS_KEYWORDS:
+            continue
+        rendered = fields[0]
+        for token in fields[1:]:
+            if _GPG_STATUS_FINGERPRINT.fullmatch(token):
+                rendered += " " + token.upper()
+                break
+        sanitized.append(rendered)
+    return "\n".join(sanitized)[:2000]
+
+
+def _parse_gpg_signer_fingerprint(status: str) -> Optional[str]:
+    """Return a signer fingerprint only from the machine status channel.
+
+    ``VALIDSIG`` is the only status that establishes a verified signer, so a
+    human-readable ``GOODSIG`` user ID alone can never produce one.
+    """
+    for line in status.splitlines():
+        if line.startswith("[GNUPG:] VALIDSIG "):
+            parts = line.split()
+            if len(parts) >= 3:
+                return PgpKeyNormalizer.normalize(parts[2])
+    return None
+
+
+def _import_public_keys(
+    gpg_tool,
+    gnupg_home: Path,
+    key_sources: Iterable[PublicKeySource],
+    *,
+    runner: Callable,
+    timeout: float,
+) -> Tuple[str, Optional[PublicKeySource]]:
+    """Import bounded captured key files into one private verification home.
+
+    Archive and Git verification share this boundary so the trusted GnuPG call
+    shape, private homedir and status handling exist once.
+    """
+    import_status = ""
+    imported_source: Optional[PublicKeySource] = None
+    for key_index, key_source in enumerate(key_sources):
+        key_payload = key_source.data
+        if key_payload is None and key_source.path is not None:
+            key_state, key_payload = _read_key_candidate(key_source.path)
+            if key_state != "resolved":
+                key_payload = None
+        if key_payload is None:
+            continue
+        import_path = gnupg_home / f"key-{key_index:04d}.asc"
+        import_fd = os.open(
+            str(import_path),
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            _write_all(import_fd, key_payload)
+            os.fsync(import_fd)
+        finally:
+            os.close(import_fd)
+        imported_source = key_source
+        revalidate_trusted_system_tool(gpg_tool)
+        import_proc = runner(
+            [gpg_tool.path, "--homedir", str(gnupg_home), "--batch", "--no-tty", "--import", str(import_path)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=_private_gpg_env(gnupg_home),
+        )
+        import_status += (import_proc.stdout or "") + (import_proc.stderr or "")
+    return import_status, imported_source
+
+
+def _git_selector(ref: SourceReference) -> str:
+    if ref.fragment_type == "branch":
+        return "refs/remotes/origin/" + str(ref.fragment_value)
+    if ref.fragment_type == "tag":
+        return "refs/tags/" + str(ref.fragment_value)
+    if ref.fragment_type == "commit":
+        return str(ref.fragment_value).lower()
+    return "HEAD"
+
+
+def _git_object_kind(selector_kind: str, reported_type: str) -> str:
+    if reported_type == "tag":
+        return "annotated_tag"
+    if selector_kind == "tag":
+        return "lightweight_tag"
+    return "commit"
+
+
+def _tag_object_signature_format(payload: str) -> Tuple[bool, str]:
+    """Classify a tag object's trailing armored signature block.
+
+    Git strips the signature by scanning the object backwards, so only the last
+    armor block that terminates the object counts.  This is format reporting; a
+    target commit signature never makes a lightweight tag a signed tag.
+    """
+    lines = payload.rstrip("\n").splitlines()
+    begin = None
+    for line in lines:
+        if _GIT_SIGNATURE_HEADER.match(line):
+            begin = line
+    if begin is None or not lines or lines[-1] != begin.replace("BEGIN", "END", 1):
+        return False, "none"
+    for name, header in _GIT_SIGNATURE_ARMOR:
+        if begin == header:
+            return True, name
+    return True, "unsupported"
+
+
+def _commit_object_signature_format(payload: str) -> Tuple[bool, str]:
+    """Classify a commit object's ``gpgsig`` header and its armor format."""
+    header_block = payload.split("\n\n", 1)[0]
+    signature_lines: List[str] = []
+    collecting = False
+    for line in header_block.split("\n"):
+        if line.startswith("gpgsig "):
+            collecting = True
+            signature_lines.append(line[len("gpgsig "):])
+            continue
+        if collecting and line.startswith(" "):
+            signature_lines.append(line[1:])
+            continue
+        collecting = False
+    if not signature_lines:
+        return False, "none"
+    body = "\n".join(signature_lines)
+    for name, header in _GIT_SIGNATURE_ARMOR:
+        if header in body:
+            return True, name
+    return True, "unsupported"
+
+
 class PublicKeyProvider:
     def get_key(self, fingerprint: str) -> PublicKeySource:
         return PublicKeySource(fingerprint=PgpKeyNormalizer.normalize(fingerprint), error="KEY_UNAVAILABLE")
@@ -1532,7 +1753,7 @@ class ChecksumVerifier:
             explanation = "Checksum is SKIP, but git source is pinned to a full commit hash."
         elif ref.kind == SourceKind.git_https and ref.fragment_type == "tag" and git_selector_supported(ref):
             severity = Severity.MEDIUM
-            explanation = "Checksum is SKIP for a git tag source; signed tag verification is not implemented yet."
+            explanation = "Checksum is SKIP for a git tag source; tag movement and signature evidence are reported separately."
         elif ref.kind == SourceKind.git_https:
             severity = Severity.HIGH
             explanation = "Checksum is SKIP for an unpinned or branch-based git source."
@@ -1670,42 +1891,13 @@ class SignatureVerifier:
         gnupg_home = Path(tempfile.mkdtemp(prefix="aurascan-gnupg-"))
         os.chmod(gnupg_home, 0o700)
         try:
-            import_status = ""
-            imported_source = None
-            for key_index, key_source in enumerate(key_sources):
-                key_payload = key_source.data
-                if key_payload is None and key_source.path is not None:
-                    key_state, key_payload = _read_key_candidate(key_source.path)
-                    if key_state != "resolved":
-                        key_payload = None
-                if key_payload is None:
-                    continue
-                import_path = gnupg_home / f"key-{key_index:04d}.asc"
-                import_fd = os.open(
-                    str(import_path),
-                    os.O_WRONLY
-                    | os.O_CREAT
-                    | os.O_EXCL
-                    | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_NOFOLLOW", 0),
-                    0o600,
-                )
-                try:
-                    _write_all(import_fd, key_payload)
-                    os.fsync(import_fd)
-                finally:
-                    os.close(import_fd)
-                imported_source = key_source
-                revalidate_trusted_system_tool(gpg_tool)
-                import_proc = self.runner(
-                    [gpg_tool.path, "--homedir", str(gnupg_home), "--batch", "--no-tty", "--import", str(import_path)],
-                    capture_output=True,
-                    text=True,
-                    timeout=self.policy.timeout,
-                    check=False,
-                    env=self._gpg_env(gnupg_home),
-                )
-                import_status += (import_proc.stdout or "") + (import_proc.stderr or "")
+            import_status, imported_source = _import_public_keys(
+                gpg_tool,
+                gnupg_home,
+                key_sources,
+                runner=self.runner,
+                timeout=self.policy.timeout,
+            )
             revalidate_trusted_system_tool(gpg_tool)
             verify_proc = self.runner(
                 [gpg_tool.path, "--homedir", str(gnupg_home), "--batch", "--no-tty", "--status-fd", "1", "--no-auto-key-retrieve", "--verify", str(signature_path), str(source_path)],
@@ -1790,11 +1982,7 @@ class SignatureVerifier:
         )
 
     def _gpg_env(self, gnupg_home: Path) -> Dict[str, str]:
-        return {
-            "GNUPGHOME": str(gnupg_home),
-            "HOME": str(gnupg_home),
-            "GPG_TTY": "",
-        }
+        return _private_gpg_env(gnupg_home)
 
     def _parse_signer_fingerprint(self, status: str) -> Optional[str]:
         for line in status.splitlines():
@@ -1810,28 +1998,309 @@ class SignatureVerifier:
         return None
 
     def _sanitize_status(self, status: str) -> str:
-        # GnuPG status output may contain an attacker-controlled user ID after
-        # GOODSIG/BADSIG and its ordinary diagnostics can echo filenames or
-        # other package-controlled text.  Persist only allowlisted machine
-        # status names and an optional hexadecimal key identifier.  Never
-        # retain human-readable `gpg:` diagnostics or the remainder of a
-        # status line.
-        sanitized: List[str] = []
-        for line in status.splitlines():
-            if len(sanitized) >= _MAX_GPG_STATUS_LINES:
-                break
-            if not line.startswith("[GNUPG:] "):
-                continue
-            fields = line[len("[GNUPG:] "):].split()
-            if not fields or fields[0] not in _GPG_STATUS_KEYWORDS:
-                continue
-            rendered = fields[0]
-            for token in fields[1:]:
-                if _GPG_STATUS_FINGERPRINT.fullmatch(token):
-                    rendered += " " + token.upper()
-                    break
-            sanitized.append(rendered)
-        return "\n".join(sanitized)[:2000]
+        return _sanitize_gpg_status(status)
+
+
+class GitSignatureVerifier:
+    """Report signature evidence for the exact Git object acquisition resolved.
+
+    The cryptographic check stays with Git (``verify-tag`` / ``verify-commit``),
+    which owns the canonical signed payload, executed with the trusted absolute
+    Git and GnuPG files, a private temporary GnuPG home, no key retrieval and a
+    bounded deadline.  Only machine-readable GnuPG status can establish a signer
+    fingerprint, and a declared ``validpgpkeys`` match is reported as declared
+    correlation, never as proof of authorization, origin or source safety.
+    """
+
+    def __init__(
+        self,
+        policy: Optional[SourcePolicy] = None,
+        key_provider: Optional[PublicKeyProvider] = None,
+        tool_capturer: Optional[Callable] = None,
+    ):
+        self.policy = policy or SourcePolicy()
+        self.key_provider = key_provider or TrustedKeyDirectoryProvider(self.policy)
+        self.tool_capturer = tool_capturer or capture_trusted_system_tool
+        self.last_result: Optional[GitSignatureVerification] = None
+
+    def verify(
+        self,
+        ref: SourceReference,
+        resolved_revision: Optional[str],
+        *,
+        run_git: Callable,
+        runner: Callable,
+    ) -> Tuple[List[Finding], GitSignatureVerification]:
+        """Inspect and verify the signature bound to the acquired local object."""
+        selector_kind = ref.fragment_type or "unpinned"
+        declared_keys = sorted({
+            PgpKeyNormalizer.normalize(key)
+            for key in ref.validpgpkeys
+            if PgpKeyNormalizer.is_full_fingerprint(key)
+        })
+        evidence = GitSignatureVerification(
+            selector_kind=selector_kind,
+            resolved_revision=str(resolved_revision or ""),
+            normalized_validpgpkeys=list(declared_keys),
+        )
+        try:
+            selector = _git_selector(ref)
+            kind_proc = run_git(["cat-file", "-t", selector])
+            reported_type = str(getattr(kind_proc, "stdout", "") or "").strip()
+            if int(getattr(kind_proc, "returncode", 1)) != 0 or reported_type not in {"tag", "commit"}:
+                raise ValueError("Git object type was unavailable")
+            payload_proc = run_git(["cat-file", reported_type, selector])
+            payload = str(getattr(payload_proc, "stdout", "") or "")
+            if (
+                int(getattr(payload_proc, "returncode", 1)) != 0
+                or not payload
+                or len(payload) > _MAX_GIT_OBJECT_BYTES
+            ):
+                raise ValueError("Git object content was unavailable")
+            evidence.object_type = _git_object_kind(selector_kind, reported_type)
+            evidence.verified_object = "tag_object" if reported_type == "tag" else "commit"
+            if reported_type == "tag":
+                tag_proc = run_git(["rev-parse", selector])
+                candidate = str(getattr(tag_proc, "stdout", "") or "").strip()
+                if _is_full_commit(candidate):
+                    evidence.tag_object = candidate.lower()
+        except (OSError, subprocess.SubprocessError, ValueError, TrustedToolError):
+            evidence.verification_status = "inspection_failed"
+            evidence.status_reason = "object_inspection_failed"
+            return self._finish(evidence, [self._coverage_finding(ref, evidence)])
+
+        if evidence.object_type == "annotated_tag":
+            signed, signature_format = _tag_object_signature_format(payload)
+        else:
+            signed, signature_format = _commit_object_signature_format(payload)
+        evidence.signature_present = signed
+        evidence.signature_format = signature_format
+        if not signed:
+            evidence.verification_status = "unsigned"
+            return self._finish(evidence, [])
+        if signature_format != "openpgp":
+            evidence.verification_status = "unsupported_signature_format"
+            evidence.status_reason = "unsupported_signature_format"
+            return self._finish(evidence, [self._coverage_finding(ref, evidence)])
+        if not declared_keys:
+            evidence.verification_status = "missing_validpgpkeys"
+            evidence.status_reason = "no_declared_validpgpkeys"
+            finding = _finding(
+                "SOURCE-SIGNATURE-WITHOUT-VALIDPGPKEYS",
+                ref.original,
+                Severity.MEDIUM,
+                "A signature is present on the acquired Git object, but the package declares no validpgpkeys fingerprint to compare it with.",
+                "Review signer identity manually; AuraScan has no declared fingerprint trust anchor for this source.",
+                False,
+                f"{evidence.object_type} signature present; validpgpkeys not declared",
+            )
+            return self._finish(evidence, [finding])
+
+        try:
+            gpg_tool = self.tool_capturer("gpg")
+        except TrustedToolError:
+            gpg_tool = None
+        if gpg_tool is None:
+            evidence.verification_status = "verifier_unavailable"
+            evidence.status_reason = "gpg_unavailable"
+            finding = _finding(
+                "SIGNATURE-VERIFICATION-UNAVAILABLE",
+                ref.original,
+                Severity.MEDIUM,
+                "A trusted system GnuPG executable is unavailable, so AuraScan could not verify the Git object signature.",
+                "Install the distribution GnuPG package, repair PATH or executable permissions, or verify the signature independently.",
+                False,
+                "trusted GnuPG verification was unavailable",
+            )
+            return self._finish(evidence, [finding])
+
+        key_sources: List[PublicKeySource] = []
+        key_findings: List[Finding] = []
+        for fingerprint in declared_keys:
+            key_source = self.key_provider.get_key(fingerprint)
+            if key_source.data is None and key_source.path is not None:
+                key_state, key_payload = _read_key_candidate(key_source.path)
+                if key_state == "resolved":
+                    key_source.data = key_payload
+                else:
+                    key_source.error = "KEY_FILE_UNSAFE"
+            key_sources.append(key_source)
+            if key_source.data is None:
+                key_findings.append(_finding(
+                    "KEY_UNAVAILABLE",
+                    ref.original,
+                    Severity.MEDIUM,
+                    "Public key for validpgpkeys fingerprint is unavailable.",
+                    "AuraScan could not complete Git object signature verification. Review manually or retry with key fetching enabled.",
+                    False,
+                    key_source.error or fingerprint,
+                ))
+        if not any(item.data is not None for item in key_sources):
+            evidence.verification_status = "key_unavailable"
+            evidence.status_reason = "key_material_unavailable"
+            return self._finish(evidence, key_findings)
+
+        gnupg_home = Path(tempfile.mkdtemp(prefix="aurascan-gnupg-"))
+        os.chmod(gnupg_home, 0o700)
+        try:
+            import_status, imported_source = _import_public_keys(
+                gpg_tool,
+                gnupg_home,
+                key_sources,
+                runner=runner,
+                timeout=self.policy.timeout,
+            )
+            returncode, output = self._verify_with_git(
+                run_git, selector, evidence, gpg_tool, gnupg_home
+            )
+        except (OSError, subprocess.SubprocessError, TrustedToolError, ValueError):
+            evidence.verification_status = "verifier_unavailable"
+            evidence.status_reason = "verification_error"
+            finding = _finding(
+                "SIGNATURE-VERIFICATION-UNAVAILABLE",
+                ref.original,
+                Severity.MEDIUM,
+                "Git object signature verification could not run through the captured trusted executables.",
+                "Review the source signature manually.",
+                False,
+                "trusted verification could not run",
+            )
+            return self._finish(evidence, key_findings + [finding])
+        finally:
+            shutil.rmtree(gnupg_home, ignore_errors=True)
+
+        status = _sanitize_gpg_status(import_status + output)
+        evidence.gpg_status = status
+        evidence.key_source = imported_source.source_type if imported_source else None
+        signer = _parse_gpg_signer_fingerprint(output)
+        expired = any(
+            keyword in status for keyword in ("EXPKEYSIG", "REVKEYSIG", "EXPSIG")
+        )
+        findings = key_findings
+        if returncode == 0 and expired:
+            # A cryptographically intact signature by an expired or revoked key
+            # is not an ordinary valid declared signer.
+            evidence.verification_status = "signature_unusable"
+            evidence.status_reason = "expired_or_revoked_key"
+            evidence.signer_fingerprint = signer
+            findings = findings + [self._coverage_finding(ref, evidence)]
+        elif returncode == 0 and signer is None:
+            evidence.verification_status = "fingerprint_unavailable"
+            evidence.status_reason = "machine_fingerprint_unavailable"
+            findings = findings + [self._coverage_finding(ref, evidence)]
+        elif returncode == 0:
+            evidence.verification_status = "valid"
+            evidence.signer_fingerprint = signer
+            matched = signer in declared_keys
+            evidence.matched_declared_validpgpkey = matched
+            if matched:
+                finding = _finding(
+                    "SIGNATURE-VERIFIED",
+                    ref.original,
+                    Severity.LOW,
+                    "Git object signature is cryptographically valid and its signer fingerprint matches a declared validpgpkeys entry.",
+                    "This confirms integrity against the declared signer; it is not proof the source is safe.",
+                    False,
+                    f"{evidence.object_type} signature; signer={signer}",
+                    EvidenceQuality.confirmed_static_pattern,
+                )
+                finding.requires_manual_review = False
+            else:
+                finding = _finding(
+                    "SIGNATURE-FINGERPRINT-MISMATCH",
+                    ref.original,
+                    Severity.HIGH,
+                    "Git object signature is valid, but the signer fingerprint does not match validpgpkeys.",
+                    "Review signer identity manually before trusting this source.",
+                    False,
+                    signer or "unknown signer",
+                )
+            findings = findings + [finding]
+        elif "BADSIG" in status:
+            evidence.verification_status = "invalid"
+            evidence.status_reason = "bad_signature"
+            evidence.signer_fingerprint = signer
+            finding = _finding(
+                "SOURCE-GIT-SIGNATURE-INVALID",
+                ref.original,
+                Severity.HIGH,
+                "A signature is present on the acquired Git object, but it did not verify.",
+                "Do not rely on this tag or commit signature. Verify the upstream revision and signing key independently.",
+                False,
+                f"{evidence.object_type} signature did not verify",
+                EvidenceQuality.confirmed_static_pattern,
+            )
+            findings = findings + [finding]
+        elif "NO_PUBKEY" in status:
+            evidence.verification_status = "key_unavailable"
+            evidence.status_reason = "signing_key_unavailable"
+            finding = _finding(
+                "KEY_UNAVAILABLE",
+                ref.original,
+                Severity.MEDIUM,
+                "The Git object signature could not be verified because the signing key is not available locally.",
+                "AuraScan did not fetch keys from the network. Provide the signing key locally or verify the signature independently.",
+                False,
+                "; ".join(declared_keys[:3]) or "declared fingerprint unavailable",
+            )
+            findings = findings + [finding]
+        else:
+            evidence.verification_status = "verifier_unavailable"
+            evidence.status_reason = "unrecognized_verifier_result"
+            findings = findings + [self._coverage_finding(ref, evidence)]
+        return self._finish(evidence, findings)
+
+    def _verify_with_git(
+        self,
+        run_git: Callable,
+        selector: str,
+        evidence: GitSignatureVerification,
+        gpg_tool,
+        gnupg_home: Path,
+    ) -> Tuple[int, str]:
+        """Let Git verify the object while GnuPG stays on the trusted pairing."""
+        subcommand = "verify-tag" if evidence.verified_object == "tag_object" else "verify-commit"
+        # Command-line config wins over any user or repository configuration, so
+        # Git can never select a different verifier program for this call.
+        base = [
+            "-c", f"gpg.program={gpg_tool.path}",
+            "-c", "gpg.format=openpgp",
+            subcommand,
+        ]
+        env = _private_gpg_env(gnupg_home)
+        process = run_git(base + ["--raw", selector], extra_env=env)
+        output = self._combined_output(process)
+        if int(getattr(process, "returncode", 1)) != 0 and _GIT_RAW_STATUS_UNSUPPORTED.search(output):
+            # Older Git cannot emit machine status.  Validity is still decided by
+            # the same trusted pairing; only the fingerprint stays unavailable,
+            # and a fingerprint is never inferred from human-readable text.
+            process = run_git(base + [selector], extra_env=env)
+            output = self._combined_output(process)
+        return int(getattr(process, "returncode", 1)), output
+
+    def _combined_output(self, process) -> str:
+        return str(getattr(process, "stdout", "") or "") + str(getattr(process, "stderr", "") or "")
+
+    def _coverage_finding(self, ref: SourceReference, evidence: GitSignatureVerification) -> Finding:
+        reason = evidence.status_reason or "signature_evidence_incomplete"
+        return _finding(
+            "SOURCE-GIT-SIGNATURE-UNVERIFIED",
+            ref.original,
+            Severity.LOW,
+            "A signature is present on the acquired Git object, but AuraScan could not establish a verified signer fingerprint.",
+            "Verify the tag or commit signature manually before relying on it.",
+            False,
+            f"{evidence.object_type or 'git object'}; format={evidence.signature_format}; reason={reason}",
+        )
+
+    def _finish(
+        self,
+        evidence: GitSignatureVerification,
+        findings: List[Finding],
+    ) -> Tuple[List[Finding], GitSignatureVerification]:
+        evidence.related_finding_ids = [finding.finding_id for finding in findings]
+        self.last_result = evidence
+        return findings, evidence
 
 
 class HttpSourceFetcher:
@@ -1880,9 +2349,15 @@ class HttpSourceFetcher:
 
 
 class GitSourceFetcher:
-    def __init__(self, policy: Optional[SourcePolicy] = None, runner: Optional[Callable] = None):
+    def __init__(
+        self,
+        policy: Optional[SourcePolicy] = None,
+        runner: Optional[Callable] = None,
+        signature_verifier: Optional[GitSignatureVerifier] = None,
+    ):
         self.policy = policy or SourcePolicy()
         self.runner = runner or run_bounded_trusted_tool
+        self.signature_verifier = signature_verifier or GitSignatureVerifier(self.policy)
 
     def fetch(self, ref: SourceReference, output_dir: Path) -> SourceAcquisitionResult:
         findings = self.classification_findings(ref)
@@ -1937,7 +2412,13 @@ class GitSourceFetcher:
             _validate_public_remote_url(repo_url, {"https"})
             deadline = time.monotonic() + self.policy.timeout
 
-            def run_git(arguments: List[str], *, in_checkout: bool = True):
+            def run_git(
+                arguments: List[str],
+                *,
+                in_checkout: bool = True,
+                check: bool = True,
+                extra_env: Optional[Dict[str, str]] = None,
+            ):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise ValueError("Git acquisition deadline expired")
@@ -1951,8 +2432,8 @@ class GitSourceFetcher:
                     capture_output=True,
                     text=True,
                     timeout=remaining,
-                    env=env,
-                    check=True,
+                    env=dict(env, **extra_env) if extra_env else env,
+                    check=check,
                 )
 
             def resolve_commit(selector: str) -> str:
@@ -1966,14 +2447,7 @@ class GitSourceFetcher:
                 ["clone", "--no-checkout", "--no-recurse-submodules", "--filter=blob:none", repo_url, str(checkout_dir)],
                 in_checkout=False,
             )
-            if ref.fragment_type == "branch":
-                selector = "refs/remotes/origin/" + ref.fragment_value
-            elif ref.fragment_type == "tag":
-                selector = "refs/tags/" + ref.fragment_value
-            elif ref.fragment_type == "commit":
-                selector = ref.fragment_value.lower()
-            else:
-                selector = "HEAD"
+            selector = _git_selector(ref)
             resolved_revision = resolve_commit(selector)
             if ref.fragment_type == "commit" and resolved_revision != ref.fragment_value.lower():
                 raise ValueError("Git resolution differs from the declared commit")
@@ -1992,9 +2466,33 @@ class GitSourceFetcher:
                 "declared Git source was not acquired",
             ))
             return SourceAcquisitionResult(ref, status="failed", findings=findings)
+        # Signature evidence is observational: it never changes acquisition
+        # status, blocking policy or any other finding, so an unexpected
+        # verifier failure is recorded as explicit coverage instead of aborting
+        # an acquisition that already succeeded.
+        git_signature: Optional[GitSignatureVerification] = None
+        try:
+            signature_findings, git_signature = self.signature_verifier.verify(
+                ref,
+                resolved_revision,
+                run_git=lambda arguments, extra_env=None: run_git(
+                    arguments, check=False, extra_env=extra_env,
+                ),
+                runner=self.runner,
+            )
+        except Exception:  # noqa: BLE001 - observational evidence must not abort
+            signature_findings = []
+            git_signature = GitSignatureVerification(
+                selector_kind=ref.fragment_type or "unpinned",
+                resolved_revision=resolved_revision,
+                verification_status="inspection_failed",
+                status_reason="verification_error",
+            )
+        findings.extend(signature_findings)
         return SourceAcquisitionResult(
             ref, checkout_dir, ref.resolved, 0, None, "acquired", findings,
             resolved_revision=resolved_revision,
+            git_signature=git_signature.to_dict() if git_signature else None,
         )
 
     def classification_findings(self, ref: SourceReference) -> List[Finding]:
@@ -2016,7 +2514,7 @@ class GitSourceFetcher:
                 "SOURCE-GIT-TAG",
                 ref.original,
                 Severity.MEDIUM,
-                "git+https source selects a movable tag; signed tag verification is not implemented.",
+                "git+https source selects a movable tag; AuraScan reports tag movement and signature evidence separately.",
                 "Verify tag provenance manually.",
                 False,
                 ref.fragment_value or "",

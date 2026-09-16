@@ -2,6 +2,32 @@
 
 Changes after v0.10.10:
 
+Deep-static Git object signature evidence (observational):
+
+- Explicit `--deep-static` acquisition now reports the signature state of the
+  exact Git object it resolved: the local object type (annotated tag,
+  lightweight tag or commit), whether a signature is present, its format, a
+  verified signer fingerprint, and whether that fingerprint matches a declared
+  `validpgpkeys` entry. The previous finding text that said signed tag
+  verification was not implemented is replaced.
+- Validity is decided by Git's own `verify-tag`/`verify-commit` with the trusted
+  absolute Git and GnuPG files, a private temporary GnuPG home, locally
+  available key material and a bounded deadline. Only machine-readable
+  `VALIDSIG` status can establish a signer fingerprint, and an older Git without
+  machine status leaves the fingerprint unavailable rather than guessing one.
+- Declared correlation is reported separately from cryptographic validity. A
+  matching `validpgpkeys` fingerprint is recorded as
+  `matched_declared_validpgpkey`; an undeclared signer is never trusted, an
+  invalid signature is reported distinctly without blocking, and expired or
+  revoked signing-key status is never presented as an ordinary valid declared
+  signer. Unsupported formats (SSH/X.509), missing keys and unavailable
+  verifiers stay explicit unresolved coverage instead of "unsigned".
+- Signature evidence is observational: it never changes acquisition status,
+  blocking policy, rule IDs, AI authority or the network/privilege surface, and
+  it never establishes signer authorization, official origin, source safety,
+  review or an uncompromised upstream. Verification performs no implicit key
+  retrieval, so it works offline when key material is already available.
+
 Upgrade advisory evidence (product fix):
 
 - `aurascan upgrade` now evaluates installed-version advisories from captured

@@ -1734,6 +1734,14 @@ checks, and removes direct shell/dynamic-loader code-loading variables such as
 These restrictions are part of the security boundary; run unusual workflows in
 a separately reviewed disposable build environment instead of bypassing them.
 
+Because only `/usr/bin/makepkg` is accepted, a `makepkg` interceptor earlier on
+`PATH` (for example `~/.local/bin/makepkg`) breaks this entry point:
+`aurascan-makepkg` stops with exit `127` and "Could not locate or safely
+revalidate the trusted system makepkg executable", and no build runs. Keep
+`makepkg` resolving to `/usr/bin/makepkg` and configure the AUR helper itself to
+call `aurascan-makepkg`, which reuses the reviewed scan, review-token, and
+handoff logic instead of a second implementation.
+
 The wrapper protects the pre-build phase. It does not sandbox makepkg, install
 packages, or make package code safe after makepkg starts running build steps.
 

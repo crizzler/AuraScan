@@ -1614,6 +1614,14 @@ root-owned, non-writable, regular/executable where applicable, and non-link.
 Hostile PATH resolution, a different installation, or replacement after the
 scan fails closed; never fall back to a bare `makepkg` name.
 
+A `makepkg` shim earlier on `PATH` therefore also disables this entry point:
+the locator returns that shim, the trusted-tool boundary rejects it, and
+`aurascan-makepkg` exits `127` before scanning anything. Keep `makepkg` on
+`PATH` resolving to `/usr/bin/makepkg` and point the AUR helper at
+`aurascan-makepkg` rather than placing an interceptor named `makepkg` on
+`PATH`; a hand-written interceptor bypasses review tokens, decision history,
+and the pre-handoff recapture regardless.
+
 The wrapper protects the pre-build phase: it scans the PKGBUILD before
 `prepare()`, `build()`, `check()`, `package()`, or package/source-tree helper
 scripts can run. It also statically scans a declared local `install=` script

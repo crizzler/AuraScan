@@ -70,6 +70,24 @@ Architecture stabilization stage 4 (no behavior change):
   subsystem engines also use, with equality assertions so the wording cannot
   drift.
 
+Architecture stabilization stage 5 (no behavior change):
+
+- Moved incident command-line dispatch out of the incident workflow. The nine
+  automation-control flags (`--set-auto-repair-policy`, `--safe-autopilot-enabled`,
+  `--apply-request`, `--enable-background-ai`, `--disable-background-ai`,
+  `--auto-repair`, `--background-ai-status`, `--capture-safe-autopilot`,
+  `--background-assist`) are now handled by `core/incident_cli.py`, a
+  presentation-layer entry point, which delegates the incident workflow itself
+  to `core.incidents.run_incidents`.
+- The incident workflow no longer imports the automation or repair-execution
+  modules to service its own flags, removing 8 of its 9 edges into
+  `incident_automation`. Root-privilege refusals, exit codes, messages, the
+  privileged request-file validation and the JSON helper output are unchanged.
+- The planner component remains eight modules: breaking dispatch did not split
+  it, because `followup`, `incidents` and `incident_automation` still call each
+  other's planners. `core.incident_cli` is registered as a UI entry point, so
+  INV-007 now prevents application code from importing it back.
+
 See [v0.10.10](v0.10.10.md) for signed runtime-intelligence support, detection-data
 tray controls, the optional-install-script wording, and the recovery-bearing
 release validation record. Production feed and signing keys remain

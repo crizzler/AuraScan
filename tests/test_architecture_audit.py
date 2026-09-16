@@ -578,3 +578,49 @@ def test_large_modules_are_reported_by_the_advisory_budget(relative):
     warned = " ".join(result.budget)
 
     assert "aurascan/{0}".format(relative) in warned
+
+
+def test_application_module_importing_the_incident_cli_is_reported(tmp_path):
+    """Stage 5 regression: the incident workflow must not reach back into the CLI.
+
+    Automation-control flag dispatch used to live inside the incident workflow,
+    which made the workflow and the automation subsystem import each other.
+    Moving dispatch to the CLI layer is only a real fix if the workflow is
+    forbidden from importing that layer back.
+    """
+
+    package_root = tmp_path / "clipkg"
+    write_module(package_root, "__init__.py", "")
+    write_module(package_root, "core/__init__.py", "")
+    write_module(
+        package_root,
+        "core/incidents.py",
+        "from clipkg.core.incident_cli import run_incident_command\n",
+    )
+    write_module(
+        package_root,
+        "core/incident_cli.py",
+        "def run_incident_command(argv=None):\n    return 0\n",
+    )
+
+    result = run_tool(package_root, "clipkg")
+    ids = {violation.invariant_id for violation in result.violations}
+
+    assert "INV-007" in ids
+
+
+def test_incident_cli_owns_automation_dispatch_not_the_incident_workflow():
+    """The dispatch seam lives in one place and points one way only."""
+
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    module = {info.name: info for info in result.modules}
+
+    cli = module["aurascan.core.incident_cli"]
+    workflow = module["aurascan.core.incidents"]
+
+    assert cli.layer == "presentation"
+    assert "aurascan.core.incident_automation" in cli.internal_imports
+    assert "aurascan.core.incidents" in cli.internal_imports
+    # The workflow keeps one genuine orchestration call into automation, but it
+    # must not import the CLI layer or the privileged helper client.
+    assert "aurascan.core.incident_cli" not in workflow.internal_imports

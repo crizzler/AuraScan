@@ -9,7 +9,7 @@ from aurascan.core.config import load_env, user_env_path
 from aurascan.core.config_drift import run_config_drift
 from aurascan.core.engine import AuraScanEngine
 from aurascan.core.followup import run_ask
-from aurascan.core.incidents import run_incidents
+from aurascan.core.incident_cli import run_incident_command
 from aurascan.core.instruction_cli import run_instruction_audit
 from aurascan.core.recovery_cli import run_recovery
 from aurascan.core.security_audit import run_security_audit
@@ -174,7 +174,7 @@ def main(argv=None):
     if raw_argv and raw_argv[0] == "config-drift":
         sys.exit(run_config_drift(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "incidents":
-        sys.exit(run_incidents(raw_argv[1:]))
+        sys.exit(run_incident_command(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "recovery":
         sys.exit(run_recovery(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "security-audit":

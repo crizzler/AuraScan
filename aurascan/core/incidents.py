@@ -912,32 +912,6 @@ def run_incidents(
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
     args = build_incidents_parser().parse_args(list(argv or []))
-    if args.set_auto_repair_policy:
-        if not hasattr(os, "geteuid") or os.geteuid() != 0:
-            print("[AuraScan] Safe Autopilot policy writes require root privileges.", file=stderr)
-            return EXIT_INCIDENT_CONFIG_ERROR
-        from aurascan.core.incident_automation import write_auto_repair_policy
-
-        ok, message = write_auto_repair_policy(str(args.set_auto_repair_policy))
-        print(message, file=stdout if ok else stderr)
-        return 0 if ok else EXIT_INCIDENT_CONFIG_ERROR
-    if args.safe_autopilot_enabled:
-        from aurascan.core.incident_automation import read_auto_repair_policy
-
-        return 0 if read_auto_repair_policy().policy == "safe" else 1
-    if args.apply_request:
-        if not hasattr(os, "geteuid") or os.geteuid() != 0:
-            print("[AuraScan] Privileged incident repair helper refused a non-root invocation.", file=stderr)
-            return EXIT_INCIDENT_REPAIR_FAILED
-        request_ok, request_error = validate_privileged_request_file(Path(args.apply_request))
-        if not request_ok:
-            print(f"[AuraScan] Privileged incident repair helper refused the request: {request_error}", file=stderr)
-            return EXIT_INCIDENT_REPAIR_FAILED
-        from aurascan.core.incident_repairs import execute_repair_request
-
-        results, ok = execute_repair_request(Path(args.apply_request), runner=runner, which=which, repair_root=system_root / "repairs")
-        print(json.dumps({"ok": ok, "results": [result.to_dict() for result in results]}), file=stdout)
-        return 0 if ok else EXIT_INCIDENT_REPAIR_FAILED
 
     effective_env = dict(os.environ if env is None else env)
     if env_path and env_path.exists():
@@ -945,54 +919,14 @@ def run_incidents(
             effective_env.update(read_env_file(env_path))
         except OSError:
             pass
-    if args.enable_background_ai or args.disable_background_ai:
-        from aurascan.core.incident_automation import set_background_ai_enabled
-
-        enabled = bool(args.enable_background_ai and not args.disable_background_ai)
-        ok, message = set_background_ai_enabled(enabled, runner=runner, env_path=env_path or user_env_path())
-        print(message, file=stdout if ok else stderr)
-        return 0 if ok else EXIT_INCIDENT_CONFIG_ERROR
-    if args.auto_repair:
-        from aurascan.core.incident_automation import configure_auto_repair_policy
-
-        ok, message = configure_auto_repair_policy(str(args.auto_repair), runner=runner)
-        print(message, file=stdout if ok else stderr)
-        return 0 if ok else EXIT_INCIDENT_CONFIG_ERROR
-    if args.background_ai_status:
-        from aurascan.core.incident_automation import print_background_ai_status
-
-        return print_background_ai_status(
-            env=effective_env,
-            runner=runner,
-            user_root=user_root,
-            stdout=stdout,
-            json_output=bool(args.json_output),
-        )
     options = incident_options_from_args(args, effective_env)
     if options.config.error:
         print(f"[AuraScan] Incident configuration error: {options.config.error}", file=stderr)
         return EXIT_INCIDENT_CONFIG_ERROR
-    if (options.capture_monitor or options.capture_maintenance or args.capture_safe_autopilot) and (not hasattr(os, "geteuid") or os.geteuid() != 0):
+    if (options.capture_monitor or options.capture_maintenance) and (not hasattr(os, "geteuid") or os.geteuid() != 0):
         print("[AuraScan] Incident monitor capture must run as root.", file=stderr)
         return EXIT_INCIDENT_CONFIG_ERROR
 
-    if args.capture_safe_autopilot:
-        from aurascan.core.incident_automation import run_safe_autopilot
-
-        return run_safe_autopilot(system_root=system_root, runner=runner, which=which, stdout=stdout, stderr=stderr)
-    if args.background_assist:
-        from aurascan.core.incident_automation import run_background_assistant
-
-        return run_background_assistant(
-            env=effective_env,
-            system_root=system_root,
-            user_root=user_root,
-            runner=runner,
-            which=which,
-            urlopen=urlopen,
-            stdout=stdout,
-            stderr=stderr,
-        )
     if options.capture_maintenance:
         return capture_incident_maintenance(
             system_root=system_root,

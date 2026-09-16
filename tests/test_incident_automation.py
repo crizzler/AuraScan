@@ -29,9 +29,9 @@ from aurascan.core.incidents import (
     load_incident_report,
     pending_markers,
     persist_system_incident_report,
-    run_incidents,
     write_pending_markers,
 )
+from aurascan.core.incident_cli import run_incident_command
 from aurascan.core.models import Confidence, Severity
 
 
@@ -127,7 +127,7 @@ def test_background_cli_can_repair_an_invalid_existing_toggle(tmp_path):
     env_path.write_text(f"{INCIDENT_BACKGROUND_AI_ENV}=sometimes\n", encoding="utf-8")
     calls = []
 
-    status = run_incidents(
+    status = run_incident_command(
         ["--enable-background-ai"],
         env_path=env_path,
         env={},
@@ -148,7 +148,7 @@ def test_auto_repair_cli_delegates_only_to_root_validated_policy_writer(monkeypa
         lambda value, runner=None: calls.append(value) or (True, "configured"),
     )
 
-    status = run_incidents(["--auto-repair", "safe"], env={}, stdout=io.StringIO())
+    status = run_incident_command(["--auto-repair", "safe"], env={}, stdout=io.StringIO())
 
     assert status == 0
     assert calls == ["safe"]

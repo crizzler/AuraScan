@@ -52,6 +52,7 @@ from aurascan.core.incidents import (
     validate_incident_ai_response,
     write_pending_markers,
 )
+from aurascan.core.incident_cli import run_incident_command
 from aurascan.core.incident_presenter import render_incident
 from aurascan.core.models import Confidence, Severity
 
@@ -1093,7 +1094,9 @@ def test_privileged_repair_helper_refuses_non_root_invocation(monkeypatch, tmp_p
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
     stderr = io.StringIO()
 
-    status = run_incidents(["--apply-request", str(tmp_path / "request.json")], stderr=stderr, env={})
+    status = run_incident_command(
+        ["--apply-request", str(tmp_path / "request.json")], stderr=stderr, env={}
+    )
 
     assert status != 0
     assert "non-root" in stderr.getvalue()

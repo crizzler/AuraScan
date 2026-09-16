@@ -62,7 +62,7 @@ Two rules hold across every plane:
 Layers are assigned from repository structure by the audit tool. They describe
 dependency direction; they are not a package reorganisation.
 
-Current measurement: **82 modules, 71,613 physical lines.**
+Current measurement: **83 modules, 71,708 physical lines.**
 
 | Layer | Modules | Contents |
 | --- | ---: | --- |
@@ -73,7 +73,7 @@ Current measurement: **82 modules, 71,613 physical lines.**
 | `adapters` | 12 | Bounded platform boundaries: `core/trusted_tools.py`, `core/trusted_executable.py`, `core/archive.py`, `core/package_archive.py`, `core/source_acquisition.py`, `core/intelligence_transport.py`, `core/intelligence_crypto.py`, `core/cache.py`, `core/local_package_db.py`, `core/ai_provider.py`, `core/recovery_network.py`, `core/compatibility.py` |
 | `application` | 25 | Orchestration and policy: `core/engine.py`, upgrade preflight, incidents, follow-up, agent, config drift, security audit, recovery planners, instruction guard logic |
 | `recovery` | 3 | `core/recovery.py`, `core/recovery_boot.py`, `core/recovery_repairs.py` |
-| `presentation` | 15 | Entry points, trays and renderers: `cli.py`, `__main__.py`, `makepkg_wrapper.py`, `setup_wizard.py`, `core/updater_tray.py`, `core/intelligence_tray.py`, `core/instruction_cli.py`, `core/intelligence_cli.py`, `core/recovery_cli.py`, plus the six rendering modules `core/scan_report_presenter.py`, `core/config_drift_presenter.py`, `core/incident_presenter.py`, `core/recovery_presenter.py`, `core/security_audit_presenter.py`, `core/upgrade_preflight_presenter.py` |
+| `presentation` | 16 | Entry points, trays and renderers: `cli.py`, `__main__.py`, `makepkg_wrapper.py`, `setup_wizard.py`, `core/updater_tray.py`, `core/intelligence_tray.py`, `core/instruction_cli.py`, `core/intelligence_cli.py`, `core/recovery_cli.py`, `core/incident_cli.py`, plus the six rendering modules `core/scan_report_presenter.py`, `core/config_drift_presenter.py`, `core/incident_presenter.py`, `core/recovery_presenter.py`, `core/security_audit_presenter.py`, `core/upgrade_preflight_presenter.py` |
 
 Dependency direction:
 
@@ -98,6 +98,10 @@ domain   ←   catalog
   rules exist (INV-011). Rendering modules are sinks: none may appear in an
   import cycle (INV-015), and none may run a process, open the network, mutate
   the filesystem, touch privilege state or call an AI provider (INV-016).
+  Command dispatch belongs here too, including flags that control another
+  subsystem: `core/incident_cli.py` owns the automation-control flags that used
+  to live in the incident workflow, and application code may not import it back
+  (INV-007).
 
 Renderer modules and their inputs:
 
@@ -167,7 +171,7 @@ known decision rather than a surprise.
 
 | Cycle | Modules | Assessment |
 | --- | --- | --- |
-| Recovery planner | `core.agent`, `core.config_drift`, `core.followup`, `core.incident_automation`, `core.incident_diagnostics`, `core.incident_repairs`, `core.incidents`, `core.upgrade_preflight` | Expected: these modules call each other's planners through function-local imports to avoid a heavier module-level graph. Candidate for a planner interface later. |
+| Recovery planner | `core.agent`, `core.config_drift`, `core.followup`, `core.incident_automation`, `core.incident_diagnostics`, `core.incident_repairs`, `core.incidents`, `core.upgrade_preflight` | Expected: these modules call each other's planners through function-local imports to avoid a heavier module-level graph. Candidate for a planner interface later. Stage 5 removed the incident-to-automation *dispatch* edges; the component is still eight members, so the remaining debt is planner-to-planner replication, not command-line glue. |
 | Intelligence | `core.intelligence`, `core.intelligence_crypto`, `core.intelligence_store` | Expected: snapshot identity, verification and storage are one transaction. |
 | Install-hook / provenance | `analyzers.repository_provenance`, `core.install_hook`, `core.source_acquisition` | Expected: declared-source filtering needs the hook reader and the acquisition snapshot. |
 
@@ -224,17 +228,69 @@ Reported by the audit, never fatal:
 - modules with more than 5 concern tags.
 
 Current warnings: `core/instruction_guard.py` (8760 lines),
-`analyzers/repository_provenance.py` (4555), `core/incidents.py` (4036),
-`core/agent.py` (3741), `core/upgrade_preflight.py` (3142 lines, 6 concern tags),
-`core/followup.py` (2581), `core/source_acquisition.py` (2554),
+`analyzers/repository_provenance.py` (4555), `core/incidents.py` (3825),
+`core/agent.py` (3741), `core/upgrade_preflight.py` (3044 lines, 6 concern tags),
+`core/followup.py` (2583), `core/source_acquisition.py` (2554),
 `setup_wizard.py` (2521).
 
 ## Decomposition log
 
-**Resolved in Stage 4:** the six remaining self-rendering report classes. Their
-`render_terminal` methods (384 lines in total) moved into subsystem presenters,
-so no report or state object owns terminal rendering any more. The planner
-component is unchanged at the same eight members: presentation did not join it.
+**Resolved in Stage 5:** the `incidents <-> incident_automation` half of the
+planner cycle that was pure command-line dispatch. The incident workflow no
+longer imports the automation subsystem to service its own CLI flags; a new
+presentation module (`core/incident_cli.py`) owns that dispatch. Eight of the
+nine edges disappeared; the component is still eight members, and the remaining
+edge is a real orchestration call in each direction of the pair.
+
+### Stage 5 — automation control flags left the incident workflow
+
+The planner component contained an ambiguous edge: `incidents` imported
+`incident_automation` and `incident_automation` imported `incidents`, so it was
+impossible to say which subsystem was downstream. Characterizing all 57 import
+statements inside the component showed that the `incidents` side of that pair
+was **entirely command-line dispatch**: `run_incidents` parsed the incidents
+command line and then serviced nine flags that belong to other subsystems
+(`--set-auto-repair-policy`, `--safe-autopilot-enabled`, `--apply-request`,
+`--enable-background-ai`, `--disable-background-ai`, `--auto-repair`,
+`--background-ai-status`, `--capture-safe-autopilot`, `--background-assist`) by
+lazy-importing `incident_automation` and `incident_repairs`.
+
+- **Extracted `core/incident_cli.py`** (presentation layer):
+  `run_incident_command()` parses the command line, routes those nine control
+  flags, and otherwise delegates to `run_incidents()`. The branch bodies moved
+  verbatim, including the `geteuid` root checks and the privileged helper's
+  `validate_privileged_request_file` call, so refusals, exit codes and messages
+  are unchanged.
+- **`incidents.py` lost 8 of its 9 edges into `incident_automation`.** One
+  deliberate orchestration edge remains: when resolving a pending marker the
+  interactive workflow reuses a background plan that automation already
+  produced (`load_reusable_background_plan`). That is a genuine
+  planner-to-planner reuse, not dispatch glue, and it is documented rather than
+  hidden.
+- **Honest topology result:** the component is **still eight members**. Removing
+  dispatch did not break the strongly connected component, because
+  `followup <-> incidents` and `followup -> incident_automation -> incidents`
+  still close cycles. The stage clarified ownership and edge direction; it did
+  not reduce the component.
+- **Direction enforced:** `core.incident_cli` now belongs to the audit's UI
+  entry-point set, so INV-007 forbids any core application module from importing
+  it back. A negative fixture asserts the violation is reported.
+- **Deliberately not moved:** `run_incidents` itself. It is the interactive
+  incident workflow (build report, plan repairs, review, confirm, apply,
+  follow-up), not CLI glue; relocating it wholesale would have pushed
+  orchestration and policy into presentation.
+- **Not selected, recorded as debt:** the `incidents <-> incident_repairs` pair.
+  Nine symbols travel from `incidents` to `incident_repairs`, and four of them
+  (`atomic_write_json`, `run_bounded_command`, `redact_incident_text`,
+  `IncidentReport`) are general utilities used far outside the incident
+  subsystem. That is a misplaced-utility problem, not a direction problem:
+  `incident_repairs` plans and executes actions, while `incidents` orchestrates
+  them. Extracting a shared utility module would be the honest fix, and it is
+  the recommended Stage 6 seam.
+- **Evidence:** `tests/test_architecture_audit.py` (INV-007 fixture plus a seam
+  direction test over the real package), `tests/test_incident_automation.py` and
+  `tests/test_incidents.py` migrated to the new entry point with every existing
+  behavior assertion kept.
 
 ### Stage 4 — presentation left the report classes
 
@@ -402,7 +458,7 @@ Extracted `core/trusted_executable.py`: `TrustedExecutable`,
 | --- | --- |
 | `core/instruction_guard.py` (8760) | Highest absolute risk: discovery, integrity manifests, private report state and triage UX in one file. Needs a characterisation-test layer over paging/enrollment state before any move. |
 | `analyzers/repository_provenance.py` (4555) | Splitting magic classification from correlation is plausible, but the bounded-walk coverage rules are subtle and the fixture matrix is the contract. |
-| `core/incidents.py` (4036) | Its cycle with the other planner modules must be designed first; extracting one member alone would leave the cycle in place. |
+| `core/incidents.py` (3825) | Stage 5 removed its CLI dispatch and its automation edges, so what is left is the interactive workflow. Its cycle with `followup`, `incident_repairs` and `incident_diagnostics` must be designed before another member moves. |
 | `core/agent.py` (3741) | Command allowlisting, consent and execution are one security boundary; separating them without a policy/adapter interface risks weakening the fail-closed path. |
 
 ## Next targets
@@ -410,13 +466,19 @@ Extracted `core/trusted_executable.py`: `TrustedExecutable`,
 1. The eight-member planner component (`agent`, `config_drift`, `followup`,
    `incidents`, `incident_*`, `upgrade_preflight`): give it a narrow interface so
    the cycle can be reviewed as a group rather than as eight mutual imports.
-   Stage 4 leaves it unchanged, which is the preparation Stage 5 needs.
-2. Four subsystem modules still reach their presenter from inside their own CLI
-   entry points (`config_drift`, `incidents`, `security_audit`,
-   `upgrade_preflight`). That edge is one-way and cycle-free, but it means CLI
-   printing still lives in subsystem modules; extracting those runners would
-   finish the seam.
-3. `core/upgrade_preflight.py` (3142 lines, 6 concern tags — the top hotspot):
+   Stage 5 explored the lowest-risk seam in that component — command-line
+   dispatch — and confirmed the component survives without it, so the remaining
+   debt is genuine planner-to-planner coupling. The best next seam is the four
+   misplaced general utilities that `incident_repairs` imports from `incidents`
+   (`atomic_write_json`, `run_bounded_command`, `redact_incident_text`,
+   `IncidentReport`): they belong in a shared utility module, not in the incident
+   workflow.
+2. **Partially done in Stage 5:** one of the four subsystem CLI runners
+   (`incidents`) moved to `core/incident_cli.py`. `config_drift`,
+   `security_audit` and `upgrade_preflight` still reach their presenter from
+   inside their own CLI entry points. That edge is one-way and cycle-free, but
+   it means CLI printing still lives in subsystem modules.
+3. `core/upgrade_preflight.py` (3044 lines, 6 concern tags — the top hotspot):
    split mirror/repository repair (I/O plus privileged commands) from output
    parsing (pure functions).
 4. Move the security-audit recommended-action decision out of the presenter and

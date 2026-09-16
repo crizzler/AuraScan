@@ -21,15 +21,15 @@ from aurascan.core.incident_repairs import (
     plan_service_restart,
     plan_stale_lock,
 )
-from aurascan.core.incidents import (
+from aurascan.core.bounded_process import run_bounded_command
+from aurascan.core.incident_models import (
     DiagnosticProbe,
     DiagnosticProbeResult,
     IncidentReport,
     RepairAction,
-    bounded_ai_system_facts,
-    redact_incident_text,
-    run_bounded_command,
 )
+from aurascan.core.incidents import bounded_ai_system_facts
+from aurascan.core.redaction import redact_incident_text
 
 
 INCIDENT_MAX_PROBE_CANDIDATES = 24

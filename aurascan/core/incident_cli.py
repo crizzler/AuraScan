@@ -26,10 +26,10 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
 
 from aurascan.core.config import read_env_file, user_env_path
+from aurascan.core.incident_models import INCIDENT_SYSTEM_ROOT
 from aurascan.core.incidents import (
     EXIT_INCIDENT_CONFIG_ERROR,
     EXIT_INCIDENT_REPAIR_FAILED,
-    INCIDENT_SYSTEM_ROOT,
     build_incidents_parser,
     run_incidents,
     validate_privileged_request_file,

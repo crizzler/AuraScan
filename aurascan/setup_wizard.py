@@ -61,6 +61,8 @@ from aurascan.core.kernel_module_autopilot import (
     detect_module_families,
     is_kernel_base_package,
 )
+from aurascan.core.bounded_process import run_bounded_command
+from aurascan.core.incident_models import INCIDENT_SYSTEM_ROOT
 from aurascan.core.incidents import (
     INCIDENT_AI_ENABLED_ENV,
     INCIDENT_AI_EVIDENCE_ENV,
@@ -70,12 +72,10 @@ from aurascan.core.incidents import (
     INCIDENT_MAINTENANCE_SERVICE,
     INCIDENT_MAINTENANCE_TIMER,
     INCIDENT_MONITOR_SERVICE,
-    INCIDENT_SYSTEM_ROOT,
     incident_monitor_status,
     load_maintenance_status,
     maintenance_paths,
     resolve_incident_config,
-    run_bounded_command,
     set_incident_monitor_enabled,
     user_incident_root,
 )

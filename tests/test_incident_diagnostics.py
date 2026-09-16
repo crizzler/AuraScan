@@ -14,16 +14,18 @@ from aurascan.core.incident_diagnostics import (
     select_probe_ids,
 )
 from aurascan.core.incident_repairs import make_action
-from aurascan.core.incidents import (
+from aurascan.core.incident_models import (
     CoredumpGroup,
     DiagnosticProbeResult,
     IncidentEvidence,
     IncidentFinding,
     IncidentReport,
-    atomic_write_json,
+)
+from aurascan.core.incidents import (
     marker_key,
     persist_incident_report,
 )
+from aurascan.core.state_file import atomic_write_json
 from aurascan.core.models import Confidence, Severity
 
 

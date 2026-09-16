@@ -13,10 +13,11 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence
 from aurascan.core.ai_provider import parse_bool as parse_config_bool
 from aurascan.core.config import read_env_file, user_env_path, write_user_env
 from aurascan.core.intelligence_tray import build_intelligence_menu
-from aurascan.core.incidents import (
+from aurascan.core.incident_models import (
     INCIDENT_MAINTENANCE_STATUS,
     INCIDENT_MONITOR_MARKER_ROOT,
-    atomic_write_json,
+)
+from aurascan.core.incidents import (
     incident_reviewed_state_path,
     incident_seen_state_path,
     load_maintenance_status,
@@ -26,6 +27,7 @@ from aurascan.core.incidents import (
     unseen_pending_markers,
     user_incident_root,
 )
+from aurascan.core.state_file import atomic_write_json
 from aurascan.core.incident_automation import (
     INCIDENT_BACKGROUND_SERVICE,
     background_result_path,

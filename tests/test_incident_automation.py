@@ -18,14 +18,16 @@ from aurascan.core.incident_automation import (
     write_auto_repair_policy,
 )
 from aurascan.core.incident_repairs import is_background_safe_action, make_action, safe_background_repository_file
-from aurascan.core.incidents import (
-    INCIDENT_AI_ENABLED_ENV,
-    INCIDENT_AI_EVIDENCE_ENV,
-    INCIDENT_BACKGROUND_AI_ENV,
+from aurascan.core.incident_models import (
     IncidentEvidence,
     IncidentFinding,
     IncidentReport,
     RepairResult,
+)
+from aurascan.core.incidents import (
+    INCIDENT_AI_ENABLED_ENV,
+    INCIDENT_AI_EVIDENCE_ENV,
+    INCIDENT_BACKGROUND_AI_ENV,
     load_incident_report,
     pending_markers,
     persist_system_incident_report,

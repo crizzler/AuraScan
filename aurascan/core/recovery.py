@@ -16,25 +16,27 @@ from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, 
 from aurascan.core.ai_provider import call_ai_provider, parse_bool, resolve_ai_config
 from aurascan.core.compatibility import DistroInfo, distro_from_os_release, parse_os_release
 from aurascan.core.config import parse_env_lines
-from aurascan.core.incidents import (
+from aurascan.core.incident_models import (
+    CoredumpGroup,
     DiagnosticProbe,
     DiagnosticProbeResult,
-    CoredumpGroup,
-    INCIDENT_AI_EVIDENCE_ENV,
-    INCIDENT_AI_EVIDENCE_VALUES,
-    INCIDENT_MAX_LOCAL_EVIDENCE_CHARS,
     IncidentEvidence,
     IncidentFinding,
     IncidentReport,
+)
+from aurascan.core.incidents import (
+    INCIDENT_AI_EVIDENCE_ENV,
+    INCIDENT_AI_EVIDENCE_VALUES,
+    INCIDENT_MAX_LOCAL_EVIDENCE_CHARS,
     INCIDENT_RULES,
     bound_evidence,
     collect_coredumps,
     collect_pstore_evidence,
     deduplicate_evidence,
     deduplicate_findings,
-    redact_incident_text,
 )
 from aurascan.core.models import Confidence, SCANNER_VERSION, Severity
+from aurascan.core.redaction import redact_incident_text
 from aurascan.core.recovery_boot import BootloaderInfo, detect_bootloader
 from aurascan.core.recovery_network import RecoveryNetworkState
 from aurascan.core.text_safety import (

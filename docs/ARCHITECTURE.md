@@ -62,15 +62,15 @@ Two rules hold across every plane:
 Layers are assigned from repository structure by the audit tool. They describe
 dependency direction; they are not a package reorganisation.
 
-Current measurement: **83 modules, 71,708 physical lines.**
+Current measurement: **87 modules, 71,816 physical lines.**
 
 | Layer | Modules | Contents |
 | --- | ---: | --- |
-| `domain` | 3 | Evidence vocabulary — the leaf of the graph: `core/models.py`, `core/text_safety.py`, `core/update_policy.py` |
+| `domain` | 5 | Evidence and incident vocabulary: `core/models.py`, `core/text_safety.py`, `core/update_policy.py`, `core/redaction.py`, `core/incident_models.py` |
 | `risk` | 1 | Risk aggregation over captured evidence: `core/risk.py` |
 | `catalog` | 2 | Stable rule catalog and user-facing explanation templates: `core/rule_metadata.py`, `core/presenter.py` |
 | `analysis` | 19 | `analyzers/` — static PKGBUILD, install-hook, provenance, remote-stage, npm, editor-task and bytecode analysis |
-| `adapters` | 12 | Bounded platform boundaries: `core/trusted_tools.py`, `core/trusted_executable.py`, `core/archive.py`, `core/package_archive.py`, `core/source_acquisition.py`, `core/intelligence_transport.py`, `core/intelligence_crypto.py`, `core/cache.py`, `core/local_package_db.py`, `core/ai_provider.py`, `core/recovery_network.py`, `core/compatibility.py` |
+| `adapters` | 14 | Bounded platform boundaries: `core/trusted_tools.py`, `core/trusted_executable.py`, `core/archive.py`, `core/package_archive.py`, `core/source_acquisition.py`, `core/intelligence_transport.py`, `core/intelligence_crypto.py`, `core/cache.py`, `core/local_package_db.py`, `core/ai_provider.py`, `core/recovery_network.py`, `core/compatibility.py`, `core/state_file.py`, `core/bounded_process.py` |
 | `application` | 25 | Orchestration and policy: `core/engine.py`, upgrade preflight, incidents, follow-up, agent, config drift, security audit, recovery planners, instruction guard logic |
 | `recovery` | 3 | `core/recovery.py`, `core/recovery_boot.py`, `core/recovery_repairs.py` |
 | `presentation` | 16 | Entry points, trays and renderers: `cli.py`, `__main__.py`, `makepkg_wrapper.py`, `setup_wizard.py`, `core/updater_tray.py`, `core/intelligence_tray.py`, `core/instruction_cli.py`, `core/intelligence_cli.py`, `core/recovery_cli.py`, `core/incident_cli.py`, plus the six rendering modules `core/scan_report_presenter.py`, `core/config_drift_presenter.py`, `core/incident_presenter.py`, `core/recovery_presenter.py`, `core/security_audit_presenter.py`, `core/upgrade_preflight_presenter.py` |
@@ -82,9 +82,13 @@ domain   ←   risk     ←   application   ←   presentation
 domain   ←   catalog
 ```
 
-- `domain` is the leaf: it depends on the standard library only, and has no
-  intra-package imports at all today. It must not reach into risk, catalog,
-  analysis, adapters, application, recovery or presentation code (INV-013).
+- `domain` is the leaf layer: it depends on the standard library and on itself,
+  and must not reach into risk, catalog, analysis, adapters, application,
+  recovery or presentation code (INV-013). `core/incident_models.py` is the one
+  domain module with intra-package imports today (`core.models` and
+  `core.redaction`); `core/redaction.py`, `core/models.py`,
+  `core/text_safety.py` and `core/update_policy.py` import nothing from the
+  package.
 - `risk` aggregates captured evidence into a `RiskSummary`. It may use domain
   modules and itself, and nothing higher (INV-014).
 - `catalog` may use domain modules and itself (INV-012).
@@ -126,12 +130,21 @@ processes or opening sockets fails the test until this document is updated.
 
 | Capability | Modules | Notes |
 | --- | ---: | --- |
-| Process execution | 4 | `core/agent.py`, `core/local_package_db.py`, `core/package_archive.py`, `core/trusted_tools.py`. The last is the shared bounded runner; `core/trusted_executable.py` supplies the identity check it revalidates, but performs no execution itself. |
+| Process execution | 4 | `core/agent.py`, `core/local_package_db.py`, `core/package_archive.py`, `core/trusted_tools.py`. The last is the shared bounded runner; `core/trusted_executable.py` supplies the identity check it revalidates, but performs no execution itself. See the note below on injected runners. |
 | Network access | 6 | `core/ai_provider.py`, `core/intelligence_transport.py`, `core/recovery_boot.py`, `core/security_audit.py`, `core/source_acquisition.py`, `core/upgrade_preflight.py` |
 | Privilege-sensitive calls | 2 | `core/config.py`, `core/intelligence_cli.py` (ownership/UID lookups only, no privilege change) |
 | Archive extraction | 1 | `core/archive.py` (`SafeArchiveExtractor`, bounded by bytes and entries) |
 | SQLite state | 3 | `analyzers/history.py`, `core/cache.py`, `core/review.py` |
-| Filesystem writes | 26 | Widespread by design; each path is bounded and reviewed at its call site |
+| Filesystem writes | 27 | Widespread by design; each path is bounded and reviewed at its call site. Stage 6 added `core/state_file.py` as the reviewer-visible owner of the atomic state write those callers share. |
+
+**Capabilities trace call sites, not injected runners.** A module that receives
+its runner as a parameter (`runner: Callable = subprocess.run`) or calls a
+bounded helper such as `core/bounded_process.run_bounded_command` shows no
+`process` tag, because the audit resolves call sites and imports rather than
+data flow. The incident, repair, diagnostics, automation and setup paths execute
+commands that way, so their execution authority is real and *under-reported* by
+the table above. Treat the process count as a map of direct call sites, and read
+`core/bounded_process.py` plus its callers for the bounded-execution boundary.
 
 Notably, **no analyzer executes a process** (INV-001). Analyzers obtain native
 tool results through the trusted adapters, so the execution boundary stays in
@@ -171,7 +184,7 @@ known decision rather than a surprise.
 
 | Cycle | Modules | Assessment |
 | --- | --- | --- |
-| Recovery planner | `core.agent`, `core.config_drift`, `core.followup`, `core.incident_automation`, `core.incident_diagnostics`, `core.incident_repairs`, `core.incidents`, `core.upgrade_preflight` | Expected: these modules call each other's planners through function-local imports to avoid a heavier module-level graph. Candidate for a planner interface later. Stage 5 removed the incident-to-automation *dispatch* edges; the component is still eight members, so the remaining debt is planner-to-planner replication, not command-line glue. |
+| Recovery planner | `core.agent`, `core.config_drift`, `core.followup`, `core.incident_automation`, `core.incident_diagnostics`, `core.incident_repairs`, `core.incidents`, `core.upgrade_preflight` | Expected: these modules call each other's planners through function-local imports to avoid a heavier module-level graph. Candidate for a planner interface later. Stage 5 removed the incident-to-automation *dispatch* edges and Stage 6 removed the repair-to-workflow vocabulary and infrastructure edges; the component is still eight members, reachable through `incident_repairs -> upgrade_preflight -> followup -> incidents`. The remaining debt is planner-to-planner coupling around repository repair. |
 | Intelligence | `core.intelligence`, `core.intelligence_crypto`, `core.intelligence_store` | Expected: snapshot identity, verification and storage are one transaction. |
 | Install-hook / provenance | `analyzers.repository_provenance`, `core.install_hook`, `core.source_acquisition` | Expected: declared-source filtering needs the hook reader and the acquisition snapshot. |
 
@@ -228,19 +241,63 @@ Reported by the audit, never fatal:
 - modules with more than 5 concern tags.
 
 Current warnings: `core/instruction_guard.py` (8760 lines),
-`analyzers/repository_provenance.py` (4555), `core/incidents.py` (3825),
-`core/agent.py` (3741), `core/upgrade_preflight.py` (3044 lines, 6 concern tags),
-`core/followup.py` (2583), `core/source_acquisition.py` (2554),
-`setup_wizard.py` (2521).
+`analyzers/repository_provenance.py` (4555), `core/agent.py` (3741),
+`core/incidents.py` (3241), `core/upgrade_preflight.py` (3044 lines, 6 concern
+tags), `core/followup.py` (2585), `core/source_acquisition.py` (2554),
+`setup_wizard.py` (2521), `core/updater_tray.py` (6 concern tags).
 
 ## Decomposition log
 
-**Resolved in Stage 5:** the `incidents <-> incident_automation` half of the
-planner cycle that was pure command-line dispatch. The incident workflow no
-longer imports the automation subsystem to service its own CLI flags; a new
-presentation module (`core/incident_cli.py`) owns that dispatch. Eight of the
-nine edges disappeared; the component is still eight members, and the remaining
-edge is a real orchestration call in each direction of the pair.
+**Resolved in Stage 6:** the reverse half of `incidents <-> incident_repairs`. The
+repair planner no longer imports the incident workflow for vocabulary or
+infrastructure; the incident value types moved to the domain layer and three
+shared helpers moved to dedicated adapters. The planner component is still eight
+members, reachable now only through
+`incident_repairs -> upgrade_preflight -> followup -> incidents`.
+
+### Stage 6 — incident vocabulary and infrastructure left the workflow
+
+`incident_repairs` imported nine symbols from `incidents`: four value types
+(`IncidentReport`, `RepairAction`, `RepairResult`, plus `CommandOutput` and the
+boot-target predicate), four low-level helpers (`atomic_write_json`,
+`run_bounded_command`, `redact_incident_text`, `redact_structure`) and one path
+constant (`INCIDENT_REPAIR_ROOT`). Tracing every consumer showed the ownership,
+not just the direction, was wrong: the helpers were used by `updater_tray`,
+`setup_wizard`, `recovery`, `recovery_repairs`, `incident_diagnostics` and
+`incident_automation` as well, so the workflow was an accidental utility module.
+
+| Symbol group | New owner | Responsibility sentence |
+| --- | --- | --- |
+| `IncidentReport`, `IncidentEvidence`, `IncidentFinding`, `CoredumpGroup`, `DiagnosticProbe`, `DiagnosticProbeResult`, `RepairAction`, `RepairResult`, `repair_action_covers_finding`, `valid_boot_target`, the incident state paths, schema/report IDs, severity/confidence order | `core/incident_models.py` (domain) | The incident domain's declarative surface: report value types and the state layout they live under |
+| `redact_incident_text`, `redact_structure`, `correlation_token`, the redaction patterns | `core/redaction.py` (domain) | Privacy redaction: replace host-identifying and secret-bearing text with stable tokens |
+| `atomic_write_json` | `core/state_file.py` (adapter) | Atomic writes of private state files with an explicit permission mode |
+| `run_bounded_command`, `CommandOutput` | `core/bounded_process.py` (adapter) | Bounded subprocess capture for already-authorized commands |
+
+- **Implemented verbatim:** all 38 moved definitions are AST-identical to the
+  code they replace, including the timeout retry, the 127 error path, the
+  `mkstemp`/`chmod`/`replace` sequence and every redaction pattern. No
+  security-sensitive helper was rewritten while moving.
+- **Direction enforced by layer, not by filename:** both vocabulary modules were
+  added to the domain layer, so INV-013 now rejects a value or text module that
+  imports the workflow, and INV-010 rejects one that gains a side effect. The two
+  helper modules were classified as adapters, which is what makes their
+  `fs_write`/process authority visible in the capability table.
+- **Deliberately left alone:** the workflow still owns the persistence functions
+  (`persist_incident_report`, `load_incident_report`, `list_incident_reports`),
+  the configuration/env vocabulary, `MaintenanceCheckpoint` (it depends on the
+  general `safe_int` helper) and `sanitize_error`. Moving them would have been a
+  storage-layer redesign, not a dependency fix.
+- **Duplication recorded, not merged:** `followup.redact_followup_text`,
+  `recovery_boot.atomic_write`, `recovery_repairs._atomic_json`,
+  `followup.atomic_write_private_json` and `config_drift.redact_text` remain
+  separate implementations of the two concerns above. Stage 6 did not touch them
+  (the non-goals exclude `followup` and the recovery subsystem);
+  `core/redaction.py` and `core/state_file.py` are now the natural homes when
+  those modules are next changed.
+- **Capability visibility:** `fs_write` ownership grew from 26 to 27 modules
+  because `core/state_file.py` became visible as the atomic-write owner. Process
+  execution stayed at 4: the incident family executes through an injected runner,
+  which the audit cannot see — documented above rather than papered over.
 
 ### Stage 5 — automation control flags left the incident workflow
 
@@ -461,32 +518,62 @@ Extracted `core/trusted_executable.py`: `TrustedExecutable`,
 | `core/incidents.py` (3825) | Stage 5 removed its CLI dispatch and its automation edges, so what is left is the interactive workflow. Its cycle with `followup`, `incident_repairs` and `incident_diagnostics` must be designed before another member moves. |
 | `core/agent.py` (3741) | Command allowlisting, consent and execution are one security boundary; separating them without a policy/adapter interface risks weakening the fail-closed path. |
 
+#### Planning and execution inside the repair module
+
+`core/incident_repairs.py` holds both halves of the repair subsystem. Stage 6
+classified every public function rather than splitting the file, because the
+split was not what caused the cycle.
+
+| Role | Functions |
+| --- | --- |
+| Planning | `plan_repair_actions` and the nine `plan_*` recipes (`plan_repository_restore`, `plan_stale_lock`, `plan_package_cache_cleanup`, `plan_kernel_headers`, `plan_dkms_autoinstall`, `plan_initramfs_rebuild`, `plan_service_restart`, `plan_exact_package_reinstall`), plus `make_action` and `repair_action_id` |
+| Eligibility / policy | `is_background_safe_action`, `safe_background_repository_file`, `is_transient_application_unit`, `is_critical_unit`, `repair_action_covers_finding` (now in `incident_models`) |
+| Authorization | The `geteuid()` gate in the autopilot entry point, `trusted_repair_commands`, and `execute_repair_request`'s request-file validation — plus `incidents`' root check and `incident_cli`'s dispatch checks |
+| Execution | `apply_repair_plan`, `execute_repair_request`, `execute_one_repair`, `execute_background_safe_actions` and the ten `execute_*` recipes, `rollback_repository_repair` |
+| Serialization | `repair_manifest_entry`, `backup_checksums`, `parse_repair_response`, `command_output_excerpt`, `refused`/`failed`/`applied` |
+| Infrastructure | `sha256_file`, `path_size`, `make_run_id`, the pacman/version query helpers, `command_lines`, `command_text`, `journal_has_pattern` |
+
+Assessment: the mixture is a readability and review-size cost, not an authority
+problem. Authorization is checked at the entry points, eligibility is decided in
+planning, and execution only ever runs actions that planning produced. The cycle
+that keeps `incidents` and `incident_repairs` mutually reachable does not pass
+through this internal split. Splitting the file is therefore **not** recommended
+as the next seam.
+
 ## Next targets
 
 1. The eight-member planner component (`agent`, `config_drift`, `followup`,
    `incidents`, `incident_*`, `upgrade_preflight`): give it a narrow interface so
    the cycle can be reviewed as a group rather than as eight mutual imports.
-   Stage 5 explored the lowest-risk seam in that component — command-line
-   dispatch — and confirmed the component survives without it, so the remaining
-   debt is genuine planner-to-planner coupling. The best next seam is the four
-   misplaced general utilities that `incident_repairs` imports from `incidents`
-   (`atomic_write_json`, `run_bounded_command`, `redact_incident_text`,
-   `IncidentReport`): they belong in a shared utility module, not in the incident
-   workflow.
-2. **Partially done in Stage 5:** one of the four subsystem CLI runners
-   (`incidents`) moved to `core/incident_cli.py`. `config_drift`,
+   Stage 6 removed the vocabulary and infrastructure half of the
+   `incidents <-> incident_repairs` pair, so the remaining reachability runs
+   through `incident_repairs -> upgrade_preflight -> followup -> incidents`.
+   `upgrade_preflight` is therefore the next cycle edge worth separating: its
+   mirror/repository repair capability is what pulls two planners into the loop.
+   The planner/executor split inside `incident_repairs` is *not* recommended yet
+   — see the classification above; it does not create the cycle.
+2. **Partially done:** Stages 5 and 6 moved the `incidents` CLI runner and the
+   shared helper ownership out of subsystem modules. `config_drift`,
    `security_audit` and `upgrade_preflight` still reach their presenter from
    inside their own CLI entry points. That edge is one-way and cycle-free, but
    it means CLI printing still lives in subsystem modules.
 3. `core/upgrade_preflight.py` (3044 lines, 6 concern tags — the top hotspot):
    split mirror/repository repair (I/O plus privileged commands) from output
-   parsing (pure functions).
-4. Move the security-audit recommended-action decision out of the presenter and
+   parsing (pure functions). This is also the edge that keeps the planner cycle
+   closed (`incident_repairs -> upgrade_preflight -> followup -> incidents`), so
+   it is now both the largest hotspot and the highest-value next seam.
+4. Five duplicate implementations of the two concerns Stage 6 extracted:
+   `followup.redact_followup_text`/`redact_followup_structure`/`correlation_token`,
+   `config_drift.redact_text`, `recovery_boot.atomic_write`,
+   `recovery_repairs._atomic_json` and `followup.atomic_write_private_json`.
+   They should converge on `core/redaction.py` and `core/state_file.py` when
+   those modules are next changed.
+5. Move the security-audit recommended-action decision out of the presenter and
    onto the report as a decided field.
-5. Dead helpers found in earlier stages:
+6. Dead helpers found in earlier stages:
    `AnalysisResult.get_highest_severity()`, `AnalysisResult.blocks_installation()`
    and `findings_from_results()` still have no callers.
-6. Characterise Instruction Guard state transitions, then decompose by
+7. Characterise Instruction Guard state transitions, then decompose by
    responsibility.
 
 ## Related documents

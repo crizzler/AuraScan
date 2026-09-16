@@ -1797,9 +1797,11 @@ def build_incident_runtime(
         merge_repair_actions,
     )
     from aurascan.core.incident_repairs import apply_repair_plan, plan_repair_actions
-    from aurascan.core.incidents import (
+    from aurascan.core.incident_models import (
         INCIDENT_REPAIR_ROOT,
         INCIDENT_SYSTEM_ROOT,
+    )
+    from aurascan.core.incidents import (
         build_incident_report,
         current_user_uid,
         incident_reviewed_state_path,

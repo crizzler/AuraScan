@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from aurascan.core.models import Severity
-from aurascan.core.incidents import CoredumpGroup, IncidentEvidence
+from aurascan.core.incident_models import CoredumpGroup, IncidentEvidence
 from aurascan.core.recovery_presenter import render_recovery
 from aurascan.core.recovery import (
     RECOVERY_AI_ENABLED_ENV,

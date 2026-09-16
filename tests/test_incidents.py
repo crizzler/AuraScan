@@ -8,6 +8,16 @@ from pathlib import Path
 
 import pytest
 
+from aurascan.core.incident_models import (
+    CoredumpGroup,
+    DiagnosticProbe,
+    DiagnosticProbeResult,
+    IncidentEvidence,
+    IncidentFinding,
+    IncidentReport,
+    RepairAction,
+    RepairResult,
+)
 from aurascan.core.incidents import (
     INCIDENT_AI_ENABLED_ENV,
     INCIDENT_AI_EVIDENCE_ENV,
@@ -16,15 +26,7 @@ from aurascan.core.incidents import (
     INCIDENT_MAINTENANCE_SERVICE,
     INCIDENT_MAINTENANCE_TIMER,
     INCIDENT_MONITOR_ENABLED_ENV,
-    CoredumpGroup,
-    DiagnosticProbe,
-    DiagnosticProbeResult,
-    IncidentEvidence,
-    IncidentFinding,
-    IncidentReport,
     MaintenanceCheckpoint,
-    RepairAction,
-    RepairResult,
     analyze_journal_records,
     apply_ai_incident_review,
     build_incident_ai_prompt,
@@ -44,7 +46,6 @@ from aurascan.core.incidents import (
     mark_pending_markers_seen,
     pending_markers,
     persist_incident_report,
-    redact_incident_text,
     resolve_incident_config,
     run_incidents,
     set_incident_monitor_enabled,
@@ -52,6 +53,7 @@ from aurascan.core.incidents import (
     validate_incident_ai_response,
     write_pending_markers,
 )
+from aurascan.core.redaction import redact_incident_text
 from aurascan.core.incident_cli import run_incident_command
 from aurascan.core.incident_presenter import render_incident
 from aurascan.core.models import Confidence, Severity

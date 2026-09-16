@@ -70,6 +70,26 @@ Architecture stabilization stage 4 (no behavior change):
   subsystem engines also use, with equality assertions so the wording cannot
   drift.
 
+Architecture stabilization stage 6 (no behavior change):
+
+- Moved the incident value types out of the incident workflow into a new domain
+  module, `core/incident_models.py`: the report, evidence, finding, coredump,
+  diagnostic and repair value types, the incident state paths, the schema and
+  report identifiers, and the boot-target predicate. Repairs, diagnostics,
+  automation, the presenter and recovery now import their data types from the
+  vocabulary module instead of the workflow.
+- Moved the shared helpers into dedicated owners: privacy redaction into
+  `core/redaction.py` (domain) and both the atomic private-state write and the
+  bounded command capture into adapters `core/state_file.py` and
+  `core/bounded_process.py`.
+- `core/incident_repairs.py` no longer imports the incident workflow at all. The
+  extracted code is byte-for-byte the same logic, including the timeout retry,
+  the 127 error path and every redaction pattern.
+- The planner component is still eight modules: the remaining route between the
+  repair planner and the workflow is now
+  `incident_repairs -> upgrade_preflight -> followup -> incidents`, which names
+  the next seam.
+
 Architecture stabilization stage 5 (no behavior change):
 
 - Moved incident command-line dispatch out of the incident workflow. The nine

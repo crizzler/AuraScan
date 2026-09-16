@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from aurascan.core.incidents import redact_incident_text
+from aurascan.core.redaction import redact_incident_text
 from aurascan.core.recovery import (
     CRITICAL_UNIT_PREFIXES,
     RECOVERY_STATE_ROOT,

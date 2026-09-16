@@ -95,7 +95,7 @@ def test_presentation_entry_points_keep_their_documented_defaults():
 def test_depth_adapters_still_render_their_reports():
     """The extracted presenters must be reachable, not just importable."""
 
-    from aurascan.core.incidents import IncidentReport
+    from aurascan.core.incident_models import IncidentReport
     from aurascan.core.recovery import RecoveryReport
 
     assert callable(IncidentReport.from_dict)

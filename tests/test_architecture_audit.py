@@ -624,3 +624,68 @@ def test_incident_cli_owns_automation_dispatch_not_the_incident_workflow():
     # The workflow keeps one genuine orchestration call into automation, but it
     # must not import the CLI layer or the privileged helper client.
     assert "aurascan.core.incident_cli" not in workflow.internal_imports
+
+
+def test_domain_vocabulary_declaring_a_side_effect_capability_is_reported(tmp_path):
+    """Stage 6 regression for the new domain modules.
+
+    ``incident_models`` and ``redaction`` were moved into the domain layer, so
+    INV-010 now applies to them: a value or text module that starts executing
+    processes, opening sockets or writing files is a violation.
+    """
+
+    package_root = tmp_path / "vocabpkg"
+    write_module(package_root, "__init__.py", "")
+    write_module(package_root, "core/__init__.py", "")
+    write_module(
+        package_root,
+        "core/incident_models.py",
+        "import subprocess\n\n\ndef helper():\n    return subprocess.run(['true'])\n",
+    )
+
+    result = run_tool(package_root, "vocabpkg")
+    by_id = {violation.invariant_id: violation for violation in result.violations}
+
+    assert "INV-010" in by_id
+    assert by_id["INV-010"].module == "vocabpkg/core/incident_models.py"
+
+
+def test_incident_vocabulary_and_redaction_are_domain_modules():
+    """Stage 6 ownership: the moved vocabulary sits below every consumer."""
+
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    module = {info.name: info for info in result.modules}
+
+    for name in ("aurascan.core.incident_models", "aurascan.core.redaction"):
+        info = module[name]
+        assert info.layer == "domain", name
+        # A domain module may only depend on other domain modules (INV-013).
+        for imported in info.internal_imports:
+            assert imported in {
+                "aurascan.core.models",
+                "aurascan.core.redaction",
+                "aurascan.core.text_safety",
+                "aurascan.core.update_policy",
+            }, (name, imported)
+
+    assert module["aurascan.core.incident_models"].internal_imports == [
+        "aurascan.core.models",
+        "aurascan.core.redaction",
+    ]
+    assert module["aurascan.core.redaction"].internal_imports == []
+
+
+def test_state_and_bounded_process_helpers_are_adapters():
+    """Stage 6 ownership: the side-effecting helpers are visible adapters."""
+
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    module = {info.name: info for info in result.modules}
+
+    state_file = module["aurascan.core.state_file"]
+    bounded_process = module["aurascan.core.bounded_process"]
+
+    assert state_file.layer == "adapters"
+    assert bounded_process.layer == "adapters"
+    assert "fs_write" in state_file.capabilities
+    assert state_file.internal_imports == []
+    assert bounded_process.internal_imports == []

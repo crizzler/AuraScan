@@ -11,19 +11,18 @@ import time
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from aurascan.core.incidents import (
+from aurascan.core.bounded_process import run_bounded_command
+from aurascan.core.incident_models import (
     INCIDENT_REPAIR_ROOT,
     IncidentReport,
     RepairAction,
     RepairResult,
-    atomic_write_json,
-    redact_incident_text,
-    redact_structure,
-    run_bounded_command,
     valid_boot_target,
 )
 from aurascan.core.kernel_module_autopilot import is_kernel_base_package
 from aurascan.core.models import Severity
+from aurascan.core.redaction import redact_incident_text, redact_structure
+from aurascan.core.state_file import atomic_write_json
 from aurascan.core.upgrade_preflight import (
     apply_repository_health_repairs,
     build_repository_health_check,

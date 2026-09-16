@@ -41,9 +41,8 @@ from aurascan.core.followup import (
     validate_followup_ai_response,
 )
 from aurascan.core.hardware_health import HARDWARE_HEALTH_PROBE_ID
+from aurascan.core.incident_models import IncidentEvidence, IncidentReport
 from aurascan.core.incidents import (
-    IncidentEvidence,
-    IncidentReport,
     persist_incident_report,
     run_incidents,
 )

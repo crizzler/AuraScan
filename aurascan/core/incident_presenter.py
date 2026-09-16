@@ -12,7 +12,7 @@ from aurascan.core.models import Severity
 from aurascan.core.text_safety import advisory_text_or_fallback
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, never executed
-    from aurascan.core.incidents import IncidentReport
+    from aurascan.core.incident_models import IncidentReport
 
 # Severity ordering for display sorting. This mirrors the ordering used by the
 # other severity-aware modules (presenter.py and risk.py each keep a private

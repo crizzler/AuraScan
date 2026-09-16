@@ -11,16 +11,14 @@ from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
 from aurascan.core.ai_provider import resolve_ai_config
+from aurascan.core.bounded_process import run_bounded_command
 from aurascan.core.config import write_user_env
+from aurascan.core.incident_models import INCIDENT_SYSTEM_ROOT, IncidentReport
 from aurascan.core.incidents import (
     EXIT_INCIDENT_CONFIG_ERROR,
     EXIT_INCIDENT_REPAIR_FAILED,
     INCIDENT_BACKGROUND_AI_ENV,
-    INCIDENT_SYSTEM_ROOT,
-    IncidentReport,
-    Severity,
     apply_ai_incident_review,
-    atomic_write_json,
     build_incident_report,
     current_user_uid,
     highest_priority_pending_marker,
@@ -31,11 +29,12 @@ from aurascan.core.incidents import (
     persist_incident_report,
     persist_system_incident_report,
     resolve_incident_config,
-    run_bounded_command,
     unseen_pending_markers,
     update_pending_marker_repair_state,
     user_incident_root,
 )
+from aurascan.core.models import Severity
+from aurascan.core.state_file import atomic_write_json
 
 
 INCIDENT_AUTO_REPAIR_ENV = "AURASCAN_INCIDENT_AUTO_REPAIR"

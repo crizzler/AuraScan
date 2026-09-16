@@ -1123,7 +1123,7 @@ def collect_incident_system_facts(
     from aurascan.core.hardware_health import collect_static_hardware_facts
     from aurascan.core.kernel_module_autopilot import build_kernel_module_check
     from aurascan.core.repository_state import build_repository_health_check
-    from aurascan.core.upgrade_preflight import SystemSnapshot, UpgradePlan
+    from aurascan.core.upgrade_models import SystemSnapshot, UpgradePlan
 
     facts: Dict[str, object] = {
         "tools": {

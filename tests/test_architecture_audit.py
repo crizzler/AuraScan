@@ -828,8 +828,8 @@ def test_upgrade_refresh_is_owned_by_the_upgrade_lifecycle():
     assert "run_agent(raw_argv[1:], refresh_upgrade_report=refresh_upgrade_preflight)" in cli_source
 
 
-def test_upgrade_preflight_and_followup_are_only_mutually_reachable_through_incidents():
-    """Stage 8 topology: the direct reciprocal edge is gone."""
+def test_upgrade_preflight_and_followup_direction_is_one_way():
+    """Stage 8 topology: the lifecycle runs upgrade -> follow-up only."""
 
     result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
     module = {info.name: info for info in result.modules}
@@ -837,7 +837,73 @@ def test_upgrade_preflight_and_followup_are_only_mutually_reachable_through_inci
     followup = module["aurascan.core.followup"]
     assert "aurascan.core.upgrade_preflight" not in followup.internal_imports
     assert "aurascan.core.followup" in module["aurascan.core.upgrade_preflight"].internal_imports
-    # The remaining route runs through the incident workflow, which is the next
-    # seam; it must stay explicit rather than silently reintroduced.
-    assert "aurascan.core.incidents" in followup.internal_imports
-    assert "aurascan.core.upgrade_preflight" in module["aurascan.core.incidents"].internal_imports
+
+
+def test_incident_collection_does_not_import_the_upgrade_workflow():
+    """Stage 9 regression: incident reasoning owns no upgrade-workflow edge."""
+
+    source = (ROOT / "aurascan" / "core" / "incidents.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    imported = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    imported |= {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+
+    assert "aurascan.core.upgrade_preflight" not in imported
+    assert not any(name.startswith("aurascan.core.upgrade_preflight.") for name in imported)
+
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    module = {info.name: info for info in result.modules}
+    assert "aurascan.core.upgrade_preflight" not in module["aurascan.core.incidents"].internal_imports
+
+
+def test_upgrade_value_types_are_inert_domain_values():
+    """The shared upgrade values are a leaf: no imports, no capabilities."""
+
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    module = {info.name: info for info in result.modules}
+
+    models = module["aurascan.core.upgrade_models"]
+    assert models.layer == "domain"
+    assert models.internal_imports == []
+    for category in ("process", "network", "fs_write", "privilege", "sqlite"):
+        assert category not in models.capabilities, category
+
+    # Both consumers depend downward on the same values.
+    assert "aurascan.core.upgrade_models" in module["aurascan.core.upgrade_preflight"].internal_imports
+    assert "aurascan.core.upgrade_models" in module["aurascan.core.incidents"].internal_imports
+
+
+def test_snapshot_collection_stays_with_the_workflow():
+    """Reading the machine is not inert: only the value is shared."""
+
+    models_source = (ROOT / "aurascan" / "core" / "upgrade_models.py").read_text(encoding="utf-8")
+    workflow_source = (ROOT / "aurascan" / "core" / "upgrade_preflight.py").read_text(encoding="utf-8")
+
+    assert "def collect" not in models_source
+    assert "subprocess" not in models_source
+    assert "def collect_system_snapshot(" in workflow_source
+    assert "SystemSnapshot.collect(" not in workflow_source
+
+
+def test_upgrade_preflight_left_the_planner_component():
+    """Stage 9 topology: the upgrade workflow is no longer in a cycle."""
+
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    cycles = {module for component in result.cycles for module in component}
+
+    assert "aurascan.core.upgrade_preflight" not in cycles
+    assert "aurascan.core.upgrade_models" not in cycles
+    # The remaining component is the incident/agent/follow-up planner group.
+    planner = next(component for component in result.cycles if "aurascan.core.followup" in component)
+    assert len(planner) == 6
+    assert "aurascan.core.incidents" in planner
+    assert "aurascan.core.upgrade_preflight" not in planner

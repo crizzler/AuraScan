@@ -62,11 +62,11 @@ Two rules hold across every plane:
 Layers are assigned from repository structure by the audit tool. They describe
 dependency direction; they are not a package reorganisation.
 
-Current measurement: **89 modules, 71,925 physical lines.**
+Current measurement: **90 modules, 71,978 physical lines.**
 
 | Layer | Modules | Contents |
 | --- | ---: | --- |
-| `domain` | 5 | Evidence and incident vocabulary: `core/models.py`, `core/text_safety.py`, `core/update_policy.py`, `core/redaction.py`, `core/incident_models.py` |
+| `domain` | 6 | Evidence and upgrade vocabulary: `core/models.py`, `core/text_safety.py`, `core/update_policy.py`, `core/redaction.py`, `core/incident_models.py`, `core/upgrade_models.py` |
 | `risk` | 1 | Risk aggregation over captured evidence: `core/risk.py` |
 | `catalog` | 2 | Stable rule catalog and user-facing explanation templates: `core/rule_metadata.py`, `core/presenter.py` |
 | `analysis` | 19 | `analyzers/` — static PKGBUILD, install-hook, provenance, remote-stage, npm, editor-task and bytecode analysis |
@@ -87,8 +87,8 @@ domain   ←   catalog
   recovery or presentation code (INV-013). `core/incident_models.py` is the one
   domain module with intra-package imports today (`core.models` and
   `core.redaction`); `core/redaction.py`, `core/models.py`,
-  `core/text_safety.py` and `core/update_policy.py` import nothing from the
-  package.
+  `core/text_safety.py`, `core/update_policy.py` and `core/upgrade_models.py`
+  import nothing from the package.
 - `risk` aggregates captured evidence into a `RiskSummary`. It may use domain
   modules and itself, and nothing higher (INV-014).
 - `catalog` may use domain modules and itself (INV-012).
@@ -184,12 +184,13 @@ known decision rather than a surprise.
 
 | Cycle | Modules | Assessment |
 | --- | --- | --- |
-| Recovery planner | `core.agent`, `core.config_drift`, `core.followup`, `core.incident_automation`, `core.incident_diagnostics`, `core.incidents`, `core.upgrade_preflight` | Seven members. Stages 5–7 removed the dispatch, shared-vocabulary and repository-interpretation edges; Stage 8 removed the direct `followup -> upgrade_preflight` refresh import, so the two are now mutually reachable only through `followup -> incidents -> upgrade_preflight`. The remaining coupling is workflow orchestration plus the value-type/analyzer borrow that `incidents` takes from the upgrade workflow. |
+| Engine and planners | `core.agent`, `core.config_drift`, `core.followup`, `core.incident_automation`, `core.incident_diagnostics`, `core.incidents` | Six members. Stages 5–8 removed the dispatch, shared-vocabulary, repository-interpretation and follow-up-refresh edges; Stage 9 moved the upgrade values those planners shared into the domain layer, so `upgrade_preflight` left the component. The remaining coupling is orchestration between the incident, follow-up, agent and config-drift workflows. |
 | Intelligence | `core.intelligence`, `core.intelligence_crypto`, `core.intelligence_store` | Expected: snapshot identity, verification and storage are one transaction. |
 | Install-hook / provenance | `analyzers.repository_provenance`, `core.install_hook`, `core.source_acquisition` | Expected: declared-source filtering needs the hook reader and the acquisition snapshot. |
 
-No cycle contains the evidence model, and the domain layer is now a leaf with no
-intra-package imports at all.
+No cycle contains the evidence model, and the domain layer only ever depends on
+itself: five of its six modules import nothing from the package at all, and
+`core/incident_models.py` uses only `core.models` and `core.redaction`.
 
 **Resolved in Stage 2:** the four-module `{core.models, core.presenter, core.risk,
 core.rule_metadata}` component. The evidence model used to import the terminal
@@ -243,18 +244,50 @@ Reported by the audit, never fatal:
 
 Current warnings: `core/instruction_guard.py` (8760 lines),
 `analyzers/repository_provenance.py` (4555), `core/agent.py` (3743),
-`core/incidents.py` (3241), `core/upgrade_preflight.py` (2725 lines, 6 concern
+`core/incidents.py` (3241), `core/upgrade_preflight.py` (2603 lines, 6 concern
 tags), `core/followup.py` (2604), `core/source_acquisition.py` (2554),
 `setup_wizard.py` (2521), `core/updater_tray.py` (6 concern tags).
 
 ## Decomposition log
 
-**Resolved in Stage 8:** the direct reciprocal dependency between the upgrade
-workflow and the follow-up framework. `followup` no longer imports
-`upgrade_preflight`; the upgrade lifecycle supplies its own refresh operation and
-the presentation layer hands it to the follow-up entry points. The planner
-component is still seven members, but the upgrade/follow-up lifecycle is now
-directional: `upgrade_preflight -> followup`, never the reverse.
+**Resolved in Stage 9:** the last non-presentation inbound edge of the upgrade
+workflow. Incident collection borrowed the upgrade *value types* to feed the
+kernel-module check, so `incidents` imported `upgrade_preflight`. Extracting those
+inert values into the domain layer let `upgrade_preflight` leave the planner
+component: the SCC dropped from seven members to six.
+
+### Stage 9 — the inert upgrade values became a domain module
+
+`incidents` imported exactly two symbols from `upgrade_preflight`:
+`SystemSnapshot` and `UpgradePlan`. The flow is not upgrade analysis at all: the
+incident workflow builds a snapshot from its own bounded collection and passes it,
+with an empty plan, to `kernel_module_autopilot.build_kernel_module_check(...)`,
+whose findings become `INC-DKMS` evidence. No upgrade policy, severity decision,
+network call or process capability travelled with those types.
+
+| Symbol | Old owner | New owner | Responsibility |
+| --- | --- | --- | --- |
+| `UpgradePackage` | `upgrade_preflight` | `core/upgrade_models.py` (domain) | one planned package change |
+| `ForeignPackageInfo` | `upgrade_preflight` | `core/upgrade_models.py` (domain) | captured foreign-package metadata |
+| `UpgradePlan` | `upgrade_preflight` | `core/upgrade_models.py` (domain) | planned transaction state (`available`, `package_names`, `to_dict`) |
+| `SystemSnapshot` | `upgrade_preflight` | `core/upgrade_models.py` (domain) | observed system state |
+| `SystemSnapshot.collect` | classmethod on the value | `upgrade_preflight.collect_system_snapshot` | observing the machine needs process execution and the trusted pacman identity, so it stayed in the workflow |
+
+- **Inertness verified before moving:** field defaults, empty and populated
+  `to_dict` projections, `available`, `package_names` and the trusted-executable
+  projection are identical to the pre-Stage-9 definitions. `UpgradePlan` still
+  carries captured executable identities, but only as a `TYPE_CHECKING`
+  annotation: the module runs nothing, and it imports nothing at runtime.
+- **Not moved:** `UpgradeFinding`, `UpgradeOptions`, `UpgradeConfig` and
+  `UpgradeFailureDiagnosis`. They are produced by preflight analysis and policy
+  (severity, blocking, recommendation), so they belong with the code that decides
+  them, not with the inputs those decisions consume.
+- **No AI involvement:** the borrowed values never touch the advisory path; the
+  AI advisory block stays in `upgrade_preflight` as Stage 8 left it.
+- **Topology:** `upgrade_preflight` left the planner component, which is now six
+  members (`agent`, `config_drift`, `followup`, `incident_automation`,
+  `incident_diagnostics`, `incidents`). Its remaining inbound edges are
+  presentation only (`cli.py`, `setup_wizard.py`).
 
 ### Stage 8 — the upgrade lifecycle supplies its own follow-up refresh
 
@@ -614,14 +647,15 @@ as the next seam.
 
 ## Next targets
 
-1. The seven-member planner component (`agent`, `config_drift`, `followup`,
-   `incidents`, `incident_*`, `upgrade_preflight`): give it a narrow interface so
-   the cycle can be reviewed as a group rather than as seven mutual imports.
-   Stages 5–8 removed the dispatch, shared-vocabulary, repository-interpretation
-   and follow-up-refresh edges. The one non-presentation incoming edge of
-   `upgrade_preflight` left is the borrow that `incidents` takes
-   (`SystemSnapshot`, `UpgradePlan` and the upgrade risk analyzer for incident
-   findings); extracting that lower is the next cycle seam.
+1. The six-member planner component (`agent`, `config_drift`, `followup`,
+   `incidents`, `incident_automation`, `incident_diagnostics`): give it a
+   narrow interface so the cycle can be reviewed as a group rather than as six
+   mutual imports. Stages 5–9 removed the dispatch, shared-vocabulary,
+   repository-interpretation, follow-up-refresh and upgrade-value edges, and
+   `upgrade_preflight` has left the component. The remaining coupling is
+   orchestration among the incident, follow-up, agent and config-drift
+   workflows: the incident workflow offers follow-up sessions, follow-up builds
+   incident runtimes, and the agent drives both.
 2. **Partially done:** Stages 5 and 6 moved the `incidents` CLI runner and the
    shared helper ownership out of subsystem modules. `config_drift`,
    `security_audit` and `upgrade_preflight` still reach their presenter from

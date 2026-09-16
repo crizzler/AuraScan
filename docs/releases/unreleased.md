@@ -70,6 +70,23 @@ Architecture stabilization stage 4 (no behavior change):
   subsystem engines also use, with equality assertions so the wording cannot
   drift.
 
+Architecture stabilization stage 9 (no behavior change):
+
+- Extracted the inert upgrade values into a new domain module,
+  `core/upgrade_models.py`: `UpgradePackage`, `ForeignPackageInfo`,
+  `UpgradePlan` and `SystemSnapshot` (fields, `to_dict` projections and the
+  `available`/`package_names` helpers). The module imports nothing at runtime
+  and performs no I/O.
+- Collecting a snapshot reads the machine, so it stayed in the workflow as
+  `upgrade_preflight.collect_system_snapshot`; only the value is shared.
+- Incident collection now builds its snapshot and kernel-module check input
+  from the shared values, so `core/incidents.py` no longer imports
+  `core.upgrade_preflight` at all.
+- `core/upgrade_preflight.py` left the planner component: the strongly
+  connected component dropped from seven members to six. `UpgradeFinding`,
+  `UpgradeOptions`, `UpgradeConfig` and `UpgradeFailureDiagnosis` stayed with
+  the workflow that decides them.
+
 Architecture stabilization stage 8 (no behavior change):
 
 - The upgrade lifecycle now owns its own follow-up refresh operation:

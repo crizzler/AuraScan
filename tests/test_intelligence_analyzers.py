@@ -16,9 +16,8 @@ from aurascan.core.security_audit_presenter import render_security_audit
 from aurascan.core.security_audit import (
     SecurityAuditReport, audit_vendor_emergency_exposure, build_security_audit,
 )
-from aurascan.core.upgrade_preflight import (
-    UpgradePackage, UpgradePlan, security_audit_upgrade_findings,
-)
+from aurascan.core.upgrade_models import UpgradePackage, UpgradePlan
+from aurascan.core.upgrade_preflight import security_audit_upgrade_findings
 from tests.helpers.intelligence_fixtures import bundled_payload
 
 

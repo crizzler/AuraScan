@@ -73,6 +73,7 @@ DOMAIN_SUFFIXES = (
     "core.update_policy",
     "core.redaction",
     "core.incident_models",
+    "core.upgrade_models",
 )
 
 # Risk computation: pure aggregation over the evidence vocabulary. It sits above
@@ -1118,7 +1119,7 @@ def assign_layer(module_name: str, relative_path: str) -> str:
     if relative_path.startswith("core/"):
         stem = relative_path.split("/")[-1]
         name = stem[:-3] if stem.endswith(".py") else stem
-        if name in ("models", "text_safety", "update_policy", "redaction", "incident_models"):
+        if name in ("models", "text_safety", "update_policy", "redaction", "incident_models", "upgrade_models"):
             return "domain"
         if name == "risk":
             return "risk"

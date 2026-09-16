@@ -48,11 +48,10 @@ from aurascan.core.incidents import (
     run_incidents,
 )
 from aurascan.core.models import Severity
+from aurascan.core.upgrade_models import SystemSnapshot, UpgradePlan
 from aurascan.core.upgrade_preflight import (
     PACMAN_PRINT_FORMAT,
-    SystemSnapshot,
     TrustedExecutable,
-    UpgradePlan,
     UpgradePreflightReport,
     run_upgrade,
 )

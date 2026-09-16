@@ -162,94 +162,12 @@ def _trusted_upgrade_query_runner(plan: "UpgradePlan", runner: Callable) -> Call
     return trusted_runner
 
 
-@dataclass
-class UpgradePackage:
-    name: str
-    new_version: str = ""
-    old_version: str = ""
-    repo: str = ""
-    package_type: str = "repo"
-    size: str = ""
-    depends: List[str] = field(default_factory=list)
-    conflicts: List[str] = field(default_factory=list)
-    replaces: List[str] = field(default_factory=list)
-
-    def to_dict(self) -> Dict[str, object]:
-        return {
-            "name": self.name,
-            "old_version": self.old_version,
-            "new_version": self.new_version,
-            "repo": self.repo,
-            "package_type": self.package_type,
-            "size": self.size,
-            "depends": list(self.depends),
-            "conflicts": list(self.conflicts),
-            "replaces": list(self.replaces),
-        }
-
-
-@dataclass
-class ForeignPackageInfo:
-    name: str
-    version: str = ""
-    depends: List[str] = field(default_factory=list)
-    provides: List[str] = field(default_factory=list)
-    conflicts: List[str] = field(default_factory=list)
-    missing_depends: List[str] = field(default_factory=list)
-    install_script: bool = False
-
-    def to_dict(self) -> Dict[str, object]:
-        return {
-            "name": self.name,
-            "version": self.version,
-            "depends": list(self.depends),
-            "provides": list(self.provides),
-            "conflicts": list(self.conflicts),
-            "missing_depends": list(self.missing_depends),
-            "install_script": self.install_script,
-        }
-
-
-@dataclass
-class UpgradePlan:
-    repo_packages: List[UpgradePackage] = field(default_factory=list)
-    aur_packages: List[UpgradePackage] = field(default_factory=list)
-    removals: List[str] = field(default_factory=list)
-    replacements: List[str] = field(default_factory=list)
-    conflicts: List[str] = field(default_factory=list)
-    selected_helper: str = "none"
-    helper_error: str = ""
-    preview_error: str = ""
-    preview_command: List[str] = field(default_factory=list)
-    final_command: List[str] = field(default_factory=list)
-    command_source: str = "pacman"
-    trusted_executables: Dict[str, TrustedExecutable] = field(default_factory=dict, repr=False)
-
-    @property
-    def available(self) -> bool:
-        return not self.preview_error
-
-    def package_names(self) -> List[str]:
-        return [pkg.name for pkg in self.repo_packages + self.aur_packages]
-
-    def to_dict(self) -> Dict[str, object]:
-        return {
-            "repo_packages": [pkg.to_dict() for pkg in self.repo_packages],
-            "aur_packages": [pkg.to_dict() for pkg in self.aur_packages],
-            "removals": list(self.removals),
-            "replacements": list(self.replacements),
-            "conflicts": list(self.conflicts),
-            "selected_helper": self.selected_helper,
-            "helper_error": self.helper_error,
-            "preview_error": self.preview_error,
-            "preview_command": list(self.preview_command),
-            "final_command": list(self.final_command),
-            "command_source": self.command_source,
-            "trusted_executables": {
-                name: executable.to_dict()
-                for name, executable in sorted(self.trusted_executables.items())
-            },
-        }
+from aurascan.core.upgrade_models import (
+    ForeignPackageInfo,
+    SystemSnapshot,
+    UpgradePackage,
+    UpgradePlan,
+)
 
 
 @dataclass
@@ -262,92 +180,52 @@ class UpgradeFailureDiagnosis:
     evidence: List[str] = field(default_factory=list)
 
 
-@dataclass
-class SystemSnapshot:
-    running_kernel: str = ""
-    distro_info: Dict[str, object] = field(default_factory=dict)
-    installed_packages: List[str] = field(default_factory=list)
-    foreign_packages: List[str] = field(default_factory=list)
-    foreign_package_info: List[ForeignPackageInfo] = field(default_factory=list)
-    package_info: List[ForeignPackageInfo] = field(default_factory=list)
-    ignored_packages: List[str] = field(default_factory=list)
-    ignored_groups: List[str] = field(default_factory=list)
-    root_free_mib: Optional[int] = None
-    boot_free_mib: Optional[int] = None
-    boot_paths: List[str] = field(default_factory=list)
-    dkms_packages: List[str] = field(default_factory=list)
-    nvidia_packages: List[str] = field(default_factory=list)
-    zfs_packages: List[str] = field(default_factory=list)
-    virtualbox_packages: List[str] = field(default_factory=list)
-    pacnew_count: int = 0
-    pacsave_count: int = 0
-    pacnew_scan_truncated: bool = False
+def collect_system_snapshot(
+    runner: Callable = subprocess.run,
+    etc_root: Path = Path("/etc"),
+    trusted_executables: Optional[Mapping[str, TrustedExecutable]] = None,
+) -> SystemSnapshot:
+    """Observe the local system into an inert :class:`SystemSnapshot`.
 
-    @classmethod
-    def collect(
-        cls,
-        runner: Callable = subprocess.run,
-        etc_root: Path = Path("/etc"),
-        trusted_executables: Optional[Mapping[str, TrustedExecutable]] = None,
-    ) -> "SystemSnapshot":
-        pacman = (trusted_executables or {}).get("pacman")
-        if pacman is None:
-            try:
-                pacman = capture_trusted_executable("pacman", TRUSTED_PACMAN_PATH)
-            except UnsafeUpgradeExecutable:
-                pacman = None
-        installed_packages = _trusted_command_lines(runner, pacman, ["-Qq"]) if pacman else []
-        foreign_packages = _trusted_command_lines(runner, pacman, ["-Qqem"]) if pacman else []
-        ignored_packages = _command_lines(runner, ["pacman-conf", "IgnorePkg"])
-        ignored_groups = _command_lines(runner, ["pacman-conf", "IgnoreGroup"])
-        boot_paths = [str(path) for path in (Path("/boot"), Path("/boot/efi")) if path.exists()]
-        pacnew_count, pacsave_count, truncated = count_pacnew_pacsave(etc_root)
+    The snapshot value is inert upgrade vocabulary; reading the machine is not,
+    so collection stays in the workflow that owns the trusted pacman identity.
+    """
+    pacman = (trusted_executables or {}).get("pacman")
+    if pacman is None:
+        try:
+            pacman = capture_trusted_executable("pacman", TRUSTED_PACMAN_PATH)
+        except UnsafeUpgradeExecutable:
+            pacman = None
+    installed_packages = _trusted_command_lines(runner, pacman, ["-Qq"]) if pacman else []
+    foreign_packages = _trusted_command_lines(runner, pacman, ["-Qqem"]) if pacman else []
+    ignored_packages = _command_lines(runner, ["pacman-conf", "IgnorePkg"])
+    ignored_groups = _command_lines(runner, ["pacman-conf", "IgnoreGroup"])
+    boot_paths = [str(path) for path in (Path("/boot"), Path("/boot/efi")) if path.exists()]
+    pacnew_count, pacsave_count, truncated = count_pacnew_pacsave(etc_root)
 
-        return cls(
-            running_kernel=_command_text(runner, ["uname", "-r"]),
-            distro_info=detect_distro().to_dict(),
-            installed_packages=installed_packages,
-            foreign_packages=foreign_packages,
-            foreign_package_info=collect_foreign_package_info(
-                foreign_packages,
-                runner=runner,
-                pacman_executable=pacman,
-            ),
-            ignored_packages=ignored_packages,
-            ignored_groups=ignored_groups,
-            root_free_mib=_free_mib(Path("/")),
-            boot_free_mib=_free_mib(Path("/boot")) if Path("/boot").exists() else None,
-            boot_paths=boot_paths,
-            dkms_packages=[name for name in installed_packages if "dkms" in name],
-            nvidia_packages=[name for name in installed_packages if name.startswith("nvidia") or "nvidia" in name],
-            zfs_packages=[name for name in installed_packages if name.startswith("zfs") or name.startswith("spl")],
-            virtualbox_packages=[name for name in installed_packages if name.startswith("virtualbox")],
-            pacnew_count=pacnew_count,
-            pacsave_count=pacsave_count,
-            pacnew_scan_truncated=truncated,
-        )
-
-    def to_dict(self) -> Dict[str, object]:
-        return {
-            "running_kernel": self.running_kernel,
-            "distro": dict(self.distro_info),
-            "installed_package_count": len(self.installed_packages),
-            "foreign_packages": list(self.foreign_packages),
-            "foreign_package_info": [item.to_dict() for item in self.foreign_package_info],
-            "package_info": [item.to_dict() for item in self.package_info],
-            "ignored_packages": list(self.ignored_packages),
-            "ignored_groups": list(self.ignored_groups),
-            "root_free_mib": self.root_free_mib,
-            "boot_free_mib": self.boot_free_mib,
-            "boot_paths": list(self.boot_paths),
-            "dkms_packages": list(self.dkms_packages),
-            "nvidia_packages": list(self.nvidia_packages),
-            "zfs_packages": list(self.zfs_packages),
-            "virtualbox_packages": list(self.virtualbox_packages),
-            "pacnew_count": self.pacnew_count,
-            "pacsave_count": self.pacsave_count,
-            "pacnew_scan_truncated": self.pacnew_scan_truncated,
-        }
+    return SystemSnapshot(
+        running_kernel=_command_text(runner, ["uname", "-r"]),
+        distro_info=detect_distro().to_dict(),
+        installed_packages=installed_packages,
+        foreign_packages=foreign_packages,
+        foreign_package_info=collect_foreign_package_info(
+            foreign_packages,
+            runner=runner,
+            pacman_executable=pacman,
+        ),
+        ignored_packages=ignored_packages,
+        ignored_groups=ignored_groups,
+        root_free_mib=_free_mib(Path("/")),
+        boot_free_mib=_free_mib(Path("/boot")) if Path("/boot").exists() else None,
+        boot_paths=boot_paths,
+        dkms_packages=[name for name in installed_packages if "dkms" in name],
+        nvidia_packages=[name for name in installed_packages if name.startswith("nvidia") or "nvidia" in name],
+        zfs_packages=[name for name in installed_packages if name.startswith("zfs") or name.startswith("spl")],
+        virtualbox_packages=[name for name in installed_packages if name.startswith("virtualbox")],
+        pacnew_count=pacnew_count,
+        pacsave_count=pacsave_count,
+        pacnew_scan_truncated=truncated,
+    )
 
 
 @dataclass
@@ -890,7 +768,7 @@ def refresh_upgrade_preflight(
         options,
         runner=runner,
         which=which,
-        snapshot=SystemSnapshot.collect(runner=runner),
+        snapshot=collect_system_snapshot(runner=runner),
         urlopen=urlopen,
         progress=lambda _message: None,
     )
@@ -1341,7 +1219,7 @@ def run_upgrade_kernel_module_aftercare(
         return
     stream = stderr if options.json_output else stdout
     try:
-        post_snapshot = snapshot or SystemSnapshot.collect(
+        post_snapshot = snapshot or collect_system_snapshot(
             runner=runner,
             trusted_executables=plan.trusted_executables,
         )
@@ -1535,7 +1413,7 @@ def run_upgrade_preflight(
     trusted_query_runner = _trusted_upgrade_query_runner(plan, runner)
     progress("Collecting local system facts.")
     try:
-        system_snapshot = snapshot or SystemSnapshot.collect(
+        system_snapshot = snapshot or collect_system_snapshot(
             runner=runner,
             trusted_executables=plan.trusted_executables,
         )

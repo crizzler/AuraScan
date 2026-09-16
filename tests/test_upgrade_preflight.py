@@ -15,6 +15,7 @@ from aurascan.core import trusted_executable
 from aurascan.core import upgrade_preflight
 from aurascan.core.models import Severity
 from aurascan.core.upgrade_preflight_presenter import render_upgrade_preflight
+from aurascan.core.upgrade_models import ForeignPackageInfo, SystemSnapshot, UpgradePackage, UpgradePlan
 from aurascan.core.upgrade_preflight import (
     EXIT_PREFLIGHT_UNAVAILABLE,
     EXIT_PREFLIGHT_DISABLED,
@@ -22,15 +23,11 @@ from aurascan.core.upgrade_preflight import (
     EXIT_UPGRADE_COMMAND_FAILED_TO_START,
     EXIT_UPGRADE_VERIFICATION_FAILED,
     EXIT_USER_DECLINED,
-    ForeignPackageInfo,
     PACMAN_PRINT_FORMAT,
     UpgradeFinding,
     UpgradeOptions,
     build_upgrade_parser,
-    UpgradePackage,
-    UpgradePlan,
     UpgradePreflightReport,
-    SystemSnapshot,
     TrustedExecutable,
     UnsafeUpgradeExecutable,
     analyze_upgrade_risks,

@@ -19,11 +19,8 @@ from aurascan.core.security_audit import (
     parse_arch_audit_json,
     run_security_audit,
 )
-from aurascan.core.upgrade_preflight import (
-    UpgradePackage,
-    UpgradePlan,
-    security_audit_upgrade_findings,
-)
+from aurascan.core.upgrade_models import UpgradePackage, UpgradePlan
+from aurascan.core.upgrade_preflight import security_audit_upgrade_findings
 
 
 EXPOSURE_RULE = "SEC-KNOWN-EXPLOITED-VERSION-LAG"

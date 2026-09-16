@@ -8,7 +8,8 @@ from aurascan.core.kernel_module_autopilot import (
     kernel_module_fix_command,
 )
 from aurascan.core.models import Severity
-from aurascan.core.upgrade_preflight import UpgradePackage, UpgradePlan, SystemSnapshot, analyze_upgrade_risks
+from aurascan.core.upgrade_models import SystemSnapshot, UpgradePackage, UpgradePlan
+from aurascan.core.upgrade_preflight import analyze_upgrade_risks
 
 
 class FakeRunner:

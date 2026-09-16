@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from aurascan.core import trusted_executable
 from aurascan.core import upgrade_preflight
 from aurascan.core.config_drift import (
     build_config_drift_report,
@@ -73,7 +74,7 @@ def allow_fixture_upgrade_executables(monkeypatch):
             mode=stat.S_IFREG | 0o755,
         ),
     )
-    monkeypatch.setattr(upgrade_preflight, "revalidate_trusted_executable", lambda _executable: None)
+    monkeypatch.setattr(trusted_executable, "revalidate_trusted_executable", lambda _executable: None)
 
 
 def ai_env(tmp_path: Path):

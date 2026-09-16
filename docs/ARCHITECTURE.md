@@ -62,7 +62,7 @@ Two rules hold across every plane:
 Layers are assigned from repository structure by the audit tool. They describe
 dependency direction; they are not a package reorganisation.
 
-Current measurement: **87 modules, 71,816 physical lines.**
+Current measurement: **89 modules, 71,894 physical lines.**
 
 | Layer | Modules | Contents |
 | --- | ---: | --- |
@@ -70,7 +70,7 @@ Current measurement: **87 modules, 71,816 physical lines.**
 | `risk` | 1 | Risk aggregation over captured evidence: `core/risk.py` |
 | `catalog` | 2 | Stable rule catalog and user-facing explanation templates: `core/rule_metadata.py`, `core/presenter.py` |
 | `analysis` | 19 | `analyzers/` — static PKGBUILD, install-hook, provenance, remote-stage, npm, editor-task and bytecode analysis |
-| `adapters` | 14 | Bounded platform boundaries: `core/trusted_tools.py`, `core/trusted_executable.py`, `core/archive.py`, `core/package_archive.py`, `core/source_acquisition.py`, `core/intelligence_transport.py`, `core/intelligence_crypto.py`, `core/cache.py`, `core/local_package_db.py`, `core/ai_provider.py`, `core/recovery_network.py`, `core/compatibility.py`, `core/state_file.py`, `core/bounded_process.py` |
+| `adapters` | 16 | Bounded platform boundaries: `core/trusted_tools.py`, `core/trusted_executable.py`, `core/archive.py`, `core/package_archive.py`, `core/source_acquisition.py`, `core/intelligence_transport.py`, `core/intelligence_crypto.py`, `core/cache.py`, `core/local_package_db.py`, `core/ai_provider.py`, `core/recovery_network.py`, `core/compatibility.py`, `core/state_file.py`, `core/bounded_process.py`, `core/repository_state.py`, `core/repository_repair.py` |
 | `application` | 25 | Orchestration and policy: `core/engine.py`, upgrade preflight, incidents, follow-up, agent, config drift, security audit, recovery planners, instruction guard logic |
 | `recovery` | 3 | `core/recovery.py`, `core/recovery_boot.py`, `core/recovery_repairs.py` |
 | `presentation` | 16 | Entry points, trays and renderers: `cli.py`, `__main__.py`, `makepkg_wrapper.py`, `setup_wizard.py`, `core/updater_tray.py`, `core/intelligence_tray.py`, `core/instruction_cli.py`, `core/intelligence_cli.py`, `core/recovery_cli.py`, `core/incident_cli.py`, plus the six rendering modules `core/scan_report_presenter.py`, `core/config_drift_presenter.py`, `core/incident_presenter.py`, `core/recovery_presenter.py`, `core/security_audit_presenter.py`, `core/upgrade_preflight_presenter.py` |
@@ -184,7 +184,7 @@ known decision rather than a surprise.
 
 | Cycle | Modules | Assessment |
 | --- | --- | --- |
-| Recovery planner | `core.agent`, `core.config_drift`, `core.followup`, `core.incident_automation`, `core.incident_diagnostics`, `core.incident_repairs`, `core.incidents`, `core.upgrade_preflight` | Expected: these modules call each other's planners through function-local imports to avoid a heavier module-level graph. Candidate for a planner interface later. Stage 5 removed the incident-to-automation *dispatch* edges and Stage 6 removed the repair-to-workflow vocabulary and infrastructure edges; the component is still eight members, reachable through `incident_repairs -> upgrade_preflight -> followup -> incidents`. The remaining debt is planner-to-planner coupling around repository repair. |
+| Recovery planner | `core.agent`, `core.config_drift`, `core.followup`, `core.incident_automation`, `core.incident_diagnostics`, `core.incidents`, `core.upgrade_preflight` | Seven members, down from eight. Stages 5 and 6 removed the dispatch and the shared vocabulary/infrastructure edges; Stage 7 moved repository interpretation below both planners, which finally removed `incident_repairs` from the component. What remains is planner-to-planner coupling around upgrade preflight, repository repair and follow-up. |
 | Intelligence | `core.intelligence`, `core.intelligence_crypto`, `core.intelligence_store` | Expected: snapshot identity, verification and storage are one transaction. |
 | Install-hook / provenance | `analyzers.repository_provenance`, `core.install_hook`, `core.source_acquisition` | Expected: declared-source filtering needs the hook reader and the acquisition snapshot. |
 
@@ -227,6 +227,7 @@ reason.
 | INV-014 | Risk computation modules must depend only on domain and risk |
 | INV-015 | Presentation modules must not participate in an import cycle |
 | INV-016 | Presentation rendering modules must not perform dangerous operations |
+| INV-017 | Platform adapters must not depend on application workflows |
 
 What the invariants deliberately do **not** do: fail on module size, forbid
 in-repo private names, or enforce a full layered architecture. The advisory
@@ -242,18 +243,53 @@ Reported by the audit, never fatal:
 
 Current warnings: `core/instruction_guard.py` (8760 lines),
 `analyzers/repository_provenance.py` (4555), `core/agent.py` (3741),
-`core/incidents.py` (3241), `core/upgrade_preflight.py` (3044 lines, 6 concern
+`core/incidents.py` (3241), `core/upgrade_preflight.py` (2694 lines, 6 concern
 tags), `core/followup.py` (2585), `core/source_acquisition.py` (2554),
 `setup_wizard.py` (2521), `core/updater_tray.py` (6 concern tags).
 
 ## Decomposition log
 
-**Resolved in Stage 6:** the reverse half of `incidents <-> incident_repairs`. The
-repair planner no longer imports the incident workflow for vocabulary or
-infrastructure; the incident value types moved to the domain layer and three
-shared helpers moved to dedicated adapters. The planner component is still eight
-members, reachable now only through
-`incident_repairs -> upgrade_preflight -> followup -> incidents`.
+**Resolved in Stage 7:** the planner component finally shrank. `incident_repairs`
+imported repository knowledge from the upgrade-preflight workflow; extracting
+repository *interpretation* below both planners removed that edge, and the
+strongly connected component went from eight members to seven. The repair planner
+has no path to the upgrade workflow at all now, and no module in the cycle reaches
+it.
+
+### Stage 7 — repository interpretation left the upgrade workflow
+
+`incident_repairs` imported exactly two symbols from `upgrade_preflight`:
+`build_repository_health_check` (planning, eligibility re-checks and
+post-execution verification) and `apply_repository_health_repairs` (privileged
+repair execution). Reading both showed the two are different concerns, and that
+`followup`, `incidents` and the preflight itself needed the same two.
+
+| Responsibility inside `upgrade_preflight` | Side effects | New owner |
+| --- | --- | --- |
+| Pacman/pacman.conf/mirrorlist parsing and repository-health interpretation (`build_repository_health_check`, `parse_pacman_repository_entries`, `count_active_servers`, `resolve_pacman_include_path`, `RepositoryHealthCheck`, `RepositoryMirrorIssue`, `_RepositoryEntry`) | bounded local reads | `core/repository_state.py` (adapter) |
+| Privileged mirrorlist restore with run backup and manifest (`apply_repository_health_repairs`, `repository_repair_needs_sudo`, `write_repository_repair_manifest`, `RepositoryRepairResult`, `REPOSITORY_HEALTH_BACKUP_ROOT`) | sudo capture, process execution through the caller's runner, filesystem writes under `/etc` and `/var` | `core/repository_repair.py` (adapter) |
+| Revalidate-then-run for a bound executable (`_run_trusted_command`, used 16 times across the workflow) | process execution | `core/trusted_executable.py` as `run_trusted_command`, with the fixed `TRUSTED_SUDO_PATH`/`TRUSTED_PACMAN_PATH` it validates |
+| Upgrade planning, handoff, kernel-module aftercare, config drift, security-audit findings, AI advisory, failure diagnosis, CLI | network, process, fs_write | stays in `core/upgrade_preflight.py` |
+
+- **Implemented verbatim:** every moved definition is AST-identical to the code
+  it replaces; the only change inside a moved body is the renamed call to the
+  shared trusted runner. A direct comparison against the pre-Stage-7 code shows
+  identical parse results, identical health-check values across seven scenarios,
+  identical repair side effects (target contents, backup directory, runner argv,
+  error text) and identical sudo classification.
+- **Direction:** `incident_repairs` and `upgrade_preflight` both depend *downward*
+  on `repository_state`/`repository_repair`; nothing was reversed. `incidents`
+  still imports `incident_repairs` and `upgrade_preflight` still reaches the
+  incident workflow through `followup`, which is correct: those are workflow
+  invocations, not vocabulary reuse.
+- **Layer:** both new modules are adapters. `repository_state` reads files and
+  holds no dangerous capability; `repository_repair` owns the privileged write.
+  INV-017 was added with that split in mind, and the repository modules are why
+  the rule exists.
+- **Not moved:** the network boundary (`package_url_status`, AI advisory, failure
+  diagnosis), the upgrade handoff, kernel-module aftercare and config drift all
+  remain with `upgrade_preflight`. They are workflow behavior, not repository
+  interpretation.
 
 ### Stage 6 — incident vocabulary and infrastructure left the workflow
 

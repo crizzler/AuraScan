@@ -9,6 +9,8 @@ from urllib.error import HTTPError
 import pytest
 
 from aurascan.core import ai_provider
+from aurascan.core import repository_repair
+from aurascan.core import repository_state
 from aurascan.core import trusted_executable
 from aurascan.core import upgrade_preflight
 from aurascan.core.models import Severity
@@ -32,10 +34,8 @@ from aurascan.core.upgrade_preflight import (
     TrustedExecutable,
     UnsafeUpgradeExecutable,
     analyze_upgrade_risks,
-    apply_repository_health_repairs,
     apply_ai_risk_raises,
     apply_ai_upgrade_review,
-    build_repository_health_check,
     build_upgrade_ai_prompt,
     build_upgrade_plan,
     collect_foreign_package_info,
@@ -45,7 +45,6 @@ from aurascan.core.upgrade_preflight import (
     parse_aur_updates,
     parse_pacman_preview,
     parse_pacman_qi,
-    parse_pacman_repository_entries,
     parse_shelly_updates,
     options_from_args,
     resolve_aur_helper,
@@ -57,7 +56,7 @@ from aurascan.core.upgrade_preflight import (
 SUDO_PATH = "/usr/bin/sudo"
 PACMAN_PATH = "/usr/bin/pacman"
 REAL_CAPTURE_TRUSTED_EXECUTABLE = upgrade_preflight.capture_trusted_executable
-REAL_REVALIDATE_TRUSTED_EXECUTABLE = upgrade_preflight.revalidate_trusted_executable
+REAL_REVALIDATE_TRUSTED_EXECUTABLE = trusted_executable.revalidate_trusted_executable
 
 
 def fake_trusted_executable(name, path):
@@ -79,7 +78,14 @@ def trusted_upgrade_executables(monkeypatch):
         "capture_trusted_executable",
         lambda name, path: fake_trusted_executable(name, path),
     )
-    monkeypatch.setattr(upgrade_preflight, "revalidate_trusted_executable", lambda _executable: None)
+    monkeypatch.setattr(
+        repository_repair,
+        "capture_trusted_executable",
+        lambda name, path: fake_trusted_executable(name, path),
+    )
+    # The shared runner revalidates through its own module globals, so the trust
+    # check is substituted there for every caller.
+    monkeypatch.setattr(trusted_executable, "revalidate_trusted_executable", lambda _executable: None)
 
 
 class FakeResponse:
@@ -422,7 +428,7 @@ def test_build_upgrade_plan_uses_shelly_and_parses_json_aur_updates():
 def test_preview_and_helper_queries_revalidate_each_executable(monkeypatch):
     checked = []
     monkeypatch.setattr(
-        upgrade_preflight,
+        trusted_executable,
         "revalidate_trusted_executable",
         lambda executable: checked.append(executable.name),
     )
@@ -704,7 +710,7 @@ def test_repository_health_detects_empty_mirrorlist_with_backup(tmp_path):
     mirrorlist.write_text("#Server = https://example.invalid/$repo/os/$arch\n", encoding="utf-8")
     backup.write_text("Server = https://mirror.example/$repo/os/$arch\n", encoding="utf-8")
 
-    check = build_repository_health_check(pacman_conf)
+    check = repository_state.build_repository_health_check(pacman_conf)
 
     assert check.status == "repair_available"
     assert check.fixable_issues[0].repositories == ["core", "extra"]
@@ -713,7 +719,7 @@ def test_repository_health_detects_empty_mirrorlist_with_backup(tmp_path):
 
 
 def test_parse_pacman_repository_entries_ignores_commented_repos(tmp_path):
-    entries = parse_pacman_repository_entries(
+    entries = repository_state.parse_pacman_repository_entries(
         "#[testing]\n#Include = mirrorlist\n[core]\nInclude = mirrorlist\nServer = https://local/$repo/os/$arch\n",
         base_dir=tmp_path,
     )
@@ -730,9 +736,9 @@ def test_apply_repository_health_repairs_restores_from_backup(tmp_path):
     pacman_conf.write_text("[core]\nInclude = mirrorlist\n", encoding="utf-8")
     mirrorlist.write_text("#Server = https://disabled.invalid/$repo/os/$arch\n", encoding="utf-8")
     backup.write_text("Server = https://mirror.example/$repo/os/$arch\n", encoding="utf-8")
-    check = build_repository_health_check(pacman_conf)
+    check = repository_state.build_repository_health_check(pacman_conf)
 
-    result = apply_repository_health_repairs(check, backup_root=tmp_path / "backups")
+    result = repository_repair.apply_repository_health_repairs(check, backup_root=tmp_path / "backups")
 
     assert result.success is True
     assert "Server = https://mirror.example" in mirrorlist.read_text(encoding="utf-8")
@@ -747,7 +753,7 @@ def test_preview_no_servers_finding_points_to_aurascan_repair(tmp_path):
     pacman_conf.write_text("[core]\nInclude = mirrorlist\n", encoding="utf-8")
     mirrorlist.write_text("#Server = https://disabled.invalid/$repo/os/$arch\n", encoding="utf-8")
     backup.write_text("Server = https://mirror.example/$repo/os/$arch\n", encoding="utf-8")
-    check = build_repository_health_check(pacman_conf)
+    check = repository_state.build_repository_health_check(pacman_conf)
     plan = UpgradePlan(preview_error="pacman upgrade preview failed: error: no servers configured for repository")
 
     findings = analyze_upgrade_risks(plan, base_snapshot(), repository_health=check)
@@ -1275,7 +1281,7 @@ def test_final_handoff_revalidates_executable_and_refuses_replacement(monkeypatc
             if sudo_checks > 1:
                 raise UnsafeUpgradeExecutable("trusted sudo executable changed after preflight")
 
-    monkeypatch.setattr(upgrade_preflight, "revalidate_trusted_executable", revalidate)
+    monkeypatch.setattr(trusted_executable, "revalidate_trusted_executable", revalidate)
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
         (SUDO_PATH, PACMAN_PATH, "-Syu"): completed(returncode=0),

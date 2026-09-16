@@ -2126,9 +2126,9 @@ def build_upgrade_runtime(
         run_config_drift,
     )
     from aurascan.core.kernel_module_autopilot import kernel_module_fix_command
+    from aurascan.core.repository_repair import apply_repository_health_repairs
     from aurascan.core.upgrade_preflight import (
         SystemSnapshot,
-        apply_repository_health_repairs,
         build_upgrade_parser,
         options_from_args,
         run_upgrade_preflight,

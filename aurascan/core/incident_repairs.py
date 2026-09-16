@@ -23,10 +23,8 @@ from aurascan.core.kernel_module_autopilot import is_kernel_base_package
 from aurascan.core.models import Severity
 from aurascan.core.redaction import redact_incident_text, redact_structure
 from aurascan.core.state_file import atomic_write_json
-from aurascan.core.upgrade_preflight import (
-    apply_repository_health_repairs,
-    build_repository_health_check,
-)
+from aurascan.core.repository_repair import apply_repository_health_repairs
+from aurascan.core.repository_state import build_repository_health_check
 
 
 SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9@._+:-]{1,200}$")

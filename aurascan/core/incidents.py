@@ -1122,7 +1122,8 @@ def collect_incident_system_facts(
 ) -> Tuple[Dict[str, object], List[IncidentEvidence], List[IncidentFinding], List[str]]:
     from aurascan.core.hardware_health import collect_static_hardware_facts
     from aurascan.core.kernel_module_autopilot import build_kernel_module_check
-    from aurascan.core.upgrade_preflight import SystemSnapshot, UpgradePlan, build_repository_health_check
+    from aurascan.core.repository_state import build_repository_health_check
+    from aurascan.core.upgrade_preflight import SystemSnapshot, UpgradePlan
 
     facts: Dict[str, object] = {
         "tools": {

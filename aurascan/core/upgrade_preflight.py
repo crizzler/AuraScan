@@ -35,6 +35,20 @@ from aurascan.core.kernel_module_autopilot import (
 )
 from aurascan.core.local_package_db import compare_versions_with_vercmp
 from aurascan.core.models import SCANNER_VERSION, Severity
+from aurascan.core.repository_repair import (
+    REPOSITORY_HEALTH_BACKUP_ROOT,
+    RepositoryRepairResult,
+    apply_repository_health_repairs,
+)
+from aurascan.core.repository_state import (
+    RepositoryHealthCheck,
+    RepositoryMirrorIssue,
+    build_repository_health_check,
+    count_active_servers,
+    parse_pacman_repository_entries,
+    preview_error_indicates_no_servers,
+    resolve_pacman_include_path,
+)
 from aurascan.core.security_audit import (
     SecurityAuditReport, build_security_audit, vendor_emergency_version_status,
 )
@@ -43,10 +57,13 @@ from aurascan.core.text_safety import (
     validate_model_advisory_text,
 )
 from aurascan.core.trusted_executable import (
+    TRUSTED_PACMAN_PATH,
+    TRUSTED_SUDO_PATH,
     TrustedExecutable,
     UnsafeUpgradeExecutable,
     capture_trusted_executable,
     revalidate_trusted_executable,
+    run_trusted_command,
 )
 from aurascan.core.trusted_executable import trusted_executable_stat as _trusted_executable_stat
 
@@ -70,9 +87,6 @@ UPGRADE_AI_MAX_RISK_RAISES = 12
 UPGRADE_AI_MAX_SUMMARY_CHARS = 500
 UPGRADE_AI_MAX_REASON_CHARS = 500
 UPGRADE_AUR_HELPERS = {"auto", "paru", "yay", "shelly", "none"}
-TRUSTED_SUDO_PATH = "/usr/bin/sudo"
-TRUSTED_PACMAN_PATH = "/usr/bin/pacman"
-REPOSITORY_HEALTH_BACKUP_ROOT = Path("/var/lib/aurascan/repo-health")
 SHELLY_MODERN_MAJOR = 3
 SHELLY_MODERN_UPGRADE_COMMAND = [
     "shelly",
@@ -128,24 +142,6 @@ UPGRADE_AI_UNSUPPORTED_CONCLUSION_RE = re.compile(
 ProgressReporter = Callable[[str], None]
 
 
-def _run_trusted_command(
-    command: Sequence[str],
-    executables: Sequence[TrustedExecutable],
-    *,
-    runner: Callable,
-    **kwargs,
-):
-    """Revalidate every bound executable, then run the exact argument vector.
-
-    The revalidation call intentionally resolves through this module's globals
-    so callers (including tests) can substitute the trust check without
-    replacing the execution helper itself.
-    """
-    for executable in executables:
-        revalidate_trusted_executable(executable)
-    return runner(list(command), **kwargs)
-
-
 def _trusted_upgrade_query_runner(plan: "UpgradePlan", runner: Callable) -> Callable:
     """Wrap downstream collectors so their pacman queries use the bound file."""
 
@@ -155,7 +151,7 @@ def _trusted_upgrade_query_runner(plan: "UpgradePlan", runner: Callable) -> Call
             pacman = plan.trusted_executables.get("pacman")
             if pacman is None:
                 raise UnsafeUpgradeExecutable("trusted pacman identity is unavailable")
-            return _run_trusted_command(
+            return run_trusted_command(
                 [pacman.path] + argv[1:],
                 [pacman],
                 runner=runner,
@@ -257,74 +253,6 @@ class UpgradePlan:
 
 
 @dataclass
-class RepositoryMirrorIssue:
-    repositories: List[str]
-    include_path: str
-    active_servers: int = 0
-    backup_path: str = ""
-    backup_active_servers: int = 0
-    repair_action: str = ""
-    detail: str = ""
-
-    @property
-    def fixable(self) -> bool:
-        return self.repair_action == "restore_from_backup" and bool(self.backup_path) and self.backup_active_servers > 0
-
-    def to_dict(self) -> Dict[str, object]:
-        return {
-            "repositories": list(self.repositories),
-            "include_path": self.include_path,
-            "active_servers": self.active_servers,
-            "backup_path": self.backup_path,
-            "backup_active_servers": self.backup_active_servers,
-            "repair_action": self.repair_action,
-            "fixable": self.fixable,
-            "detail": self.detail,
-        }
-
-
-@dataclass
-class RepositoryHealthCheck:
-    enabled_repositories: List[str] = field(default_factory=list)
-    issues: List[RepositoryMirrorIssue] = field(default_factory=list)
-    pacman_conf_path: str = ""
-    status: str = "ok"
-
-    @property
-    def fixable_issues(self) -> List[RepositoryMirrorIssue]:
-        return [issue for issue in self.issues if issue.fixable]
-
-    @property
-    def summary(self) -> str:
-        if not self.issues:
-            return "enabled repositories have active servers"
-        if self.fixable_issues:
-            count = len(self.fixable_issues)
-            item = "mirrorlist" if count == 1 else "mirrorlists"
-            return f"{count} disabled {item} can be restored from backup"
-        count = len(self.issues)
-        item = "repository include" if count == 1 else "repository includes"
-        return f"{count} {item} have no active servers"
-
-    def to_dict(self) -> Dict[str, object]:
-        return {
-            "enabled_repositories": list(self.enabled_repositories),
-            "issues": [issue.to_dict() for issue in self.issues],
-            "pacman_conf_path": self.pacman_conf_path,
-            "status": self.status,
-            "summary": self.summary,
-        }
-
-
-@dataclass
-class RepositoryRepairResult:
-    success: bool
-    applied: List[str] = field(default_factory=list)
-    errors: List[str] = field(default_factory=list)
-    backup_dir: str = ""
-
-
-@dataclass
 class UpgradeFailureDiagnosis:
     kind: str
     title: str
@@ -332,13 +260,6 @@ class UpgradeFailureDiagnosis:
     likely_cause: str
     recommended_action: str
     evidence: List[str] = field(default_factory=list)
-
-
-@dataclass
-class _RepositoryEntry:
-    name: str
-    includes: List[Path] = field(default_factory=list)
-    server_count: int = 0
 
 
 @dataclass
@@ -1054,7 +975,7 @@ def installed_package_versions(
         except UnsafeUpgradeExecutable:
             return {}
     try:
-        result = _run_trusted_command(
+        result = run_trusted_command(
             [pacman_executable.path, "-Q"] + names,
             [pacman_executable],
             runner=runner,
@@ -1147,7 +1068,7 @@ def planned_package_download_urls(
     with tempfile.TemporaryDirectory(prefix="aurascan-url-check.") as cache_dir:
         cmd = [pacman.path, "-Sp", "--cachedir", cache_dir] + names[:max_urls]
         try:
-            result = _run_trusted_command(
+            result = run_trusted_command(
                 cmd,
                 [pacman],
                 runner=runner,
@@ -1217,14 +1138,14 @@ def run_trusted_upgrade_handoff(plan: UpgradePlan, *, runner: Callable = subproc
             raise UnsafeUpgradeExecutable("trusted sudo/pacman identity is missing from the upgrade plan")
         if command[:2] != [sudo.path, pacman.path]:
             raise UnsafeUpgradeExecutable("repository upgrade command no longer matches the trusted sudo/pacman plan")
-        return _run_trusted_command(command, [sudo, pacman], runner=runner, check=False)
+        return run_trusted_command(command, [sudo, pacman], runner=runner, check=False)
 
     helper = plan.trusted_executables.get(plan.command_source)
     if helper is None:
         raise UnsafeUpgradeExecutable(f"trusted {plan.command_source} identity is missing from the upgrade plan")
     if not command or command[0] != helper.path:
         raise UnsafeUpgradeExecutable(f"{plan.command_source} upgrade command no longer matches the trusted executable plan")
-    return _run_trusted_command(command, [helper], runner=runner, check=False)
+    return run_trusted_command(command, [helper], runner=runner, check=False)
 
 
 def print_trusted_handoff_note(report: UpgradePreflightReport, options: UpgradeOptions, *, stdout, stderr=None) -> None:
@@ -1340,7 +1261,7 @@ def run_kernel_module_autopilot_fixes(
     if answer in {"", "y", "yes"}:
         print(f"[AuraScan] Running kernel/module fix: {' '.join(command)}", file=stdout)
         try:
-            result = _run_trusted_command(command, [sudo, pacman], runner=runner, check=False)
+            result = run_trusted_command(command, [sudo, pacman], runner=runner, check=False)
         except (OSError, UnsafeUpgradeExecutable) as exc:
             print(f"[AuraScan] Kernel/module fix command failed to start: {exc}", file=stderr)
             return EXIT_UPGRADE_COMMAND_FAILED_TO_START
@@ -1497,277 +1418,6 @@ def run_repository_health_autopilot_repairs(
         print(f"[AuraScan] Repository repair backup: {result.backup_dir}", file=stdout)
     print("[AuraScan] Repository repair completed. Rerunning preflight.", file=stdout)
     return True
-
-
-def preview_error_indicates_no_servers(error: str) -> bool:
-    return "no servers configured for repository" in error.lower()
-
-
-def build_repository_health_check(pacman_conf_path: Path = Path("/etc/pacman.conf")) -> RepositoryHealthCheck:
-    check = RepositoryHealthCheck(pacman_conf_path=str(pacman_conf_path))
-    try:
-        text = pacman_conf_path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        check.status = "error"
-        check.issues.append(RepositoryMirrorIssue(
-            repositories=[],
-            include_path=str(pacman_conf_path),
-            detail=f"could not read pacman.conf: {exc}",
-        ))
-        return check
-
-    entries = parse_pacman_repository_entries(text, base_dir=pacman_conf_path.parent)
-    check.enabled_repositories = [entry.name for entry in entries]
-    include_repos: Dict[Path, List[str]] = {}
-    include_counts: Dict[Path, int] = {}
-    for entry in entries:
-        if entry.server_count > 0:
-            continue
-        if not entry.includes:
-            check.issues.append(RepositoryMirrorIssue(
-                repositories=[entry.name],
-                include_path="",
-                detail=f"repository {entry.name} has no Server or Include directives",
-            ))
-            continue
-        for include_path in entry.includes:
-            count = include_counts.setdefault(include_path, count_active_servers(include_path))
-            if count == 0:
-                include_repos.setdefault(include_path, []).append(entry.name)
-
-    for include_path, repos in sorted(include_repos.items(), key=lambda item: str(item[0])):
-        backup_path = include_path.with_name(include_path.name + "-backup")
-        backup_count = count_active_servers(backup_path)
-        action = "restore_from_backup" if backup_count > 0 else ""
-        detail = (
-            "included mirrorlist has no active Server entries; companion backup has active servers"
-            if action
-            else "included mirrorlist has no active Server entries and no usable companion backup was found"
-        )
-        check.issues.append(RepositoryMirrorIssue(
-            repositories=sorted(set(repos)),
-            include_path=str(include_path),
-            active_servers=0,
-            backup_path=str(backup_path) if backup_path.exists() else "",
-            backup_active_servers=backup_count,
-            repair_action=action,
-            detail=detail,
-        ))
-
-    if check.issues:
-        check.status = "repair_available" if check.fixable_issues else "broken"
-    return check
-
-
-def parse_pacman_repository_entries(text: str, *, base_dir: Path = Path("/etc")) -> List[_RepositoryEntry]:
-    entries: List[_RepositoryEntry] = []
-    current: Optional[_RepositoryEntry] = None
-    for raw in text.splitlines():
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        header = REPO_HEADER_RE.match(raw)
-        if header:
-            if current and current.name.lower() != "options":
-                entries.append(current)
-            current = _RepositoryEntry(name=header.group(1).strip())
-            continue
-        if current is None:
-            continue
-        include = REPO_INCLUDE_RE.match(raw)
-        if include:
-            current.includes.append(resolve_pacman_include_path(include.group(1), base_dir=base_dir))
-            continue
-        if REPO_SERVER_RE.match(raw):
-            current.server_count += 1
-    if current and current.name.lower() != "options":
-        entries.append(current)
-    return entries
-
-
-def resolve_pacman_include_path(value: str, *, base_dir: Path = Path("/etc")) -> Path:
-    raw = value.strip().strip('"').strip("'")
-    path = Path(raw)
-    if not path.is_absolute():
-        path = base_dir / path
-    return path
-
-
-def count_active_servers(path: Path) -> int:
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return 0
-    return sum(1 for line in lines if REPO_SERVER_RE.match(line) and not line.lstrip().startswith("#"))
-
-
-def apply_repository_health_repairs(
-    check: RepositoryHealthCheck,
-    *,
-    runner: Callable = subprocess.run,
-    backup_root: Path = REPOSITORY_HEALTH_BACKUP_ROOT,
-    sudo_executable: Optional[TrustedExecutable] = None,
-) -> RepositoryRepairResult:
-    issues = check.fixable_issues
-    if not issues:
-        return RepositoryRepairResult(success=True)
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
-    backup_dir = backup_root / run_id
-    result = RepositoryRepairResult(success=False, backup_dir=str(backup_dir))
-    use_sudo = repository_repair_needs_sudo(issues, backup_root)
-    manifest = {
-        "run_id": run_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "pacman_conf_path": check.pacman_conf_path,
-        "actions": [],
-    }
-
-    if use_sudo and sudo_executable is None:
-        try:
-            sudo_executable = capture_trusted_executable("sudo", TRUSTED_SUDO_PATH)
-        except UnsafeUpgradeExecutable as exc:
-            result.errors.append(f"repository repair executable trust check failed: {exc}")
-            return result
-
-    try:
-        if use_sudo:
-            command = [sudo_executable.path, "mkdir", "-p", str(backup_dir)]
-            status = _run_trusted_command(command, [sudo_executable], runner=runner, check=False)
-            if int(getattr(status, "returncode", 0)) != 0:
-                result.errors.append(f"failed to create backup directory: {' '.join(command)}")
-                return result
-        else:
-            backup_dir.mkdir(parents=True, exist_ok=True)
-
-        for issue in issues:
-            target = Path(issue.include_path)
-            source = Path(issue.backup_path)
-            if not source.exists():
-                result.errors.append(f"backup mirrorlist is missing: {source}")
-                return result
-            if count_active_servers(source) <= 0:
-                result.errors.append(f"backup mirrorlist has no active servers: {source}")
-                return result
-            if target.exists():
-                mode = target.stat().st_mode & 0o7777
-                owner = target.stat().st_uid
-                group = target.stat().st_gid
-            else:
-                mode = 0o644
-                owner = 0
-                group = 0
-            backup_path = backup_dir / target.name
-            if use_sudo:
-                copy_status = _run_trusted_command(
-                    [sudo_executable.path, "cp", "-a", str(target), str(backup_path)],
-                    [sudo_executable],
-                    runner=runner,
-                    check=False,
-                )
-                if int(getattr(copy_status, "returncode", 0)) != 0:
-                    result.errors.append(f"failed to back up {target} to {backup_path}")
-                    return result
-                install_command = [
-                    sudo_executable.path,
-                    "install",
-                    "-o",
-                    str(owner),
-                    "-g",
-                    str(group),
-                    "-m",
-                    f"{mode & 0o777:o}",
-                    str(source),
-                    str(target),
-                ]
-                install_status = _run_trusted_command(
-                    install_command,
-                    [sudo_executable],
-                    runner=runner,
-                    check=False,
-                )
-                if int(getattr(install_status, "returncode", 0)) != 0:
-                    result.errors.append(f"failed to restore {target} from {source}")
-                    return result
-            else:
-                if target.exists():
-                    shutil.copy2(target, backup_path)
-                shutil.copy2(source, target)
-                try:
-                    os.chmod(target, mode)
-                    if os.geteuid() == 0:
-                        current = target.stat()
-                        if current.st_uid != owner or current.st_gid != group:
-                            os.chown(target, owner, group)
-                except OSError as exc:
-                    result.errors.append(f"restored {target} but could not preserve ownership/mode: {exc}")
-                    return result
-
-            result.applied.append(str(target))
-            manifest["actions"].append({
-                "action": "restore_from_backup",
-                "target": str(target),
-                "source": str(source),
-                "backup": str(backup_path),
-                "repositories": list(issue.repositories),
-                "mode": f"{mode & 0o777:o}",
-                "owner": owner,
-                "group": group,
-            })
-
-        manifest_path = backup_dir / "manifest.json"
-        write_repository_repair_manifest(
-            manifest_path,
-            manifest,
-            runner=runner,
-            use_sudo=use_sudo,
-            sudo_executable=sudo_executable,
-        )
-    except (OSError, UnsafeUpgradeExecutable) as exc:
-        result.errors.append(str(exc))
-        return result
-
-    result.success = True
-    return result
-
-
-def repository_repair_needs_sudo(issues: List[RepositoryMirrorIssue], backup_root: Path) -> bool:
-    if os.geteuid() == 0:
-        return False
-    paths = [Path(issue.include_path) for issue in issues] + [backup_root]
-    return any(str(path).startswith(("/etc/", "/var/")) or str(path) in {"/etc", "/var"} for path in paths)
-
-
-def write_repository_repair_manifest(
-    manifest_path: Path,
-    manifest: Dict[str, object],
-    *,
-    runner: Callable,
-    use_sudo: bool,
-    sudo_executable: Optional[TrustedExecutable] = None,
-) -> None:
-    text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
-    if not use_sudo:
-        manifest_path.write_text(text, encoding="utf-8")
-        return
-    if sudo_executable is None:
-        raise UnsafeUpgradeExecutable("trusted sudo identity is unavailable for repository repair")
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
-        handle.write(text)
-        tmp_path = Path(handle.name)
-    try:
-        status = _run_trusted_command(
-            [sudo_executable.path, "install", "-m", "0644", str(tmp_path), str(manifest_path)],
-            [sudo_executable],
-            runner=runner,
-            check=False,
-        )
-        if int(getattr(status, "returncode", 0)) != 0:
-            raise OSError(f"failed to write repair manifest to {manifest_path}")
-    finally:
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
 
 
 def build_upgrade_unavailable_report(reason: str) -> UpgradePreflightReport:
@@ -1975,7 +1625,7 @@ def build_upgrade_plan(
 
     progress("Building pacman upgrade preview. This may sync package databases and can take a moment.")
     try:
-        result = _run_trusted_command(
+        result = run_trusted_command(
             preview_command,
             [trusted_executables["sudo"], trusted_executables["pacman"]],
             runner=runner,
@@ -2063,7 +1713,7 @@ def _resolve_trusted_aur_helper(
 
 def shelly_uses_modern_cli(executable: TrustedExecutable, *, runner: Callable = subprocess.run) -> bool:
     try:
-        result = _run_trusted_command(
+        result = run_trusted_command(
             [executable.path, "--version"],
             [executable],
             runner=runner,
@@ -2140,7 +1790,7 @@ def query_helper_updates(
         parser = parse_aur_updates
     for index, cmd in enumerate(query_commands):
         try:
-            result = _run_trusted_command(
+            result = run_trusted_command(
                 cmd,
                 [executable],
                 runner=runner,
@@ -2974,7 +2624,7 @@ def _trusted_command_text(
     args: Sequence[str],
 ) -> str:
     try:
-        result = _run_trusted_command(
+        result = run_trusted_command(
             [executable.path] + list(args),
             [executable],
             runner=runner,
@@ -3006,7 +2656,7 @@ def _trusted_command_stdout_lines(
     args: Sequence[str],
 ) -> List[str]:
     try:
-        result = _run_trusted_command(
+        result = run_trusted_command(
             [executable.path] + list(args),
             [executable],
             runner=runner,

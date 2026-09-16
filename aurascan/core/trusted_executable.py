@@ -27,7 +27,11 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict
+from typing import Callable, Dict, Sequence
+
+
+TRUSTED_SUDO_PATH = "/usr/bin/sudo"
+TRUSTED_PACMAN_PATH = "/usr/bin/pacman"
 
 
 class UnsafeUpgradeExecutable(RuntimeError):
@@ -128,3 +132,21 @@ def revalidate_trusted_executable(executable: TrustedExecutable) -> None:
         raise UnsafeUpgradeExecutable(
             f"trusted {executable.name} executable changed after preflight; run a fresh preflight"
         )
+
+
+def run_trusted_command(
+    command: Sequence[str],
+    executables: Sequence[TrustedExecutable],
+    *,
+    runner: Callable,
+    **kwargs,
+):
+    """Revalidate every bound executable, then run the exact argument vector.
+
+    The revalidation call intentionally resolves through this module's globals
+    so callers (including tests) can substitute the trust check without
+    replacing the execution helper itself.
+    """
+    for executable in executables:
+        revalidate_trusted_executable(executable)
+    return runner(list(command), **kwargs)

@@ -70,6 +70,26 @@ Architecture stabilization stage 4 (no behavior change):
   subsystem engines also use, with equality assertions so the wording cannot
   drift.
 
+Architecture stabilization stage 7 (no behavior change):
+
+- Extracted repository interpretation from `core/upgrade_preflight.py` into
+  `core/repository_state.py`: pacman.conf and mirrorlist parsing, the repository
+  health/issue values and the `build_repository_health_check` state builder. It
+  performs bounded local reads only — no process, network, privilege or write.
+- Extracted the privileged mirrorlist restore into `core/repository_repair.py`:
+  run backup, install, ownership preservation and the repair manifest, with sudo
+  captured through the trusted-executable boundary.
+- Moved the revalidate-then-run helper to `core/trusted_executable.py` as
+  `run_trusted_command`, together with the fixed `sudo`/`pacman` paths it
+  validates, so every caller revalidates through one module.
+- `core/incident_repairs.py` no longer imports `core.upgrade_preflight` at all:
+  repair planning reads repository state and executes the repair through the new
+  adapters. The planner component dropped from eight modules to seven and no
+  longer contains the repair planner. All moved code is byte-for-byte the same
+  logic; only the internal runner call was renamed.
+- Added INV-017 («platform adapters must not depend on application workflows»),
+  which encodes why the edge existed and prevents it returning.
+
 Architecture stabilization stage 6 (no behavior change):
 
 - Moved the incident value types out of the incident workflow into a new domain

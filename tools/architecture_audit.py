@@ -470,6 +470,31 @@ INVARIANT_ALLOWLIST: Dict[str, Dict[str, str]] = {
     "INV-014": {},
     "INV-015": {},
     "INV-016": {},
+    # Adapters that legitimately reach into a higher layer. Each entry records
+    # the current coupling; the goal is to make it visible, not to bless it.
+    "INV-017": {
+        "aurascan/core/intelligence_crypto.py": (
+            "Snapshot verification is one transaction with the intelligence "
+            "engine: the crypto adapter signs and verifies the snapshots that "
+            "module defines, and intelligence imports it back."
+        ),
+        "aurascan/core/intelligence_transport.py": (
+            "Same snapshot transaction: the transport adapter enforces the "
+            "contract declared by the intelligence engine."
+        ),
+        "aurascan/core/local_package_db.py": (
+            "The local package database reads through the context provider that "
+            "owns the configured roots."
+        ),
+        "aurascan/core/package_archive.py": (
+            "The bounded package reader uses the shared configuration loader "
+            "for its reader limits."
+        ),
+        "aurascan/core/source_acquisition.py": (
+            "Acquired-source inspection needs the install-hook reader that "
+            "classifies declared sources; both are in the provenance cycle."
+        ),
+    },
 }
 
 RULE_ID_PATTERN = r"^[A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+$"
@@ -701,6 +726,17 @@ INVARIANTS: Tuple[Invariant, ...] = (
         "A presenter consumes already-decided data and renders it. It must not "
         "run processes, open the network, mutate the filesystem, touch "
         "privilege state or call an AI provider.",
+    ),
+    Invariant(
+        "INV-017",
+        "platform adapters must not depend on application workflows",
+        "Adapters own one bounded platform boundary (a parser, a state write, a "
+        "transport) and sit below every workflow that uses them. An adapter "
+        "that imports an application, recovery or presentation module inverts "
+        "the dependency and makes the workflow and the adapter mutually "
+        "reachable, which is how the incident repair planner ended up inside "
+        "the upgrade-preflight cycle. Recorded exceptions live in "
+        "INVARIANT_ALLOWLIST with a reason each.",
     ),
 )
 
@@ -1115,6 +1151,8 @@ def assign_layer(module_name: str, relative_path: str) -> str:
             "compatibility",
             "bounded_process",
             "state_file",
+            "repository_state",
+            "repository_repair",
         ):
             return "adapters"
         if name.startswith("recovery"):
@@ -1288,6 +1326,7 @@ def evaluate_invariants(infos: Sequence[ModuleInfo], package_name: str) -> List[
     violations: List[Violation] = []
     pure = pure_modules(package_name)
     ui_entries = ui_entry_modules(package_name)
+    by_module_name = {info.name: info for info in infos}
     for info in infos:
         allow = INVARIANT_ALLOWLIST
         if info.layer == "analysis" and "process" in info.capabilities:
@@ -1455,6 +1494,21 @@ def evaluate_invariants(infos: Sequence[ModuleInfo], package_name: str) -> List[
                             ),
                         )
                     )
+
+        if info.layer == "adapters":
+            for imported in info.internal_imports:
+                target = by_module_name.get(imported)
+                if target is None or target.layer not in ("application", "recovery", "presentation"):
+                    continue
+                if info.path in allow["INV-017"]:
+                    continue
+                violations.append(
+                    _violation(
+                        "INV-017",
+                        info.path,
+                        "adapter depends on {0} ({1} layer)".format(imported, target.layer),
+                    )
+                )
 
     by_module = {info.name: info for info in infos}
     for component in find_cycles(infos):

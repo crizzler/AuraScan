@@ -9,6 +9,7 @@ The audit tool never imports ``aurascan`` and never executes candidate content,
 so these tests stay offline, deterministic and rootless.
 """
 
+import ast
 import importlib.util
 import json
 import sys
@@ -689,3 +690,91 @@ def test_state_and_bounded_process_helpers_are_adapters():
     assert "fs_write" in state_file.capabilities
     assert state_file.internal_imports == []
     assert bounded_process.internal_imports == []
+
+
+def test_incident_repair_planner_does_not_import_the_upgrade_workflow():
+    """Stage 7 regression: repair planning must not reach the upgrade workflow."""
+
+    source = (ROOT / "aurascan" / "core" / "incident_repairs.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    imported = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    imported |= {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+
+    assert "aurascan.core.upgrade_preflight" not in imported
+    assert not any(name.startswith("aurascan.core.upgrade_preflight.") for name in imported)
+    assert "aurascan.core.incidents" not in imported
+
+
+def test_incident_repair_planner_is_not_in_an_import_cycle():
+    """The Stage 7 seam: ``incident_repairs`` left the planner component."""
+
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    cycles = {module for component in result.cycles for module in component}
+
+    assert "aurascan.core.incident_repairs" not in cycles
+    assert "aurascan.core.repository_state" not in cycles
+    assert "aurascan.core.repository_repair" not in cycles
+
+
+def test_repository_state_and_repair_modules_are_adapters():
+    """Stage 7 ownership: interpreted state stays below every workflow."""
+
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    module = {info.name: info for info in result.modules}
+
+    state = module["aurascan.core.repository_state"]
+    repair = module["aurascan.core.repository_repair"]
+
+    assert state.layer == "adapters"
+    assert repair.layer == "adapters"
+    assert state.internal_imports == []
+    # Reading pacman.conf is a bounded local read: no process, network, write
+    # or privilege capability may appear in the state interpreter.
+    for category in ("process", "network", "fs_write", "privilege", "sqlite"):
+        assert category not in state.capabilities, category
+    assert "fs_write" in repair.capabilities
+    assert repair.internal_imports == [
+        "aurascan.core.repository_state",
+        "aurascan.core.trusted_executable",
+    ]
+
+
+def test_adapter_importing_an_application_module_is_reported(tmp_path):
+    """INV-017 negative fixture: an adapter may not depend upward."""
+
+    package_root = tmp_path / "adaptpkg"
+    write_module(package_root, "__init__.py", "")
+    write_module(package_root, "core/__init__.py", "")
+    write_module(
+        package_root,
+        "core/repository_state.py",
+        "from adaptpkg.core.upgrade_workflow import run_upgrade\n\n\ndef status():\n    return run_upgrade\n",
+    )
+    write_module(package_root, "core/upgrade_workflow.py", "def run_upgrade():\n    return 0\n")
+
+    result = run_tool(package_root, "adaptpkg")
+    by_id = {violation.invariant_id: violation for violation in result.violations}
+
+    assert "INV-017" in by_id
+    assert by_id["INV-017"].module == "adaptpkg/core/repository_state.py"
+
+
+def test_network_capability_stays_with_the_upgrade_workflow():
+    """Moving the parser out must not move or hide network authority."""
+
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    module = {info.name: info for info in result.modules}
+
+    assert "network" in module["aurascan.core.upgrade_preflight"].capabilities
+    assert "network" not in module["aurascan.core.repository_state"].capabilities
+    assert "network" not in module["aurascan.core.repository_repair"].capabilities

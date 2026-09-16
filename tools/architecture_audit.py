@@ -465,6 +465,8 @@ INVARIANT_ALLOWLIST: Dict[str, Dict[str, str]] = {
     "INV-012": {},
     "INV-013": {},
     "INV-014": {},
+    "INV-015": {},
+    "INV-016": {},
 }
 
 RULE_ID_PATTERN = r"^[A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+$"
@@ -681,6 +683,22 @@ INVARIANTS: Tuple[Invariant, ...] = (
         "recovery or presentation code, so the decision stays a pure function "
         "of captured evidence.",
     ),
+    Invariant(
+        "INV-015",
+        "presentation modules must not participate in an import cycle",
+        "Presentation is downstream of the report and state objects it renders. "
+        "A report object that imports its own presenter therefore always forms a "
+        "cycle, which is why the cycle rule catches every instance of that "
+        "defect (ScanReport.render_terminal and the six subsystem renderers were "
+        "all of this shape).",
+    ),
+    Invariant(
+        "INV-016",
+        "presentation modules must not perform dangerous operations",
+        "A presenter consumes already-decided data and renders it. It must not "
+        "run processes, open the network, mutate the filesystem, touch "
+        "privilege state or call an AI provider.",
+    ),
 )
 
 INVARIANT_BY_ID: Dict[str, Invariant] = {
@@ -778,15 +796,24 @@ class ModuleVisitor(ast.NodeVisitor):
         self._risk_hits: List[RiskHit] = []
         self._defined_names: Set[str] = set()
         self._used_names: Set[str] = set()
+        self._in_type_checking_block = False
 
     # -- imports ---------------------------------------------------------- #
     def visit_Import(self, node: ast.Import) -> None:
+        if self._in_type_checking_block:
+            self.resolver.visit(node)
+            self.generic_visit(node)
+            return
         self.resolver.visit(node)
         for alias in node.names:
             self._record_import(alias.name)
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if self._in_type_checking_block:
+            self.resolver.visit(node)
+            self.generic_visit(node)
+            return
         self.resolver.visit(node)
         module = self._absolute_module(node)
         if module is None:
@@ -798,6 +825,31 @@ class ModuleVisitor(ast.NodeVisitor):
             else:
                 self._record_import(module)
         self.generic_visit(node)
+
+    def visit_If(self, node: ast.If) -> None:
+        """Skip imports guarded by ``if TYPE_CHECKING:``.
+
+        A type-checking block is never executed, so it cannot create an import
+        cycle or shadow a runtime dependency. Recording those edges would make
+        presentation modules look coupled to the modules they only annotate.
+        """
+        if self._is_type_checking_test(node.test):
+            self._in_type_checking_block = True
+            for statement in node.body:
+                self.visit(statement)
+            self._in_type_checking_block = False
+            for statement in node.orelse:
+                self.visit(statement)
+            return
+        self.generic_visit(node)
+
+    @staticmethod
+    def _is_type_checking_test(test: ast.AST) -> bool:
+        if isinstance(test, ast.Name):
+            return test.id == "TYPE_CHECKING"
+        if isinstance(test, ast.Attribute):
+            return test.attr == "TYPE_CHECKING"
+        return False
 
     def _absolute_module(self, node: ast.ImportFrom) -> Optional[str]:
         if node.level == 0:
@@ -1033,6 +1085,8 @@ def assign_layer(module_name: str, relative_path: str) -> str:
             return "risk"
         if name in ("rule_metadata", "presenter"):
             return "catalog"
+        if name.endswith("_presenter"):
+            return "presentation"
         if name in (
             "updater_tray",
             "intelligence_tray",
@@ -1382,6 +1436,35 @@ def evaluate_invariants(infos: Sequence[ModuleInfo], package_name: str) -> List[
                     ),
                 )
             )
+
+        if info.layer == "presentation" and info.name.split(".")[-1].endswith("_presenter"):
+            for category in ("process", "network", "fs_write", "privilege", "sqlite"):
+                if category in info.capabilities:
+                    violations.append(
+                        _violation(
+                            "INV-016",
+                            info.path,
+                            "presentation module declares {0} capability: {1}".format(
+                                category, ", ".join(info.capabilities[category])
+                            ),
+                        )
+                    )
+
+    by_module = {info.name: info for info in infos}
+    for component in find_cycles(infos):
+        for member in component:
+            info = by_module.get(member)
+            if info is not None and info.layer == "presentation":
+                violations.append(
+                    _violation(
+                        "INV-015",
+                        info.path,
+                        "presentation module is inside an import cycle with {0}".format(
+                            ", ".join(name for name in component if name != member)
+                        ),
+                    )
+                )
+
     return violations
 
 

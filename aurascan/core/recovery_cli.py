@@ -84,6 +84,7 @@ from aurascan.core.recovery_network import (
     scan_wifi_networks,
     start_network_manager,
 )
+from aurascan.core.recovery_presenter import render_recovery
 from aurascan.core.recovery_repairs import execute_recovery_plan, export_recovery_report, save_recovery_report
 from aurascan.core.trusted_tools import (
     TrustedToolError,
@@ -1046,7 +1047,7 @@ def run_recovery_session(
     )
     report_only = dry_run or (json_output and not yes) or not report.eligible_actions
     if not json_output:
-        print(report.render_terminal(verbose=True), file=stdout)
+        print(render_recovery(report, verbose=True), file=stdout)
     if report_only:
         _saved_path, save_message = save_recovery_report(report)
         if json_output:
@@ -1078,7 +1079,7 @@ def run_recovery_session(
     if json_output:
         print(json.dumps(report.to_dict(), indent=2), file=stdout)
     else:
-        print(report.render_terminal(verbose=True), file=stdout)
+        print(render_recovery(report, verbose=True), file=stdout)
         print(save_message, file=stdout)
         _offer_report_export(report, save_message, input_func=input_func, stdout=stdout, runner=runner)
         print("AuraScan will not reboot automatically. Review validation above, then reboot when ready.", file=stdout)

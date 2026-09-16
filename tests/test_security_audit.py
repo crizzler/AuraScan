@@ -11,6 +11,7 @@ import pytest
 from aurascan.analyzers.deterministic import DeterministicAnalyzer
 from aurascan.analyzers.deep_static import DeepStaticAnalyzer
 from aurascan.core.models import Severity
+from aurascan.core.security_audit_presenter import render_security_audit
 from aurascan.core.security_audit import (
     MAX_CAMPAIGN_BYTES,
     ArchAuditResult,
@@ -431,7 +432,7 @@ def test_codewhale_audit_is_offline_and_distinct_from_campaign_or_official_arch_
     assert report.campaign_findings == []
     assert report.official_vulnerability_findings == []
     assert report.to_dict()["risk_summary"]["upstream_vulnerability_findings"] == 1
-    rendered = report.render_terminal(verbose=True, use_color=False)
+    rendered = render_security_audit(report, verbose=True, use_color=False)
     assert "Treat the matched evidence as an incident" not in rendered
     assert "verified fixed updates" in rendered
     assert "user-local npm/Cargo installs" in report.to_json()

@@ -367,9 +367,19 @@ vocabulary that everything else imports, so it must not render itself, format
 terminal output, assemble reports or reach for the risk engine or the rule
 presenter. Report assembly belongs to the application layer
 (`core/engine.py` builds a `ScanReport` and asks `RiskEngine` for the summary),
-rule explanations live in `core/presenter.py`, report rendering lives in
-`core/scan_report_presenter.py`, and risk aggregation lives in `core/risk.py`.
-Each depends on the model, never the reverse.
+rule explanations live in `core/presenter.py`, and terminal rendering lives in
+the presentation layer: `core/scan_report_presenter.py`, plus one
+`*_presenter.py` per subsystem (`config_drift`, `incident`, `recovery`,
+`security_audit`, `upgrade_preflight`). Each depends on the model, never the
+reverse.
+
+Report and state classes must not define `render_terminal`. When you add a
+renderer, put it in a `*_presenter.py` module, keep it free of process, network,
+filesystem-mutation, privilege and AI capabilities (INV-016), and make sure it
+does not form an import cycle with the object it renders (INV-015). If a
+presenter would need a type from the module that calls it, import that type under
+`if TYPE_CHECKING:` and keep any display constant in the presenter with an
+equality test against the engine's value.
 
 When a change legitimately needs an exception, add an entry to
 `INVARIANT_ALLOWLIST` in the tool with a written reason; never weaken the check

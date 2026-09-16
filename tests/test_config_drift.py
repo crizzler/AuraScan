@@ -5,6 +5,7 @@ import subprocess
 import pytest
 
 from aurascan.core import config_drift
+from aurascan.core.config_drift_presenter import render_config_drift
 from aurascan.core.config_drift import (
     EXIT_CONFIG_DRIFT_USER_DECLINED,
     apply_ai_config_drift_review,
@@ -349,7 +350,7 @@ def test_config_drift_rejects_unsafe_ai_prose_without_persisting_it(tmp_path, mo
             "choices": [{"message": {"content": json.dumps(response)}}]
         }),
     )
-    output = report.to_json() + report.render_terminal()
+    output = report.to_json() + render_config_drift(report)
 
     assert report.ai_review["status"] == "invalid_response"
     assert all(not action.ai_note for action in report.actions)
@@ -391,7 +392,7 @@ def test_config_drift_rejects_schema_and_count_abuse(tmp_path, monkeypatch, case
             "choices": [{"message": {"content": json.dumps(response)}}]
         }),
     )
-    output = report.to_json() + report.render_terminal()
+    output = report.to_json() + render_config_drift(report)
 
     assert report.ai_review["status"] == "invalid_response"
     assert "rm -rf" not in output
@@ -431,7 +432,7 @@ def test_terminal_hides_disabled_ai_diff_review_noise(tmp_path):
     report = build_config_drift_report(root)
     report.ai_review = {"enabled": False, "status": "disabled"}
 
-    rendered = report.render_terminal()
+    rendered = render_config_drift(report)
 
     assert "AI diff review: disabled" not in rendered
 

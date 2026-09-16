@@ -436,55 +436,6 @@ class RecoveryReport:
             scanner_version=str(data.get("scanner_version") or SCANNER_VERSION),
         )
 
-    def render_terminal(self, *, verbose: bool = False) -> str:
-        lines = [
-            "\n[AuraScan] AI-Assisted Recovery",
-            "=" * 56,
-            f"Target: {self.target.distro.get('name', 'Unknown')} | Filesystem: {self.target.filesystem} | Bootloader: {self.target.bootloader.name}",
-            f"Findings: {len(self.findings)} | Risk: {self.highest_severity.value} | Verified repairs: {len(self.eligible_actions)}",
-            f"Network: {'connected' if self.network.connected else 'offline'} | AI: {self.ai_review.get('status', 'not run')}",
-            "-" * 56,
-        ]
-        if not self.findings:
-            lines.append("[OK] No recognized boot-blocking or package-state problem was found.")
-        for index, finding in enumerate(self.findings if verbose else self.findings[:6], start=1):
-            lines.append(f"{index}. {finding.title} [{finding.severity.value}]")
-            lines.append(finding.summary)
-            if finding.recommended_action:
-                lines.append("AuraScan response: " + finding.recommended_action)
-        if len(self.findings) > 6 and not verbose:
-            lines.append(f"{len(self.findings) - 6} additional findings hidden. Use --verbose to show all.")
-        if self.eligible_actions:
-            lines.append("\nRecommended recovery plan:")
-            ordered = sorted(self.eligible_actions, key=lambda item: (not item.ai_recommended, recovery_recipe_order(item.recipe_id)))
-            for index, action in enumerate(ordered, start=1):
-                suffix = " | AI recommended" if action.ai_recommended else ""
-                lines.append(f"{index}. {action.title} [{action.risk.value}{suffix}]")
-                lines.append(action.summary)
-                if action.confirmation_phrase:
-                    lines.append("   Requires separate typed confirmation.")
-                if verbose:
-                    for command in action.command_preview:
-                        lines.append("   Command: " + " ".join(command))
-        if self.probe_results:
-            successful = sum(item.status not in {"failed", "timeout"} for item in self.probe_results)
-            lines.append(f"\nLocal verification: {successful}/{len(self.probe_results)} probe(s) completed.")
-        summary = advisory_text_or_fallback(
-            self.ai_review.get("summary"),
-            max_chars=2000,
-            fallback=RECOVERY_AI_FALLBACK,
-        )
-        if summary:
-            lines.append("\nAI explanation: " + summary)
-        if self.notes:
-            lines.append("\nRecovery notes:")
-            lines.extend("- " + item for item in self.notes[:10])
-        if self.repair_results:
-            lines.append("\nRepair results:")
-            lines.extend(f"- {item.status}: {item.message}" for item in self.repair_results)
-        return "\n".join(lines)
-
-
 def rooted(root: Path, path: Path) -> Path:
     return path if Path(root) == Path("/") else Path(root) / str(path).lstrip("/")
 

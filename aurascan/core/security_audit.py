@@ -299,87 +299,6 @@ class SecurityAuditReport:
         indexed.sort(key=lambda item: (-SEVERITY_ORDER.index(item[1].severity), item[0]))
         return [finding for _, finding in indexed]
 
-    def render_terminal(self, *, verbose: bool = False, use_color: bool = True) -> str:
-        reset = "\033[0m" if use_color else ""
-        red = "\033[91m" if use_color else ""
-        yellow = "\033[93m" if use_color else ""
-        green = "\033[92m" if use_color else ""
-        color = red if self.has_alert else yellow if self.findings or self.status != "ok" else green
-        campaign_label = "unavailable"
-        if self.campaign:
-            campaign_label = (
-                f"{self.campaign.title} ({len(self.campaign.package_names)} names, "
-                f"{self.campaign.data_origin}; {self.campaign.source_kind})"
-            )
-        lines = [
-            "\n[AuraScan] Security Audit",
-            "=" * 54,
-            f"Risk: {color}{self.highest_severity.value}{reset} | Status: {self.status.upper()}",
-            f"AUR campaign intelligence: {campaign_label}",
-            (
-                f"Packages checked: {self.installed_package_count} | "
-                f"Pacman history records: {self.history_record_count}"
-            ),
-            f"Official package advisories: {self._arch_audit_summary()}",
-            f"Bundled CodeWhale version advisories: {len(self.upstream_vulnerability_findings)} match(es); reviewed {CODEWHALE_ADVISORY_REVIEWED}",
-            f"Emergency vendor/KEV advisories: {len(self.vendor_emergency_findings)} match(es)",
-            "Runtime intelligence: " + str(self.intelligence.get("status", "legacy-unrecorded")),
-            "-" * 54,
-        ]
-        if self.campaign is None:
-            lines.append("[WARN] Known AUR campaign intelligence was unavailable, so that check is incomplete.")
-        elif not self.campaign_findings:
-            lines.append("[OK] No known AUR campaign package or campaign-window history matches were found.")
-        if not self.official_vulnerability_findings and self.arch_audit.status == "ok":
-            lines.append("[OK] arch-audit reported no applicable official-package advisories.")
-
-        findings = self.sorted_findings()
-        visible = findings if verbose else findings[:5]
-        if visible:
-            lines.append("Security findings:")
-            for index, finding in enumerate(visible, start=1):
-                lines.append(f"{index}. {finding.title} [{finding.severity.value}]")
-                lines.append(finding.summary)
-                lines.append(f"Why it matters: {finding.why_it_matters}")
-                lines.append(f"Recommended action: {finding.recommended_action}")
-                if verbose and finding.evidence:
-                    lines.append("Evidence: " + "; ".join(finding.evidence[:8]))
-                lines.append("")
-            if lines[-1] == "":
-                lines.pop()
-        hidden = len(findings) - len(visible)
-        if hidden:
-            lines.append(f"{hidden} additional finding(s) hidden. Use --verbose to show all.")
-        if self.notes:
-            lines.append("Collection notes:")
-            for note in self.notes if verbose else self.notes[:4]:
-                lines.append(f"- {note}")
-        lines.append(
-            "\nA clean-looking result means no known match was found; it is not proof that package code or the system is safe."
-        )
-        if any(item.severity in {Severity.HIGH, Severity.CRITICAL}
-               and item.category not in {"official_vulnerability", "upstream_vulnerability", "vendor_emergency_advisory"}
-               for item in self.findings):
-            lines.append("Recommended Action: Treat the matched evidence as an incident and investigate from trusted media.")
-        elif self.findings:
-            lines.append("Recommended Action: Review the advisory context and package provenance, then apply verified fixed updates.")
-        else:
-            lines.append("Recommended Action: No campaign-specific response is indicated by the available evidence.")
-        return "\n".join(lines)
-
-    def _arch_audit_summary(self) -> str:
-        if self.arch_audit.status == "ok":
-            count = len(self.arch_audit.findings)
-            return "no findings" if count == 0 else f"{count} finding(s)"
-        if self.arch_audit.status == "not_installed":
-            return "not checked (arch-audit is not installed)"
-        if self.arch_audit.status == "skipped_offline":
-            return "skipped in offline mode"
-        if self.arch_audit.error:
-            return f"{self.arch_audit.status} ({self.arch_audit.error})"
-        return self.arch_audit.status
-
-
 def _asset_path(name: str) -> Path:
     return Path(__file__).resolve().parents[1] / "assets" / name
 
@@ -1537,7 +1456,9 @@ def run_security_audit(
     if args.json_output:
         print(report.to_json(), file=stdout)
     else:
-        print(report.render_terminal(verbose=bool(args.verbose)), file=stdout)
+        from aurascan.core.security_audit_presenter import render_security_audit
+
+        print(render_security_audit(report, verbose=bool(args.verbose)), file=stdout)
     if report.status == "unavailable":
         print("[AuraScan] Security audit was unavailable.", file=stderr)
         return EXIT_SECURITY_AUDIT_UNAVAILABLE

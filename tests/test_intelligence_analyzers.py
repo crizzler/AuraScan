@@ -12,6 +12,7 @@ from aurascan.analyzers.npm_lifecycle import inspect_npm_lifecycle
 from aurascan.core import security_audit
 from aurascan.core.intelligence import IntelligenceError, snapshot_from_payload
 from aurascan.core.models import AnalysisResult, Phase, Severity
+from aurascan.core.security_audit_presenter import render_security_audit
 from aurascan.core.security_audit import (
     SecurityAuditReport, audit_vendor_emergency_exposure, build_security_audit,
 )
@@ -184,7 +185,7 @@ def test_audit_reports_explicit_snapshot_status_without_loading_another(tmp_path
     )
     assert report.intelligence["identity"] == intelligence.identity
     assert report.to_dict()["intelligence"]["status"] == status
-    assert "Runtime intelligence: " + status in report.render_terminal(use_color=False)
+    assert "Runtime intelligence: " + status in render_security_audit(report, use_color=False)
     assert len(report.vendor_emergency_findings) == 1
     assert bool(any(item.rule_id == "INTELLIGENCE-UNAVAILABLE-001" for item in report.findings)) is bool(error)
     assert report.status == ("partial" if error else "ok")

@@ -2213,7 +2213,9 @@ def build_upgrade_runtime(
                     if item.action_id != FOLLOWUP_ACTION_CONFIG_DRIFT
                 ]
             else:
-                print(config_report.render_terminal(), file=stdout)
+                from aurascan.core.config_drift_presenter import render_config_drift
+
+                print(render_config_drift(config_report), file=stdout)
         if not selected:
             return FollowUpActionOutcome(
                 attempted=True,

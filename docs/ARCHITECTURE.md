@@ -62,7 +62,7 @@ Two rules hold across every plane:
 Layers are assigned from repository structure by the audit tool. They describe
 dependency direction; they are not a package reorganisation.
 
-Current measurement: **77 modules, 71,442 physical lines.**
+Current measurement: **82 modules, 71,613 physical lines.**
 
 | Layer | Modules | Contents |
 | --- | ---: | --- |
@@ -73,7 +73,7 @@ Current measurement: **77 modules, 71,442 physical lines.**
 | `adapters` | 12 | Bounded platform boundaries: `core/trusted_tools.py`, `core/trusted_executable.py`, `core/archive.py`, `core/package_archive.py`, `core/source_acquisition.py`, `core/intelligence_transport.py`, `core/intelligence_crypto.py`, `core/cache.py`, `core/local_package_db.py`, `core/ai_provider.py`, `core/recovery_network.py`, `core/compatibility.py` |
 | `application` | 25 | Orchestration and policy: `core/engine.py`, upgrade preflight, incidents, follow-up, agent, config drift, security audit, recovery planners, instruction guard logic |
 | `recovery` | 3 | `core/recovery.py`, `core/recovery_boot.py`, `core/recovery_repairs.py` |
-| `presentation` | 10 | Entry points and rendering surfaces: `cli.py`, `__main__.py`, `makepkg_wrapper.py`, `setup_wizard.py`, `core/updater_tray.py`, `core/intelligence_tray.py`, `core/instruction_cli.py`, `core/intelligence_cli.py`, `core/recovery_cli.py`, `core/scan_report_presenter.py` |
+| `presentation` | 15 | Entry points, trays and renderers: `cli.py`, `__main__.py`, `makepkg_wrapper.py`, `setup_wizard.py`, `core/updater_tray.py`, `core/intelligence_tray.py`, `core/instruction_cli.py`, `core/intelligence_cli.py`, `core/recovery_cli.py`, plus the six rendering modules `core/scan_report_presenter.py`, `core/config_drift_presenter.py`, `core/incident_presenter.py`, `core/recovery_presenter.py`, `core/security_audit_presenter.py`, `core/upgrade_preflight_presenter.py` |
 
 Dependency direction:
 
@@ -95,7 +95,24 @@ domain   ←   catalog
 - `application` assembles reports and decides outcomes: `core/engine.py` builds
   the `ScanReport` and asks `RiskEngine` for the summary.
 - `presentation` consumes application and domain APIs and does not decide which
-  rules exist (INV-011).
+  rules exist (INV-011). Rendering modules are sinks: none may appear in an
+  import cycle (INV-015), and none may run a process, open the network, mutate
+  the filesystem, touch privilege state or call an AI provider (INV-016).
+
+Renderer modules and their inputs:
+
+| Module | Renders | Runtime imports |
+| --- | --- | --- |
+| `core/scan_report_presenter.py` | `ScanReport` | domain, catalog |
+| `core/config_drift_presenter.py` | `ConfigDriftReport` | domain (also supplies `preview_diff`) |
+| `core/incident_presenter.py` | `IncidentReport` | domain |
+| `core/recovery_presenter.py` | `RecoveryReport` | `core/recovery` (ordering helper) |
+| `core/security_audit_presenter.py` | `SecurityAuditReport` | domain |
+| `core/upgrade_preflight_presenter.py` | `UpgradePreflightReport`, `UpgradeFailureDiagnosis` | domain |
+
+A presenter that would form a cycle with the object it renders imports that type
+under `if TYPE_CHECKING:` instead; the audit ignores type-checking blocks because
+they are never executed, so a hint cannot hide a runtime dependency.
 
 ## Where side effects live
 
@@ -191,6 +208,8 @@ reason.
 | INV-012 | Catalog modules must depend only on domain and catalog |
 | INV-013 | Domain evidence modules must not depend on risk, catalog or presentation |
 | INV-014 | Risk computation modules must depend only on domain and risk |
+| INV-015 | Presentation modules must not participate in an import cycle |
+| INV-016 | Presentation rendering modules must not perform dangerous operations |
 
 What the invariants deliberately do **not** do: fail on module size, forbid
 in-repo private names, or enforce a full layered architecture. The advisory
@@ -211,6 +230,42 @@ Current warnings: `core/instruction_guard.py` (8760 lines),
 `setup_wizard.py` (2521).
 
 ## Decomposition log
+
+**Resolved in Stage 4:** the six remaining self-rendering report classes. Their
+`render_terminal` methods (384 lines in total) moved into subsystem presenters,
+so no report or state object owns terminal rendering any more. The planner
+component is unchanged at the same eight members: presentation did not join it.
+
+### Stage 4 — presentation left the report classes
+
+Six production classes still rendered themselves after Stage 3:
+`ConfigDriftReport` (47 lines), `IncidentReport` (147), `RecoveryReport` (47),
+`SecurityAuditReport` (67), `UpgradePreflightReport` (63) and
+`UpgradeFailureDiagnosis` (13).
+
+- **Compatibility finding:** all six methods were internal by the same standard
+  as Stages 2 and 3 (no exported API, no documentation, CLI-only shipped
+  surface). The only callers were in-package CLI entry points and tests.
+- **Extracted five presenters** (see the renderer table above), carrying the
+  rendering bodies verbatim. `preview_diff` moved with the config-drift renderer
+  because it is a display formatter; `_check_summary_lines` and
+  `_arch_audit_summary` moved as private formatting helpers that only the
+  renderers used.
+- **Direction enforced:** a first attempt had the subsystem modules import their
+  presenters, which pulled three presenters *into* the planner component (8 → 11
+  members) and created a new `security_audit` cycle. The audit caught it, so the
+  presenters were made runtime-independent of their subsystems instead: types
+  come from `if TYPE_CHECKING:` blocks and the few display constants are held in
+  the presenter with an equality test against the engine value. The planner
+  component is back to its original eight members.
+- **Known debt (recorded, not changed):** the security-audit presenter derives
+  its recommended-action line from finding severities and categories at render
+  time. That is a policy-flavoured decision in presentation and is preserved
+  byte-for-byte until it becomes a decided report field.
+- **Evidence:** `tests/test_presentation_renderers.py` pins the removed methods,
+  the entry-point defaults, the constant agreement, presenter purity and two
+  negative fixtures; the subsystem suites exercise the new entry points and
+  assert the rendered text unchanged.
 
 ### Stage 3 — the evidence model stops assembling reports
 
@@ -355,18 +410,21 @@ Extracted `core/trusted_executable.py`: `TrustedExecutable`,
 1. The eight-member planner component (`agent`, `config_drift`, `followup`,
    `incidents`, `incident_*`, `upgrade_preflight`): give it a narrow interface so
    the cycle can be reviewed as a group rather than as eight mutual imports.
-2. `core/upgrade_preflight.py` (3142 lines, 6 concern tags — the top hotspot):
+   Stage 4 leaves it unchanged, which is the preparation Stage 5 needs.
+2. Four subsystem modules still reach their presenter from inside their own CLI
+   entry points (`config_drift`, `incidents`, `security_audit`,
+   `upgrade_preflight`). That edge is one-way and cycle-free, but it means CLI
+   printing still lives in subsystem modules; extracting those runners would
+   finish the seam.
+3. `core/upgrade_preflight.py` (3142 lines, 6 concern tags — the top hotspot):
    split mirror/repository repair (I/O plus privileged commands) from output
    parsing (pure functions).
-3. Apply the Stage 2 seam to the remaining report classes that still own their
-   own `render_terminal` (`config_drift`, `incidents`, `recovery`,
-   `security_audit`, `upgrade_preflight`) so presentation lives in one layer
-   everywhere.
-4. Dead helper methods discovered during Stage 3: `AnalysisResult.get_highest_severity()`,
-   `AnalysisResult.blocks_installation()` and `findings_from_results()` also have
-   no callers. They carry no dependency, so they were left alone, but the
-   evidence model should not advertise policy helpers that nothing uses.
-5. Characterise Instruction Guard state transitions, then decompose by
+4. Move the security-audit recommended-action decision out of the presenter and
+   onto the report as a decided field.
+5. Dead helpers found in earlier stages:
+   `AnalysisResult.get_highest_severity()`, `AnalysisResult.blocks_installation()`
+   and `findings_from_results()` still have no callers.
+6. Characterise Instruction Guard state transitions, then decompose by
    responsibility.
 
 ## Related documents

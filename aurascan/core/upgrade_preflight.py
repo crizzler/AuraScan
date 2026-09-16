@@ -333,20 +333,6 @@ class UpgradeFailureDiagnosis:
     recommended_action: str
     evidence: List[str] = field(default_factory=list)
 
-    def render_terminal(self) -> str:
-        lines = [
-            "\n[AuraScan] Upgrade failure diagnosis",
-            f"{self.title}.",
-            self.summary,
-            f"Likely cause: {self.likely_cause}",
-            f"Next step: {self.recommended_action}",
-        ]
-        if self.evidence:
-            lines.append("Evidence:")
-            for item in self.evidence[:6]:
-                lines.append(f"- {item}")
-        return "\n".join(lines)
-
 
 @dataclass
 class _RepositoryEntry:
@@ -548,100 +534,6 @@ class UpgradePreflightReport:
     def to_json(self, *, indent: Optional[int] = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent)
 
-    def render_terminal(self, *, use_color: bool = True, verbose: bool = False) -> str:
-        reset = "\033[0m" if use_color else ""
-        red = "\033[91m" if use_color else ""
-        yellow = "\033[93m" if use_color else ""
-        green = "\033[92m" if use_color else ""
-        color = red if self.highest_severity == Severity.CRITICAL else yellow if self.requires_confirmation else green
-
-        lines = [
-            "\n[AuraScan] Upgrade Preflight",
-            "=" * 50,
-            f"Repo upgrades: {len(self.plan.repo_packages)} | AUR upgrades: {len(self.plan.aur_packages)} | Removals/Replacements: {self.transaction_change_count()}",
-            f"Risk: {color}{self.highest_severity.value}{reset} | Action: {color}{self.action.upper()}{reset} | Helper: {self.plan.selected_helper}",
-            f"Planned command: {' '.join(self.plan.final_command) if self.plan.final_command else '(none)'}",
-            "-" * 50,
-        ]
-        lines.extend(self._check_summary_lines())
-
-        if self.plan.preview_error:
-            lines.append("Preflight unavailable.")
-            lines.append(self.plan.preview_error)
-        elif not self.findings:
-            lines.append("[INFO] No upgrade preflight findings were produced. This is not proof the upgrade is safe.")
-
-        terminal_findings = self.terminal_findings()
-        visible = terminal_findings if verbose else terminal_findings[:3]
-        if visible:
-            lines.append("Upgrade risks:")
-            for index, finding in enumerate(visible, start=1):
-                lines.append(f"{index}. {finding.title} [{finding.severity.value}]")
-                lines.append(finding.summary)
-                if finding.why_it_matters:
-                    lines.append(f"Why it matters: {finding.why_it_matters}")
-                if finding.recommended_action:
-                    lines.append(f"Before upgrading: {finding.recommended_action}")
-                if verbose and finding.evidence:
-                    lines.append(f"Technical details: {finding.rule_id}: {finding.evidence}")
-                lines.append("")
-            if lines[-1] == "":
-                lines.pop()
-
-        hidden = len(terminal_findings) - len(visible)
-        if hidden > 0:
-            note = "additional upgrade risk hidden" if hidden == 1 else "additional upgrade risks hidden"
-            lines.append(f"{hidden} {note}. Use --verbose to show all.")
-
-        if self.ai_review:
-            status = str(self.ai_review.get("status") or "unknown")
-            provider = str(self.ai_review.get("provider") or "")
-            summary = str(self.ai_review.get("summary") or "")
-            label = f"AI review: {status}" + (f" ({provider})" if provider else "")
-            lines.append(label)
-            if summary:
-                lines.append(summary)
-
-        if self.action == "block":
-            lines.append("\nRecommended Action: Do not continue through AuraScan's automatic handoff; follow the blocking finding above.")
-        elif self.action == "confirm":
-            lines.append("\nRecommended Action: Review the risks above before continuing.")
-        elif self.action == "unavailable":
-            lines.append("\nRecommended Action: Do not run the upgrade from AuraScan until the preview problem is resolved.")
-        else:
-            lines.append("\nRecommended Action: Continue only with normal package-manager judgment.")
-        return "\n".join(lines)
-
-    def _check_summary_lines(self) -> List[str]:
-        lines: List[str] = []
-        if self.repository_health and self.repository_health.issues:
-            lines.append(f"Repository health: {self.repository_health.summary}.")
-        if self.security_audit:
-            campaign_count = len(self.security_audit.campaign_findings)
-            advisory_count = len(self.security_audit.official_vulnerability_findings)
-            if campaign_count:
-                lines.append(f"Security audit: {campaign_count} known AUR campaign match(es) require attention.")
-            elif advisory_count:
-                lines.append(f"Security audit: no known AUR campaign match; {advisory_count} official package advisory finding(s).")
-            else:
-                lines.append("Security audit: no known AUR campaign match detected.")
-        if self.kernel_module_check and self.kernel_module_check.enabled:
-            lines.append(f"Kernel/module check: {self.kernel_module_check.summary}.")
-        if self.snapshot.foreign_packages:
-            issue_count = sum(1 for finding in self.findings if finding.rule_id in {"UPG-AUR-DEPENDENCY-MISSING", "UPG-AUR-CONFLICTS"})
-            if self.plan.selected_helper != "none" and not self.plan.helper_error:
-                status = "dependency issues not detected" if issue_count == 0 else f"dependency/conflict issues={issue_count}"
-                lines.append(f"Foreign package check: {len(self.snapshot.foreign_packages)} installed, {len(self.plan.aur_packages)} helper updates, {status}.")
-            elif self.plan.helper_error:
-                lines.append(f"Foreign package check: {len(self.snapshot.foreign_packages)} installed, helper query unavailable.")
-            else:
-                lines.append(f"Foreign package check: {len(self.snapshot.foreign_packages)} installed, helper updates not checked.")
-        if self.snapshot.pacnew_count or self.snapshot.pacsave_count:
-            lines.append(f"Config drift check: {self.snapshot.pacnew_count} .pacnew, {self.snapshot.pacsave_count} .pacsave files counted under /etc.")
-        if lines:
-            lines.append("-" * 50)
-        return lines
-
 
 @dataclass
 class UpgradeConfig:
@@ -795,7 +687,9 @@ def run_upgrade(
         if options.json_output:
             print(report.to_json(), file=stdout)
         else:
-            print(report.render_terminal(verbose=options.verbose), file=stdout)
+            from aurascan.core.upgrade_preflight_presenter import render_upgrade_preflight
+
+            print(render_upgrade_preflight(report, verbose=options.verbose), file=stdout)
         return EXIT_PREFLIGHT_UNAVAILABLE
 
     if not options.preflight_enabled:
@@ -803,7 +697,9 @@ def run_upgrade(
         if options.json_output:
             print(report.to_json(), file=stdout)
         else:
-            print(report.render_terminal(verbose=options.verbose), file=stdout)
+            from aurascan.core.upgrade_preflight_presenter import render_upgrade_preflight
+
+            print(render_upgrade_preflight(report, verbose=options.verbose), file=stdout)
             print("[AuraScan] Upgrade command was not run. Use --enable-preflight or update AuraScan config to enable this feature.", file=stderr)
         return EXIT_PREFLIGHT_DISABLED
 
@@ -847,7 +743,9 @@ def run_upgrade(
     if options.json_output:
         print(report.to_json(), file=stdout)
     else:
-        print(report.render_terminal(verbose=options.verbose), file=stdout)
+        from aurascan.core.upgrade_preflight_presenter import render_upgrade_preflight
+
+        print(render_upgrade_preflight(report, verbose=options.verbose), file=stdout)
 
     followup_context = None
     followup_runtime = None
@@ -1198,7 +1096,9 @@ def print_upgrade_failure_diagnosis(
     if diagnosis is None:
         return
     stream = stderr if options.json_output else stdout
-    print(diagnosis.render_terminal(), file=stream)
+    from aurascan.core.upgrade_preflight_presenter import render_upgrade_failure_diagnosis
+
+    print(render_upgrade_failure_diagnosis(diagnosis), file=stream)
 
 
 def diagnose_upgrade_failure(
@@ -1467,7 +1367,9 @@ def run_kernel_module_autopilot_fixes(
         report.repository_health = refreshed.repository_health
         report.security_audit = refreshed.security_audit
         apply_trusted_handoff(report, options)
-        print(report.render_terminal(verbose=options.verbose), file=stdout)
+        from aurascan.core.upgrade_preflight_presenter import render_upgrade_preflight
+
+        print(render_upgrade_preflight(report, verbose=options.verbose), file=stdout)
     else:
         print("[AuraScan] Kernel/module fix skipped. Keeping preflight risk for confirmation.", file=stderr)
     return None

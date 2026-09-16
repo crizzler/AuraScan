@@ -10,6 +10,7 @@ import pytest
 
 from aurascan.core.models import Severity
 from aurascan.core.incidents import CoredumpGroup, IncidentEvidence
+from aurascan.core.recovery_presenter import render_recovery
 from aurascan.core.recovery import (
     RECOVERY_AI_ENABLED_ENV,
     RecoveryAction,
@@ -388,10 +389,10 @@ def test_recovery_ai_rejects_unsafe_prose_without_persisting_it(tmp_path, unsafe
     }
 
     apply_recovery_ai_plan(report, enabled=True, env=env, urlopen=urlopen)
-    output = json.dumps(report.to_dict(), sort_keys=True) + report.render_terminal()
+    output = json.dumps(report.to_dict(), sort_keys=True) + render_recovery(report)
 
     assert report.ai_review["status"] == "invalid_response"
-    assert report.ai_review["summary"] == report.render_terminal().split("AI explanation: ", 1)[1].splitlines()[0]
+    assert report.ai_review["summary"] == render_recovery(report).split("AI explanation: ", 1)[1].splitlines()[0]
     assert all(not action.ai_recommended for action in report.repair_actions)
     for marker in ("recovery-terminal", "[AuraScan] SAFE", "example.invalid", "curl", "untrusted-package"):
         assert marker not in output
@@ -436,7 +437,7 @@ def test_recovery_ai_rejects_extra_fields_and_count_abuse(tmp_path, case):
     }
 
     apply_recovery_ai_plan(report, enabled=True, env=env, urlopen=urlopen)
-    output = json.dumps(report.to_dict(), sort_keys=True) + report.render_terminal()
+    output = json.dumps(report.to_dict(), sort_keys=True) + render_recovery(report)
 
     assert report.ai_review["status"] == "invalid_response"
     assert "rm -rf" not in output

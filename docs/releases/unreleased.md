@@ -51,6 +51,25 @@ Architecture stabilization stage 3 (no behavior change):
   (`core/engine.py` builds the `ScanReport` and asks `RiskEngine` for the
   summary).
 
+Architecture stabilization stage 4 (no behavior change):
+
+- Removed terminal rendering from the last six self-rendering report classes:
+  `ConfigDriftReport`, `IncidentReport`, `RecoveryReport`,
+  `SecurityAuditReport`, `UpgradePreflightReport` and `UpgradeFailureDiagnosis`
+  no longer define `render_terminal`. Rendering now lives in
+  `config_drift_presenter`, `incident_presenter`, `recovery_presenter`,
+  `security_audit_presenter` and `upgrade_preflight_presenter`.
+- `preview_diff`, `_check_summary_lines` and `_arch_audit_summary` moved with the
+  renderers as display helpers.
+- Added the presentation rules: a presenter may not appear in an import cycle
+  (INV-015) and a rendering module may not run processes, open the network,
+  mutate the filesystem, touch privilege state or call an AI provider (INV-016).
+  Presenters are runtime-independent of the objects they render; only the type
+  hints are imported, under `if TYPE_CHECKING:`.
+- Presenter engines keep display-only copies of three constants that the
+  subsystem engines also use, with equality assertions so the wording cannot
+  drift.
+
 See [v0.10.10](v0.10.10.md) for signed runtime-intelligence support, detection-data
 tray controls, the optional-install-script wording, and the recovery-bearing
 release validation record. Production feed and signing keys remain

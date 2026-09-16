@@ -12,6 +12,7 @@ from aurascan.core import ai_provider
 from aurascan.core import trusted_executable
 from aurascan.core import upgrade_preflight
 from aurascan.core.models import Severity
+from aurascan.core.upgrade_preflight_presenter import render_upgrade_preflight
 from aurascan.core.upgrade_preflight import (
     EXIT_PREFLIGHT_UNAVAILABLE,
     EXIT_PREFLIGHT_DISABLED,
@@ -590,7 +591,7 @@ def test_replacement_metadata_only_does_not_create_high_risk_false_alarm():
 
     assert "UPG-TRANSACTION-REPLACES" not in {finding.rule_id for finding in findings}
     assert report.transaction_change_count() == 0
-    assert "Removals/Replacements: 0" in report.render_terminal(use_color=False)
+    assert "Removals/Replacements: 0" in render_upgrade_preflight(report, use_color=False)
 
 
 def test_installed_replacement_target_is_reported_without_always_forcing_high():
@@ -796,7 +797,7 @@ def test_terminal_renders_high_severity_findings_before_medium_notices():
         ],
     )
 
-    rendered = report.render_terminal(use_color=False)
+    rendered = render_upgrade_preflight(report, use_color=False)
 
     assert rendered.index("1. High risk [HIGH]") < rendered.index("2. Medium notice [MEDIUM]")
 
@@ -1092,7 +1093,7 @@ def test_upgrade_ai_rejects_hostile_or_out_of_contract_output_without_persisting
     }
     assert finding.severity == Severity.LOW
     assert finding.summary == "deterministic summary"
-    persisted = report.to_json() + report.render_terminal(use_color=False, verbose=True)
+    persisted = report.to_json() + render_upgrade_preflight(report, use_color=False, verbose=True)
     assert forbidden_marker not in persisted
 
 
@@ -1113,7 +1114,7 @@ def test_upgrade_ai_provider_error_does_not_persist_raw_exception(monkeypatch):
         "status": "error",
         "error": "AI provider request failed",
     }
-    persisted = report.to_json() + report.render_terminal(use_color=False)
+    persisted = report.to_json() + render_upgrade_preflight(report, use_color=False)
     assert "fixture-secret" not in persisted
     assert "example.invalid" not in persisted
 

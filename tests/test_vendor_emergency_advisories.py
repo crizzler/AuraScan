@@ -10,6 +10,7 @@ import pytest
 from aurascan.core import security_audit
 from aurascan.core.models import Severity
 from aurascan.core.intelligence import bundled_snapshot
+from aurascan.core.security_audit_presenter import render_security_audit
 from aurascan.core.security_audit import (
     ArchAuditResult,
     SecurityAuditReport,
@@ -156,7 +157,7 @@ def test_offline_emergency_advisory_remains_enabled_without_arch_audit(tmp_path)
     assert report.official_vulnerability_findings == []
     assert report.campaign_findings == []
     assert report.to_dict()["risk_summary"]["vendor_emergency_findings"] == 1
-    terminal = report.render_terminal(verbose=True, use_color=False)
+    terminal = render_security_audit(report, verbose=True, use_color=False)
     assert "Treat the matched evidence as an incident" not in terminal
     assert "investigate from trusted media" not in terminal
     assert "verified fixed updates" in terminal

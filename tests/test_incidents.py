@@ -52,6 +52,7 @@ from aurascan.core.incidents import (
     validate_incident_ai_response,
     write_pending_markers,
 )
+from aurascan.core.incident_presenter import render_incident
 from aurascan.core.models import Confidence, Severity
 
 
@@ -469,7 +470,7 @@ def test_incident_ai_rejects_unsafe_prose_without_persisting_it(monkeypatch, uns
             "choices": [{"message": {"content": json.dumps(response)}}]
         }),
     )
-    output = report.to_json() + report.render_terminal()
+    output = report.to_json() + render_incident(report)
 
     assert report.ai_review["status"] == "invalid_response"
     assert report.eligible_actions == [action]
@@ -513,7 +514,7 @@ def test_incident_ai_rejects_extra_fields_and_count_abuse(monkeypatch, case):
             "choices": [{"message": {"content": json.dumps(response)}}]
         }),
     )
-    output = report.to_json() + report.render_terminal()
+    output = report.to_json() + render_incident(report)
 
     assert report.ai_review["status"] == "invalid_response"
     assert "rm -rf" not in output
@@ -533,7 +534,7 @@ def test_ai_timeout_is_classified_and_explained_without_blocking(monkeypatch):
         raise TimeoutError("The read operation timed out")
 
     apply_ai_incident_review(report, urlopen=timeout_response)
-    rendered = report.render_terminal()
+    rendered = render_incident(report)
 
     assert timeouts == [INCIDENT_AI_TIMEOUT_SECONDS]
     assert report.ai_review["status"] == "timeout"
@@ -555,7 +556,7 @@ def test_ai_transport_failure_is_not_mislabeled_as_invalid_json(monkeypatch):
     apply_ai_incident_review(report, urlopen=unavailable)
 
     assert report.ai_review["status"] == "provider_error"
-    assert "AI review: provider unavailable (openai)" in report.render_terminal()
+    assert "AI review: provider unavailable (openai)" in render_incident(report)
 
 
 def test_final_ai_failure_keeps_valid_triage_and_verified_plan(monkeypatch):
@@ -620,7 +621,7 @@ def test_final_ai_timeout_keeps_valid_triage_and_explains_fallback(monkeypatch):
         raise TimeoutError("The read operation timed out")
 
     apply_ai_incident_review(report, phase="final", urlopen=timeout_response)
-    rendered = report.render_terminal()
+    rendered = render_incident(report)
 
     assert report.ai_review["status"] == "triage_only"
     assert report.ai_review["final"]["status"] == "timeout"

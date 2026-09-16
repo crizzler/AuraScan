@@ -14,6 +14,7 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from aurascan.core.ai_provider import call_ai_provider, resolve_ai_config
 from aurascan.core.ai_provider import parse_bool as parse_config_bool
+from aurascan.core.config_drift_presenter import preview_diff
 from aurascan.core.models import SCANNER_VERSION
 from aurascan.core.text_safety import (
     advisory_text_or_fallback,
@@ -223,55 +224,6 @@ class ConfigDriftReport:
     def to_json(self, *, indent: Optional[int] = 2, include_preview: bool = False) -> str:
         return json.dumps(self.to_dict(include_preview=include_preview), indent=indent)
 
-    def render_terminal(self, *, include_preview: bool = True) -> str:
-        lines = [
-            "\n[AuraScan] Config Drift Assistant",
-            "=" * 50,
-            f"Files: {len(self.files)} | Planned fixes: {len(self.apply_actions)} | Manual review: {len(self.manual_actions)} | Sensitive: {sum(1 for item in self.files if item.sensitive)}",
-            "-" * 50,
-        ]
-        if self.scan_truncated:
-            lines.append("Scan was truncated; some drift files may be missing from this report.")
-        if not self.files:
-            lines.append("[OK] No .pacnew or .pacsave files were found.")
-        for index, action in enumerate(self.actions, start=1):
-            label = "will apply" if action.applies else "manual"
-            sensitive = " sensitive" if action.drift_file.sensitive else ""
-            lines.append(f"{index}. {action.drift_file.path} [{action.drift_file.kind}/{action.drift_file.risk}{sensitive}]")
-            lines.append(f"Plan: {action.summary} ({label})")
-            if action.ai_note:
-                note = advisory_text_or_fallback(
-                    action.ai_note,
-                    max_chars=500,
-                    fallback=CONFIG_DRIFT_AI_FALLBACK,
-                )
-                if note:
-                    lines.append(f"AI note: {note}")
-            if include_preview and action.candidate_text and action.applies:
-                diff = preview_diff(action.drift_file.target_path, action.candidate_text, max_lines=18)
-                if diff:
-                    lines.append("Preview:")
-                    lines.extend(f"  {line}" for line in diff.splitlines())
-            lines.append("")
-        if lines and lines[-1] == "":
-            lines.pop()
-        if self.ai_review and str(self.ai_review.get("status") or "") not in {"disabled", "not_run"}:
-            status = str(self.ai_review.get("status") or "unknown")
-            provider = str(self.ai_review.get("provider") or "")
-            label = f"AI diff review: {status}" + (f" ({provider})" if provider else "")
-            lines.append(label)
-            if status == "invalid_response":
-                lines.append(CONFIG_DRIFT_AI_FALLBACK)
-        if self.applied:
-            lines.append(f"Applied fixes: {len(self.applied)}")
-            if self.backup_root:
-                lines.append(f"Backups: {self.backup_root}")
-        if self.errors:
-            lines.append("Errors:")
-            lines.extend(f"- {error}" for error in self.errors)
-        return "\n".join(lines)
-
-
 def build_config_drift_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aurascan config-drift",
@@ -460,7 +412,9 @@ def run_config_drift(
     if options.json_output:
         print(report.to_json(include_preview=True), file=stdout)
     elif report.applied or report.errors:
-        print(report.render_terminal(include_preview=False), file=stdout)
+        from aurascan.core.config_drift_presenter import render_config_drift
+
+        print(render_config_drift(report, include_preview=False), file=stdout)
     if ok and followup_context is not None:
         _offer_config_followup_after_apply(
             options,
@@ -546,7 +500,9 @@ def _emit_config_report(report: ConfigDriftReport, options: ConfigDriftOptions, 
     if options.json_output:
         print(report.to_json(include_preview=True), file=stdout)
     else:
-        print(report.render_terminal(), file=stdout)
+        from aurascan.core.config_drift_presenter import render_config_drift
+
+        print(render_config_drift(report), file=stdout)
 
 
 def build_config_drift_report(root: Path = Path("/etc"), *, max_entries: int = 20000) -> ConfigDriftReport:
@@ -990,20 +946,6 @@ def redact_text(text: str) -> str:
         else:
             redacted_lines.append(line)
     return "\n".join(redacted_lines)
-
-
-def preview_diff(target_path: Path, candidate_text: str, *, max_lines: int = 30) -> str:
-    target_text = read_text_lossy(target_path) if target_path.exists() else ""
-    lines = list(difflib.unified_diff(
-        target_text.splitlines(),
-        candidate_text.splitlines(),
-        fromfile=str(target_path),
-        tofile="AuraScan candidate",
-        lineterm="",
-    ))
-    if len(lines) > max_lines:
-        lines = lines[:max_lines] + ["... diff truncated ..."]
-    return "\n".join(lines)
 
 
 def read_text_lossy(path: Path) -> str:

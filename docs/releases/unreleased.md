@@ -35,6 +35,22 @@ Architecture stabilization stage 2 (no behavior change):
   catalog or presentation layers (INV-013, which reproduces the removed defect if
   it returns).
 
+Architecture stabilization stage 3 (no behavior change):
+
+- Removed the last domain-to-service dependency. `AnalysisResult.to_report()` and
+  `AnalysisResult.to_dict(package_name, package_version)` assembled a
+  `ScanReport` and evaluated risk from inside the evidence model, which held the
+  `models` ↔ `risk` import cycle open. Both methods were internal and had no
+  callers anywhere, so they were removed rather than relocated.
+- `aurascan/core/models.py` is now a leaf module with no intra-package imports;
+  no import cycle contains it, and it remains the most depended-on module.
+- Corrected the layer taxonomy: `core/risk.py` is a risk-computation module, not
+  domain vocabulary. INV-013 was rewritten to the real rule and INV-014 was added
+  so the risk layer cannot reach into application, adapter or presentation code.
+- Report assembly stays where it already was: the application layer
+  (`core/engine.py` builds the `ScanReport` and asks `RiskEngine` for the
+  summary).
+
 See [v0.10.10](v0.10.10.md) for signed runtime-intelligence support, detection-data
 tray controls, the optional-install-script wording, and the recovery-bearing
 release validation record. Production feed and signing keys remain

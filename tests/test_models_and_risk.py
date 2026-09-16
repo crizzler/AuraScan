@@ -1,9 +1,11 @@
 from aurascan.core.models import (
+    AnalysisResult,
     Confidence,
     EvidenceQuality,
     Finding,
     PackageMetadata,
     Phase,
+    RecommendedAction,
     ScanReport,
     Severity,
     Source,
@@ -164,3 +166,75 @@ def test_history_anomaly_requires_manual_review():
 
     assert risk.requires_manual_review is True
     assert risk.blocks_installation is False
+
+
+def test_analysis_result_is_a_plain_analyzer_result_container():
+    empty = AnalysisResult(True, "nothing to check")
+
+    assert empty.is_safe is True
+    assert empty.msg == "nothing to check"
+    assert empty.findings == []
+
+    findings = [make_finding()]
+    populated = AnalysisResult(False, "needs review", findings)
+
+    assert populated.is_safe is False
+    assert populated.findings is findings
+
+
+def test_analysis_result_does_not_assemble_or_serialize_reports():
+    """Report assembly belongs to the application layer, not the domain model.
+
+    ``AnalysisResult`` used to expose ``to_report()``/``to_dict()``, which
+    imported the risk service into the domain evidence module and formed the
+    ``models`` <-> ``risk`` import cycle. Neither method had any caller.
+    """
+
+    assert not hasattr(AnalysisResult, "to_report")
+    assert not hasattr(AnalysisResult, "to_dict")
+
+
+def test_application_layer_assembles_the_report_and_risk_summary():
+    """The supported assembly path: build the report, then evaluate risk."""
+
+    finding = make_finding()
+    report = ScanReport(
+        PackageMetadata("pkg", "1"),
+        [finding],
+        messages=["scan message"],
+    )
+    report.risk_summary = RiskEngine().evaluate(report.findings)
+
+    assert report.package_metadata.name == "pkg"
+    assert report.package_metadata.version == "1"
+    assert report.messages == ["scan message"]
+    assert report.findings == [finding]
+    assert report.risk_summary.severity == Severity.MEDIUM
+    assert report.to_dict()["risk_summary"]["severity"] == "MEDIUM"
+    assert report.to_dict()["findings"][0]["rule_id"] == "TEST-001"
+
+
+def test_low_risk_finding_allows_install():
+    finding = make_finding(severity=Severity.LOW, requires_manual_review=False)
+
+    risk = RiskEngine().evaluate([finding])
+
+    assert risk.severity == Severity.LOW
+    assert risk.requires_manual_review is False
+    assert risk.blocks_installation is False
+    assert risk.action == RecommendedAction.allow
+
+
+def test_risk_summary_is_independent_of_finding_order():
+    rule_ids = ["TEST-A", "TEST-B", "TEST-C"]
+
+    forward = RiskEngine().evaluate([make_finding(rule_id=rule) for rule in rule_ids])
+    backward = RiskEngine().evaluate(
+        [make_finding(rule_id=rule) for rule in reversed(rule_ids)]
+    )
+
+    assert forward.severity == backward.severity == Severity.HIGH
+    assert forward.action == backward.action
+    assert forward.requires_manual_review == backward.requires_manual_review
+    assert forward.blocks_installation == backward.blocks_installation
+    assert forward.reason == backward.reason

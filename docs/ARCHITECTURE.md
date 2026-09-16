@@ -62,11 +62,12 @@ Two rules hold across every plane:
 Layers are assigned from repository structure by the audit tool. They describe
 dependency direction; they are not a package reorganisation.
 
-Current measurement: **77 modules, 71,456 physical lines.**
+Current measurement: **77 modules, 71,442 physical lines.**
 
 | Layer | Modules | Contents |
 | --- | ---: | --- |
-| `domain` | 4 | Evidence models and pure policy data: `core/models.py`, `core/risk.py`, `core/text_safety.py`, `core/update_policy.py` |
+| `domain` | 3 | Evidence vocabulary — the leaf of the graph: `core/models.py`, `core/text_safety.py`, `core/update_policy.py` |
+| `risk` | 1 | Risk aggregation over captured evidence: `core/risk.py` |
 | `catalog` | 2 | Stable rule catalog and user-facing explanation templates: `core/rule_metadata.py`, `core/presenter.py` |
 | `analysis` | 19 | `analyzers/` — static PKGBUILD, install-hook, provenance, remote-stage, npm, editor-task and bytecode analysis |
 | `adapters` | 12 | Bounded platform boundaries: `core/trusted_tools.py`, `core/trusted_executable.py`, `core/archive.py`, `core/package_archive.py`, `core/source_acquisition.py`, `core/intelligence_transport.py`, `core/intelligence_crypto.py`, `core/cache.py`, `core/local_package_db.py`, `core/ai_provider.py`, `core/recovery_network.py`, `core/compatibility.py` |
@@ -77,19 +78,22 @@ Current measurement: **77 modules, 71,456 physical lines.**
 Dependency direction:
 
 ```
-domain   ←   catalog   ←   analysis   ←   application   ←   presentation
-                                          ↑
-                                      adapters
+domain   ←   risk     ←   application   ←   presentation
+domain   ←   catalog
 ```
 
-- `domain` depends on domain modules and the standard library only
-  (enforced by INV-013). It must not reach into the catalog, analysis,
-  adapters, application, recovery or presentation code.
+- `domain` is the leaf: it depends on the standard library only, and has no
+  intra-package imports at all today. It must not reach into risk, catalog,
+  analysis, adapters, application, recovery or presentation code (INV-013).
+- `risk` aggregates captured evidence into a `RiskSummary`. It may use domain
+  modules and itself, and nothing higher (INV-014).
 - `catalog` may use domain modules and itself (INV-012).
 - `analysis` produces evidence; it does not execute processes (INV-001) and does
   not import UI entry points (INV-007).
 - `adapters` own the dangerous capabilities: process execution, network access,
   archive extraction, privilege lookups, persistent state.
+- `application` assembles reports and decides outcomes: `core/engine.py` builds
+  the `ScanReport` and asks `RiskEngine` for the summary.
 - `presentation` consumes application and domain APIs and does not decide which
   rules exist (INV-011).
 
@@ -149,13 +153,20 @@ known decision rather than a surprise.
 | Recovery planner | `core.agent`, `core.config_drift`, `core.followup`, `core.incident_automation`, `core.incident_diagnostics`, `core.incident_repairs`, `core.incidents`, `core.upgrade_preflight` | Expected: these modules call each other's planners through function-local imports to avoid a heavier module-level graph. Candidate for a planner interface later. |
 | Intelligence | `core.intelligence`, `core.intelligence_crypto`, `core.intelligence_store` | Expected: snapshot identity, verification and storage are one transaction. |
 | Install-hook / provenance | `analyzers.repository_provenance`, `core.install_hook`, `core.source_acquisition` | Expected: declared-source filtering needs the hook reader and the acquisition snapshot. |
-| Evidence model | `core.models`, `core.risk` | Remaining one-way-turned-cycle edge: `core/models.AnalysisResult.to_report` builds a report and delegates its risk summary to `core.risk.RiskEngine`, which imports the model vocabulary back. Removing it means moving report assembly out of the evidence model — the next target. |
+
+No cycle contains the evidence model, and the domain layer is now a leaf with no
+intra-package imports at all.
 
 **Resolved in Stage 2:** the four-module `{core.models, core.presenter, core.risk,
 core.rule_metadata}` component. The evidence model used to import the terminal
 presenter to render itself; rendering now lives in
-`core/scan_report_presenter.py`, so the catalog and presentation modules depend
-on the evidence model and never the reverse.
+`core/scan_report_presenter.py`.
+
+**Resolved in Stage 3:** the residual `{core.models, core.risk}` component.
+`AnalysisResult.to_report()` imported `RiskEngine` to assemble a report, which
+made the evidence vocabulary depend on the risk service. Report assembly is an
+application-layer responsibility — `core/engine.py` already does it — so the two
+uncalled methods were removed rather than relocated.
 
 ## Architecture invariants
 
@@ -171,14 +182,15 @@ reason.
 | INV-003 | Production code must not import training or model-research libraries |
 | INV-004 | Production code must not import research tooling (`tools/`, `security-data`, model-lab) |
 | INV-005 | Production runtime must stay standard library plus declared optional extras |
-| INV-006 | Domain and catalog modules must not depend on AI provider modules |
+| INV-006 | Domain, risk and catalog modules must not depend on AI provider modules |
 | INV-007 | Core application code must not import UI entry points |
 | INV-008 | Production code must not evaluate or unpickle dynamic data |
 | INV-009 | Production code must not disable TLS verification |
-| INV-010 | Domain and catalog modules must remain free of side effects |
+| INV-010 | Domain, risk and catalog modules must remain free of side effects |
 | INV-011 | UI entry points must not contain rule IDs |
 | INV-012 | Catalog modules must depend only on domain and catalog |
-| INV-013 | Domain evidence modules must not depend on the catalog or presentation layers |
+| INV-013 | Domain evidence modules must not depend on risk, catalog or presentation |
+| INV-014 | Risk computation modules must depend only on domain and risk |
 
 What the invariants deliberately do **not** do: fail on module size, forbid
 in-repo private names, or enforce a full layered architecture. The advisory
@@ -200,9 +212,59 @@ Current warnings: `core/instruction_guard.py` (8760 lines),
 
 ## Decomposition log
 
-### Stage 2 — the evidence model no longer renders itself
+### Stage 3 — the evidence model stops assembling reports
 
-`core/models.py` (529 → **430** lines) mixed domain evidence with the terminal
+With the presenter gone, the evidence model still borrowed `RiskEngine` inside
+`AnalysisResult.to_report()` (430 → **416** lines), which kept a smaller
+`models` <-> `risk` cycle alive.
+
+- **Compatibility finding:** `AnalysisResult.to_report()` and
+  `AnalysisResult.to_dict(package_name, package_version)` were internal *and
+dead*: zero callers in `aurascan/`, `tests/`, `tools/`, `contrib/` or
+`packaging/`, no dynamic `getattr` use, and no mention in any user or developer
+document. `AnalysisResult` is used throughout the analyzers purely as the
+return-value container the engine reads (`is_safe`, `findings`).
+- **Root cause of the survival:** the layer taxonomy classified `core/risk.py` as
+`domain`, so `models → risk` was not an upward edge and INV-013 did not fire.
+The taxonomy, not the edge, hid the cycle.
+- **Change:** removed the two dead methods instead of relocating them. Report
+assembly already lives in the application layer (`core/engine.py` builds the
+`ScanReport` and calls `self.risk_engine.evaluate(...)`), so moving the methods
+to a new service would have created a module with no callers — mechanical
+acyclic-graph editing rather than a real seam.
+- **Cycle removed:** no strongly connected component contains `models` any more;
+`core/models.py` now has **no intra-package imports at all** and remains the most
+depended-on module (31 importers).
+- **Taxonomy corrected:** `core/risk.py` moved to its own `risk` layer, and
+INV-013 was rewritten to the real rule (domain may depend on domain only) plus
+INV-014 for the risk layer. INV-013 now reproduces the removed edge if it
+returns.
+- **Evidence:** `tests/test_models_and_risk.py` pins `AnalysisResult`'s retained
+container semantics and the application-layer assembly path;
+`tests/test_architecture_audit.py` asserts the layer rule (not an exact import
+list) and includes a synthetic regression for a domain-to-risk edge.
+
+Dependency shape, before and after:
+
+```
+BEFORE
+
+  core.models.AnalysisResult.to_report
+        │  (lazy import)
+        ▼
+  core.risk.RiskEngine
+        │  (top-level import)
+        ▼
+  core.models  (Finding, RiskSummary, Severity, ...)
+  SCC: {core.models, core.risk}
+
+AFTER
+
+  core.engine          core.risk
+        ├──▶ core.models     └──▶ core.models
+        └──▶ core.risk
+  SCC: none containing core.models
+```
 presentation of a scan report: `ScanReport.render_terminal` owned 99 lines of
 ANSI colour, English wording and update-scan policy prose, and imported
 `core.presenter` inside the method to do it.
@@ -290,16 +352,20 @@ Extracted `core/trusted_executable.py`: `TrustedExecutable`,
 
 ## Next targets
 
-1. `core/models.AnalysisResult.to_report` still builds a report and borrows
-   `core.risk.RiskEngine`, which is the remaining `models`/`risk` cycle. Move
-   report assembly out of the evidence model.
-2. Give the incident/upgrade planner cycle a narrow interface so the eight-member
-   component can be reviewed as a group.
-3. Split `core/upgrade_preflight.py` further: mirror/repository repair (I/O plus
-   privileged commands) from output parsing (pure functions).
-4. Apply the Stage 2 seam to the other report classes that still own their own
-   `render_terminal` (`config_drift`, `incidents`, `recovery`, `security_audit`,
-   `upgrade_preflight`) so presentation lives in one layer everywhere.
+1. The eight-member planner component (`agent`, `config_drift`, `followup`,
+   `incidents`, `incident_*`, `upgrade_preflight`): give it a narrow interface so
+   the cycle can be reviewed as a group rather than as eight mutual imports.
+2. `core/upgrade_preflight.py` (3142 lines, 6 concern tags — the top hotspot):
+   split mirror/repository repair (I/O plus privileged commands) from output
+   parsing (pure functions).
+3. Apply the Stage 2 seam to the remaining report classes that still own their
+   own `render_terminal` (`config_drift`, `incidents`, `recovery`,
+   `security_audit`, `upgrade_preflight`) so presentation lives in one layer
+   everywhere.
+4. Dead helper methods discovered during Stage 3: `AnalysisResult.get_highest_severity()`,
+   `AnalysisResult.blocks_installation()` and `findings_from_results()` also have
+   no callers. They carry no dependency, so they were left alone, but the
+   evidence model should not advertise policy helpers that nothing uses.
 5. Characterise Instruction Guard state transitions, then decompose by
    responsibility.
 

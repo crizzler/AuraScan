@@ -408,20 +408,6 @@ class AnalysisResult:
     def blocks_installation(self) -> bool:
         return not self.is_safe or any(f.blocks_installation for f in self.findings)
 
-    def to_report(self, package_name: str, package_version: str) -> ScanReport:
-        from aurascan.core.risk import RiskEngine
-
-        report = ScanReport(
-            package_metadata=PackageMetadata(package_name, package_version),
-            findings=self.findings,
-            messages=[self.msg] if self.msg else [],
-        )
-        report.risk_summary = RiskEngine().evaluate(self.findings)
-        return report
-
-    def to_dict(self, package_name: str, package_version: str) -> Dict[str, Any]:
-        return self.to_report(package_name, package_version).to_dict()
-
 
 def findings_from_results(results: Iterable[AnalysisResult]) -> List[Finding]:
     findings: List[Finding] = []

@@ -356,16 +356,20 @@ Invariants are the narrow, mechanically checkable subset of the repository
 contract: analyzers must not execute processes, production code must not use
 `shell=True`, import training or research modules, or use undeclared third-party
 dependencies, deterministic policy must not depend on AI providers, domain
-modules must not depend on the catalog or presentation layers, catalog modules
-must depend only on domain and catalog, both must stay side-effect free, UI
+modules must not depend on the risk service, catalog or presentation layers,
+risk computation must not depend on application code, catalog modules must
+depend only on domain and catalog, all three must stay side-effect free, UI
 entry points must not contain rule IDs, and TLS verification must not be
 disabled.
 
-The domain/catalog split matters for reviewability: `core/models.py` is the
-evidence vocabulary that everything else imports. It must not render itself,
-format terminal output or reach for the rule presenter. Presentation lives in
-`core/presenter.py` (rule explanations) and `core/scan_report_presenter.py`
-(report rendering), and depends on the model, never the reverse.
+The layering matters for reviewability. `core/models.py` is the evidence
+vocabulary that everything else imports, so it must not render itself, format
+terminal output, assemble reports or reach for the risk engine or the rule
+presenter. Report assembly belongs to the application layer
+(`core/engine.py` builds a `ScanReport` and asks `RiskEngine` for the summary),
+rule explanations live in `core/presenter.py`, report rendering lives in
+`core/scan_report_presenter.py`, and risk aggregation lives in `core/risk.py`.
+Each depends on the model, never the reverse.
 
 When a change legitimately needs an exception, add an entry to
 `INVARIANT_ALLOWLIST` in the tool with a written reason; never weaken the check

@@ -64,13 +64,20 @@ DEFAULT_PACKAGE_ROOT = ROOT / "aurascan"
 # Role definitions are written as dotted suffixes so the audit can run against
 # any package, including temporary fixtures in tests.
 
-# Domain evidence and pure policy modules.
+# The evidence vocabulary: the leaf of the dependency graph. These modules are
+# imported by nearly everything else and must not import anything inside the
+# package (no risk service, catalog, analysis, adapter, application or UI code).
 DOMAIN_SUFFIXES = (
     "core.models",
-    "core.risk",
     "core.text_safety",
     "core.update_policy",
 )
+
+# Risk computation: pure aggregation over the evidence vocabulary. It sits above
+# the evidence vocabulary and below report/application assembly, and the domain
+# must not depend on it. Keeping it out of DOMAIN_SUFFIXES is what makes the
+# removed models<->risk edge a violation in the audit.
+RISK_SUFFIXES = ("core.risk",)
 
 # The stable rule catalog and its user-facing explanation templates. AGENTS.md
 # groups ``rule_metadata.py`` and ``presenter.py`` as one catalog layer; the rule
@@ -106,9 +113,13 @@ def catalog_modules(package_name: str) -> Tuple[str, ...]:
     return _qualify(package_name, CATALOG_SUFFIXES)
 
 
+def risk_modules(package_name: str) -> Tuple[str, ...]:
+    return _qualify(package_name, RISK_SUFFIXES)
+
+
 def pure_modules(package_name: str) -> Tuple[str, ...]:
-    """Domain and catalog modules: side-effect free, dependencies downward only."""
-    return domain_modules(package_name) + catalog_modules(package_name)
+    """Side-effect-free layers: evidence vocabulary, risk computation, catalog."""
+    return domain_modules(package_name) + risk_modules(package_name) + catalog_modules(package_name)
 
 
 def ui_entry_modules(package_name: str) -> Tuple[str, ...]:
@@ -453,6 +464,7 @@ INVARIANT_ALLOWLIST: Dict[str, Dict[str, str]] = {
     "INV-011": {},
     "INV-012": {},
     "INV-013": {},
+    "INV-014": {},
 }
 
 RULE_ID_PATTERN = r"^[A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+$"
@@ -612,7 +624,7 @@ INVARIANTS: Tuple[Invariant, ...] = (
     ),
     Invariant(
         "INV-006",
-        "domain and policy modules must not depend on AI provider modules",
+        "domain, risk and catalog modules must not depend on AI provider modules",
         "Deterministic policy is authoritative. AI is advisory, so policy code "
         "must not acquire a dependency on the provider transport.",
     ),
@@ -636,9 +648,9 @@ INVARIANTS: Tuple[Invariant, ...] = (
     ),
     Invariant(
         "INV-010",
-        "domain modules must remain free of side effects",
-        "Evidence models, severity metadata and text safety are pure data and "
-        "pure functions so they stay trivially reviewable and testable.",
+        "domain, risk and catalog modules must remain free of side effects",
+        "Evidence models, risk aggregation and explanation templates are pure "
+        "data and pure functions so they stay trivially reviewable and testable.",
     ),
     Invariant(
         "INV-011",
@@ -655,11 +667,19 @@ INVARIANTS: Tuple[Invariant, ...] = (
     ),
     Invariant(
         "INV-013",
-        "domain evidence modules must not depend on the catalog or presentation layers",
-        "The evidence model sits at the bottom of the graph. When "
-        "aurascan.core.models rendered its own terminal output, it imported "
-        "the rule presenter and formed a models<->presenter cycle. Domain "
+        "domain evidence modules must not depend on risk, catalog or presentation",
+        "The evidence vocabulary is the leaf of the dependency graph. AuraScan's "
+        "evidence model used to own report assembly, which pulled the risk "
+        "service into the domain and formed a models<->risk cycle. Domain "
         "modules may import domain modules and the standard library only.",
+    ),
+    Invariant(
+        "INV-014",
+        "risk computation modules must depend only on domain and risk",
+        "Risk aggregation reads the evidence vocabulary and returns a risk "
+        "summary. It must not reach into analysis, adapters, application, "
+        "recovery or presentation code, so the decision stays a pure function "
+        "of captured evidence.",
     ),
 )
 
@@ -1007,8 +1027,10 @@ def assign_layer(module_name: str, relative_path: str) -> str:
     if relative_path.startswith("core/"):
         stem = relative_path.split("/")[-1]
         name = stem[:-3] if stem.endswith(".py") else stem
-        if name in ("models", "risk", "text_safety", "update_policy"):
+        if name in ("models", "text_safety", "update_policy"):
             return "domain"
+        if name == "risk":
+            return "risk"
         if name in ("rule_metadata", "presenter"):
             return "catalog"
         if name in (
@@ -1305,8 +1327,9 @@ def evaluate_invariants(infos: Sequence[ModuleInfo], package_name: str) -> List[
                     )
 
         if info.name in catalog_modules(package_name):
+            allowed = domain_modules(package_name) + catalog_modules(package_name)
             for imported in info.internal_imports:
-                if imported not in pure:
+                if imported not in allowed:
                     violations.append(
                         _violation(
                             "INV-012",
@@ -1323,6 +1346,18 @@ def evaluate_invariants(infos: Sequence[ModuleInfo], package_name: str) -> List[
                             "INV-013",
                             info.path,
                             "domain module depends on {0}".format(imported),
+                        )
+                    )
+
+        if info.name in risk_modules(package_name):
+            allowed = domain_modules(package_name) + risk_modules(package_name)
+            for imported in info.internal_imports:
+                if imported not in allowed:
+                    violations.append(
+                        _violation(
+                            "INV-014",
+                            info.path,
+                            "risk module depends on {0}".format(imported),
                         )
                     )
 

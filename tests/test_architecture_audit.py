@@ -80,34 +80,14 @@ def test_domain_and_catalog_layers_stay_pure():
 
     for name in architecture_audit.catalog_modules("aurascan"):
         info = by_name[name]
+        allowed = set(domain) | set(architecture_audit.catalog_modules("aurascan"))
         for imported in info.internal_imports:
-            assert imported in pure, "/".join([name, imported])
+            assert imported in allowed, "/".join([name, imported])
 
     for name in pure:
         info = by_name[name]
         for category in ("process", "network", "fs_write", "privilege", "sqlite"):
             assert category not in info.capabilities
-
-
-def test_evidence_model_does_not_depend_on_presentation():
-    """The Stage 2 claim, pinned.
-
-    The core evidence model must not reach into the rule catalog or the
-    presentation layer. It previously imported the terminal presenter inside
-    ScanReport.render_terminal, which formed a models<->presenter cycle.
-    """
-
-    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
-    models = {info.name: info for info in result.modules}["aurascan.core.models"]
-
-    forbidden = set(architecture_audit.pure_modules("aurascan")) - set(
-        architecture_audit.domain_modules("aurascan")
-    )
-    assert set(models.internal_imports).isdisjoint(forbidden)
-    assert "aurascan.core.presenter" not in models.internal_imports
-    assert "aurascan.core.scan_report_presenter" not in models.internal_imports
-    assert "aurascan.core.text_safety" not in models.internal_imports
-    assert models.internal_imports == ["aurascan.core.risk"]
 
 
 def test_scan_report_rendering_lives_in_the_presentation_layer():
@@ -121,6 +101,51 @@ def test_scan_report_rendering_lives_in_the_presentation_layer():
 
     models = by_name["aurascan.core.models"]
     assert "render_terminal" not in models.public_symbols
+
+
+def test_evidence_model_does_not_depend_on_risk_or_presentation():
+    """The Stage 2 and Stage 3 claim, expressed as layer edges.
+
+    The evidence model imported the terminal presenter to render itself (Stage
+    2) and the risk engine to assemble its own report (Stage 3). Each formed an
+    import cycle. Assert the architectural rule rather than an exact import
+    list so a future legitimate domain-to-domain import stays possible.
+    """
+
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    models = {info.name: info for info in result.modules}["aurascan.core.models"]
+
+    forbidden = (
+        set(architecture_audit.risk_modules("aurascan"))
+        | set(architecture_audit.catalog_modules("aurascan"))
+        | {"aurascan.core.scan_report_presenter"}
+    )
+
+    assert set(models.internal_imports).isdisjoint(forbidden)
+    assert models.imports_by, "the evidence model should still be widely used"
+
+
+def test_domain_evidence_modules_have_no_upward_layer_edges():
+    """No domain module may depend on anything outside the domain layer."""
+
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    by_name = {info.name: info for info in result.modules}
+    domain = set(architecture_audit.domain_modules("aurascan"))
+
+    for name in sorted(domain):
+        info = by_name[name]
+        offenders = [imported for imported in info.internal_imports if imported not in domain]
+        assert offenders == [], name
+
+
+def test_risk_module_depends_only_on_the_evidence_vocabulary():
+    result = run_tool(ROOT / "aurascan", "aurascan", RULE_METADATA_PATH)
+    by_name = {info.name: info for info in result.modules}
+    risk = by_name["aurascan.core.risk"]
+
+    assert risk.layer == "risk"
+    for imported in risk.internal_imports:
+        assert imported in architecture_audit.domain_modules("aurascan")
 
 
 def test_production_has_no_third_party_runtime_imports():
@@ -345,6 +370,52 @@ def test_upward_dependency_from_a_domain_module_is_reported(tmp_path):
 
     assert "INV-013" in ids
     assert "INV-007" not in ids
+
+
+def test_domain_module_importing_the_risk_service_is_reported(tmp_path):
+    """Regression for the defect Stage 3 removed.
+
+    ``AnalysisResult.to_report`` imported the risk engine to assemble a report,
+    which formed the models<->risk cycle. A domain module must not reach the
+    risk service, and the audit must say so.
+    """
+
+    package_root = tmp_path / "riskcycle"
+    write_module(package_root, "__init__.py", "")
+    write_module(package_root, "core/__init__.py", "")
+    write_module(
+        package_root,
+        "core/models.py",
+        "def to_report(self):\n"
+        "    from riskcycle.core.risk import RiskEngine\n"
+        "    return RiskEngine()\n",
+    )
+    write_module(
+        package_root,
+        "core/risk.py",
+        "from riskcycle.core.models import ScanReport\n\n\nclass RiskEngine:\n    pass\n",
+    )
+
+    result = run_tool(package_root, "riskcycle")
+    by_id = {violation.invariant_id: violation for violation in result.violations}
+
+    assert "INV-013" in by_id
+    assert by_id["INV-013"].module == "riskcycle/core/models.py"
+    assert "riskcycle.core.risk" in by_id["INV-013"].detail
+    assert result.cycles == [["riskcycle.core.models", "riskcycle.core.risk"]]
+
+
+def test_risk_module_importing_application_code_is_reported(tmp_path):
+    package_root = tmp_path / "risklayer"
+    write_module(package_root, "__init__.py", "")
+    write_module(package_root, "core/__init__.py", "")
+    write_module(package_root, "core/risk.py", "from risklayer.core.engine import run\n")
+    write_module(package_root, "core/engine.py", "def run():\n    return None\n")
+
+    result = run_tool(package_root, "risklayer")
+    ids = {violation.invariant_id for violation in result.violations}
+
+    assert "INV-014" in ids
 
 
 def test_domain_module_importing_the_catalog_is_reported(tmp_path):

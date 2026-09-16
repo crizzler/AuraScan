@@ -62,7 +62,7 @@ Two rules hold across every plane:
 Layers are assigned from repository structure by the audit tool. They describe
 dependency direction; they are not a package reorganisation.
 
-Current measurement: **91 modules, 72,084 physical lines.**
+Current measurement: **92 modules, 72,340 physical lines.**
 
 | Layer | Modules | Contents |
 | --- | ---: | --- |
@@ -71,9 +71,11 @@ Current measurement: **91 modules, 72,084 physical lines.**
 | `catalog` | 2 | Stable rule catalog and user-facing explanation templates: `core/rule_metadata.py`, `core/presenter.py` |
 | `analysis` | 19 | `analyzers/` — static PKGBUILD, install-hook, provenance, remote-stage, npm, editor-task and bytecode analysis |
 | `adapters` | 16 | Bounded platform boundaries: `core/trusted_tools.py`, `core/trusted_executable.py`, `core/archive.py`, `core/package_archive.py`, `core/source_acquisition.py`, `core/intelligence_transport.py`, `core/intelligence_crypto.py`, `core/cache.py`, `core/local_package_db.py`, `core/ai_provider.py`, `core/recovery_network.py`, `core/compatibility.py`, `core/state_file.py`, `core/bounded_process.py`, `core/repository_state.py`, `core/repository_repair.py` |
-| `application` | 25 | Orchestration and policy: `core/engine.py`, upgrade preflight, incidents, follow-up, agent, config drift, security audit, recovery planners, instruction guard logic |
+| `application` | 27 | Orchestration and policy: `core/engine.py`, upgrade preflight, incidents, the follow-up framework and its lifecycle adapters (`core/incident_followup.py`, `core/upgrade_followup.py`), agent, config drift, security audit, recovery planners, instruction guard logic |
 | `recovery` | 3 | `core/recovery.py`, `core/recovery_boot.py`, `core/recovery_repairs.py` |
 | `presentation` | 16 | Entry points, trays and renderers: `cli.py`, `__main__.py`, `makepkg_wrapper.py`, `setup_wizard.py`, `core/updater_tray.py`, `core/intelligence_tray.py`, `core/instruction_cli.py`, `core/intelligence_cli.py`, `core/recovery_cli.py`, `core/incident_cli.py`, plus the six rendering modules `core/scan_report_presenter.py`, `core/config_drift_presenter.py`, `core/incident_presenter.py`, `core/recovery_presenter.py`, `core/security_audit_presenter.py`, `core/upgrade_preflight_presenter.py` |
+| `assets` | 1 | `assets/` bundled data |
+| `package` | 1 | `core/__init__.py` package metadata |
 
 Dependency direction:
 

@@ -161,6 +161,8 @@ a test currently catches them:
 - disabled TLS verification anywhere on a network path;
 - process execution with `shell=True`;
 - a rule identifier decided by a UI entry point;
+- a generic lifecycle framework that imports a concrete lifecycle workflow, or
+  that participates in an import cycle;
 - any import from the production package into research tooling or the reverse;
 - a third-party runtime dependency outside the declared optional extras.
 

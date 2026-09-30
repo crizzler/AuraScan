@@ -537,6 +537,104 @@ def test_wrapper_does_not_call_makepkg_when_manual_review_is_needed(tmp_path):
     assert "AuraScan needs review before makepkg" in stdout.getvalue()
 
 
+def test_scan_only_passes_without_calling_makepkg(tmp_path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
+    order = []
+    factory, _created = fake_engine_factory(order)
+    makepkg_calls = []
+    stdout = io.StringIO()
+
+    code = run(
+        ["--aurascan-scan-only"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    assert code == 0
+    assert order == ["scan"]
+    assert makepkg_calls == []
+    assert "AuraScan review passed" in stdout.getvalue()
+    assert "did not run makepkg" in stdout.getvalue()
+
+
+def test_scan_only_blocked_returns_block_without_makepkg(tmp_path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
+    order = []
+    factory, _created = fake_engine_factory(
+        order,
+        scan_ok=False,
+        risk={"blocks_installation": True, "requires_manual_review": False, "action": "BLOCKED"},
+    )
+    makepkg_calls = []
+
+    code = run(
+        ["--aurascan-scan-only"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == EXIT_SCAN_BLOCKED
+    assert order == ["scan"]
+    assert makepkg_calls == []
+
+
+def test_scan_only_review_required_returns_review_without_makepkg(tmp_path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
+    order = []
+    factory, _created = fake_engine_factory(
+        order,
+        risk={"blocks_installation": False, "requires_manual_review": True, "recommended_action": "manual_review"},
+    )
+    makepkg_calls = []
+    stdout = io.StringIO()
+
+    code = run(
+        ["--aurascan-scan-only"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    assert code == EXIT_MANUAL_REVIEW
+    assert order == ["scan"]
+    assert makepkg_calls == []
+    assert "AuraScan needs review before makepkg" in stdout.getvalue()
+
+
+def test_scan_only_json_reports_scan_only_passed(tmp_path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
+    order = []
+    factory, _created = fake_engine_factory(order)
+    stdout = io.StringIO()
+
+    code = run(
+        ["--aurascan-json", "--aurascan-scan-only"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, []),
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+    data = json.loads(stdout.getvalue())
+
+    assert code == 0
+    assert data["action"] == "scan_only_passed"
+    assert data["makepkg_invoked"] is False
+    assert "makepkg" not in order
+
+
 def test_wrapper_returns_makepkg_exit_code(tmp_path):
     (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
     order = []
@@ -2233,3 +2331,97 @@ def test_build_privilege_elevation_blocks_before_makepkg_and_before_sudo_cleanup
     # timestamp can never be used by it.
     assert not makepkg_calls
     assert not invalidations
+
+
+def test_interactive_scan_prints_advisory_explanation_before_the_block_notice(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
+    order = []
+    factory, _created = fake_engine_factory(
+        order,
+        scan_ok=False,
+        risk={
+            "blocks_installation": True,
+            "requires_manual_review": False,
+            "action": "BLOCKED",
+        },
+    )
+    seen_reports = []
+
+    def fake_lines(report):
+        seen_reports.append(report)
+        return ["", "[AuraScan] AI explanation (advisory):", "Fixture explanation."]
+
+    monkeypatch.setattr(makepkg_wrapper, "scan_explanation_lines", fake_lines)
+    stdout = io.StringIO()
+
+    code = run(
+        [],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, []),
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    output = stdout.getvalue()
+    assert code == EXIT_SCAN_BLOCKED
+    assert seen_reports and isinstance(seen_reports[0], dict)
+    assert "Fixture explanation." in output
+    assert output.index("Fixture explanation.") < output.index("AuraScan blocked makepkg")
+
+
+def test_scan_only_interactive_run_prints_advisory_explanation(tmp_path, monkeypatch):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
+    order = []
+    factory, _created = fake_engine_factory(order)
+    monkeypatch.setattr(
+        makepkg_wrapper,
+        "scan_explanation_lines",
+        lambda _report: ["", "[AuraScan] AI explanation (advisory):", "Fixture explanation."],
+    )
+    stdout = io.StringIO()
+
+    code = run(
+        ["--aurascan-scan-only"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, []),
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    assert code == 0
+    assert "Fixture explanation." in stdout.getvalue()
+    assert "AuraScan review passed" in stdout.getvalue()
+
+
+def test_json_scan_never_requests_an_advisory_explanation(tmp_path, monkeypatch):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
+    order = []
+    factory, _created = fake_engine_factory(order)
+
+    def forbidden(_report):
+        raise AssertionError("JSON output must never include advisory lines")
+
+    monkeypatch.setattr(makepkg_wrapper, "scan_explanation_lines", forbidden)
+    stdout = io.StringIO()
+
+    code = run(
+        ["--aurascan-json"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, []),
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    data = json.loads(stdout.getvalue())
+    assert code == 0
+    assert "Fixture explanation." not in stdout.getvalue()
+    assert "explanation" not in data
+    assert "makepkg" in order

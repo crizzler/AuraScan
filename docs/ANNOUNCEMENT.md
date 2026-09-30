@@ -9,6 +9,19 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
+The v0.10.11 release adds a guided AUR update flow to `aurascan upgrade`.
+After the repository-only continuation it can download a pending AUR update
+through the trusted Git boundary, review it with the normal scan (including
+the configured AI review), check its declared build dependencies with
+read-only pacman queries, and - only after explicit consent and a passing
+review - build and install it through `aurascan-makepkg`. Blocks and reviews
+now name the failing entry and can print an advisory AI explanation that can
+never change a deterministic result, and in-checkout symbolic links whose
+target was captured as a stable regular file no longer stop the provenance
+scan. This recovery-bearing release includes a fresh validated image; see its
+versioned note for the exact image identity, gate results and remaining
+limitations.
+
 The v0.10.10 release adds signed runtime-intelligence support and
 tray entries for detection-data status, explicit refresh and optional daily
 updates. Bundled detections remain available; production feed and signing keys

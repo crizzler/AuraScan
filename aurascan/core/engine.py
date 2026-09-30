@@ -79,7 +79,7 @@ class AuraScanEngine:
         self.last_pnpm_buildchain = None
         self._pnpm_controls = []
         self.scanner_version = "2.6.0"
-        self.rule_version = "1.10.0"
+        self.rule_version = "1.12.0"
         self.cache = ScanCache()
         self.risk_engine = RiskEngine()
         self.trust_diff_adapter = HistoryTrustDiffAdapter()

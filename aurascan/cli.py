@@ -12,6 +12,7 @@ from aurascan.core.config_drift import (
     run_config_drift,
 )
 from aurascan.core.engine import AuraScanEngine
+from aurascan.core.finding_explainer import scan_explanation_lines
 from aurascan.core.followup import run_ask
 from aurascan.core.incident_followup import (
     build_incident_followup_runtime,
@@ -42,6 +43,46 @@ OFFLINE_AGENT_HELPER_FLAGS = {
     "--execute-request",
     "--revoke-root-session",
 }
+
+
+def run_aur_update_wrapper(makepkg_args, cwd, stdout, stderr):
+    """Run one guided AUR update step through the aurascan-makepkg wrapper.
+
+    The guided flow in ``aurascan.core.aur_update_review`` orchestrates the
+    download, consent prompts and verification, but core modules must not
+    import the makepkg wrapper (a UI entry point). The CLI supplies this
+    operation and normalizes the wrapper's exit status; every scan, blocking,
+    review-token and makepkg handoff decision stays inside the wrapper.
+    """
+
+    from aurascan import makepkg_wrapper
+    from aurascan.core.aur_update_review import (
+        WRAPPER_RESULT_BLOCKED,
+        WRAPPER_RESULT_FAILED,
+        WRAPPER_RESULT_OK,
+        WRAPPER_RESULT_REVIEW_REQUIRED,
+        WRAPPER_RESULT_TOOL_UNAVAILABLE,
+    )
+
+    try:
+        code = makepkg_wrapper.run(
+            list(makepkg_args),
+            cwd=Path(cwd),
+            stdout=stdout,
+            stderr=stderr,
+            sudo_invalidator=makepkg_wrapper.invalidate_cached_sudo,
+        )
+    except Exception:  # bounded: a failed guided step must not abort the upgrade flow
+        return WRAPPER_RESULT_FAILED
+    if code == 0:
+        return WRAPPER_RESULT_OK
+    if code == makepkg_wrapper.EXIT_SCAN_BLOCKED:
+        return WRAPPER_RESULT_BLOCKED
+    if code == makepkg_wrapper.EXIT_MANUAL_REVIEW:
+        return WRAPPER_RESULT_REVIEW_REQUIRED
+    if code == makepkg_wrapper.EXIT_MAKEPKG_NOT_FOUND:
+        return WRAPPER_RESULT_TOOL_UNAVAILABLE
+    return WRAPPER_RESULT_FAILED
 
 
 def load_command_environment(raw_argv: List[str]) -> None:
@@ -172,6 +213,23 @@ def scan_pacman_hook_targets(engine: AuraScanEngine, targets: List[str], *, cach
     return not failed
 
 
+def print_scan_explanation(engine: AuraScanEngine, *, json_mode: bool) -> None:
+    """Print the optional advisory explanation for the last interactive scan.
+
+    JSON output must stay one parseable object, and a missing or disabled AI
+    configuration prints nothing at all.  The deterministic report that the
+    engine already printed remains the complete authority on the result.
+    """
+
+    if json_mode:
+        return
+    report = getattr(engine, "last_report", None)
+    if not isinstance(report, dict):
+        return
+    for line in scan_explanation_lines(report):
+        print(line)
+
+
 def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv and raw_argv[0] == "intelligence":
@@ -186,7 +244,11 @@ def main(argv=None):
     if raw_argv and raw_argv[0] == "doctor":
         sys.exit(run_doctor(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "upgrade":
-        sys.exit(run_upgrade(raw_argv[1:], agent_escalation_provider=run_agent_escalation))
+        sys.exit(run_upgrade(
+            raw_argv[1:],
+            agent_escalation_provider=run_agent_escalation,
+            aur_update_wrapper=run_aur_update_wrapper,
+        ))
     if raw_argv and raw_argv[0] == "config-drift":
         sys.exit(run_config_drift(raw_argv[1:], agent_escalation_provider=run_agent_escalation))
     if raw_argv and raw_argv[0] == "incidents":
@@ -238,12 +300,16 @@ def main(argv=None):
     )
 
     if args.pkgbuild:
-        if not engine.scan_pkgbuild(args.pkgbuild):
+        scan_ok = engine.scan_pkgbuild(args.pkgbuild)
+        print_scan_explanation(engine, json_mode=args.json_mode)
+        if not scan_ok:
             sys.exit(1)
         return
 
     if args.pkg:
-        if not engine.scan_package(args.pkg):
+        scan_ok = engine.scan_package(args.pkg)
+        print_scan_explanation(engine, json_mode=args.json_mode)
+        if not scan_ok:
             sys.exit(1)
         return
 

@@ -347,6 +347,7 @@ def test_required_path_with_symlinked_component_fails_closed(tmp_path: Path):
 
     assert snapshot.status == REPOSITORY_UNINSPECTED
     assert snapshot.error_code == "symlink_entry"
+    assert snapshot.failure_detail.startswith(".cache -> ")
 
 
 def test_backslash_name_fails_closed_instead_of_aliasing_slash_path(tmp_path: Path):
@@ -415,6 +416,7 @@ def test_oversized_required_root_generated_archive_fails_closed(
 
     assert snapshot.status == REPOSITORY_UNINSPECTED
     assert snapshot.error_code == "file_oversized"
+    assert snapshot.failure_detail == generated.name
 
 
 @pytest.mark.parametrize("link_to_directory", [False, True])
@@ -430,7 +432,80 @@ def test_symlink_entries_fail_closed(tmp_path: Path, link_to_directory: bool):
 
     assert snapshot.status == REPOSITORY_UNINSPECTED
     assert snapshot.error_code == "symlink_entry"
+    assert snapshot.failure_detail.startswith("linked -> ")
     assert len(snapshot.input_digest) == 64
+
+
+def test_in_root_file_symlink_is_captured_without_following(tmp_path: Path):
+    (tmp_path / "LICENSE").write_bytes(b"license text\n")
+    (tmp_path / "LICENSES").mkdir()
+    (tmp_path / "LICENSES" / "0BSD.txt").symlink_to("../LICENSE")
+
+    snapshot = capture_repository_snapshot(tmp_path)
+
+    assert snapshot.status == REPOSITORY_COMPLETE
+    assert snapshot.error_code == ""
+    assert snapshot.failure_detail == ""
+
+
+def test_in_root_symlink_identity_binds_the_link_target(tmp_path: Path):
+    (tmp_path / "LICENSE").write_bytes(b"same bytes")
+    (tmp_path / "COPYING").write_bytes(b"same bytes")
+    (tmp_path / "LICENSES").mkdir()
+    alias = tmp_path / "LICENSES" / "0BSD.txt"
+    alias.symlink_to("../LICENSE")
+
+    first = capture_repository_snapshot(tmp_path)
+    alias.unlink()
+    alias.symlink_to("../COPYING")
+    second = capture_repository_snapshot(tmp_path)
+
+    assert first.status == second.status == REPOSITORY_COMPLETE
+    assert first.input_digest != second.input_digest
+
+
+@pytest.mark.parametrize(
+    "link_name,target",
+    (
+        ("alias", "real"),
+        ("missing.txt", "not-there.txt"),
+        ("up", "../../outside.txt"),
+    ),
+)
+def test_unsupported_in_root_links_fail_closed(tmp_path: Path, link_name, target):
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "payload.bin").write_bytes(b"\x7fELF" + b"X" * 32)
+    (tmp_path / link_name).symlink_to(target, target_is_directory=(target == "real"))
+
+    snapshot = capture_repository_snapshot(tmp_path)
+
+    assert snapshot.status == REPOSITORY_UNINSPECTED
+    assert snapshot.error_code == "symlink_entry"
+    assert snapshot.failure_detail == f"{link_name} -> {target}"
+
+
+def test_symlink_chain_fails_closed(tmp_path: Path):
+    (tmp_path / "LICENSE").write_bytes(b"license text\n")
+    (tmp_path / "first").symlink_to("second")
+    (tmp_path / "second").symlink_to("LICENSE")
+
+    snapshot = capture_repository_snapshot(tmp_path)
+
+    assert snapshot.status == REPOSITORY_UNINSPECTED
+    assert snapshot.error_code == "symlink_entry"
+    assert snapshot.failure_detail == "first -> second"
+
+
+def test_absolute_in_root_symlink_fails_closed(tmp_path: Path):
+    target = tmp_path / "LICENSE"
+    target.write_bytes(b"license text\n")
+    (tmp_path / "alias").symlink_to(str(target))
+
+    snapshot = capture_repository_snapshot(tmp_path)
+
+    assert snapshot.status == REPOSITORY_UNINSPECTED
+    assert snapshot.error_code == "symlink_entry"
+    assert snapshot.failure_detail.startswith("alias -> ")
 
 
 def test_symlinked_root_fails_closed(tmp_path: Path):
@@ -453,6 +528,7 @@ def test_special_entry_fails_closed(tmp_path: Path):
 
     assert snapshot.status == REPOSITORY_UNINSPECTED
     assert snapshot.error_code == "special_entry"
+    assert snapshot.failure_detail == "fixture.fifo"
 
 
 def test_file_size_bound_fails_closed(tmp_path: Path, monkeypatch):
@@ -463,6 +539,7 @@ def test_file_size_bound_fails_closed(tmp_path: Path, monkeypatch):
 
     assert snapshot.status == REPOSITORY_UNINSPECTED
     assert snapshot.error_code == "file_oversized"
+    assert snapshot.failure_detail == "large.bin"
 
 
 def test_oversized_excluded_source_uses_stable_metadata_identity(
@@ -670,3 +747,23 @@ def test_snapshot_and_artifact_records_are_immutable(tmp_path: Path):
         snapshot.artifacts[0].kind = "zip"
     assert isinstance(snapshot.artifacts, tuple)
     assert stat.S_IMODE(snapshot.artifacts[0].mode) == 0o644
+
+
+def test_failure_detail_is_single_line_sanitized_and_bounded():
+    detail = provenance._bounded_failure_detail(
+        "entry\x07name\n" + "x" * (provenance.MAX_FAILURE_DETAIL_CHARS + 50)
+    )
+
+    assert "\x07" not in detail
+    assert "\n" not in detail
+    assert len(detail) <= provenance.MAX_FAILURE_DETAIL_CHARS
+    assert detail.startswith("entryname")
+
+
+def test_complete_snapshot_has_no_failure_detail(tmp_path: Path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n", encoding="utf-8")
+
+    snapshot = capture_repository_snapshot(tmp_path)
+
+    assert snapshot.status == REPOSITORY_COMPLETE
+    assert snapshot.failure_detail == ""

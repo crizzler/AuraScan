@@ -4,7 +4,10 @@ This module is deliberately a byte collector, not a package evaluator.  It
 does not invoke Git, inspect archive members, source PKGBUILDs, or execute any
 file it encounters.  Every non-pruned regular file is hashed through an
 already-opened no-follow descriptor so the resulting digest can be bound to a
-later scan or review decision.
+later scan or review decision.  Symbolic links are read with ``readlink`` and
+never followed: a one-hop link is accepted only when its lexical target stays
+inside the checkout and was itself captured as a stable regular file.  Every
+other link shape keeps the fail-closed behavior.
 """
 
 import hashlib
@@ -15,14 +18,15 @@ import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Dict, Iterable, List, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from aurascan.analyzers.python_bytecode import classify_python_precompiled
+from aurascan.core.text_safety import sanitize_terminal_text
 
 
 REPOSITORY_COMPLETE = "complete"
 REPOSITORY_UNINSPECTED = "uninspected"
-REPOSITORY_SNAPSHOT_VERSION = "1.2"
+REPOSITORY_SNAPSHOT_VERSION = "1.3"
 
 MAX_REPOSITORY_ENTRIES = 20_000
 MAX_REPOSITORY_REGULAR_FILES = 4_096
@@ -37,6 +41,7 @@ MAX_EDITOR_TASK_BYTES = 1024 * 1024
 MAX_EDITOR_TASK_FILES = 32
 MAX_EDITOR_TASK_TOTAL_BYTES = 4 * 1024 * 1024
 MAX_REPOSITORY_ELAPSED_SECONDS = 15.0
+MAX_FAILURE_DETAIL_CHARS = 300
 
 _VCS_DIRECTORIES = frozenset({".git", ".hg", ".svn", ".bzr"})
 _GENERATED_ROOT_DIRECTORIES = frozenset({"src", "pkg"})
@@ -102,6 +107,7 @@ class RepositorySnapshot:
     input_digest: str
     artifacts: Tuple[RepositoryArtifact, ...]
     error_code: str = ""
+    failure_detail: str = ""
     entry_count: int = 0
     editor_tasks: Tuple[RepositoryEditorTask, ...] = ()
 
@@ -124,6 +130,7 @@ class _CaptureState:
     total_bytes: int = 0
     editor_tasks: List[RepositoryEditorTask] = field(default_factory=list)
     editor_task_bytes: int = 0
+    pending_symlinks: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -134,9 +141,12 @@ class _ValidationRecord:
 
 
 class _CaptureFailure(Exception):
-    def __init__(self, code: str):
+    """A bounded capture failure with an optional sanitized entry detail."""
+
+    def __init__(self, code: str, detail: str = ""):
         super().__init__(code)
         self.code = code
+        self.detail = detail
 
 
 def capture_repository_snapshot(
@@ -193,6 +203,7 @@ def capture_repository_snapshot(
             (),
             (),
             (),
+            failure_detail=exc.detail,
         )
 
     state = _CaptureState(
@@ -232,6 +243,13 @@ def capture_repository_snapshot(
             raise _CaptureFailure("unsafe_root")
 
         _walk_directory(root_fd, (), 0, state)
+
+        # Every recorded link must now resolve, without being followed, to a
+        # stable regular file that the same traversal captured.  This keeps
+        # the no-follow, no-hidden-bytes contract while accepting ordinary
+        # in-checkout layout links such as REUSE-style license aliases.
+        _resolve_pending_symlinks(state)
+
         for required_path in sorted(required_paths):
             _capture_required_path(root_fd, required_path, state)
 
@@ -263,6 +281,7 @@ def capture_repository_snapshot(
             sorted(excluded_subtree_paths),
             sorted(independently_bound_paths),
             sorted(required_paths),
+            failure_detail=exc.detail,
         )
     except OSError:
         return _build_snapshot(
@@ -335,15 +354,29 @@ def _walk_directory(
             try:
                 metadata = entry.stat(follow_symlinks=False)
             except OSError as exc:
-                raise _CaptureFailure("entry_unreadable") from exc
+                raise _CaptureFailure("entry_unreadable", relative_path) from exc
             mode = stat.S_IMODE(metadata.st_mode)
 
             if stat.S_ISLNK(metadata.st_mode):
+                try:
+                    target = os.readlink(name, dir_fd=directory_fd)
+                except OSError as exc:
+                    raise _CaptureFailure("symlink_entry", relative_path) from exc
+                if len(os.fsencode(target)) > MAX_REPOSITORY_PATH_BYTES:
+                    raise _CaptureFailure("path_too_long", relative_path)
+                target_bytes = target.encode("utf-8", "surrogateescape")
                 _record_manifest_entry(
                     state,
-                    _manifest_entry(relative_path, "symlink", mode=mode),
+                    _manifest_entry(
+                        relative_path,
+                        "symlink",
+                        sha256=hashlib.sha256(target_bytes).hexdigest(),
+                        size=len(target_bytes),
+                        mode=mode,
+                    ),
                 )
-                raise _CaptureFailure("symlink_entry")
+                state.pending_symlinks[relative_path] = target
+                continue
             if stat.S_ISDIR(metadata.st_mode):
                 if _is_vcs_directory(parts):
                     state.pruned_paths.add(relative_path)
@@ -398,7 +431,7 @@ def _walk_directory(
                     state,
                     _manifest_entry(relative_path, "special", mode=mode),
                 )
-                raise _CaptureFailure("special_entry")
+                raise _CaptureFailure("special_entry", relative_path)
 
             if relative_path in state.excluded_subtree_paths:
                 # A statically declared VCS cache path is directory-shaped.
@@ -412,7 +445,7 @@ def _walk_directory(
                         mode=mode,
                     ),
                 )
-                raise _CaptureFailure("excluded_subtree_wrong_type")
+                raise _CaptureFailure("excluded_subtree_wrong_type", relative_path)
 
             if not first_visit:
                 # Required directory traversal may revisit an already captured
@@ -518,29 +551,35 @@ def _capture_regular_entry(
         and (excluded or unreferenced_generated_archive)
     )
     if metadata_only:
-        digest, size, opened_mode = _read_stable_metadata_entry(
-            directory_fd,
-            name,
-            expected,
-            state,
-        )
+        try:
+            digest, size, opened_mode = _read_stable_metadata_entry(
+                directory_fd,
+                name,
+                expected,
+                state,
+            )
+        except _CaptureFailure as exc:
+            raise _CaptureFailure(exc.code, exc.detail or relative_path) from exc
         entry_type = (
             "generated-archive-metadata"
             if unreferenced_generated_archive
             else "excluded-large-regular"
         )
         return digest, b"", False, size, opened_mode, entry_type
-    digest, prefix, pe_valid, size, opened_mode = _read_regular_entry(
-        directory_fd,
-        name,
-        expected,
-        state,
-        count_toward_total=(
-            require_full_capture
-            or (not excluded and not unreferenced_generated_archive)
-        ),
-        editor_task_path=relative_path if editor_task else "",
-    )
+    try:
+        digest, prefix, pe_valid, size, opened_mode = _read_regular_entry(
+            directory_fd,
+            name,
+            expected,
+            state,
+            count_toward_total=(
+                require_full_capture
+                or (not excluded and not unreferenced_generated_archive)
+            ),
+            editor_task_path=relative_path if editor_task else "",
+        )
+    except _CaptureFailure as exc:
+        raise _CaptureFailure(exc.code, exc.detail or relative_path) from exc
     return digest, prefix, pe_valid, size, opened_mode, "regular"
 
 
@@ -811,6 +850,62 @@ def _remember_file_validation(
     )
 
 
+def _remember_symlink_validation(
+    state: _CaptureState,
+    relative_path: str,
+    target: str,
+) -> None:
+    state.validation_records[relative_path] = _ValidationRecord(
+        relative_path,
+        "symlink",
+        tuple(target.encode("utf-8", "surrogateescape")),
+    )
+
+
+def _lexical_in_root_target(link_path: str, target: str) -> Optional[str]:
+    """Resolve a link target lexically without touching the filesystem."""
+
+    if not target or target.startswith("/"):
+        return None
+    parts = list(PurePosixPath(link_path).parts[:-1])
+    for component in target.split("/"):
+        if component in ("", "."):
+            continue
+        if component == "..":
+            if not parts:
+                return None
+            parts.pop()
+            continue
+        parts.append(component)
+    return "/".join(parts) or None
+
+
+def _resolve_pending_symlinks(state: _CaptureState) -> None:
+    """Bind every recorded link to a captured in-checkout regular file.
+
+    A link is accepted only when its lexical target stays inside the checkout
+    and names a path that the same traversal captured as a fully read regular
+    file, so no bytes can hide behind it.  Absolute targets, escaping or
+    dangling targets, directories, special files, links into pruned trees,
+    and link-to-link chains keep the fail-closed behavior.
+    """
+
+    for relative_path in sorted(state.pending_symlinks):
+        target = state.pending_symlinks[relative_path]
+        resolved = _lexical_in_root_target(relative_path, target)
+        entry = None
+        if resolved is not None:
+            index = state.entry_indexes.get(resolved)
+            if index is not None:
+                entry = state.entries[index]
+        if entry is None or str(entry.get("type", "")) != "regular":
+            raise _CaptureFailure(
+                "symlink_entry",
+                "{} -> {}".format(relative_path, target),
+            )
+        _remember_symlink_validation(state, relative_path, target)
+
+
 def _remember_directory_validation(
     state: _CaptureState,
     relative_path: str,
@@ -847,7 +942,8 @@ def _revalidate_captured_paths(root_fd: int, state: _CaptureState) -> None:
                     raise _CaptureFailure(
                         "file_changed"
                         if record.entry_type == "file"
-                        else "directory_changed"
+                        else "directory_changed",
+                        relative_path,
                     ) from exc
                 opened = os.fstat(next_fd)
                 if not stat.S_ISDIR(opened.st_mode):
@@ -855,7 +951,8 @@ def _revalidate_captured_paths(root_fd: int, state: _CaptureState) -> None:
                     raise _CaptureFailure(
                         "file_changed"
                         if record.entry_type == "file"
-                        else "directory_changed"
+                        else "directory_changed",
+                        relative_path,
                     )
                 directory_fds.append(next_fd)
                 current_fd = next_fd
@@ -870,19 +967,31 @@ def _revalidate_captured_paths(root_fd: int, state: _CaptureState) -> None:
                 raise _CaptureFailure(
                     "file_changed"
                     if record.entry_type == "file"
-                    else "directory_changed"
+                    else "directory_changed",
+                    relative_path,
                 ) from exc
             if record.entry_type == "file":
                 if (
                     not stat.S_ISREG(current.st_mode)
                     or _file_identity(current) != record.identity
                 ):
-                    raise _CaptureFailure("file_changed")
+                    raise _CaptureFailure("file_changed", relative_path)
+            elif record.entry_type == "symlink":
+                try:
+                    current_target = os.readlink(parts[-1], dir_fd=current_fd)
+                except OSError as exc:
+                    raise _CaptureFailure("symlink_changed", relative_path) from exc
+                if (
+                    not stat.S_ISLNK(current.st_mode)
+                    or tuple(current_target.encode("utf-8", "surrogateescape"))
+                    != record.identity
+                ):
+                    raise _CaptureFailure("symlink_changed", relative_path)
             elif (
                 not stat.S_ISDIR(current.st_mode)
                 or _directory_identity(current) != record.identity
             ):
-                raise _CaptureFailure("directory_changed")
+                raise _CaptureFailure("directory_changed", relative_path)
         finally:
             for file_descriptor in reversed(directory_fds):
                 os.close(file_descriptor)
@@ -899,6 +1008,7 @@ def _walk_child_directory(
     required_traversal: bool = False,
 ) -> None:
     child_fd = -1
+    relative_path = PurePosixPath(*parts).as_posix()
     try:
         try:
             child_fd = os.open(
@@ -910,13 +1020,13 @@ def _walk_child_directory(
                 dir_fd=parent_fd,
             )
         except OSError as exc:
-            raise _CaptureFailure("directory_unreadable") from exc
+            raise _CaptureFailure("directory_unreadable", relative_path) from exc
         opened = os.fstat(child_fd)
         if (
             not stat.S_ISDIR(opened.st_mode)
             or _directory_identity(expected) != _directory_identity(opened)
         ):
-            raise _CaptureFailure("directory_changed")
+            raise _CaptureFailure("directory_changed", relative_path)
         _walk_directory(
             child_fd,
             parts,
@@ -928,12 +1038,12 @@ def _walk_child_directory(
         try:
             current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         except OSError as exc:
-            raise _CaptureFailure("directory_changed") from exc
+            raise _CaptureFailure("directory_changed", relative_path) from exc
         if (
             _directory_identity(opened) != _directory_identity(after)
             or _directory_identity(after) != _directory_identity(current)
         ):
-            raise _CaptureFailure("directory_changed")
+            raise _CaptureFailure("directory_changed", relative_path)
     finally:
         if child_fd >= 0:
             os.close(child_fd)
@@ -1264,6 +1374,16 @@ def _manifest_entry(
     }
 
 
+def _bounded_failure_detail(value: str) -> str:
+    """Return one bounded, display-safe description of the failing entry."""
+
+    return sanitize_terminal_text(
+        str(value or ""),
+        max_chars=MAX_FAILURE_DETAIL_CHARS,
+        single_line=True,
+    )
+
+
 def _build_snapshot(
     status: str,
     error_code: str,
@@ -1275,6 +1395,7 @@ def _build_snapshot(
     independently_bound_paths: Sequence[str] = (),
     required_paths: Sequence[str] = (),
     editor_tasks: Sequence[RepositoryEditorTask] = (),
+    failure_detail: str = "",
 ) -> RepositorySnapshot:
     ordered_entries = sorted(
         (dict(entry) for entry in entries),
@@ -1307,6 +1428,7 @@ def _build_snapshot(
             key=lambda artifact: (artifact.relative_path, artifact.kind, artifact.sha256),
         )),
         error_code=error_code,
+        failure_detail=_bounded_failure_detail(failure_detail),
         entry_count=int(entry_count),
         editor_tasks=tuple(sorted(editor_tasks, key=lambda task: task.relative_path)),
     )

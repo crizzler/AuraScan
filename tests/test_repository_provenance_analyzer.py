@@ -13,7 +13,7 @@ from aurascan.core.install_hook import (
     InstallHookResolution,
     capture_package_scan_input,
 )
-from aurascan.core.models import Phase, Severity
+from aurascan.core.models import PackageMetadata, Phase, ScanReport, Severity
 from aurascan.core.repository_provenance import (
     REPOSITORY_COMPLETE,
     REPOSITORY_UNINSPECTED,
@@ -21,6 +21,8 @@ from aurascan.core.repository_provenance import (
     RepositorySnapshot,
     capture_repository_snapshot,
 )
+from aurascan.core.risk import RiskEngine
+from aurascan.core.scan_report_presenter import render_scan_report
 
 
 NO_HOOK = InstallHookResolution(
@@ -48,12 +50,13 @@ def artifact(
     )
 
 
-def snapshot(*artifacts, status=REPOSITORY_COMPLETE, error_code=""):
+def snapshot(*artifacts, status=REPOSITORY_COMPLETE, error_code="", failure_detail=""):
     return RepositorySnapshot(
         status=status,
         input_digest="b" * 64,
         artifacts=tuple(artifacts),
         error_code=error_code,
+        failure_detail=failure_detail,
         entry_count=len(artifacts),
     )
 
@@ -64,12 +67,18 @@ def analyze(
     hook=NO_HOOK,
     status=REPOSITORY_COMPLETE,
     error_code="",
+    failure_detail="",
 ):
     return RepositoryProvenanceAnalyzer().analyze_scan_input(
         "/tmp/fixture-package/PKGBUILD",
         content,
         hook,
-        snapshot(*artifacts, status=status, error_code=error_code),
+        snapshot(
+            *artifacts,
+            status=status,
+            error_code=error_code,
+            failure_detail=failure_detail,
+        ),
         pkg_name="fixture-package",
         pkg_ver="1.0",
     )
@@ -2382,3 +2391,71 @@ def test_nested_literal_shell_expansion_counts_toward_analysis_bound(
     assert finding(result, "AUR-REPO-INSPECTION-INCOMPLETE-001").evidence_snippet.endswith(
         "analysis limit"
     )
+
+
+def test_incomplete_inspection_names_the_first_unsupported_entry():
+    result = analyze(
+        "pkgname=fixture-package\npkgver=1\n",
+        status=REPOSITORY_UNINSPECTED,
+        error_code="symlink_entry",
+        failure_detail="linked-payload -> /media/usb/payload",
+    )
+
+    incomplete = finding(result, "AUR-REPO-INSPECTION-INCOMPLETE-001")
+    assert incomplete.user_summary == (
+        "First unsupported entry: linked-payload -> /media/usb/payload "
+        "(a symbolic link)."
+    )
+    assert incomplete.technical_details == incomplete.user_summary
+    assert incomplete.file_path == "/tmp/fixture-package/PKGBUILD"
+    assert result.is_safe is False
+
+
+def test_incomplete_inspection_without_an_observed_entry_keeps_template_text():
+    result = analyze(
+        "pkgname=fixture-package\npkgver=1\n",
+        status=REPOSITORY_UNINSPECTED,
+        error_code="entry_limit",
+    )
+
+    incomplete = finding(result, "AUR-REPO-INSPECTION-INCOMPLETE-001")
+    assert incomplete.user_summary is None
+    assert incomplete.technical_details is None
+
+
+def test_incomplete_inspection_sanitizes_a_hostile_observed_entry():
+    result = analyze(
+        "pkgname=fixture-package\npkgver=1\n",
+        status=REPOSITORY_UNINSPECTED,
+        error_code="symlink_entry",
+        failure_detail="entry\x1b[31mspoof",
+    )
+
+    incomplete = finding(result, "AUR-REPO-INSPECTION-INCOMPLETE-001")
+    assert "\x1b" not in incomplete.user_summary
+    assert incomplete.user_summary == (
+        "First unsupported entry: entryspoof (a symbolic link)."
+    )
+
+
+def test_incomplete_provenance_report_shows_the_unsupported_entry_by_default():
+    result = analyze(
+        "pkgname=fixture-package\npkgver=1\n",
+        status=REPOSITORY_UNINSPECTED,
+        error_code="symlink_entry",
+        failure_detail="linked-payload -> /media/usb/payload",
+    )
+    report = ScanReport(
+        PackageMetadata("fixture-package", "1.0"),
+        list(result.findings),
+    )
+    report.risk_summary = RiskEngine().evaluate(list(result.findings))
+
+    rendered = render_scan_report(report, use_color=False, verbose=False)
+
+    assert "Package-repository provenance inspection did not complete." in rendered
+    assert (
+        "First unsupported entry: linked-payload -> /media/usb/payload "
+        "(a symbolic link)."
+    ) in rendered
+    assert "could not obtain a bounded, stable, no-follow snapshot" not in rendered

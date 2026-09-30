@@ -104,7 +104,10 @@ def render_upgrade_preflight(
         status = str(report.ai_review.get("status") or "unknown")
         provider = str(report.ai_review.get("provider") or "")
         summary = str(report.ai_review.get("summary") or "")
+        detail = str(report.ai_review.get("error") or "")
         label = f"AI review: {status}" + (f" ({provider})" if provider else "")
+        if detail and not summary:
+            label += f" - {detail}"
         lines.append(label)
         if summary:
             lines.append(summary)

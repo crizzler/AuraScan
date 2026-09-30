@@ -87,7 +87,7 @@ retire child processes/timers without letting late callbacks affect new work.
 Test authorization failures, state disagreements and Qt adapters using injected
 processes; do not start host services or request real privilege in tests.
 
-Production feed/key configuration remains empty in v0.10.10. No CLI or
+Production feed/key configuration remains empty in v0.10.11. No CLI or
 environment setting may inject keys, weaken verification, or choose a different
 feed. Initial key replacement/revocation recovery requires an application
 update, and this bounded protocol must not be described as TUF-compliant.
@@ -98,7 +98,7 @@ publisher mistakes, and an absent live freshness oracle remain limitations.
 Run `tests/test_intelligence_*.py`, publisher template tests, scanner/audit
 parity and cache/review regressions, then the full source gates. The existing
 Python 3.8/3.14 CI matrix includes the publisher tests. Validate new systemd,
-sysusers, tmpfiles and packaging definitions without starting them. The v0.10.10
+sysusers, tmpfiles and packaging definitions without starting them. The v0.10.11
 application release is **recovery-bearing** because this changes shared scanner
 trust and handoff decisions; the release workflow requires a fresh validated
 recovery build. Production key provisioning and feed publication remain
@@ -926,6 +926,17 @@ artifact, per-file, total-byte, depth, required-path, and elapsed-time limits
 must fail closed with
 `AUR-REPO-INSPECTION-INCOMPLETE-001` rather than silently reducing coverage.
 
+Symbolic links are read with `readlink` and never followed. A one-hop link is
+recorded in the manifest with its target bytes bound into the checkout
+identity, and it is accepted only when its lexical target resolves inside the
+checkout to a path captured as a fully read regular file, so no bytes can hide
+behind it. Absolute targets, escaping or dangling targets, directory targets,
+special files, links into pruned trees, and link-to-link chains keep the
+fail-closed `symlink_entry` result, with the sanitized `link -> target` detail
+surfaced through `AUR-REPO-INSPECTION-INCOMPLETE-001`. Links join the same
+post-traversal revalidation as files and directories; a link that changes type
+or target fails closed as `symlink_changed`.
+
 Pruning is an enumeration policy, not a path-based trust grant. Before the
 snapshot, collect supported, statically resolved checkout paths used by
 transfer, execution, interpreter/loader, or permission-changing package logic.
@@ -1477,10 +1488,15 @@ Shelly AUR JSON query. Repo package previews should come from pacman's `--print
 --print-format` path. If a helper query finds no AUR build, the final command
 must be repository-only pacman rather than a fresh helper transaction that
 could expand after preflight. If it finds any planned AUR build, emit blocking
-`UPG-AUR-BUILD-UNSCANNED`; do not invoke the helper unless a future design can
-prove a real per-package `aurascan-makepkg` integration. Do not simulate that
-proof with a flag or environment marker. Preflight must not run makepkg, build
-AUR packages, inspect AUR sources, or execute package code.
+`UPG-AUR-BUILD-UNSCANNED`; the helper is never asked to build AUR packages.
+The only supported AUR build path is per-package `aurascan-makepkg`
+integration, implemented by the guided AUR update stage below: after a
+successful repository-only transaction, AuraScan may download one pending AUR
+package itself and drive the wrapper through a review-only step and then a
+consented build. Do not simulate that integration with a flag or environment
+marker, and never route it through the helper. Preflight planning itself must
+not run makepkg, build AUR packages, inspect AUR sources, or execute package
+code; acquisition exists only inside the consented guided stage.
 
 Capture `/usr/bin/sudo`, `/usr/bin/pacman`, and the absolute path returned for a
 selected helper as executable identities. Reject final files or path components
@@ -1513,6 +1529,101 @@ security invariants may be hard blockers: in particular,
 `UPG-AUR-BUILD-UNSCANNED` cannot be cleared by confirmation, `--yes`, or AI.
 For an allowed repository-only transaction, pacman still owns its normal
 confirmation and failure behavior.
+
+The blocker is not a dead end in an interactive session. When the AUR
+source-build blocker is the only blocking finding, at least one repository
+package is planned, and the run is interactive (`--yes`, `--json`, dry runs and
+an already repository-only plan are excluded), `aurascan upgrade` may offer the
+documented safe continuation: re-run the preflight bound to a repository-only
+plan (`--aur-helper none`), hand only the repository transaction to pacman, and
+list the pending AUR updates. The interview never clears the blocker and never
+invokes the helper; it drops the AUR builds from the transaction instead.
+Declining, or having no interactive answer, keeps the unchanged hard stop,
+message and exit code. Do not turn this offer into automatic confirmation, a
+`--yes` behavior, or proof that a helper-driven build was wrapper-routed.
+
+### Guided AUR update stage
+
+After a repository-only continuation completes successfully, `aurascan upgrade`
+may offer to handle each pending AUR update itself so the user does not have to
+research, download and build it by hand:
+
+- the stage is offered in two interactive cases: after a successful
+  repository-only continuation, or directly at the blocker when the
+  continuation was declined or no repository packages are planned. When the
+  repository upgrade was not applied, the stage first notes that an AUR build
+  may need a rebuild after a later repository upgrade. `--yes`, `--json` and
+  dry runs keep the plain `aurascan-makepkg` guidance;
+- each package asks twice: first for consent to download and review, then,
+  only after a passing review, for consent to build and install. An earlier
+  confirmation never stands in for these consents;
+- the download uses the trusted system `git` boundary: canonical
+  `https://aur.archlinux.org/<name>.git`, a strictly validated package name,
+  `--depth=1`, no submodules, credential helpers, hooks, terminal prompts or
+  LFS smudge, bounded output and runtime, and mandatory exact-HEAD revision
+  plus a regular `PKGBUILD`. Any failure removes the partial checkout and
+  prints the manual build path;
+- the review step runs the wrapper's `--aurascan-scan-only` mode, so the
+  wrapper owns every scan, blocking and manual-review decision while recording
+  no acceptance and invoking no makepkg;
+- before the build-consent prompt, the declared `depends`/`makedepends`/
+  `checkdepends` arrays are read statically with the bounded literal reader in
+  `core/pkgbuild_dependencies.py` (any dynamic, malformed or function-scoped
+  declaration makes the result unknown and silently disables the check) and
+  classified with read-only trusted-pacman queries (`-T`, `-Sp`).
+  Dependencies pacman can install are listed before the sudo-capable build
+  step; dependencies that cannot be installed are reported with the exact
+  reason, and a dependency positively confirmed in the AUR can be handed to
+  the same guided review-and-consent flow (recursive, chain-limited). A build
+  whose declared dependencies pacman cannot satisfy is never started: the
+  flow stops with the reviewed copy's path instead of running a doomed
+  makepkg. The check is advisory UX, never policy: parser doubt or tool
+  failure keeps the previous behavior without making claims;
+- only a passing wrapper result leads to the build handoff
+  (`aurascan-makepkg --syncdeps --install`); blocked, review-required,
+  unavailable-makepkg and failed results stop with their own message. The
+  guided flow must never accept a manual review on the user's behalf;
+- the wrapper provider is injected by the CLI (core must not import the
+  `makepkg_wrapper` UI entry point), and the wrapper keeps its own pre-handoff
+  recapture, sudo-hygiene and trusted-makepkg checks;
+- after a successful build the installed version is read through the trusted
+  `pacman` boundary and compared with the helper-reported update; a mismatch is
+  reported instead of claiming success;
+- scan AI settings apply as configured and remain advisory; a passing review is
+  reported as a passing review, never as proof that a package is safe.
+
+The stage must not run during preflight planning, must never route a build
+through the AUR helper, and must never weaken the blocker above.
+
+### Advisory finding explanation
+
+Interactive scans of a PKGBUILD or built package (`aurascan --pkgbuild`,
+`aurascan --pkg`, and every non-JSON `aurascan-makepkg` run, including the
+guided review step) may print one advisory AI explanation of the findings that
+block or pause the result. The surface is intentionally narrow:
+
+- `aurascan/core/finding_explainer.py` selects at most six findings that are
+  HIGH/CRITICAL, blocking, or manual-review, and sends only fixed recorded
+  fields: rule id, severity, package name/version (omitted while the identity
+  is unknown), and the user/fixed summary, explanation, why-it-matters,
+  checked and not-checked texts. File paths, evidence snippets, hashes, raw
+  output, technical details and any field that names the local home directory
+  are never sent.
+- the response must be one strict JSON object with exactly `explanation` and
+  `explained_rule_ids`; the ids must be a non-empty, duplicate-free subset of
+  the rules actually sent, and the prose must pass the shared advisory
+  validator (bounded length, no controls, URLs, commands, questions, second
+  person or prescriptive wording, no unsupported safety or compromise claims).
+- the explanation is display-only: it cannot add, remove, reorder or weaken a
+  finding, cannot change blocking policy or review state, and is never emitted
+  in JSON output. A missing or disabled AI configuration prints nothing; a
+  provider failure or a rejected response prints one fixed line and leaves the
+  deterministic report authoritative.
+- when the repository snapshot fails, `RepositorySnapshot.failure_detail`
+  carries one bounded, sanitized relative entry path and the supplied
+  `AUR-REPO-INSPECTION-INCOMPLETE-001` finding names it as the first
+  unsupported entry. Keep that detail relative, single-line and control-free,
+  and never turn it into a malware claim.
 
 AI upgrade review is raise-only. It may raise an existing deterministic rule ID
 up to HIGH, but it cannot create a standalone finding or action, lower or
@@ -1600,12 +1711,19 @@ aurascan-makepkg --syncdeps
 aurascan-makepkg --aurascan-deep-static --syncdeps
 aurascan-makepkg --aurascan-offline --aurascan-no-auto-key-fetch --syncdeps
 aurascan-makepkg --aurascan-update-scan-policy smart --syncdeps
+aurascan-makepkg --aurascan-scan-only
 ```
 
 The wrapper looks for `PKGBUILD` in the current directory, runs AuraScan first,
 and invokes the real `makepkg` with the original makepkg arguments only when
 AuraScan allows the build. AuraScan-only flags use the `--aurascan-*` prefix and
 are not passed to makepkg.
+
+`--aurascan-scan-only` runs the same scan and classification (blocked, manual
+review, or pass) but never records a review acceptance and never invokes
+makepkg; blocked and review-required packages return their normal exit codes
+and messages. It exists for guided workflows that must show the verdict before
+any build consent, and it must never be treated as a build handoff.
 
 After scanning, capture only `/usr/bin/makepkg` through the shared trusted-tool
 boundary and revalidate its exact device/inode, ownership, group, and mode
@@ -1722,6 +1840,7 @@ Example actions include:
 manual_review_required
 review_accepted
 scan_blocked
+scan_only_passed
 makepkg_invoked
 makepkg_failed
 review_listed

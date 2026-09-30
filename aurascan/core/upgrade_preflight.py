@@ -19,6 +19,11 @@ from aurascan.core.ai_provider import (
     safe_provider_error_detail,
 )
 from aurascan.core.ai_provider import parse_bool as parse_config_bool
+from aurascan.core.aur_update_review import (
+    aur_update_review_available,
+    offer_aur_update_review,
+    print_pending_aur_update_guidance,
+)
 from aurascan.core.config_drift import (
     CONFIG_DRIFT_AI_DIFFS_ENV,
     CONFIG_DRIFT_ENABLED_ENV,
@@ -520,6 +525,7 @@ def run_upgrade(
     followup_context_root: Optional[Path] = None,
     followup_interactive: Optional[bool] = None,
     agent_escalation_provider: Optional[Callable] = None,
+    aur_update_wrapper: Optional[Callable] = None,
 ) -> int:
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
@@ -662,11 +668,67 @@ def run_upgrade(
     if options.json_output and not options.yes:
         return 0
     if report.blocks_upgrade:
+        if offer_repository_only_continuation(report, options, input_func=input_func, stdout=stdout, stderr=stderr):
+            print(
+                "[AuraScan] Continuing with the repository-only upgrade. The AUR update(s) below stay pending.",
+                file=stdout,
+            )
+            status = run_upgrade(
+                list(argv or []) + ["--aur-helper", "none"],
+                runner=runner,
+                which=which,
+                input_func=input_func,
+                stdout=stdout,
+                stderr=stderr,
+                snapshot=snapshot,
+                urlopen=urlopen,
+                config_drift_root=config_drift_root,
+                config_drift_runner=config_drift_runner,
+                modules_root=modules_root,
+                pacman_conf_path=pacman_conf_path,
+                repository_repair_backup_root=repository_repair_backup_root,
+                followup_context_root=followup_context_root,
+                followup_interactive=followup_interactive,
+                agent_escalation_provider=agent_escalation_provider,
+                aur_update_wrapper=aur_update_wrapper,
+            )
+            handled = False
+            if status == 0:
+                handled = offer_aur_update_review(
+                    report.plan.aur_packages,
+                    options,
+                    input_func=input_func,
+                    stdout=stdout,
+                    stderr=stderr,
+                    wrapper_provider=aur_update_wrapper,
+                )
+            if not handled:
+                print_pending_aur_update_guidance(
+                    report.plan.aur_packages,
+                    stream=stdout if status == 0 else stderr,
+                )
+            return status
         print(
             "[AuraScan] Upgrade blocked: planned AUR source builds are not handed to an unverified helper. "
             "Scan and build them through aurascan-makepkg, or rerun a repository-only upgrade with --aur-helper none.",
             file=stderr,
         )
+        if report.plan.repo_packages and aur_update_review_available(report.plan.aur_packages, options):
+            print(
+                "[AuraScan] The repository part of this upgrade has not been applied in this run; "
+                "an AUR package built now may need a rebuild after a later repository upgrade.",
+                file=stdout,
+            )
+        handled = offer_aur_update_review(
+            report.plan.aur_packages,
+            options,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+            wrapper_provider=aur_update_wrapper,
+        )
+        if not handled:
+            print_pending_aur_update_guidance(report.plan.aur_packages, stream=stderr)
         return EXIT_UPGRADE_BLOCKED
     if not options.dry_run and not options.json_output:
         fix_status = run_kernel_module_autopilot_fixes(
@@ -907,6 +969,74 @@ def _offer_upgrade_followup_outcome(
         force_interactive=force_interactive,
         agent_escalation_provider=agent_escalation_provider,
     )
+
+
+AUR_BUILD_BLOCK_RULE_ID = "UPG-AUR-BUILD-UNSCANNED"
+
+
+def repository_only_continuation_available(report: UpgradePreflightReport, options: UpgradeOptions) -> bool:
+    """Whether the interactive repository-only continuation may be offered.
+
+    Only the deterministic AUR source-build blocker has this documented
+    continuation, and the continuation never clears it: the AUR helper handoff
+    is dropped from the transaction instead of being approved. Non-interactive
+    runs (``--yes``, ``--json``, dry runs, an already repository-only plan) and
+    runs with any other blocking finding keep the unchanged hard stop.
+    """
+    if options.yes or options.json_output or options.dry_run:
+        return False
+    if options.aur_helper == "none" or not report.plan.available:
+        return False
+    if not report.plan.repo_packages or not report.plan.aur_packages:
+        return False
+    blocking = [finding for finding in report.findings if finding.blocking]
+    if not blocking:
+        return False
+    return all(finding.rule_id == AUR_BUILD_BLOCK_RULE_ID for finding in blocking)
+
+
+def offer_repository_only_continuation(
+    report: UpgradePreflightReport,
+    options: UpgradeOptions,
+    *,
+    input_func: Callable[[str], str],
+    stdout,
+    stderr,
+) -> bool:
+    """Interview the user about the documented continuation past the blocker.
+
+    Returns True only after an explicit interactive choice to continue with a
+    repository-only transaction. The caller then re-runs the preflight bound to
+    a repository-only plan before any package-manager command can run, so the
+    AUR helper is never invoked and the blocker is never waived by an answer.
+    """
+    if not repository_only_continuation_available(report, options):
+        return False
+    repo_count = len(report.plan.repo_packages)
+    aur_count = len(report.plan.aur_packages)
+    repo_label = "repository package" if repo_count == 1 else "repository packages"
+    aur_label = "AUR update" if aur_count == 1 else "AUR updates"
+    print("\n[AuraScan] Repository-only continuation", file=stdout)
+    print(
+        "[AuraScan] The AUR source-build blocker applies to the automatic helper handoff; "
+        "the repository part of this upgrade is not affected.",
+        file=stdout,
+    )
+    print(
+        f"[AuraScan] AuraScan can update the {repo_count} planned {repo_label} through pacman now "
+        f"and leave the {aur_count} {aur_label} below pending.",
+        file=stdout,
+    )
+    print_pending_aur_update_guidance(report.plan.aur_packages, stream=stdout)
+    try:
+        answer = input_func("Run the repository-only upgrade now? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\n[AuraScan] No interactive answer received; keeping the upgrade blocked.", file=stderr)
+        return False
+    if answer in {"y", "yes", "r", "repo", "repository"}:
+        return True
+    print("[AuraScan] Repository-only continuation declined. Keeping the upgrade blocked.", file=stderr)
+    return False
 
 
 def verify_upgrade_handoff(plan: UpgradePlan, *, runner: Callable = subprocess.run) -> List[str]:

@@ -47,6 +47,7 @@ from aurascan.core.repository_provenance import (
     RepositorySnapshot,
 )
 from aurascan.core.source_acquisition import SourceParser
+from aurascan.core.text_safety import sanitize_terminal_text
 
 
 _TRANSFER_COMMANDS = {
@@ -91,6 +92,7 @@ _SUID_SYMBOLIC_MODE = re.compile(
 )
 _MAX_RESOLUTION_PASSES = 4
 _MAX_CORRELATION_OPERATIONS = 262_144
+_MAX_OBSERVED_DETAIL_CHARS = 300
 _LITERAL_SHELL_WORK_CHARS = 256
 _FUNCTION_NAME_PATTERN = (
     r"(?:package_[A-Za-z0-9@._+\-]+|[A-Za-z_][A-Za-z0-9_]*)"
@@ -1841,6 +1843,7 @@ class RepositoryProvenanceAnalyzer:
                 pkg_name,
                 pkg_ver,
                 repository_snapshot.error_code,
+                observed_detail=repository_snapshot.failure_detail,
             )
             return AnalysisResult(
                 False,
@@ -4483,12 +4486,27 @@ class RepositoryProvenanceAnalyzer:
             file_hash=artifact.sha256,
         )
 
+    _OBSERVED_ENTRY_LABELS = {
+        "directory_changed": "a directory that changed during capture",
+        "directory_unreadable": "an unreadable directory",
+        "entry_unreadable": "an unreadable directory entry",
+        "excluded_subtree_wrong_type": "a regular file where a pruned directory was expected",
+        "file_changed": "a file that changed during capture",
+        "file_oversized": "a file above the configured size bound",
+        "file_unreadable": "an unreadable file",
+        "special_entry": "a special file",
+        "symlink_changed": "a symbolic link that changed during capture",
+        "symlink_entry": "a symbolic link",
+        "total_size_limit": "the file that exceeded the total byte bound",
+    }
+
     def _incomplete_finding(
         self,
         pkgbuild_path: str,
         pkg_name: str,
         pkg_ver: str,
         reason_code: str = "",
+        observed_detail: str = "",
     ) -> Finding:
         allowed_reasons = {
             "analysis_limit",
@@ -4519,6 +4537,7 @@ class RepositoryProvenanceAnalyzer:
             "root_unavailable",
             "source_mapping_ambiguous",
             "special_entry",
+            "symlink_changed",
             "symlink_entry",
             "total_size_limit",
             "unsafe_name",
@@ -4528,6 +4547,18 @@ class RepositoryProvenanceAnalyzer:
         evidence = "bounded package-checkout inspection did not complete"
         if safe_reason:
             evidence += ": " + safe_reason.replace("_", " ")
+        observed = ""
+        safe_detail = sanitize_terminal_text(
+            observed_detail,
+            max_chars=_MAX_OBSERVED_DETAIL_CHARS,
+            single_line=True,
+        )
+        if safe_detail:
+            label = self._OBSERVED_ENTRY_LABELS.get(safe_reason, "")
+            observed = "First unsupported entry: " + safe_detail
+            if label:
+                observed += " (" + label + ")"
+            observed += "."
         return Finding(
             rule_id="AUR-REPO-INSPECTION-INCOMPLETE-001",
             package_name=pkg_name,
@@ -4552,4 +4583,6 @@ class RepositoryProvenanceAnalyzer:
             blocks_installation=True,
             requires_manual_review=False,
             evidence_snippet=evidence,
+            user_summary=observed or None,
+            technical_details=observed or None,
         )

@@ -35,6 +35,30 @@ candidate.
 
 ## Validation
 
+- For v0.10.11, verify the guided AUR update flow's consent boundaries: the
+  repository-only continuation never clears `UPG-AUR-BUILD-UNSCANNED`, every
+  package asks for download/review and then build/install consent, blocked and
+  manual-review results never build, and the wrapper's `--aurascan-scan-only`
+  step records no acceptance. Verify the bounded dependency reader (dynamic,
+  malformed or function-scoped declarations disable the check; no claim is
+  made on doubt), the read-only classification (`pacman -T`/`-Sp` and one
+  bounded `git ls-remote`), and that an unresolvable declared dependency stops
+  the build with the exact reason instead of running a doomed makepkg. Verify
+  the link policy: one-hop in-checkout targets captured as stable regular files
+  are accepted with their target bytes bound, while absolute, escaping,
+  dangling, directory, special-file, chained and pruned-tree targets keep the
+  fail-closed `AUR-REPO-INSPECTION-INCOMPLETE-001` result with its sanitized
+  `link -> target` detail. Verify the advisory explanation contract (bounded
+  fixed facts, strict JSON, rejected actions/URLs/questions, JSON output
+  excluded, fixed provider-failure notice) and the privileged-account
+  negatives. Package rules are `1.12.0`, the scanner version is `2.6.0`,
+  repository snapshot identity is `1.3`, and the runtime-intelligence schema
+  and engine capability are `2.0`; the general security-audit report and
+  Instruction Guard schemas remain `1.0`. These shared scanning-boundary
+  changes are recovery-bearing: require a fresh candidate ISO and local UKI,
+  all applicable recovery gates, complete Python 3.8/3.14 source/package
+  validation, both strict presenter audits, and exact branch/tag CI before
+  publication.
 - For v0.10.10, verify migration parity for existing npm and emergency vendor
   detections under the separate runtime-intelligence schema `1.0`. Exact
   observed versions must not become all-version claims; corrections require

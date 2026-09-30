@@ -219,7 +219,12 @@ model choice does not change AuraScan's runtime AI defaults or safety policy.
   `src`/`pkg` trees during the normal walk. Statically resolved control paths
   into an otherwise pruned tree are mandatory no-follow capture targets;
   ambiguity or an unsafe required path fails closed, while generated output
-  without an active correlation does not create a presence notice. Exclude
+  without an active correlation does not create a presence notice. Read
+  symbolic links without following them, and accept only a one-hop link whose
+  lexical target stays inside the checkout and was captured as a stable
+  regular file; absolute, escaping, dangling, directory, special-file,
+  chained, or pruned-tree targets keep the fail-closed coverage result.
+  Exclude
   exact supported literal `source=()` checkout files from artifact
   classification, classify executable/archive carriers by bounded magic, keep
   presence MEDIUM/non-hard-blocking but acceptance-eligible for manual review,

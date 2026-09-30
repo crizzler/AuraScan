@@ -71,7 +71,7 @@ lexical URL check does not eliminate DNS rebinding.
 Content risk, integrity approval, scan coverage and neutral first-seen baseline
 enrollment are four distinct states and must never be collapsed into one badge.
 
-### 5. Model input and output (package AI, instruction AI, upgrade AI)
+### 5. Model input and output (package AI, instruction AI, upgrade AI, finding explanation)
 
 | Aspect | Detail |
 | --- | --- |
@@ -85,12 +85,23 @@ enrollment are four distinct states and must never be collapsed into one badge.
 AI is opt-in per surface, needs its own key for cloud providers, and never falls
 back from a failed local provider to cloud inference.
 
+The interactive finding explanation is a separate display-only surface. It
+sends at most six fixed, already user-facing finding facts (rule id, severity,
+package, summary and fixed explanatory texts) and never file paths, evidence
+snippets, hashes, raw output, technical details, or any field naming the local
+home directory. The response must be one bounded prose field plus a
+non-empty, duplicate-free subset of the rule ids actually sent, passes the
+shared advisory validator, and cannot add, remove, reorder or weaken a finding,
+change blocking or review state, or appear in JSON output. A missing or
+disabled AI configuration is silent; a provider failure or a rejected response
+prints one fixed notice, and the deterministic report remains authoritative.
+
 ### 6. Native tools over hostile data
 
 | Aspect | Detail |
 | --- | --- |
 | Trusted side | `core/trusted_executable.py` and `core/trusted_tools.py` |
-| Untrusted side | The bytes handed to `git`, `gpg`, `bsdtar`, `clamscan`, `makepkg`, upgrade helpers |
+| Untrusted side | The bytes handed to `git`, `gpg`, `bsdtar`, `clamscan`, `makepkg`, upgrade helpers, and the AUR package repository fetched by the guided AUR update stage |
 | Validation | Absolute non-symlink path, root-owned non-writable components and file, identity revalidated immediately before use (see `ARCHITECTURE.md`) |
 | Allowed authority | Read-only inspection within bounded input, output and runtime |
 | Prohibited | Replacing the validated executable with a bare name later; unbounded expansion; treating a timed-out or errored scan as clean |
@@ -99,6 +110,23 @@ back from a failed local provider to cloud inference.
 The post-scan `makepkg` handoff executes package build logic. It is not a
 bounded scanner and not a sandbox; it is a deliberate, consented handoff after
 revalidation.
+
+The guided AUR update stage downloads one AUR package per user consent through
+the same trusted-`git` boundary - canonical AUR URL, validated name, shallow
+credential-free clone, bounded output and runtime, mandatory exact-HEAD
+revision and regular `PKGBUILD` - then drives `aurascan-makepkg` for the review
+step and, after a second consent, for the `--syncdeps --install` handoff. A
+blocked or manual-review result stops before any build, installed-version
+verification uses the trusted `pacman` boundary, and a passing review is never
+reported as proof that a package is safe. Before the build consent, declared
+build-dependency arrays are parsed as bounded literal text (never evaluated)
+and classified with unprivileged, read-only trusted-`pacman` queries; a
+missing AUR dependency is built only through the same reviewed,
+consent-gated flow, bounded by a dependency-chain cap, and any parser doubt or
+tool failure disables the check without making claims. The review step may
+also print the display-only finding explanation described in section 5. The
+stage runs only after a successful repository-only upgrade, and it never
+routes a build through the AUR helper.
 
 ### 7. Privileged repair and recovery actions
 
@@ -132,7 +160,7 @@ non-writable checkout.
 | --- | --- |
 | Trusted side | `core/repository_provenance.py` bounded walk |
 | Untrusted side | Files beside the PKGBUILD, generated `src`/`pkg` trees, archives, executables |
-| Validation | Always-on, local, no-follow, no Git or native-tool invocation; VCS internals and named cache directories pruned; statically resolved control paths captured through pruned trees; ambiguity fails closed |
+| Validation | Always-on, local, no-follow, no Git or native-tool invocation; VCS internals and named cache directories pruned; statically resolved control paths captured through pruned trees; ambiguity fails closed; links are read but never followed, and only a one-hop in-checkout target captured as a stable regular file is accepted |
 | Allowed authority | MEDIUM presence notice, HIGH exact-install, CRITICAL exact-execution or SUID/SGID, manual review |
 | Prohibited | Claiming Git-tracked, AUR-distributed, installed or executed status from presence; copying artifact bytes into explanations |
 | Evidence | Sanitized path, deterministic control line and short artifact hash prefix only |

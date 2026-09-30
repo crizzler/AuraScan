@@ -12,6 +12,7 @@ from typing import Callable, List, Optional, Sequence, TextIO
 
 from aurascan.analyzers.history import HistoryAnalyzer
 from aurascan.core.engine import AuraScanEngine
+from aurascan.core.finding_explainer import scan_explanation_lines
 from aurascan.core.install_hook import (
     PackageScanInput,
     PackageScanInputError,
@@ -59,6 +60,7 @@ _BOOL_FLAGS = {
     "--aurascan-offline": "offline",
     "--aurascan-no-auto-key-fetch": "no_auto_key_fetch",
     "--aurascan-json": "json_output",
+    "--aurascan-scan-only": "scan_only",
     "--aurascan-verbose": "verbose",
     "--aurascan-remember-review": "remember_review",
     "--aurascan-review-once": "review_once",
@@ -190,6 +192,7 @@ class MakepkgWrapperOptions:
     keyserver: Optional[str] = None
     trusted_key_dirs: List[str] = field(default_factory=list)
     json_output: bool = False
+    scan_only: bool = False
     verbose: bool = False
     accept_review: str = ""
     adjudication_label: str = ""
@@ -297,6 +300,12 @@ def run(
     risk = _risk_summary_from_engine(engine)
     blockers = get_non_acceptance_blockers(report)
     candidates = get_manual_review_acceptance_candidates(report)
+
+    if not options.json_output:
+        # Interactive advisory only: the deterministic report above remains
+        # authoritative, and a missing AI configuration prints nothing.
+        for line in scan_explanation_lines(report):
+            print(line, file=stdout)
 
     if not scan_ok or _risk_blocks(risk) or blockers:
         annotate_report_for_review(
@@ -423,6 +432,25 @@ def run(
             fingerprint,
             candidates,
         )
+
+    if options.scan_only:
+        # Review-only step: the caller gets the classification without any
+        # review-acceptance recording or makepkg handoff, so a guided workflow
+        # can show the verdict before the user consents to a build. A blocked
+        # or review-required package never reaches this point.
+        if options.json_output:
+            _emit_json(stdout, _wrapper_envelope(
+                options,
+                action="scan_only_passed",
+                wrapper_exit_code=0,
+                pkgbuild_path=str(pkgbuild_path),
+                scan_report=report,
+                makepkg_invoked=False,
+                warnings=scan_warnings,
+            ))
+        else:
+            _print_scan_only_passed(stdout)
+        return 0
 
     try:
         makepkg_tool = makepkg_tool_capture(
@@ -979,6 +1007,12 @@ def _print_passed(stream: TextIO) -> None:
     print("AuraScan check passed", file=stream)
     print("AuraScan checked the PKGBUILD before makepkg runs.", file=stream)
     print("Recommended action: Continuing with makepkg.", file=stream)
+
+
+def _print_scan_only_passed(stream: TextIO) -> None:
+    print("AuraScan review passed", file=stream)
+    print("AuraScan checked the PKGBUILD and this step did not run makepkg.", file=stream)
+    print("Recommended action: Build only after reviewing any advisory findings above.", file=stream)
 
 
 def _print_blocked(stream: TextIO) -> None:

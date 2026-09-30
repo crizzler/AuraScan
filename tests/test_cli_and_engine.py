@@ -16,6 +16,7 @@ from aurascan.core.package_archive import PackageIdentityCapture, PACKAGE_IDENTI
 from aurascan.core.update_policy import UpdateScanPolicy
 from pathlib import Path
 import io
+import json
 import os
 import tarfile
 import aurascan.__main__ as module_entrypoint
@@ -197,6 +198,64 @@ def test_doctor_subcommand_dispatches_before_scan_parser(monkeypatch):
         assert exc.code == 0
 
     assert calls == [["--json"]]
+
+
+def test_cli_pkgbuild_scan_prints_advisory_explanation_for_text_output(
+    tmp_path, monkeypatch, capsys
+):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text(
+        "pkgname=demo\npkgver=1.0\n"
+        "source=('https://example.invalid/demo-1.0.tar.gz')\n"
+        "sha256sums=('" + "a" * 64 + "')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "load_env", lambda: None)
+    seen = []
+
+    def fake_lines(report):
+        seen.append(report)
+        return ["", "[AuraScan] AI explanation (advisory):", "Advisory fixture line."]
+
+    monkeypatch.setattr(cli, "scan_explanation_lines", fake_lines)
+
+    try:
+        cli.main(["--pkgbuild", str(pkgbuild)])
+    except SystemExit:
+        pass
+
+    output = capsys.readouterr().out
+    assert seen and isinstance(seen[0], dict)
+    assert "Advisory fixture line." in output
+
+
+def test_cli_json_pkgbuild_scan_never_requests_an_explanation(
+    tmp_path, monkeypatch, capsys
+):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text(
+        "pkgname=demo\npkgver=1.0\n"
+        "source=('https://example.invalid/demo-1.0.tar.gz')\n"
+        "sha256sums=('" + "a" * 64 + "')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "load_env", lambda: None)
+    calls = []
+
+    def forbidden(report):
+        calls.append(report)
+        raise AssertionError("JSON output must never include advisory lines")
+
+    monkeypatch.setattr(cli, "scan_explanation_lines", forbidden)
+
+    try:
+        cli.main(["--json", "--pkgbuild", str(pkgbuild)])
+    except SystemExit:
+        pass
+
+    output = capsys.readouterr().out
+    assert calls == []
+    assert isinstance(json.loads(output), dict)
 
 
 def test_config_drift_subcommand_dispatches_before_scan_parser(monkeypatch):
@@ -633,7 +692,7 @@ def test_pkgbuild_cache_is_bound_to_exact_pkgbuild_and_install_hook_bytes(tmp_pa
     engine.cache = ScanCache(tmp_path / "cache")
     engine.analyzers = [analyzer]
 
-    assert engine.rule_version == "1.10.0"
+    assert engine.rule_version == "1.12.0"
     assert engine.scan_pkgbuild(str(pkgbuild)) is True
     first_digest = engine.last_scan_input_digest
     assert analyzer.pkgbuild_calls == 1
@@ -847,6 +906,10 @@ def test_new_only_update_cannot_skip_incomplete_repository_snapshot(tmp_path):
     )
     assert finding["blocks_installation"] is True
     assert "symlink entry" in finding["evidence_snippet"]
+    assert finding["user_summary"].startswith(
+        "First unsupported entry: linked-payload -> "
+    )
+    assert finding["user_summary"].endswith("(a symbolic link).")
 
 
 BASE_UPDATE = """# Maintainer: Alice <alice@example.invalid>

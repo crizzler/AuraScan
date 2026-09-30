@@ -9,6 +9,7 @@ from urllib.error import HTTPError
 import pytest
 
 from aurascan.core import ai_provider
+from aurascan.core import aur_update_review
 from aurascan.core import repository_repair
 from aurascan.core import repository_state
 from aurascan.core import trusted_executable
@@ -1504,6 +1505,342 @@ def test_shelly_planned_aur_build_is_blocked_even_with_yes():
     assert status == EXIT_UPGRADE_BLOCKED
     assert ["/usr/bin/shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"] not in runner.calls
     assert "aurascan-makepkg" in stderr.getvalue()
+    assert "demo-bin 1 -> 2" in stderr.getvalue()
+
+
+def test_aur_build_block_interview_runs_repository_only_upgrade():
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+        ("/usr/bin/shelly", "--version"): completed("3.0.1\n"),
+        ("/usr/bin/shelly", "list-updates", "aur", "--json"): completed(
+            '[{"Name":"demo-bin","OldVersion":"1","Version":"2"}]\n'
+        ),
+        ("/usr/bin/shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"): completed(returncode=0),
+        (SUDO_PATH, PACMAN_PATH, "-Syu"): completed(returncode=0),
+        installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
+    })
+    prompts = []
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    status = run_upgrade(
+        ["--no-ai", "--aur-helper", "shelly"],
+        runner=runner,
+        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
+        snapshot=base_snapshot(),
+        input_func=lambda prompt: prompts.append(prompt) or "y",
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    output = stdout.getvalue()
+    assert status == 0
+    assert prompts and prompts[0] == "Run the repository-only upgrade now? [y/N] "
+    assert [SUDO_PATH, PACMAN_PATH, "-Syu"] in runner.calls
+    assert not any(call and call[0] == "/usr/bin/shelly" and "upgrade" in call for call in runner.calls)
+    assert "Repository-only continuation" in output
+    assert "demo-bin 1 -> 2" in output
+    assert "aurascan-makepkg --syncdeps" in output
+    assert "Upgrade transaction verified" in output
+    assert "Upgrade blocked" not in stderr.getvalue()
+
+
+def test_aur_build_block_interview_declined_keeps_hard_stop():
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+        ("/usr/bin/shelly", "--version"): completed("3.0.1\n"),
+        ("/usr/bin/shelly", "list-updates", "aur", "--json"): completed(
+            '[{"Name":"demo-bin","OldVersion":"1","Version":"2"}]\n'
+        ),
+        ("/usr/bin/shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"): completed(returncode=0),
+        (SUDO_PATH, PACMAN_PATH, "-Syu"): completed(returncode=0),
+    })
+    stderr = io.StringIO()
+
+    status = run_upgrade(
+        ["--no-ai", "--aur-helper", "shelly"],
+        runner=runner,
+        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
+        snapshot=base_snapshot(),
+        input_func=lambda _prompt: "",
+        stdout=io.StringIO(),
+        stderr=stderr,
+    )
+
+    assert status == EXIT_UPGRADE_BLOCKED
+    assert [SUDO_PATH, PACMAN_PATH, "-Syu"] not in runner.calls
+    assert ["/usr/bin/shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"] not in runner.calls
+    assert "Upgrade blocked" in stderr.getvalue()
+    assert "demo-bin 1 -> 2" in stderr.getvalue()
+
+
+def test_aur_build_block_interview_without_answer_keeps_hard_stop():
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+        ("/usr/bin/shelly", "--version"): completed("3.0.1\n"),
+        ("/usr/bin/shelly", "list-updates", "aur", "--json"): completed(
+            '[{"Name":"demo-bin","OldVersion":"1","Version":"2"}]\n'
+        ),
+        ("/usr/bin/shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"): completed(returncode=0),
+        (SUDO_PATH, PACMAN_PATH, "-Syu"): completed(returncode=0),
+    })
+
+    def no_answer(_prompt):
+        raise EOFError
+
+    stderr = io.StringIO()
+    status = run_upgrade(
+        ["--no-ai", "--aur-helper", "shelly"],
+        runner=runner,
+        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
+        snapshot=base_snapshot(),
+        input_func=no_answer,
+        stdout=io.StringIO(),
+        stderr=stderr,
+    )
+
+    assert status == EXIT_UPGRADE_BLOCKED
+    assert [SUDO_PATH, PACMAN_PATH, "-Syu"] not in runner.calls
+    assert "No interactive answer received" in stderr.getvalue()
+
+
+def test_aur_build_block_without_repository_packages_offers_guided_handling():
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed(""),
+        ("/usr/bin/shelly", "--version"): completed("3.0.1\n"),
+        ("/usr/bin/shelly", "list-updates", "aur", "--json"): completed(
+            '[{"Name":"demo-bin","OldVersion":"1","Version":"2"}]\n'
+        ),
+        ("/usr/bin/shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"): completed(returncode=0),
+    })
+    prompts = []
+    stdout = io.StringIO()
+
+    def fake_wrapper(arguments, cwd, stdout_stream, stderr_stream):
+        raise AssertionError("wrapper must not run when the user declines")
+
+    status = run_upgrade(
+        ["--no-ai", "--aur-helper", "shelly"],
+        runner=runner,
+        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
+        snapshot=base_snapshot(),
+        input_func=lambda prompt: prompts.append(prompt) or "n",
+        stdout=stdout,
+        stderr=io.StringIO(),
+        aur_update_wrapper=fake_wrapper,
+    )
+
+    assert status == EXIT_UPGRADE_BLOCKED
+    assert len(prompts) == 1
+    assert "Download and review it from the Arch User Repository" in prompts[0]
+    assert "Skipped demo-bin." in stdout.getvalue()
+    assert "repository part of this upgrade has not been applied" not in stdout.getvalue()
+    assert ["/usr/bin/shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"] not in runner.calls
+
+
+def test_aur_build_block_without_repository_packages_guided_flow_builds(monkeypatch, tmp_path):
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed(""),
+        ("/usr/bin/shelly", "--version"): completed("3.0.1\n"),
+        ("/usr/bin/shelly", "list-updates", "aur", "--json"): completed(
+            '[{"Name":"demo-bin","OldVersion":"1","Version":"2"}]\n'
+        ),
+        ("/usr/bin/shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"): completed(returncode=0),
+    })
+    clone_dir = tmp_path / "fake-aur" / "demo-bin"
+    clone_dir.mkdir(parents=True)
+
+    def fake_acquire(name, *, work_root, runner, which, tool_capture, tool_revalidate):
+        return aur_update_review.AcquiredAurPackage(name=name, path=clone_dir, revision="a" * 40)
+
+    monkeypatch.setattr(aur_update_review, "acquire_aur_package", fake_acquire)
+    monkeypatch.setattr(
+        aur_update_review,
+        "query_installed_package_version",
+        lambda name, **kwargs: "2",
+    )
+    wrapper_calls = []
+
+    def fake_wrapper(arguments, cwd, stdout_stream, stderr_stream):
+        wrapper_calls.append((list(arguments), Path(cwd)))
+        return aur_update_review.WRAPPER_RESULT_OK
+
+    stdout = io.StringIO()
+    status = run_upgrade(
+        ["--no-ai", "--aur-helper", "shelly"],
+        runner=runner,
+        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
+        snapshot=base_snapshot(),
+        input_func=lambda _prompt: "y",
+        stdout=stdout,
+        stderr=io.StringIO(),
+        aur_update_wrapper=fake_wrapper,
+    )
+
+    assert status == EXIT_UPGRADE_BLOCKED
+    assert wrapper_calls == [
+        (["--aurascan-scan-only"], clone_dir),
+        (["--syncdeps", "--install"], clone_dir),
+    ]
+    assert "Verified: demo-bin 2 is installed." in stdout.getvalue()
+
+
+def test_continuation_accept_offers_guided_aur_update_flow(monkeypatch, tmp_path):
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+        ("/usr/bin/shelly", "--version"): completed("3.0.1\n"),
+        ("/usr/bin/shelly", "list-updates", "aur", "--json"): completed(
+            '[{"Name":"demo-bin","OldVersion":"1","Version":"2"}]\n'
+        ),
+        ("/usr/bin/shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"): completed(returncode=0),
+        (SUDO_PATH, PACMAN_PATH, "-Syu"): completed(returncode=0),
+        installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
+    })
+    clone_dir = tmp_path / "fake-aur" / "demo-bin"
+    clone_dir.mkdir(parents=True)
+
+    def fake_acquire(name, *, work_root, runner, which, tool_capture, tool_revalidate):
+        return aur_update_review.AcquiredAurPackage(name=name, path=clone_dir, revision="a" * 40)
+
+    monkeypatch.setattr(aur_update_review, "acquire_aur_package", fake_acquire)
+    monkeypatch.setattr(
+        aur_update_review,
+        "query_installed_package_version",
+        lambda name, **kwargs: "2",
+    )
+    wrapper_calls = []
+
+    def fake_wrapper(arguments, cwd, stdout, stderr):
+        wrapper_calls.append((list(arguments), Path(cwd)))
+        return aur_update_review.WRAPPER_RESULT_OK
+
+    prompts = []
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    status = run_upgrade(
+        ["--no-ai", "--aur-helper", "shelly"],
+        runner=runner,
+        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
+        snapshot=base_snapshot(),
+        input_func=lambda prompt: prompts.append(prompt) or "y",
+        stdout=stdout,
+        stderr=stderr,
+        aur_update_wrapper=fake_wrapper,
+    )
+
+    assert status == 0
+    assert [SUDO_PATH, PACMAN_PATH, "-Syu"] in runner.calls
+    assert wrapper_calls == [
+        (["--aurascan-scan-only"], clone_dir),
+        (["--syncdeps", "--install"], clone_dir),
+    ]
+    assert prompts[0] == "Run the repository-only upgrade now? [y/N] "
+    assert any("Download and review it from the Arch User Repository now?" in prompt for prompt in prompts)
+    assert any("Build and install it now" in prompt for prompt in prompts)
+    output = stdout.getvalue()
+    assert "Verified: demo-bin 2 is installed." in output
+    assert "was not built" not in stderr.getvalue()
+
+
+def test_continuation_accept_blocked_guided_review_stops_before_build(monkeypatch, tmp_path):
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+        ("/usr/bin/shelly", "--version"): completed("3.0.1\n"),
+        ("/usr/bin/shelly", "list-updates", "aur", "--json"): completed(
+            '[{"Name":"demo-bin","OldVersion":"1","Version":"2"}]\n'
+        ),
+        (SUDO_PATH, PACMAN_PATH, "-Syu"): completed(returncode=0),
+        installed_q_cmd("glibc"): completed("glibc 2.40-1\n"),
+    })
+    clone_dir = tmp_path / "fake-aur" / "demo-bin"
+    clone_dir.mkdir(parents=True)
+
+    def fake_acquire(name, *, work_root, runner, which, tool_capture, tool_revalidate):
+        return aur_update_review.AcquiredAurPackage(name=name, path=clone_dir, revision="a" * 40)
+
+    monkeypatch.setattr(aur_update_review, "acquire_aur_package", fake_acquire)
+    wrapper_calls = []
+
+    def fake_wrapper(arguments, cwd, stdout, stderr):
+        wrapper_calls.append((list(arguments), Path(cwd)))
+        return aur_update_review.WRAPPER_RESULT_BLOCKED
+
+    stderr = io.StringIO()
+    status = run_upgrade(
+        ["--no-ai", "--aur-helper", "shelly"],
+        runner=runner,
+        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
+        snapshot=base_snapshot(),
+        input_func=lambda _prompt: "y",
+        stdout=io.StringIO(),
+        stderr=stderr,
+        aur_update_wrapper=fake_wrapper,
+    )
+
+    assert status == 0
+    assert wrapper_calls == [(["--aurascan-scan-only"], clone_dir)]
+    assert "was not built" in stderr.getvalue()
+
+
+def test_continuation_declined_still_offers_guided_handling(tmp_path):
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+        ("/usr/bin/shelly", "--version"): completed("3.0.1\n"),
+        ("/usr/bin/shelly", "list-updates", "aur", "--json"): completed(
+            '[{"Name":"demo-bin","OldVersion":"1","Version":"2"}]\n'
+        ),
+    })
+    wrapper_calls = []
+
+    def fake_wrapper(arguments, cwd, stdout_stream, stderr_stream):
+        wrapper_calls.append((list(arguments), Path(cwd)))
+        return aur_update_review.WRAPPER_RESULT_OK
+
+    answers = iter(["", "n"])
+
+    def responder(_prompt):
+        try:
+            return next(answers)
+        except StopIteration:
+            raise EOFError
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    status = run_upgrade(
+        ["--no-ai", "--aur-helper", "shelly"],
+        runner=runner,
+        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
+        snapshot=base_snapshot(),
+        input_func=responder,
+        stdout=stdout,
+        stderr=stderr,
+        aur_update_wrapper=fake_wrapper,
+    )
+
+    assert status == EXIT_UPGRADE_BLOCKED
+    assert wrapper_calls == []
+    assert "Upgrade blocked" in stderr.getvalue()
+    assert "Skipped demo-bin." in stdout.getvalue()
+    assert "repository part of this upgrade has not been applied" in stdout.getvalue()
+
+
+def test_upgrade_presenter_shows_ai_review_error_detail():
+    report = UpgradePreflightReport(
+        plan=UpgradePlan(selected_helper="none"),
+        snapshot=SystemSnapshot(),
+        findings=[],
+        ai_review={
+            "enabled": True,
+            "provider": "deepseek",
+            "status": "error",
+            "error": "AI provider request timed out",
+        },
+    )
+
+    rendered = render_upgrade_preflight(report)
+
+    assert "AI review: error (deepseek) - AI provider request timed out" in rendered
 
 
 def test_helper_repo_only_handoff_ignores_shelly_confirmation_mode():

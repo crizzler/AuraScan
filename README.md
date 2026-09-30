@@ -42,13 +42,16 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
-The [v0.10.10 release](docs/releases/v0.10.10.md) adds signed
-runtime-intelligence support and tray controls for detection-data status,
-explicit refresh, and optional daily updates. Production feed and signing keys
-remain unconfigured; bundled detections continue to work. This is a
-recovery-bearing release with a fresh validated image. Its release note
-records the exact image identity, build and boot gates, validation, and
-remaining limitations.
+The [v0.10.11 release](docs/releases/v0.10.11.md) makes `aurascan upgrade`
+handle pending AUR updates end to end: it offers a repository-only
+continuation, downloads each AUR update through the trusted Git boundary,
+reviews it with the normal scan, checks its declared build dependencies with
+read-only pacman queries, and builds and installs it through `aurascan-makepkg`
+only after a passing review and explicit consent. Blocks and reviews now name
+the failing entry, and an advisory AI explanation can restate what AuraScan
+found without ever changing a deterministic result. This is a recovery-bearing
+release with a fresh validated image; its release note records the exact image
+identity, build and boot gates, validation, and remaining limitations.
 
 ## What You Can Try Now
 
@@ -109,7 +112,7 @@ Normal scans remain local and use one captured intelligence version throughout
 their analysis. A signature authenticates the publisher; it does not prove
 that an indicator is correct or that package code executed.
 
-**The production feed and signing keys are not yet configured in v0.10.10.**
+**The production feed and signing keys are not yet configured in v0.10.11.**
 Bundled detections continue to work. Refresh, import, and timer enablement
 deliberately refuse activation until a separately reviewed application release
 provisions that trust. Installing this version does not start downloads or
@@ -369,7 +372,28 @@ Repository artifact findings deliberately form an evidence ladder:
   (or its exact installed destination), or requests SUID or SGID privilege
   bits.
 - `AUR-REPO-INSPECTION-INCOMPLETE-001` is a HIGH fail-closed blocker when the
-  bounded traversal or stable file capture cannot finish safely.
+  bounded traversal or stable file capture cannot finish safely. When the
+  failing entry is known, the finding names it and its target (for example
+  `First unsupported entry: linked-payload -> /media/usb/payload (a symbolic
+  link).`) so the reason and the location are visible without re-running the
+  capture.
+
+Symbolic links beside the PKGBUILD are read but never followed. A one-hop
+link to a stable regular file that stays inside the checkout - for example a
+REUSE-style `LICENSES/0BSD.txt -> ../LICENSE` alias - is recorded with its
+target bytes bound into the checkout identity, so it no longer stops the scan.
+Links that are absolute, escape the checkout, dangle, or point at directories,
+special files, pruned trees, or other links still produce the HIGH
+incomplete-coverage result above.
+
+A clean result is not a sandbox. AuraScan never executes package code, so an
+allowed build still runs on this machine through makepkg. When a reviewed
+package still needs hands-on testing, treat it as hostile: build and run it in
+a disposable local virtual machine (for example an Arch install ISO in QEMU
+with a snapshot or overlay disk, no shared folders, no host keys or
+credentials, and no network or an isolated one), never on the daily system. A
+single sandboxed run cannot prove that a package is safe; it only shows what
+that run did in that environment.
 
 This local check performs no network request, runs no native inspection tool,
 and never executes or extracts an artifact. A finding does not prove that the
@@ -1110,6 +1134,44 @@ through `aurascan-makepkg`. Run the repository upgrade with `--aur-helper none`,
 then inspect and build each AUR update through `aurascan-makepkg`. A model or
 `--yes` cannot override this blocker.
 
+In an interactive session, when this blocker is the only blocking finding and
+at least one repository package is planned, AuraScan offers a repository-only
+continuation instead of stopping at the message: it asks whether to run the
+repository-only upgrade now, re-runs the preflight bound to a repository-only
+plan, and lists each pending AUR update. Declining the offer, running with
+`--yes` or `--json`, or having no interactive answer keeps the hard stop
+exactly as before. The offer never clears the blocker, never runs the AUR
+helper, and never installs an AUR update.
+
+After the repository-only upgrade completes successfully - or directly when
+you decline it or have no repository updates pending - AuraScan offers to
+handle the pending AUR updates for you instead of leaving manual steps: for
+each update it asks whether to download the package from `aur.archlinux.org`
+and review it, and only when that review passes does it ask whether to build
+and install it through `aurascan-makepkg`. Blocked or manual-review results
+never build anything, both steps ask for consent first, and a passing review is
+a passing review - not a promise that the package is safe.
+
+Before asking to build, AuraScan reads the PKGBUILD's declared build
+dependencies and checks them with read-only pacman queries: dependencies your
+repositories can install are listed before the build step, and a dependency
+that cannot be installed that way stops the build with the exact reason
+instead of running a doomed makepkg. When that dependency is an AUR package,
+AuraScan offers to download, review, build and install it first through the
+same guided flow, and then continues with the original package.
+
+When a scan blocks, needs manual review, or reports HIGH/CRITICAL risk in an
+interactive terminal session and AI is configured (`--no-ai` disables it),
+AuraScan prints one advisory "what, why and where" explanation after the
+deterministic report - including in the guided review step and in
+`aurascan-makepkg` runs. The explanation is written from recorded finding
+facts only (rule id, severity, package, fixed summary texts and the observed
+entry name); file paths, evidence snippets, hashes and raw output never leave
+the machine. It cannot add or remove findings, cannot lower a severity, cannot
+establish trust, and never contains commands or links; a provider failure or a
+rejected response only prints a fixed notice, and the deterministic report
+stays authoritative. JSON output never includes the explanation.
+
 Before the preview, every helper query, and the final handoff, AuraScan binds
 `sudo`, `pacman`, and any selected helper to a root-owned, non-writable,
 non-symlink absolute executable beneath root-owned, non-writable path
@@ -1714,12 +1776,20 @@ can be configured to use a custom makepkg command.
 aurascan-makepkg --syncdeps
 aurascan-makepkg --aurascan-deep-static --syncdeps
 aurascan-makepkg --aurascan-json --syncdeps
+aurascan-makepkg --aurascan-scan-only
 ```
 
 The wrapper scans the current directory's `PKGBUILD` before invoking the real
-`makepkg`. AuraScan-only flags use the `--aurascan-*` prefix and are stripped
-before makepkg receives its arguments. If AuraScan blocks or requires review,
-makepkg is not invoked by default.
+`makepkg`. `--aurascan-scan-only` reports the same scan verdict (blocked,
+manual review, or pass) without recording a review acceptance and without
+invoking makepkg; `aurascan upgrade` uses it to show the verdict before the
+build consent of the guided AUR update flow. When AI is configured and the
+interactive scan reports HIGH/CRITICAL or manual-review findings, the wrapper
+also prints the bounded advisory explanation described under Upgrade
+Preflight; `--aurascan-json` output never includes it. AuraScan-only flags use
+the `--aurascan-*` prefix and are stripped before makepkg receives its
+arguments. If AuraScan blocks or requires review, makepkg is not invoked by
+default.
 
 After the scan, the wrapper accepts only a captured `/usr/bin/makepkg` whose
 path components and final file are root-owned, non-writable, regular,

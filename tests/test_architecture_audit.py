@@ -1118,6 +1118,7 @@ def _module_bindings(tree) -> set:
     """Names a module has bound by the time its top-level `def`s run."""
 
     names = {"__name__", "__file__", "__doc__", "__package__", "__builtins__"}
+    try_nodes = (ast.Try, ast.TryStar) if hasattr(ast, "TryStar") else (ast.Try,)
 
     def collect(body) -> None:
         for node in body:
@@ -1138,7 +1139,7 @@ def _module_bindings(tree) -> set:
             elif isinstance(node, ast.If):
                 collect(node.body)
                 collect(node.orelse)
-            elif isinstance(node, (ast.Try, ast.TryStar)):
+            elif isinstance(node, try_nodes):
                 collect(node.body)
                 collect(node.orelse)
                 collect(node.finalbody)
@@ -1183,6 +1184,15 @@ def _unresolved_annotations(source: str):
                 if isinstance(inner, ast.Name) and inner.id not in available:
                     problems.append((node.name, inner.id))
     return problems
+
+
+def test_stdlib_fallback_covers_builtin_pure_and_extension_modules():
+    """Python 3.8/3.9 have no ``sys.stdlib_module_names`` to consult."""
+
+    for name in ("sys", "time", "math", "zlib", "json", "typing", "asyncio"):
+        assert architecture_audit._is_stdlib_from_running_interpreter(name) is True
+    assert architecture_audit._is_stdlib_from_running_interpreter("requests") is False
+    assert architecture_audit._is_stdlib_from_running_interpreter("aurascan") is False
 
 
 def test_annotations_resolve_at_definition_time_on_python_38():

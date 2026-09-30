@@ -1614,20 +1614,41 @@ def evaluate_invariants(infos: Sequence[ModuleInfo], package_name: str) -> List[
     return violations
 
 
-def _is_stdlib(name: str) -> bool:
-    """Best-effort standard-library check for Python 3.8 through 3.14.
+def _is_stdlib_from_running_interpreter(name: str) -> bool:
+    """Fallback standard-library check for interpreters without the name set.
 
-    ``sys.stdlib_module_names`` exists from Python 3.10; older interpreters
-    fall back to probing the running interpreter's standard-library directory.
+    ``sys.stdlib_module_names`` exists from Python 3.10; on 3.8 and 3.9 the
+    running interpreter's layout is probed instead, covering built-in modules,
+    pure-Python modules and packages, and dynamically loaded extension
+    modules (``lib-dynload``).
     """
-    known = getattr(sys, "stdlib_module_names", None)
-    if known is not None:
-        return name in known
+
+    if name in sys.builtin_module_names:
+        return True
     try:
         stdlib = Path(sysconfig.get_paths()["stdlib"])
     except (KeyError, OSError):
         return False
-    return (stdlib / (name + ".py")).exists() or (stdlib / name / "__init__.py").exists()
+    if (stdlib / (name + ".py")).exists() or (stdlib / name / "__init__.py").exists():
+        return True
+    try:
+        entries = list((stdlib / "lib-dynload").iterdir())
+    except OSError:
+        return False
+    prefix = name + "."
+    return any(
+        entry.name.startswith(prefix) and entry.suffix in {".so", ".pyd"}
+        for entry in entries
+    )
+
+
+def _is_stdlib(name: str) -> bool:
+    """Best-effort standard-library check for Python 3.8 through 3.14."""
+
+    known = getattr(sys, "stdlib_module_names", None)
+    if known is not None:
+        return name in known
+    return _is_stdlib_from_running_interpreter(name)
 
 
 def budget_warnings(infos: Sequence[ModuleInfo]) -> List[str]:

@@ -998,7 +998,9 @@ def test_doctor_accepts_packaged_hook_without_local_override(tmp_path):
     env_path.chmod(0o600)
     packaged_hook = tmp_path / "usr" / "share" / "libalpm" / "hooks" / "aurascan.hook"
     packaged_hook.parent.mkdir(parents=True)
-    packaged_hook.write_text("Exec = /usr/bin/aurascan\nNeedsTargets\n", encoding="utf-8")
+    packaged_hook.write_text(
+        "Exec = /usr/bin/aurascan\nNeedsTargets\nAbortOnFail\n", encoding="utf-8"
+    )
 
     checks = build_doctor_checks(
         env_path=env_path,
@@ -1019,7 +1021,9 @@ def test_doctor_accepts_local_hook_without_packaged_hook(tmp_path):
     env_path.chmod(0o600)
     local_hook = tmp_path / "etc" / "pacman.d" / "hooks" / "aurascan.hook"
     local_hook.parent.mkdir(parents=True)
-    local_hook.write_text("Exec = /usr/bin/aurascan\nNeedsTargets\n", encoding="utf-8")
+    local_hook.write_text(
+        "Exec = /usr/bin/aurascan\nNeedsTargets\nAbortOnFail\n", encoding="utf-8"
+    )
 
     checks = build_doctor_checks(
         env_path=env_path,
@@ -1287,7 +1291,9 @@ def test_init_recognizes_active_packaged_hook_without_prompting_for_local_overri
     env_path = tmp_path / ".env"
     packaged_hook = tmp_path / "usr" / "share" / "libalpm" / "hooks" / "aurascan.hook"
     packaged_hook.parent.mkdir(parents=True)
-    packaged_hook.write_text("Exec = /usr/bin/aurascan\nNeedsTargets\n", encoding="utf-8")
+    packaged_hook.write_text(
+        "Exec = /usr/bin/aurascan\nNeedsTargets\nAbortOnFail\n", encoding="utf-8"
+    )
     stdout = io.StringIO()
     calls = []
 
@@ -1312,7 +1318,9 @@ def test_hook_install_uses_sudo_install_for_release_safe_template(tmp_path):
     template = tmp_path / "aurascan.hook"
     executable = tmp_path / "aurascan"
     hook = tmp_path / "etc" / "pacman.d" / "hooks" / "aurascan.hook"
-    template.write_text("Exec = /usr/bin/aurascan\nNeedsTargets\n", encoding="utf-8")
+    template.write_text(
+        "Exec = /usr/bin/aurascan\nNeedsTargets\nAbortOnFail\n", encoding="utf-8"
+    )
     executable.write_text("#!/bin/sh\n", encoding="utf-8")
     calls = []
 
@@ -1336,3 +1344,17 @@ def test_hook_template_safety_rejects_development_paths(tmp_path):
     template.write_text("Exec = /home/developer/project/.venv/bin/python -m aurascan --deep-static\n", encoding="utf-8")
 
     assert is_release_safe_hook_template(template) is False
+
+
+def test_hook_template_safety_requires_abort_on_fail(tmp_path):
+    template = tmp_path / "aurascan.hook"
+    template.write_text(
+        "Exec = /usr/bin/aurascan\nNeedsTargets\n", encoding="utf-8"
+    )
+
+    assert is_release_safe_hook_template(template) is False
+
+    template.write_text(
+        "Exec = /usr/bin/aurascan\nNeedsTargets\nAbortOnFail\n", encoding="utf-8"
+    )
+    assert is_release_safe_hook_template(template) is True

@@ -92,6 +92,113 @@ def rule_ids(result):
     return {item.rule_id for item in result.findings}
 
 
+def test_preexisting_declared_vcs_checkout_directory_is_manual_review(tmp_path: Path):
+    content = (
+        "pkgname=fixture-package\n"
+        "pkgver=1\n"
+        'source=("myproject::git+https://example.invalid/myproject.git#tag=v1.0")\n'
+        'sha256sums=("SKIP")\n'
+    )
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text(content, encoding="utf-8")
+    checkout = tmp_path / "myproject"
+    checkout.mkdir()
+    (checkout / "payload").write_bytes(b"\x7fELF" + b"P" * 64)
+
+    captured = capture_package_scan_input(pkgbuild)
+    result = RepositoryProvenanceAnalyzer().analyze_scan_input(
+        str(pkgbuild),
+        captured.pkgbuild_content,
+        captured.install_hook,
+        captured.repository_snapshot,
+        pkg_name="fixture-package",
+        pkg_ver="1",
+    )
+
+    assert captured.repository_snapshot.source_owned_subtrees == ("myproject",)
+    assert captured.repository_snapshot.artifacts == ()
+    present = finding(result, "AUR-REPO-PREEXISTING-VCS-CHECKOUT-001")
+    assert present.severity == Severity.MEDIUM
+    assert present.requires_manual_review is True
+    assert present.blocks_installation is False
+    assert result.is_safe is True
+
+
+def test_plain_name_git_checkout_reuse_is_reported(tmp_path: Path):
+    content = (
+        "pkgname=fixture-package\n"
+        "pkgver=1\n"
+        'source=("git+https://example.invalid/tools/upstream.git#tag=v1.0")\n'
+        'sha256sums=("SKIP")\n'
+    )
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text(content, encoding="utf-8")
+    (tmp_path / "upstream").mkdir()
+
+    captured = capture_package_scan_input(pkgbuild)
+    result = RepositoryProvenanceAnalyzer().analyze_scan_input(
+        str(pkgbuild),
+        captured.pkgbuild_content,
+        captured.install_hook,
+        captured.repository_snapshot,
+        pkg_name="fixture-package",
+        pkg_ver="1",
+    )
+
+    assert captured.repository_snapshot.source_owned_subtrees == ("upstream",)
+    assert "AUR-REPO-PREEXISTING-VCS-CHECKOUT-001" in rule_ids(result)
+
+
+def test_absent_vcs_checkout_directory_is_silent(tmp_path: Path):
+    content = (
+        "pkgname=fixture-package\n"
+        "pkgver=1\n"
+        'source=("git+https://example.invalid/tools/upstream.git#tag=v1.0")\n'
+        'sha256sums=("SKIP")\n'
+    )
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text(content, encoding="utf-8")
+
+    captured = capture_package_scan_input(pkgbuild)
+    result = RepositoryProvenanceAnalyzer().analyze_scan_input(
+        str(pkgbuild),
+        captured.pkgbuild_content,
+        captured.install_hook,
+        captured.repository_snapshot,
+        pkg_name="fixture-package",
+        pkg_ver="1",
+    )
+
+    assert captured.repository_snapshot.source_owned_subtrees == ()
+    assert rule_ids(result) == set()
+
+
+def test_preexisting_directory_for_non_vcs_source_is_silent(tmp_path: Path):
+    content = (
+        "pkgname=fixture-package\n"
+        "pkgver=1\n"
+        'source=("renamed::https://example.invalid/x.tar.gz")\n'
+        'sha256sums=("SKIP")\n'
+    )
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text(content, encoding="utf-8")
+    (tmp_path / "renamed").mkdir()
+    (tmp_path / "renamed" / "notes.txt").write_text("plain text", encoding="utf-8")
+
+    captured = capture_package_scan_input(pkgbuild)
+    result = RepositoryProvenanceAnalyzer().analyze_scan_input(
+        str(pkgbuild),
+        captured.pkgbuild_content,
+        captured.install_hook,
+        captured.repository_snapshot,
+        pkg_name="fixture-package",
+        pkg_ver="1",
+    )
+
+    assert captured.repository_snapshot.source_owned_subtrees == ()
+    assert "AUR-REPO-PREEXISTING-VCS-CHECKOUT-001" not in rule_ids(result)
+
+
 def test_undeclared_opaque_checkout_artifact_is_manual_review_presence_only():
     result = analyze("pkgname=fixture-package\npkgver=1\n", artifact())
 

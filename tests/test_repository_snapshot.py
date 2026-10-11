@@ -287,6 +287,7 @@ def test_declared_vcs_cache_subtree_is_source_owned_and_bounded(tmp_path: Path, 
     assert snapshot.status == REPOSITORY_COMPLETE
     assert snapshot.entry_count == 1
     assert snapshot.artifacts == ()
+    assert snapshot.source_owned_subtrees == ("upstream",)
 
 
 def test_required_file_overrides_declared_vcs_cache_subtree(tmp_path: Path):

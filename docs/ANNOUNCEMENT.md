@@ -18,7 +18,11 @@ review - build and install it through `aurascan-makepkg`. Blocks and reviews
 now name the failing entry and can print an advisory AI explanation that can
 never change a deterministic result, and in-checkout symbolic links whose
 target was captured as a stable regular file no longer stop the provenance
-scan. This recovery-bearing release includes a fresh validated image; see its
+scan. It also lands a security-hardening batch from an external source
+review: the Repair Agent command gate, the makepkg wrapper handoff, the
+pacman-hook archive gate, deep-static source binding, and the recovery repair
+recipes all close reviewed gaps and document their remaining limits. This
+recovery-bearing release includes a fresh validated image; see its
 versioned note for the exact image identity, gate results and remaining
 limitations.
 

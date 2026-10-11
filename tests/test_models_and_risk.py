@@ -1,3 +1,5 @@
+import pytest
+
 from aurascan.core.models import (
     AnalysisResult,
     Confidence,
@@ -143,11 +145,12 @@ def test_multiple_medium_findings_escalate_to_high():
     assert risk.severity == Severity.HIGH
 
 
-def test_repository_artifact_inventory_does_not_self_escalate_to_high():
-    findings = [
-        make_finding(rule_id="AUR-REPO-OPAQUE-ARTIFACT-001")
-        for _index in range(4)
-    ]
+@pytest.mark.parametrize(
+    "rule_id",
+    ["AUR-REPO-OPAQUE-ARTIFACT-001", "AUR-REPO-PREEXISTING-VCS-CHECKOUT-001"],
+)
+def test_repository_artifact_inventory_does_not_self_escalate_to_high(rule_id):
+    findings = [make_finding(rule_id=rule_id) for _index in range(4)]
 
     risk = RiskEngine().evaluate(findings)
 

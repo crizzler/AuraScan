@@ -338,6 +338,7 @@ def test_agent_response_rejects_commands_without_shell_grant_and_validates_shell
         ("/usr/bin/ip -j address show", "user-shell", False),
         ("/usr/bin/ip route get 192.0.2.1", "user-shell", False),
         ("/usr/bin/ps -ef", "user-shell", False),
+        ("echo '#'", "user-shell", False),
     ],
 )
 def test_agent_command_policy_preserves_local_diagnostics_and_trusted_pacman(
@@ -451,6 +452,20 @@ def test_agent_command_policy_preserves_local_diagnostics_and_trusted_pacman(
         "/usr/bin/cat /etc/shadow",
         "/usr/bin/cat ~/.ssh/id_ed25519",
         "/usr/bin/cat /etc/{passwd,shadow}",
+        "/usr/bin/cat /etc/shadow-",
+        "/usr/bin/cat /etc/gshadow-",
+        "/usr/bin/cat ~/.git-credentials",
+        "/usr/bin/cat ~/.netrc",
+        "/usr/bin/cat ~/.config/gh/hosts.yml",
+        "/usr/bin/cat ~/.config/gcloud/application_default_credentials.json",
+        "/usr/bin/cat ~/.config/rclone/rclone.conf",
+        "/usr/bin/cat ~/.config/github-copilot/hosts.json",
+        "/usr/bin/cat ~/.bash_history",
+        "/usr/bin/cat ~/.mysql_history",
+        "/usr/bin/cat ~/.bashrc",
+        "/usr/bin/cat ~/.profile",
+        "/usr/bin/cat ~/.zshrc",
+        "/usr/bin/cat .config/gh/hosts.yml",
         "/usr/bin/ls /tmp/*",
     ],
 )
@@ -469,6 +484,44 @@ def test_agent_command_policy_rejects_remote_dynamic_and_build_commands(command)
         )
 
     assert str(raised.value) == agent.AGENT_COMMAND_POLICY_ERROR
+
+
+def test_agent_command_policy_rejects_hash_masked_live_shell_text():
+    # '#' only starts a Bash comment at the beginning of a word; text that
+    # follows a mid-word '#' (or an escaped metacharacter) is live shell text
+    # and must pass the same fail-closed checks.
+    assert (
+        agent._contains_active_shell_expansion("echo a\\;#$(touch /tmp/x)")
+        is True
+    )
+    assert agent._contains_active_path_expansion("echo a\\;#*") is True
+
+    for command, access, requires_root in (
+        ("journalctl -u dbus#;cat /etc/shadow", "user-shell", False),
+        ("echo a\\;#$(touch /tmp/x)", "user-shell", False),
+        ("echo a\\;#*", "user-shell", False),
+        ("echo ''#;cat /etc/shadow", "user-shell", False),
+        ("echo#fixture;echo ok", "user-shell", False),
+        ("journalctl -u dbus#>/tmp/fixture", "user-shell", False),
+        (
+            "/usr/bin/journalctl -u dbus#;/usr/bin/pacman -U /tmp/fixture.pkg.tar.zst",
+            "root-shell",
+            True,
+        ),
+    ):
+        with pytest.raises(ValueError) as raised:
+            agent.validate_agent_command(
+                {
+                    "command": command,
+                    "cwd": "",
+                    "timeout_seconds": 30,
+                    "requires_root": requires_root,
+                    "reason": "The command inspects the local fixture state.",
+                    "expected_result": "Local diagnostic information is available.",
+                },
+                access=access,
+            )
+        assert str(raised.value) == agent.AGENT_COMMAND_POLICY_ERROR
 
 
 def test_agent_command_policy_rejects_sensitive_cwd_and_symlink_targets(tmp_path):

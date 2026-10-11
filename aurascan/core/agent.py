@@ -137,10 +137,13 @@ AGENT_ENCODED_ESCAPE_RE = re.compile(
 )
 AGENT_SENSITIVE_PATH_RE = re.compile(
     r"(?:^|/)(?:\.aws|\.azure|\.docker|\.gnupg|\.kube|\.ssh|keyrings?|secrets?)(?:/|$)|"
-    r"^/etc/(?:gshadow|shadow|sudoers)(?:$|[./])|"
+    r"^/etc/(?:gshadow|shadow|sudoers)(?:$|[./-])|"
     r"^/etc/(?:ssh|sudoers\.d)/|"
     r"^/(?:proc/(?:kcore|(?:self|[0-9]+)/(?:environ|mem))|run/(?:credentials|secrets))(?:/|$)|"
-    r"(?:^|/)(?:\.env|auth\.json|credentials(?:\.json)?|id_(?:dsa|ecdsa|ed25519|rsa))(?:$|\.)",
+    r"(?:^|/)\.config/(?:gh|gcloud|github-copilot|rclone)(?:/|$)|"
+    r"(?:^|/)(?:\.env|auth\.json|[A-Za-z0-9_.-]*credentials(?:\.json)?|id_(?:dsa|ecdsa|ed25519|rsa)|"
+    r"\.netrc|\.?(?:bash_login|bash_profile|bashrc|profile|zlogin|zprofile|zshenv|zshrc)|"
+    r"\.?[A-Za-z0-9_-]*history)(?:$|\.)",
     re.IGNORECASE,
 )
 AGENT_FORBIDDEN_PROGRAMS = {
@@ -935,7 +938,12 @@ def _contains_active_shell_expansion(command: str) -> bool:
             continue
         if escaped:
             escaped = False
-            previous = char
+            # An escaped character stays inside the current word in Bash: it
+            # never starts a new word, so a following '#' is a word
+            # character, not a comment start.  The sentinel is neither
+            # whitespace nor a shell metacharacter so the '#' heuristic
+            # below keeps scanning all text the shell may execute.
+            previous = "x"
             continue
         if char == "\\":
             escaped = True
@@ -974,7 +982,12 @@ def _contains_active_path_expansion(command: str) -> bool:
             continue
         if escaped:
             escaped = False
-            previous = char
+            # An escaped character stays inside the current word in Bash: it
+            # never starts a new word, so a following '#' is a word
+            # character, not a comment start.  The sentinel is neither
+            # whitespace nor a shell metacharacter so the '#' heuristic
+            # below keeps scanning all text the shell may execute.
+            previous = "x"
             continue
         if char == "\\":
             escaped = True
@@ -1048,7 +1061,12 @@ def _lex_agent_command(command: str) -> List[str]:
             punctuation_chars=";&|<>()",
         )
         lexer.whitespace_split = True
-        lexer.commenters = "#"
+        # Keep '#' inside the token stream.  Bash only starts a comment when
+        # '#' begins a word, while shlex would drop an unquoted mid-word
+        # '#...' suffix as a comment even though Bash executes it as live
+        # shell text.  Retaining it keeps every segment Bash may run visible
+        # to the policy checks (fail closed).
+        lexer.commenters = ""
         return list(lexer)
     except ValueError:
         raise ValueError(AGENT_COMMAND_POLICY_ERROR)

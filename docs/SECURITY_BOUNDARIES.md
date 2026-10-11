@@ -143,6 +143,22 @@ During a recovery build, QEMU harnesses run only through the root preflight
 bootstrap and the private build attestation, from a fresh root-owned
 non-writable checkout.
 
+Recovery repair recipes execute target programs through `arch-chroot`. Every
+target-resolved tool (package manager, keyring helper, initramfs generator,
+DKMS, snapper, bootloader installer) must first pass the same root-owned,
+non-symlink, size-bounded regular-executable validation AuraScan applies to
+data files; a replaced or symlinked tool refuses the action. This is risk
+reduction, not containment: an intact target tool still runs the target's own
+hooks and configuration as recovery root, a chroot is not a security boundary
+for a UID-0 process, the package-state revalidation uses target-derived
+queries, and an already-compromised target must be treated as untrusted
+regardless of a clean repair result. Snapshot test-boot and restore actions are
+derived only from root-owned Snapper `snapshot_info.xml` metadata with a
+visible creation time, and each requires its own typed confirmation phrase.
+Journal-based service-failure evidence is accepted only from systemd's own
+producer identity (`_COMM=systemd`, `_PID=1`); MESSAGE text written by other
+local programs cannot create a service-disable action.
+
 ### 8. Intelligence updates and detection data
 
 | Aspect | Detail |

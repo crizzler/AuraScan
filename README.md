@@ -354,7 +354,11 @@ and remain subject to the normal source-provenance workflow. Statically proven
 VCS checkout directory roots are treated as source-owned subtrees during the
 normal walk so an already-populated upstream cache cannot consume the local
 artifact bounds; an exact package-control reference beneath that root overrides
-the exclusion and is captured normally.
+the exclusion and is captured normally. A declared checkout directory that
+already exists beside the PKGBUILD is reported as
+`AUR-REPO-PREEXISTING-VCS-CHECKOUT-001`, because makepkg reuses that
+directory; the finding asks the reviewer to remove it or verify it resolves to
+the declared remote revision before building.
 
 Repository artifact findings deliberately form an evidence ladder:
 
@@ -362,6 +366,11 @@ Repository artifact findings deliberately form an evidence ladder:
   MEDIUM manual-review finding when a supported executable or opaque archive
   is present but AuraScan finds no supported exact install or execution
   correlation. The makepkg wrapper pauses for an explicit review decision.
+- `AUR-REPO-PREEXISTING-VCS-CHECKOUT-001` is a non-hard-blocking,
+  acceptance-eligible MEDIUM manual-review notice when a declared VCS
+  checkout directory already exists beside the PKGBUILD. makepkg reuses such
+  a directory after comparing only its configured origin URL, and the
+  bounded walk does not inspect its content.
 - `AUR-REPO-OPAQUE-BINARY-001` is a HIGH manual-review finding when package
   control text requests copying, moving, or installing the exact undeclared
   artifact, or an exact recursively transferred directory containing it, into
@@ -560,8 +569,20 @@ network requests and blocks when a declared remote source therefore cannot be
 inspected. Deep-static parses the exact captured PKGBUILD rather than a
 neighboring `.SRCINFO`, copies local sources through bounded no-follow reads,
 isolates every acquired source path, and blocks on any declared source it
-cannot inspect. Deep-static reports are deliberately not reused from cache
-until acquired-source identities can be bound to an immutable cache key.
+cannot inspect. Deep-static also binds its verdict to the bytes the build will
+use. A declared remote source whose checkout name is already present as a
+different file in the package directory blocks, because makepkg reuses that
+local file instead of the inspected download. An HTTP/HTTPS archive declared
+with `sha256sums=SKIP` blocks as well, because no declared digest ties the
+inspected download to the bytes a later makepkg fetch would use; a detached
+signature that verifies against a declared `validpgpkeys` entry still covers
+that sanctioned SKIP-plus-signature pattern. Because makepkg later downloads a
+declared source with its own client, only a real declared checksum ties the
+inspected bytes to the bytes the build fetches; for a SKIP entry covered only
+by a detached signature, AuraScan verifies the inspected download but cannot
+prove the builder's separate download returns identical bytes. Deep-static reports are
+deliberately not reused from cache until acquired-source identities can be
+bound to an immutable cache key.
 Source parsing handles bounded literal assignments and appends, but fails
 closed with `SOURCE-PARSER-AMBIGUOUS` when Bash syntax, malformed arrays,
 indirect mutation, `eval`/sourcing, or a nameref could change what `source`
@@ -1348,7 +1369,12 @@ redirection, non-allowlisted commands, arbitrary executable paths, or unsafe
 pacman options. Diagnostics must name an allowlisted absolute `/usr/bin` or
 `/usr/sbin` executable and pass command-specific read-only checks. Repository
 package operations must name `/usr/bin/pacman`, cannot target AuraScan itself,
-and cannot use `-U` or alternate root/config/keyring/hook paths.
+and cannot use `-U` or alternate root/config/keyring/hook paths. Diagnostics
+that name sensitive paths are rejected, including password-hash backups such
+as `/etc/shadow-`, Git/netrc/cloud credential stores, shell history files and
+shell rc files. Provider-bound output is redacted for those formats as well,
+including underscore-prefixed JSON token keys, `pass =` values and rc-file
+token exports.
 
 Terminal output is shown locally. AI receives at most 32 KiB per command and
 128 KiB per session. Output is redacted by default; `full` requires typing
@@ -1706,15 +1732,30 @@ provide package names, paths, units, arguments, file edits, or commands for
 execution. The combined plan can cover stale locks, mirror restoration, bounded
 cache cleanup, complete signed pacman transactions, matching kernel/header and
 DKMS recovery, backed-up initramfs rebuilds, boot config drift, exact signed
-cached packages, and a proven noncritical boot-blocking service. Every action is
+cached packages, and a proven noncritical boot-blocking service. Service-failure
+evidence comes only from systemd's own journal entries (`_COMM=systemd`,
+`_PID=1`); failure-looking text written by other local programs cannot create
+a disable action. Every action is
 reconstructed from current target state and revalidated as root immediately
-before execution.
+before execution. Target programs executed through `arch-chroot` — the package
+manager, keyring helper, initramfs generators, DKMS, snapper, and bootloader
+installers — must first pass the same root-owned, non-symlink, bounded
+regular-executable validation AuraScan applies to data files; a replaced or
+symlinked tool refuses the action. This does not make a compromised target
+safe: an intact tool still runs the target's own hooks and configuration as
+recovery root, so review recovery results with that limit in mind.
 
 Snapshot restoration always creates a pre-recovery snapshot first and requires
-typing `RESTORE SNAPSHOT <id>`. Full Limine, systemd-boot, or GRUB reinstallation
+typing `RESTORE SNAPSHOT <id>`, and preparing a one-shot snapshot test boot
+requires typing `TEST BOOT SNAPSHOT <id>`. Snapshot actions are created only
+from directories carrying Snapper's own root-owned `snapshot_info.xml`
+metadata, and the selected snapshot's recorded creation time is shown; the
+list still comes from the target, so confirm the creation time predates the
+incident before booting or restoring it. Full Limine, systemd-boot, or GRUB
+reinstallation
 requires positive loader/ESP detection, backups, post-validation, and typing
 `REINSTALL BOOTLOADER`. Reinstall recipes update loader files without changing
-firmware variables. `--yes` cannot bypass either phrase. AuraScan never
+firmware variables. `--yes` cannot bypass these phrases. AuraScan never
 formats filesystems, changes partitions, performs filesystem repair, enrolls
 Secure Boot keys, flashes firmware, changes authentication policy, deletes user
 data, runs arbitrary AI commands, or reboots automatically.
@@ -1801,6 +1842,10 @@ and bounded checkout identity. The wrapper rejects makepkg options that replace
 the build file/configuration, reuse an unverified build tree, or skip integrity
 checks, and removes direct shell/dynamic-loader code-loading variables such as
 `BASH_ENV`, `ENV`, `LD_PRELOAD`, and `LD_AUDIT` from makepkg's environment.
+It also pins the scanned `./PKGBUILD` as the build script at the handoff and
+refuses to run when a user-level `makepkg.conf` overrides `BUILDFILE`,
+`DLAGENTS`, `VCSCLIENTS`, or `PACMAN`; those settings can replace the build
+script or the programs makepkg executes.
 These restrictions are part of the security boundary; run unusual workflows in
 a separately reviewed disposable build environment instead of bypassing them.
 
@@ -1821,6 +1866,17 @@ read, or if any component of its declared relative path under the package
 directory is a symlink, the wrapper stops before makepkg. No earlier clear
 result or review token can authorize a package while its declared hook remains
 unresolved.
+
+After makepkg finishes, the wrapper reads back every freshly written package
+archive through the same bounded `.INSTALL` reader. When the scan resolved a
+declared hook, a fresh package missing that hook member, one that cannot be
+inspected, or one whose hook bytes differ from the scanned hook is refused
+with a blocking result. This post-build verification does not cover archives
+written outside the build directory, build-only invocations that copy no
+archive (`--nobuild`, `--packagelist`, custom `PKGDEST`), or an `-i`/`--install`
+run whose pacman install happens inside makepkg before the wrapper regains
+control; treat review acceptance and the pacman hook as the effective checks
+for those flows.
 
 ## Pacman Hook
 
@@ -1853,9 +1909,13 @@ AuraScan before continuing pacman transactions.
 
 The hook uses pacman's `NeedsTargets` mode. AuraScan reads target names from
 stdin, scans an existing target path when one is provided, or looks for the
-latest matching `.pkg.tar.zst` file in `/var/cache/pacman/pkg`. Missing archive
-targets are reported as warnings and do not block by themselves. Blocking
-findings make AuraScan exit non-zero, which should stop the pacman transaction.
+newest `.pkg.tar.zst` file in `/var/cache/pacman/pkg` whose own `.PKGINFO`
+identity proves the same package name. A same-prefix file name, a corrupted
+archive, or an entry whose identity cannot be read is skipped instead of being
+trusted, and AuraScan notes when it audits a cached copy rather than the file
+being installed. Missing archive targets are reported as warnings and do not
+block by themselves. Blocking findings make AuraScan exit non-zero and the
+hook's `AbortOnFail` aborts the pacman transaction.
 ClamAV runs only when `PATH` resolves to a captured, root-owned, non-writable
 `/usr/bin/clamscan`, which AuraScan revalidates immediately before the bounded
 scan. Database version reporting uses the same policy for
@@ -1867,8 +1927,9 @@ started ClamAV scan times out, exceeds a bound, or returns an error, AuraScan
 records blocking incomplete inspection rather than a clean result. If trusted
 `clamscan` is unavailable, AuraScan reports that AV scanning was skipped and
 continues with the remaining checks. If
-`/usr/bin/aurascan` is missing, pacman cannot run the hook command; recover by
-reinstalling AuraScan or removing the stale hook from the hook directory.
+`/usr/bin/aurascan` is missing, pacman cannot run the hook command and refuses
+the transaction; recover by reinstalling AuraScan or removing the stale hook
+from the hook directory.
 
 ## Review Acceptance
 

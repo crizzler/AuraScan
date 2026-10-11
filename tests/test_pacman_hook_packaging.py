@@ -15,6 +15,10 @@ from aurascan.cli import (
     resolve_pacman_hook_target,
     scan_pacman_hook_targets,
 )
+from aurascan.core.package_archive import (
+    PACKAGE_IDENTITY_RESOLVED,
+    PackageIdentityCapture,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +50,7 @@ def assert_release_hook_is_safe(text: str) -> None:
     assert fields["When"] == ["PreTransaction"]
     assert fields["Exec"] == ["/usr/bin/aurascan"]
     assert "NeedsTargets" in text
+    assert "AbortOnFail" in text
     assert "--scan-context" not in text
     assert "--update-scan-policy" not in text
     assert "--deep-static" not in text
@@ -388,15 +393,60 @@ def test_hook_target_resolution_uses_existing_path(tmp_path):
     assert resolve_pacman_hook_target(str(package), cache_dir=tmp_path) == str(package)
 
 
-def test_hook_target_resolution_uses_latest_cache_match(tmp_path):
+def identity_by_filename(mapping):
+    """Build a fake archive-identity capture from a filename -> package map."""
+
+    def capture(path):
+        name = mapping.get(path.name)
+        if name is None:
+            return PackageIdentityCapture("uninspectable", reason="archive_listing_failed")
+        return PackageIdentityCapture(PACKAGE_IDENTITY_RESOLVED, name=name, version="1")
+
+    return capture
+
+
+def test_hook_target_resolution_uses_latest_verified_cache_match(tmp_path):
     old = tmp_path / "demo-1.0-1-x86_64.pkg.tar.zst"
     new = tmp_path / "demo-1.1-1-x86_64.pkg.tar.zst"
     old.write_bytes(b"old")
     new.write_bytes(b"new")
     os.utime(old, (1, 1))
     os.utime(new, (2, 2))
+    identity = identity_by_filename({old.name: "demo", new.name: "demo"})
 
-    assert resolve_pacman_hook_target("demo", cache_dir=tmp_path) == str(new)
+    assert resolve_pacman_hook_target("demo", cache_dir=tmp_path, identity_capture=identity) == str(new)
+
+
+def test_hook_target_resolution_ignores_same_prefix_decoy(tmp_path):
+    decoy = tmp_path / "demo-tools-9.9-1-x86_64.pkg.tar.zst"
+    real = tmp_path / "demo-2.0-1-x86_64.pkg.tar.zst"
+    decoy.write_bytes(b"decoy")
+    real.write_bytes(b"real")
+    os.utime(decoy, (5, 5))
+    os.utime(real, (1, 1))
+    identity = identity_by_filename({decoy.name: "demo-tools", real.name: "demo"})
+
+    assert resolve_pacman_hook_target("demo", cache_dir=tmp_path, identity_capture=identity) == str(real)
+
+
+def test_hook_target_resolution_skips_unverifiable_cache_entry(tmp_path):
+    corrupt = tmp_path / "demo-2.0-1-x86_64.pkg.tar.zst"
+    valid = tmp_path / "demo-1.0-1-x86_64.pkg.tar.zst"
+    corrupt.write_bytes(b"corrupt")
+    valid.write_bytes(b"valid")
+    os.utime(corrupt, (5, 5))
+    os.utime(valid, (1, 1))
+    identity = identity_by_filename({valid.name: "demo"})
+
+    assert resolve_pacman_hook_target("demo", cache_dir=tmp_path, identity_capture=identity) == str(valid)
+
+
+def test_hook_target_resolution_refuses_when_no_verified_match(tmp_path):
+    decoy = tmp_path / "demo-tools-9.9-1-x86_64.pkg.tar.zst"
+    decoy.write_bytes(b"decoy")
+    identity = identity_by_filename({decoy.name: "demo-tools"})
+
+    assert resolve_pacman_hook_target("demo", cache_dir=tmp_path, identity_capture=identity) == ""
 
 
 class FakeHookEngine:
@@ -429,3 +479,19 @@ def test_hook_scan_blocking_result_returns_failure(tmp_path):
 
     assert ok is False
     assert engine.scanned == [str(package)]
+
+
+def test_hook_scan_notes_cache_resolved_archive(tmp_path):
+    package = tmp_path / "demo-1.0-1-x86_64.pkg.tar.zst"
+    package.write_bytes(b"fixture")
+    engine = FakeHookEngine([True])
+    stderr = StringIO()
+    identity = identity_by_filename({package.name: "demo"})
+
+    ok = scan_pacman_hook_targets(
+        engine, ["demo"], cache_dir=tmp_path, stderr=stderr, identity_capture=identity
+    )
+
+    assert ok is True
+    assert engine.scanned == [str(package)]
+    assert "auditing cached archive" in stderr.getvalue()

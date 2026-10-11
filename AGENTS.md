@@ -129,7 +129,11 @@ model choice does not change AuraScan's runtime AI defaults or safety policy.
   real user home.
 - Preserve hard blockers and conservative fallbacks. A missing dependency,
   ambiguous context, parser failure, or failed verification must not silently
-  turn an unsafe path into an allowed install.
+  turn an unsafe path into an allowed install; the shipped pacman hook
+  declares `AbortOnFail` so a blocking verdict aborts the transaction. The
+  hook's cache target resolution must bind a cache hit to the archive's own
+  package identity and note when it audits a cached copy rather than the file
+  being installed.
 - Do not print or persist API keys, auth keys, SSH keys, passwords, or source
   snippets that may contain secrets. Prefer bounded, secret-free evidence.
 - Package install and upgrade scripts must remain non-interactive and must not
@@ -224,7 +228,11 @@ model choice does not change AuraScan's runtime AI defaults or safety policy.
   lexical target stays inside the checkout and was captured as a stable
   regular file; absolute, escaping, dangling, directory, special-file,
   chained, or pruned-tree targets keep the fail-closed coverage result.
-  Exclude
+  Record which declared VCS checkout directories the walk observed and
+  pruned, and surface a pre-existing declared checkout directory as MEDIUM
+  manual-review evidence; makepkg reuses it after checking only its
+  configured origin URL, so the built bytes may differ from the inspected
+  remote revision. Exclude
   exact supported literal `source=()` checkout files from artifact
   classification, classify executable/archive carriers by bounded magic, keep
   presence MEDIUM/non-hard-blocking but acceptance-eligible for manual review,
@@ -279,7 +287,9 @@ model choice does not change AuraScan's runtime AI defaults or safety policy.
 - Before the makepkg wrapper handoff, recapture the exact PKGBUILD, declared
   hook, and repository snapshot; reject makepkg controls that replace or reuse
   unscanned inputs or disable integrity checks, and remove direct shell or
-  dynamic-loader code-loading environment variables. A review decision cannot
+  dynamic-loader code-loading environment variables. Pin the scanned
+  `./PKGBUILD` at the handoff and refuse user-level `makepkg.conf` overrides of
+  `BUILDFILE`, `DLAGENTS`, `VCSCLIENTS`, or `PACMAN`. A review decision cannot
   waive this boundary.
 - Block remote second-stage execution only on a complete artifact-bound chain:
   active network acquisition, a concrete local artifact (or bounded derived
@@ -299,12 +309,19 @@ model choice does not change AuraScan's runtime AI defaults or safety policy.
 - Treat a built package `.INSTALL` member as mandatory deterministic evidence.
   Use the bounded no-follow package reader and fail closed if the member list
   or hook cannot be captured as stable regular UTF-8 text; optional AI or
-  ClamAV must not be the only install-hook control-flow check.
+  ClamAV must not be the only install-hook control-flow check. After a
+  makepkg handoff, prove every freshly written package embeds the exact
+  scanned hook bytes; a missing, uninspectable, or divergent packaged hook
+  blocks the result.
 - Deep-static must parse the captured PKGBUILD rather than a neighboring
   `.SRCINFO`, make zero HTTP/Git/key calls under `--offline`, snapshot local
   sources without following links, isolate acquisition paths, and block every
-  declared source it cannot inspect. Do not cache deep-static allow reports
-  until acquired bytes/revisions and statuses are bound into the cache key.
+  declared source it cannot inspect. Block a declared remote source whose
+  checkout-name file in the package directory diverges from the inspected
+  download, and block HTTP/HTTPS archives declared with SKIP unless a detached
+  signature verifies against a declared `validpgpkeys` entry. Do not cache
+  deep-static allow reports until acquired bytes/revisions and statuses are
+  bound into the cache key.
 - Source-array collection is not a Bash evaluator. Accept only supported
   bounded literal assignment/append forms and fail closed on malformed arrays,
   dynamic or indirect mutation, sourcing/eval, subscripts, reads, or namerefs
@@ -399,7 +416,15 @@ model choice does not change AuraScan's runtime AI defaults or safety policy.
   including remote references, network/remote-shell clients, Git, AUR/build
   front ends, interpreters/loaders, decoding/evaluation, shell expansion,
   redirection, custom/bare executables, unsafe pacman options/targets, and
-  direct AuraScan modification before offering confirmation. Approved package
+  direct AuraScan modification before offering confirmation. Model Bash's
+  comment and word boundaries exactly: `#` starts a comment only at the start
+  of a word, an escaped metacharacter stays inside its word, and no command
+  text may be exempted from validation as comment-like. Everything the shell
+  may execute must pass the same fail-closed checks. Keep the sensitive-path
+  denylist covering password-hash backups, credential stores, shell history
+  files and shell rc files on both raw tokens and resolved paths, and keep
+  provider-bound output redaction covering underscore-prefixed JSON key names,
+  `pass =` values and rc-file token exports. Approved package
   changes remain consequential and diagnostic output may contain private data;
   never describe this boundary as Full Control or unrestricted execution.
 - Invoke hostile-input native tools only through the documented trusted
@@ -410,8 +435,16 @@ model choice does not change AuraScan's runtime AI defaults or safety policy.
   `/usr/bin/gpg`, `/usr/bin/bsdtar`, `/usr/bin/clamscan`,
   `/usr/bin/freshclam`, `/usr/bin/notify-send`, `/usr/bin/makepkg`, upgrade
   tools, and Repair Agent privileged helpers; never validate one executable and
-  later call a bare name. The post-scan makepkg handoff still executes package
-  build logic and is not a bounded scanner or sandbox.
+  later call a bare name. Validate every target program executed through
+  `arch-chroot` in recovery recipes (package manager, keyring helper, initramfs
+  generators, DKMS, snapper, bootloader installers) as a root-owned,
+  non-symlink, bounded regular executable before it runs as recovery root.
+  Derive snapshot work only from root-owned Snapper metadata with a visible
+  creation time, and require a typed phrase for each such step. Accept
+  boot-failure service evidence only from the init system's own journal
+  entries; text written by other local programs must not steer a
+  service-disable step. The post-scan makepkg handoff still executes package build logic and is not a
+  bounded scanner or sandbox.
 - Keep the public-key cache private and bounded. Read cached/configured keys as
   stable no-follow byte snapshots, publish fetched cache entries atomically
   without replacing an existing path, and import an exact private temporary

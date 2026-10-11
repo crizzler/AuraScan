@@ -1759,17 +1759,34 @@ class ChecksumVerifier:
             explanation = "Checksum is SKIP for an unpinned or branch-based git source."
         elif ref.kind == SourceKind.http:
             severity = Severity.HIGH
-            explanation = "Checksum is SKIP for an HTTP/HTTPS source archive."
+            explanation = (
+                "Checksum is SKIP for an HTTP/HTTPS source archive, so no declared "
+                "digest binds the inspected download to the bytes the build tool "
+                "will fetch."
+            )
         else:
             severity = Severity.MEDIUM
             explanation = "Checksum is SKIP for this source."
+        # A SKIP checksum cannot bind the inspected snapshot to the artifact
+        # the build will use. For an HTTP/HTTPS archive makepkg performs its
+        # own download and has no usable digest to validate against, so this
+        # fails closed instead of accepting manual review. (A detached
+        # signature that later verifies against a declared validpgpkey still
+        # removes this finding - the sanctioned SKIP-plus-signature pattern -
+        # and VCS/local SKIP entries stay workflow-expected review states.)
+        blocks = ref.kind == SourceKind.http
+        recommendation = (
+            "Add a real checksum (for example with `updpkgsums`) so the inspected bytes are bound to the bytes the build uses."
+            if blocks
+            else "Manually verify source provenance and integrity."
+        )
         return _finding(
             "SOURCE-CHECKSUM-SKIP",
             ref.original,
             severity,
             explanation,
-            "Manually verify source provenance and integrity.",
-            False,
+            recommendation,
+            blocks,
             ref.original,
             EvidenceQuality.weak_heuristic if severity == Severity.LOW else EvidenceQuality.strong_heuristic,
         )
@@ -2606,13 +2623,17 @@ class SourceFetcher:
         if ref.kind == SourceKind.http:
             if self.policy.offline:
                 return _offline_acquisition_result(ref)
-            return self.http_fetcher.fetch(ref, output_dir)
+            result = self.http_fetcher.fetch(ref, output_dir)
+            self._append_local_reuse_findings(ref, pkg_dir, result)
+            return result
         if ref.kind == SourceKind.git_https:
             if self.policy.offline:
                 return _offline_acquisition_result(ref)
             return self.git_fetcher.fetch(ref, output_dir)
         if ref.kind == SourceKind.signature:
             acquired = self._acquire_signature(ref, pkg_dir, output_dir)
+            if urllib.parse.urlparse(ref.resolved).scheme.lower() in {"http", "https"}:
+                self._append_local_reuse_findings(ref, pkg_dir, acquired)
             acquired.findings.append(_finding(
                 "SOURCE-SIGNATURE-DETECTED",
                 ref.original,
@@ -2655,6 +2676,77 @@ class SourceFetcher:
             result.reference = ref
             return result
         return self._acquire_local_file(ref, pkg_dir, output_dir)
+
+    def _append_local_reuse_findings(
+        self,
+        ref: SourceReference,
+        pkg_dir: Path,
+        result: SourceAcquisitionResult,
+    ) -> None:
+        """Fail closed when makepkg would reuse a different same-named file.
+
+        makepkg prefers a same-named file already present in the package
+        directory before downloading a declared remote source
+        (``get_filepath`` checks ``$startdir/<name>`` first).  If such an
+        entry exists and differs from the bounded snapshot that was actually
+        inspected, the deep-static verdict would describe bytes the build
+        never uses, so this records a blocking finding instead of trusting
+        the download.
+        """
+
+        if result.status != "acquired":
+            return
+        name = ref.filename
+        if not name or Path(name).name != name:
+            return
+        candidate = Path(pkg_dir) / name
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            return
+        except OSError:
+            result.findings.append(_local_reuse_finding(ref, "read_error"))
+            return
+        digest, reason = self._local_reuse_digest(pkg_dir, name)
+        if not reason and digest == result.sha256:
+            return
+        result.findings.append(_local_reuse_finding(ref, reason or "content_diverged"))
+
+    def _local_reuse_digest(self, pkg_dir: Path, name: str) -> Tuple[str, str]:
+        """Hash one same-named package-directory entry without following links.
+
+        Returns ``(digest, "")`` on success or ``("", reason)`` when the
+        entry cannot be compared safely.
+        """
+
+        try:
+            source_fd = _open_bounded_local_source(
+                pkg_dir,
+                name,
+                max_bytes=self.policy.max_download_size,
+            )
+        except _LocalSourceError as exc:
+            return "", exc.code
+        digest = hashlib.sha256()
+        copied = 0
+        try:
+            before = os.fstat(source_fd)
+            while True:
+                chunk = os.read(source_fd, min(65536, self.policy.max_download_size + 1 - copied))
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if copied > self.policy.max_download_size:
+                    return "", "oversized"
+                digest.update(chunk)
+            after = os.fstat(source_fd)
+            if _file_snapshot_identity(before) != _file_snapshot_identity(after) or copied != after.st_size:
+                return "", "changed"
+        except OSError:
+            return "", "read_error"
+        finally:
+            os.close(source_fd)
+        return digest.hexdigest(), ""
 
     def _acquire_local_file(
         self,
@@ -2863,6 +2955,18 @@ def _write_all(fd: int, payload: bytes) -> None:
         if written <= 0:
             raise OSError("short write while snapshotting local source")
         offset += written
+
+
+def _local_reuse_finding(ref: SourceReference, reason: str) -> Finding:
+    return _finding(
+        "SOURCE-LOCAL-REUSE-DIVERGENCE",
+        ref.original,
+        Severity.HIGH,
+        "A same-named file already present in the package directory does not match the bounded snapshot AuraScan downloaded and inspected, and makepkg would prefer the local file instead.",
+        "Remove or independently verify the same-named local file, then rescan before building or installing.",
+        True,
+        f"declared source checkout-name reuse diverges from the inspected download ({reason})",
+    )
 
 
 def _offline_finding(ref: SourceReference) -> Finding:

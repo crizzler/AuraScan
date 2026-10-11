@@ -1,4 +1,5 @@
 import os
+import stat
 import subprocess
 import sys
 import json
@@ -8,15 +9,22 @@ import time
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, TextIO
+from typing import Callable, List, Mapping, Optional, Sequence, TextIO
 
 from aurascan.analyzers.history import HistoryAnalyzer
 from aurascan.core.engine import AuraScanEngine
 from aurascan.core.finding_explainer import scan_explanation_lines
 from aurascan.core.install_hook import (
+    INSTALL_HOOK_RESOLVED,
     PackageScanInput,
     PackageScanInputError,
     capture_package_scan_input,
+)
+from aurascan.core.package_archive import (
+    PACKAGE_HOOK_ABSENT,
+    PACKAGE_HOOK_RESOLVED,
+    PackageInstallHookCapture,
+    capture_package_install_hook,
 )
 from aurascan.core.trusted_tools import (
     TrustedTool,
@@ -36,6 +44,7 @@ from aurascan.core.review import (
     get_non_acceptance_blockers,
     validate_review_token,
 )
+from aurascan.core.text_safety import sanitize_terminal_text
 
 
 EXIT_USAGE = 2
@@ -107,6 +116,15 @@ _MAKEPKG_CODE_LOADING_ENV_KEYS = frozenset({
     "MAKEPKG_LIBRARY",
 })
 _MAKEPKG_CODE_LOADING_ENV_PREFIXES = ("BASH_FUNC_",)
+# User-level makepkg.conf overrides that can redirect what makepkg executes:
+# the build script, download/VCS agents, or the pacman command run under sudo.
+_USER_MAKEPKG_CONFIG_GUARDED_KEYS = frozenset({
+    "BUILDFILE",
+    "DLAGENTS",
+    "PACMAN",
+    "VCSCLIENTS",
+})
+_USER_MAKEPKG_CONFIG_MAX_BYTES = 64 * 1024
 
 
 class WrapperArgumentError(ValueError):
@@ -225,6 +243,8 @@ def run(
     subprocess_run: Callable[..., object] = subprocess.run,
     sudo_invalidator: Optional[Callable[[], SudoInvalidation]] = None,
     review_store: Optional[ReviewDecisionStore] = None,
+    environ: Optional[Mapping[str, str]] = None,
+    install_hook_capture: Callable[..., PackageInstallHookCapture] = None,
     stdout: TextIO = None,
     stderr: TextIO = None,
 ) -> int:
@@ -235,6 +255,7 @@ def run(
     makepkg_tool_capture = makepkg_tool_capture or capture_trusted_system_tool
     makepkg_tool_revalidate = makepkg_tool_revalidate or revalidate_trusted_system_tool
     sudo_invalidator = sudo_invalidator or _sudo_invalidation_not_requested
+    install_hook_capture = install_hook_capture or capture_package_install_hook
     raw_argv = list(argv if argv is not None else sys.argv[1:])
     json_requested = _argv_requests_json(raw_argv)
 
@@ -520,11 +541,24 @@ def run(
             stderr,
             scan_warnings,
         )
-    makepkg_environment = _sanitized_makepkg_environment()
+    makepkg_environment = _sanitized_makepkg_environment(environ)
+    config_override = _user_makepkg_config_override(makepkg_environment)
+    if config_override is not None:
+        return _emit_user_makepkg_config_override(
+            options,
+            report,
+            pkgbuild_path,
+            stdout,
+            scan_warnings,
+            config_override,
+        )
     # Review/history persistence and trusted-tool revalidation may take long
     # enough for a mutable checkout to change.  Re-capture the complete input
-    # identity as the final package-state operation before the handoff.
-    if _matching_scan_input(engine, pkgbuild_path) is None:
+    # identity as the final package-state operation before the handoff.  The
+    # captured install hook doubles as the expected `.INSTALL` evidence for
+    # the post-build package verification below.
+    final_scan_input = _matching_scan_input(engine, pkgbuild_path)
+    if final_scan_input is None:
         return _emit_scan_input_changed(
             options,
             report,
@@ -540,13 +574,41 @@ def run(
     sudo_invalidation = sudo_invalidator()
     if sudo_invalidation.detail:
         scan_warnings = list(scan_warnings) + [sudo_invalidation.detail]
+    handoff_started = time.time()
     result = subprocess_run(
-        [makepkg_tool.path] + options.makepkg_args,
+        # Pin the build script through makepkg's trailing argument-assignment
+        # channel: makepkg exports extra argv assignments after sourcing its
+        # configuration files, so this keeps makepkg on the scanned
+        # ./PKGBUILD even if a user config sets BUILDFILE.
+        [makepkg_tool.path]
+        + options.makepkg_args
+        + [f"BUILDFILE={pkgbuild_path.name}"],
         cwd=str(cwd_path),
         check=False,
         env=makepkg_environment,
     )
     makepkg_exit_code = int(getattr(result, "returncode", 0))
+    # makepkg copies the declared install hook into each built package.  A
+    # fresh package whose `.INSTALL` member is missing, unreadable, or
+    # different from the scanned hook bytes means the installed code would
+    # not be the reviewed code; refuse the handoff result instead of
+    # reporting success.
+    hook_problem = _packaged_install_hook_problem(
+        cwd_path,
+        handoff_started,
+        final_scan_input,
+        install_hook_capture,
+    )
+    if hook_problem is not None:
+        return _emit_packaged_install_hook_mismatch(
+            options,
+            report,
+            pkgbuild_path,
+            stdout,
+            scan_warnings,
+            makepkg_exit_code,
+            hook_problem,
+        )
     if options.json_output:
         if makepkg_exit_code != 0:
             action = "makepkg_failed"
@@ -657,6 +719,143 @@ def _emit_scan_input_changed(
     return EXIT_SCAN_BLOCKED
 
 
+def _emit_user_makepkg_config_override(
+    options: MakepkgWrapperOptions,
+    report,
+    pkgbuild_path: Path,
+    stdout: TextIO,
+    scan_warnings,
+    detail: str,
+) -> int:
+    safe_detail = sanitize_terminal_text(detail, max_chars=300, single_line=True)
+    error = (
+        "User-level makepkg configuration can replace the build script or the "
+        "programs makepkg executes ("
+        + safe_detail
+        + "); makepkg was not invoked. Remove the BUILDFILE, DLAGENTS, "
+        "VCSCLIENTS, or PACMAN override from the user makepkg.conf and run again."
+    )
+    if options.json_output:
+        _emit_json(stdout, _wrapper_envelope(
+            options,
+            action="user_makepkg_config_override",
+            wrapper_exit_code=EXIT_SCAN_BLOCKED,
+            pkgbuild_path=str(pkgbuild_path),
+            scan_report=report,
+            makepkg_invoked=False,
+            errors=[error],
+            warnings=scan_warnings,
+        ))
+    else:
+        print(f"[AuraScan] BLOCKED: {error}", file=stdout)
+    return EXIT_SCAN_BLOCKED
+
+
+def _fresh_package_archives(build_dir: Path, handoff_started: float) -> List[Path]:
+    """List package archives written by this handoff, in name order."""
+
+    fresh = []
+    for path in sorted(build_dir.glob("*.pkg.tar.*")):
+        name = path.name
+        if name.endswith(".sig") or name.endswith(".part"):
+            continue
+        try:
+            stat_result = path.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(stat_result.st_mode):
+            continue
+        # A two-second tolerance absorbs filesystem timestamp granularity
+        # while still excluding archives that predate this handoff.
+        if stat_result.st_mtime < handoff_started - 2:
+            continue
+        fresh.append(path)
+    return fresh
+
+
+def _packaged_install_hook_problem(
+    build_dir: Path,
+    handoff_started: float,
+    scan_input: PackageScanInput,
+    install_hook_capture: Callable[..., PackageInstallHookCapture],
+) -> Optional[str]:
+    """Verify the built packages embed the exact scanned install hook.
+
+    Returns ``None`` when no check applies or every fresh package matches,
+    or a short human-readable problem description when the packaged hook
+    bytes are not the reviewed bytes.
+    """
+
+    hook = scan_input.install_hook
+    if hook.status != INSTALL_HOOK_RESOLVED or not hook.content_sha256:
+        # No declared, inspectable install hook was part of the scan.
+        return None
+    fresh = _fresh_package_archives(build_dir, handoff_started)
+    if not fresh:
+        # Build-only invocations (`--nobuild`, `--packagelist`) or custom
+        # PKGDEST locations produce no fresh archive here; makepkg's own
+        # exit status governs those flows without an archive gate.
+        return None
+    expected_digest = hook.content_sha256
+    for archive in fresh:
+        capture = install_hook_capture(archive)
+        if capture.status == PACKAGE_HOOK_ABSENT:
+            return f"built package {archive.name} does not embed the scanned install hook"
+        if capture.status != PACKAGE_HOOK_RESOLVED:
+            safe_reason = sanitize_terminal_text(
+                capture.reason or "uninspectable",
+                max_chars=80,
+                single_line=True,
+            )
+            return (
+                f"built package {archive.name} could not be inspected for its install hook ({safe_reason})"
+            )
+        digest = hashlib.sha256(capture.content.encode("utf-8")).hexdigest()
+        if digest != expected_digest:
+            return f"built package {archive.name} embeds install-hook content that differs from the scanned hook"
+    return None
+
+
+def _emit_packaged_install_hook_mismatch(
+    options: MakepkgWrapperOptions,
+    report,
+    pkgbuild_path: Path,
+    stdout: TextIO,
+    scan_warnings,
+    makepkg_exit_code: int,
+    detail: str,
+) -> int:
+    safe_detail = sanitize_terminal_text(detail, max_chars=200, single_line=True)
+    error = (
+        "The built package does not embed the exact scanned install hook ("
+        + safe_detail
+        + "); do not install it. "
+        "makepkg ran, but the packaged install hook no longer matches the scanned hook bytes."
+    )
+    if options.json_output:
+        _emit_json(stdout, _wrapper_envelope(
+            options,
+            action="packaged_install_hook_mismatch",
+            wrapper_exit_code=EXIT_SCAN_BLOCKED,
+            pkgbuild_path=str(pkgbuild_path),
+            scan_report=report,
+            makepkg_invoked=True,
+            makepkg_exit_code=makepkg_exit_code,
+            errors=[error],
+            warnings=scan_warnings,
+        ))
+    else:
+        print(
+            "[AuraScan] BLOCKED: the built package's install hook does not match the scanned hook.",
+            file=stdout,
+        )
+        print(
+            "Do not install the built package. Rebuild from a clean checkout and scan again.",
+            file=stdout,
+        )
+    return EXIT_SCAN_BLOCKED
+
+
 def parse_args(argv: List[str]) -> MakepkgWrapperOptions:
     options = MakepkgWrapperOptions()
     i = 0
@@ -742,10 +941,10 @@ def _validate_makepkg_argument(argument: str) -> None:
         )
 
 
-def _sanitized_makepkg_environment():
+def _sanitized_makepkg_environment(environment: Optional[Mapping[str, str]] = None):
     """Copy the user environment without direct pre-PKGBUILD code loaders."""
 
-    environment = dict(os.environ)
+    environment = dict(os.environ if environment is None else environment)
     for key in tuple(environment):
         if (
             key in _MAKEPKG_CODE_LOADING_ENV_KEYS
@@ -753,6 +952,66 @@ def _sanitized_makepkg_environment():
         ):
             environment.pop(key, None)
     return environment
+
+
+def _user_makepkg_config_paths(environment: Mapping[str, str]) -> List[Path]:
+    """Mirror makepkg's user-config precedence (XDG path wins over $HOME)."""
+
+    home = str(environment.get("HOME") or "")
+    xdg_base = str(environment.get("XDG_CONFIG_HOME") or "") or f"{home}/.config"
+    return [
+        Path(xdg_base) / "pacman" / "makepkg.conf",
+        Path(f"{home}/.makepkg.conf"),
+    ]
+
+
+def _user_makepkg_config_problem(path: Path) -> Optional[str]:
+    """Describe a guarded override in one user makepkg.conf, if present.
+
+    The file is treated as hostile text: it is read as a bounded byte
+    snapshot and never sourced or expanded.  Lookalike lines fail closed.
+    """
+
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(_USER_MAKEPKG_CONFIG_MAX_BYTES + 1)
+    except OSError:
+        return "could not be read for a safety check"
+    if len(data) > _USER_MAKEPKG_CONFIG_MAX_BYTES:
+        return "is too large to verify safely"
+    text = data.decode("utf-8", errors="replace")
+    for line in text.splitlines():
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        if entry.startswith("export "):
+            entry = entry[len("export "):].lstrip()
+        if "=" not in entry:
+            continue
+        name = entry.split("=", 1)[0].strip().rstrip("+").strip()
+        name = name.strip("'\"")
+        if name in _USER_MAKEPKG_CONFIG_GUARDED_KEYS:
+            return f"sets {name}"
+    return None
+
+
+def _user_makepkg_config_override(environment: Mapping[str, str]) -> Optional[str]:
+    """Name the user makepkg.conf override that would redirect makepkg.
+
+    makepkg sources the first readable user-level config after the system
+    configuration; a user BUILDFILE/DLAGENTS/VCSCLIENTS/PACMAN override can
+    replace the build script or the programs makepkg executes, defeating the
+    scanned-input binding, so the wrapper refuses the handoff instead.
+    """
+
+    for candidate in _user_makepkg_config_paths(environment):
+        if not candidate.is_file() or not os.access(candidate, os.R_OK):
+            continue
+        problem = _user_makepkg_config_problem(candidate)
+        if problem is None:
+            return None
+        return f"{candidate} {problem}"
+    return None
 
 
 def locate_real_makepkg(current_executable: Optional[str] = None, path_env: Optional[str] = None) -> str:

@@ -110,6 +110,7 @@ class RepositorySnapshot:
     failure_detail: str = ""
     entry_count: int = 0
     editor_tasks: Tuple[RepositoryEditorTask, ...] = ()
+    source_owned_subtrees: Tuple[str, ...] = ()
 
 
 @dataclass
@@ -131,6 +132,7 @@ class _CaptureState:
     editor_tasks: List[RepositoryEditorTask] = field(default_factory=list)
     editor_task_bytes: int = 0
     pending_symlinks: Dict[str, str] = field(default_factory=dict)
+    source_owned_subtrees: Set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -313,6 +315,7 @@ def capture_repository_snapshot(
         sorted(independently_bound_paths),
         sorted(required_paths),
         editor_tasks=state.editor_tasks,
+        source_owned_subtrees=sorted(state.source_owned_subtrees),
     )
 
 
@@ -397,6 +400,12 @@ def _walk_directory(
                         if len(state.required_paths) > MAX_REQUIRED_RELATIVE_PATHS:
                             raise _CaptureFailure("required_path_limit")
                     state.pruned_paths.add(relative_path)
+                    # Record exactly which declared checkout directories were
+                    # observed and pruned.  makepkg reuses such a directory
+                    # after checking only its configured origin URL, so the
+                    # analyzer must be able to report the reuse risk instead
+                    # of treating the exclusion as a clean result.
+                    state.source_owned_subtrees.add(relative_path)
                     _record_manifest_entry(
                         state,
                         _manifest_entry(
@@ -1395,6 +1404,7 @@ def _build_snapshot(
     independently_bound_paths: Sequence[str] = (),
     required_paths: Sequence[str] = (),
     editor_tasks: Sequence[RepositoryEditorTask] = (),
+    source_owned_subtrees: Sequence[str] = (),
     failure_detail: str = "",
 ) -> RepositorySnapshot:
     ordered_entries = sorted(
@@ -1431,4 +1441,5 @@ def _build_snapshot(
         failure_detail=_bounded_failure_detail(failure_detail),
         entry_count=int(entry_count),
         editor_tasks=tuple(sorted(editor_tasks, key=lambda task: task.relative_path)),
+        source_owned_subtrees=tuple(sorted(source_owned_subtrees)),
     )

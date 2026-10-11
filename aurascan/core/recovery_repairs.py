@@ -97,6 +97,36 @@ def _safe_regular(
     )
 
 
+def _trusted_target_binary(path: Path, root: Path) -> bool:
+    """Validate a target program before arch-chroot executes it as root.
+
+    Programs handed to ``arch-chroot`` are resolved inside the target and
+    would otherwise run the target's own bytes — including a replaced or
+    symlinked package manager, keyring helper, initramfs generator, dkms,
+    snapper or bootloader installer.  Apply at least the same root-owned,
+    non-symlink, size-bounded regular-file discipline that mere data files
+    already receive, and require an executable bit.
+    """
+
+    if not _safe_regular(path, root, max_size=512 * 1024 * 1024):
+        return False
+    try:
+        return bool(stat.S_IMODE(path.lstat().st_mode) & 0o111)
+    except OSError:
+        return False
+
+
+def _trusted_arch_chroot_tools(command: List[str], root: Path) -> bool:
+    """Validate the bare-name tool of an ``arch-chroot <root> <tool> …`` recipe."""
+
+    if len(command) < 3 or command[0] != "arch-chroot" or str(command[1]) != str(root):
+        return False
+    tool = str(command[2])
+    if not tool or "/" in tool:
+        return False
+    return _trusted_target_binary(rooted(root, Path(f"/usr/bin/{tool}")), root)
+
+
 def _active_servers(path: Path) -> bool:
     try:
         return any(
@@ -346,7 +376,7 @@ def _unit_still_failed(root: Path, unit: str, runner: Callable) -> bool:
         return False
     code, output = _run(
         runner,
-        ["journalctl", f"--directory={journal_root}", "--boot=0", "--priority=0..3", "--no-pager", "--lines=2000"],
+        ["journalctl", f"--directory={journal_root}", "--boot=0", "--priority=0..3", "--no-pager", "--lines=2000", "_COMM=systemd", "_PID=1"],
         timeout=45,
     )
     if code not in {0, 1}:
@@ -377,7 +407,7 @@ def _fresh_action(report: RecoveryReport, action: RecoveryAction, runner: Callab
             return action
     if not matches and action.recipe_id == "dkms_autoinstall":
         has_headers = all(f"{kernel}-headers" in target.installed_packages for kernel in target.installed_kernels)
-        if has_headers and any(name.endswith("-dkms") for name in target.installed_packages) and (Path(target.root_path) / "usr/bin/dkms").is_file():
+        if has_headers and any(name.endswith("-dkms") for name in target.installed_packages) and _trusted_target_binary(Path(target.root_path) / "usr/bin/dkms", Path(target.root_path)):
             return action
     if not matches and action.recipe_id == "disable_boot_service":
         unit = str(action.parameters.get("unit") or "")
@@ -530,6 +560,13 @@ def _execute_pacman_action(report: RecoveryReport, action: RecoveryAction, runne
     ready, reason = _pacman_transaction_preconditions(root, runner)
     if not ready:
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", reason)
+    if not _trusted_target_binary(rooted(root, Path("/usr/bin/pacman")), root):
+        return RecoveryRepairResult(
+            action.action_id,
+            action.recipe_id,
+            "refused",
+            "The target package manager is not a root-owned non-symlink executable; refusing to execute it as recovery root.",
+        )
     if action.recipe_id == "complete_pacman_transaction":
         if not report.network.connected or report.network.captive_portal:
             return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "A full non-captive network connection is required for the repository transaction.")
@@ -555,6 +592,13 @@ def _execute_pacman_action(report: RecoveryReport, action: RecoveryAction, runne
             target_signature = "/" + str(signature.resolve().relative_to(root.resolve()))
         except (OSError, ValueError):
             return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "Cached package path escaped the recovery target.")
+        if not _trusted_target_binary(rooted(root, Path("/usr/bin/pacman-key")), root):
+            return RecoveryRepairResult(
+                action.action_id,
+                action.recipe_id,
+                "refused",
+                "The target keyring helper is not a root-owned non-symlink executable; refusing to execute it as recovery root.",
+            )
         verify_code, verify_output = _run(
             runner,
             ["arch-chroot", str(root), "pacman-key", "--verify", target_signature, target_archive],
@@ -578,7 +622,7 @@ def _execute_initramfs(
 ) -> RecoveryRepairResult:
     root = Path(report.target.root_path)
     generator = str(action.parameters.get("generator") or "")
-    if generator not in {"mkinitcpio", "dracut"} or not rooted(root, Path(f"/usr/bin/{generator}")).is_file():
+    if generator not in {"mkinitcpio", "dracut"} or not _trusted_target_binary(rooted(root, Path(f"/usr/bin/{generator}")), root):
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "Installed initramfs generator validation failed.")
     boot = rooted(root, Path("/boot"))
     try:
@@ -631,7 +675,7 @@ def _execute_config_drift(report: RecoveryReport, action: RecoveryAction, runner
 def _execute_dkms(report: RecoveryReport, action: RecoveryAction, runner: Callable) -> RecoveryRepairResult:
     root = Path(report.target.root_path)
     headers = list((root / "usr/lib/modules").glob("*/build"))
-    if not headers or not rooted(root, Path("/usr/bin/dkms")).is_file():
+    if not headers or not _trusted_target_binary(rooted(root, Path("/usr/bin/dkms")), root):
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "DKMS or matching kernel headers are unavailable.")
     code, output = _run(runner, ["arch-chroot", str(root), "dkms", "autoinstall"], timeout=1200)
     return RecoveryRepairResult(action.action_id, action.recipe_id, "applied" if code == 0 else "failed", "DKMS modules were rebuilt." if code == 0 else "DKMS autoinstall failed.", code == 0, output_excerpt=output)
@@ -700,7 +744,7 @@ def _execute_snapshot_restore(
     root = Path(report.target.root_path)
     snapshot_id = str(action.parameters.get("snapshot_id") or "")
     snapshot = root / f".snapshots/{snapshot_id}/snapshot"
-    if report.target.filesystem != "btrfs" or not snapshot.is_dir() or not rooted(root, Path("/usr/bin/snapper")).is_file():
+    if report.target.filesystem != "btrfs" or not snapshot.is_dir() or not _trusted_target_binary(rooted(root, Path("/usr/bin/snapper")), root):
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "Snapshot restore prerequisites changed.")
     snapshot_root = root / ".snapshots"
     try:
@@ -753,6 +797,13 @@ def _execute_bootloader(
     commands = bootloader_reinstall_commands(info, root=root, esp_path=esp)
     if not commands:
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "No bounded reinstall recipe exists for the detected loader.")
+    if not all(_trusted_arch_chroot_tools(command, root) for command in commands):
+        return RecoveryRepairResult(
+            action.action_id,
+            action.recipe_id,
+            "refused",
+            "A bootloader reinstall tool is not a root-owned non-symlink executable; refusing to execute it as recovery root.",
+        )
     outputs = []
     for command in commands:
         code, output = _run(runner, command, timeout=900)

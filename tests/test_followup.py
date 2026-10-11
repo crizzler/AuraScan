@@ -37,10 +37,12 @@ from aurascan.core.followup import (
     load_followup_context,
     persist_followup_context,
     prune_followup_contexts,
+    redact_followup_text,
     run_ask,
     run_followup_session,
     validate_followup_ai_response,
 )
+
 from aurascan.core.hardware_health import HARDWARE_HEALTH_PROBE_ID
 from aurascan.core.incident_followup import (
     build_incident_followup_runtime,
@@ -282,6 +284,24 @@ def test_prompt_redacts_secrets_and_stays_bounded():
     assert "/home/arawn/" not in prompt
     assert "192.168.1.20" not in prompt
     assert "<redacted>" in prompt
+
+
+def test_redact_followup_text_masks_credential_store_formats():
+    text = (
+        '{"client_secret": "secret-value", "refresh_token": "refresh-value", '
+        '"oauth_token": "oauth-value"}\n'
+        "pass = obscured-value\n"
+        "export GITHUB_TOKEN=token-value\n"
+    )
+
+    redacted = redact_followup_text(text)
+
+    assert "secret-value" not in redacted
+    assert "refresh-value" not in redacted
+    assert "oauth-value" not in redacted
+    assert "obscured-value" not in redacted
+    assert "token-value" not in redacted
+    assert "<redacted>" in redacted
 
 
 def test_strict_response_accepts_only_safe_answer_and_known_ids():

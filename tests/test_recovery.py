@@ -48,10 +48,14 @@ from aurascan.core.recovery_cli import (
 from aurascan.core.recovery_boot import UsbDeviceInfo
 from aurascan.core.recovery_network import RecoveryNetworkState
 from aurascan.core.recovery_repairs import (
+    _execute_dkms,
     _execute_initramfs,
+    _execute_pacman_action,
     _execute_snapshot_restore,
     _pacman_transaction_preconditions,
     _prepare_write_target,
+    _trusted_arch_chroot_tools,
+    _unit_still_failed,
     execute_recovery_plan,
     save_recovery_report,
 )
@@ -221,14 +225,73 @@ def test_target_inspection_and_clean_scan_do_not_offer_destructive_repairs(tmp_p
     assert report.eligible_actions == []
 
 
-def test_recovery_snapshot_order_is_numeric(tmp_path):
+def write_snapshot(root: Path, snapshot_id: int, *, date: str = "2026-01-01 00:00:00", description: str = "fixture"):
+    snapshot = root / f".snapshots/{snapshot_id}/snapshot"
+    snapshot.mkdir(parents=True, exist_ok=True)
+    (root / f".snapshots/{snapshot_id}/snapshot_info.xml").write_text(
+        "<snapshot>\n"
+        f"  <date>{date}</date>\n"
+        f"  <description>{description}</description>\n"
+        "</snapshot>\n",
+        encoding="utf-8",
+    )
+    return snapshot
+
+
+def allow_fixture_snapshot_metadata(monkeypatch):
+    monkeypatch.setattr(
+        "aurascan.core.recovery._root_owned_target_file",
+        lambda path, target_root, max_size: path.is_file()
+        and not path.is_symlink()
+        and path.stat().st_size <= max_size
+        and path_is_relative_to(path.resolve(), target_root.resolve()),
+    )
+
+
+def test_recovery_snapshot_order_is_numeric(tmp_path, monkeypatch):
+    allow_fixture_snapshot_metadata(monkeypatch)
     root = make_target(tmp_path)
-    (root / ".snapshots/9/snapshot").mkdir(parents=True)
-    (root / ".snapshots/10/snapshot").mkdir(parents=True)
+    write_snapshot(root, 9)
+    write_snapshot(root, 10)
 
     target = inspect_target(root)
 
     assert [item["id"] for item in target.snapshots] == [9, 10]
+    assert [item["date"] for item in target.snapshots] == ["2026-01-01 00:00:00", "2026-01-01 00:00:00"]
+
+
+def test_snapshot_without_snapper_metadata_is_not_recovery_selectable(tmp_path, monkeypatch):
+    allow_fixture_snapshot_metadata(monkeypatch)
+    root = make_target(tmp_path, interrupted=True)
+    write_snapshot(root, 7)
+    (root / ".snapshots/999999/snapshot").mkdir(parents=True)
+
+    target = inspect_target(root)
+
+    assert [item["id"] for item in target.snapshots] == [7]
+
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
+    snapshot_actions = [
+        item for item in report.eligible_actions
+        if item.parameters.get("category") == "snapshot"
+    ]
+    assert snapshot_actions
+    assert all(item.parameters.get("snapshot_id") == "7" for item in snapshot_actions)
+
+
+def test_snapshot_selection_surfaces_recorded_provenance_and_typed_phrase(tmp_path, monkeypatch):
+    allow_fixture_snapshot_metadata(monkeypatch)
+    root = make_target(tmp_path, interrupted=True)
+    write_snapshot(root, 7, date="2026-01-01 10:00:00")
+    write_snapshot(root, 8, date="2026-02-02 11:00:00")
+
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
+
+    restore = next(item for item in report.eligible_actions if item.recipe_id == "snapshot_restore")
+    test_boot = next(item for item in report.eligible_actions if item.recipe_id == "snapshot_test_boot")
+    assert restore.parameters.get("snapshot_id") == "8"
+    assert "created 2026-02-02 11:00:00" in restore.summary
+    assert test_boot.confirmation_phrase == "TEST BOOT SNAPSHOT 8"
 
 
 def test_plain_linux_kernel_does_not_match_linux_lts_initramfs(tmp_path):
@@ -601,7 +664,25 @@ def test_latest_target_boot_service_failure_is_probed_without_ai(tmp_path):
 
     assert "INC-SYSTEMD-FAILED" in {item.rule_id for item in report.findings}
     assert any(item.recipe_id == "disable_boot_service" for item in report.eligible_actions)
-    assert all("--boot=0" in command for command in commands if command[0] == "journalctl")
+    journal_commands = [command for command in commands if command[0] == "journalctl"]
+    assert journal_commands
+    assert all("--boot=0" in command for command in journal_commands)
+    # Boot-failure evidence must come from systemd itself; MESSAGE text from
+    # any other local writer must not steer a service-disable action.
+    assert all("_COMM=systemd" in command and "_PID=1" in command for command in journal_commands)
+
+
+def test_unit_failure_revalidation_requires_systemd_producer(tmp_path):
+    root = make_target(tmp_path)
+    (root / "var/log/journal").mkdir(parents=True)
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "Failed to start apparmor.service.\n", "")
+
+    assert _unit_still_failed(root, "apparmor.service", runner) is True
+    assert commands[0][-2:] == ["_COMM=systemd", "_PID=1"]
 
 
 def test_target_coredump_collection_is_scoped_to_mounted_root(tmp_path):
@@ -1057,9 +1138,9 @@ def test_json_yes_emits_one_post_repair_report_and_never_requests_typed_confirma
 
 
 def test_yes_does_not_supply_snapshot_or_bootloader_typed_confirmation(tmp_path, monkeypatch):
+    allow_fixture_snapshot_metadata(monkeypatch)
     root = make_target(tmp_path, interrupted=True)
-    snapshot = root / ".snapshots/7/snapshot"
-    snapshot.mkdir(parents=True)
+    write_snapshot(root, 7)
     report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
     destructive = [item for item in report.eligible_actions if item.confirmation_phrase]
     assert destructive
@@ -1071,10 +1152,15 @@ def test_yes_does_not_supply_snapshot_or_bootloader_typed_confirmation(tmp_path,
     assert all(item.status == "declined" for item in results)
 
 
-def test_snapshot_restore_validates_a_new_pre_recovery_snapshot_before_rollback(tmp_path):
+def test_snapshot_restore_validates_a_new_pre_recovery_snapshot_before_rollback(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "aurascan.core.recovery_repairs._trusted_target_binary",
+        lambda *_args, **_kwargs: True,
+    )
+    allow_fixture_snapshot_metadata(monkeypatch)
     root = make_target(tmp_path, interrupted=True)
-    (root / ".snapshots/7/snapshot").mkdir(parents=True)
-    (root / ".snapshots/8/snapshot").mkdir(parents=True)
+    write_snapshot(root, 7)
+    write_snapshot(root, 8)
     (root / "usr/bin").mkdir(parents=True, exist_ok=True)
     (root / "usr/bin/snapper").write_text("fixture\n", encoding="utf-8")
     report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
@@ -1100,9 +1186,14 @@ def test_snapshot_restore_validates_a_new_pre_recovery_snapshot_before_rollback(
     assert any("rollback" in command for command in commands)
 
 
-def test_snapshot_restore_refuses_rollback_when_new_snapshot_cannot_be_proven(tmp_path):
+def test_snapshot_restore_refuses_rollback_when_new_snapshot_cannot_be_proven(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "aurascan.core.recovery_repairs._trusted_target_binary",
+        lambda *_args, **_kwargs: True,
+    )
+    allow_fixture_snapshot_metadata(monkeypatch)
     root = make_target(tmp_path, interrupted=True)
-    (root / ".snapshots/7/snapshot").mkdir(parents=True)
+    write_snapshot(root, 7)
     (root / "usr/bin").mkdir(parents=True, exist_ok=True)
     (root / "usr/bin/snapper").write_text("fixture\n", encoding="utf-8")
     report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
@@ -1120,7 +1211,11 @@ def test_snapshot_restore_refuses_rollback_when_new_snapshot_cannot_be_proven(tm
     assert not any("rollback" in command for command in commands)
 
 
-def test_failed_initramfs_rebuild_restores_previous_image_set(tmp_path):
+def test_failed_initramfs_rebuild_restores_previous_image_set(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "aurascan.core.recovery_repairs._trusted_target_binary",
+        lambda *_args, **_kwargs: True,
+    )
     root = make_target(tmp_path, interrupted=True)
     generator = root / "usr/bin/mkinitcpio"
     generator.parent.mkdir(parents=True, exist_ok=True)
@@ -1149,6 +1244,133 @@ def test_failed_initramfs_rebuild_restores_previous_image_set(tmp_path):
     assert result.status == "rolled_back"
     assert original.read_bytes() == b"image"
     assert not created.exists()
+
+
+def test_snapshot_restore_refuses_replaced_snapper_binary(tmp_path, monkeypatch):
+    allow_fixture_snapshot_metadata(monkeypatch)
+    root = make_target(tmp_path, interrupted=True)
+    write_snapshot(root, 9)
+    (root / "usr/bin").mkdir(parents=True, exist_ok=True)
+    (root / "usr/bin/snapper").write_text("fixture\n", encoding="utf-8")
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
+    action = next(item for item in report.eligible_actions if item.recipe_id == "snapshot_restore")
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "9\n", "")
+
+    result = _execute_snapshot_restore(report, action, runner)
+
+    assert result.status == "refused"
+    assert commands == []
+
+
+def test_initramfs_rebuild_refuses_replaced_generator_binary(tmp_path):
+    root = make_target(tmp_path, interrupted=True)
+    generator = root / "usr/bin/mkinitcpio"
+    generator.parent.mkdir(parents=True, exist_ok=True)
+    generator.write_text("fixture\n", encoding="utf-8")
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
+    action = RecoveryAction(
+        "fixture-initramfs-replaced",
+        "initramfs_rebuild",
+        "Rebuild initramfs",
+        "Fixture action",
+        Severity.HIGH,
+        parameters={"generator": "mkinitcpio"},
+        eligible=True,
+        verified=True,
+    )
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    result = _execute_initramfs(report, action, tmp_path / "backups", [], runner)
+
+    assert result.status == "refused"
+    assert "generator validation failed" in result.message
+    assert commands == []
+
+
+def test_dkms_autoinstall_refuses_replaced_dkms_binary(tmp_path):
+    root = make_target(tmp_path, interrupted=True)
+    (root / "usr/lib/modules/6.12.0/build").mkdir(parents=True, exist_ok=True)
+    (root / "usr/bin").mkdir(parents=True, exist_ok=True)
+    (root / "usr/bin/dkms").write_text("fixture\n", encoding="utf-8")
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
+    action = RecoveryAction(
+        "fixture-dkms-replaced",
+        "dkms_autoinstall",
+        "Rebuild DKMS modules",
+        "Fixture action",
+        Severity.HIGH,
+        parameters={},
+        eligible=True,
+        verified=True,
+    )
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    result = _execute_dkms(report, action, runner)
+
+    assert result.status == "refused"
+    assert commands == []
+
+
+def test_pacman_action_refuses_replaced_package_manager(tmp_path):
+    root = make_target(tmp_path)
+    (root / "usr/bin").mkdir(parents=True, exist_ok=True)
+    (root / "usr/bin/pacman").write_text("fixture\n", encoding="utf-8")
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
+    action = RecoveryAction(
+        "fixture-pacman-replaced",
+        "kernel_module_restore",
+        "Restore kernel modules",
+        "Fixture action",
+        Severity.HIGH,
+        parameters={"packages": ["linux-lts"]},
+        eligible=True,
+        verified=True,
+    )
+
+    def runner(command, **_kwargs):
+        if command[-1] == "SigLevel" and not any(item.startswith("--repo=") for item in command):
+            output = "PackageRequired\nPackageTrustedOnly\nDatabaseOptional\nDatabaseTrustedOnly\n"
+        elif command[-1] == "--repo-list":
+            output = "core\nextra\n"
+        elif command[-1] == "Server":
+            output = "https://mirror.example/$repo/os/$arch\n"
+        else:
+            output = ""
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    result = _execute_pacman_action(report, action, runner)
+
+    assert result.status == "refused"
+    assert "package manager" in result.message
+
+
+def test_arch_chroot_tool_validation_fails_closed(tmp_path):
+    root = tmp_path / "root"
+    (root / "usr/bin").mkdir(parents=True)
+    (root / "usr/bin/limine-install").write_text("fixture\n", encoding="utf-8")
+
+    assert _trusted_arch_chroot_tools(
+        ["arch-chroot", str(root), "limine-install", "--no-efi-register"], root
+    ) is False
+    assert _trusted_arch_chroot_tools(["limine-install"], root) is False
+    assert _trusted_arch_chroot_tools(
+        ["arch-chroot", "/other-root", "limine-install"], root
+    ) is False
+    assert _trusted_arch_chroot_tools(
+        ["arch-chroot", str(root), "/usr/bin/limine-install"], root
+    ) is False
 
 
 def test_recovery_pacman_transaction_requires_trusted_signatures_and_servers(tmp_path):

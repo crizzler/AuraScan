@@ -490,7 +490,7 @@ def test_repository_provenance_v0102_release_contract():
     assert "for v0.10.2, the package-scanner rule version is `1.5.0`" in checklist
     assert "v0.10.2 release adds an always-on static provenance check" in announcement
     assert 'self.scanner_version = "2.6.0"' in engine_source
-    assert 'self.rule_version = "1.12.0"' in engine_source
+    assert 'self.rule_version = "1.14.0"' in engine_source
     assert 'PACKAGE_SCAN_INPUT_VERSION = "2.0"' in scan_input_source
     assert 'REPOSITORY_SNAPSHOT_VERSION = "1.3"' in repository_source
     assert 'INSTRUCTION_GUARD_SCHEMA_VERSION = "1.0"' in instruction_source
@@ -664,7 +664,7 @@ def test_recovery_bearing_v01011_release_contract():
 
     assert "recovery-bearing release" in release
     assert "aurascan-recovery-0.10.11-x86_64.iso" in release
-    assert "package-scanner rule version advances from `1.10.0` to `1.12.0`" in release
+    assert "package-scanner rule version advances from `1.10.0` to `1.14.0`" in release
     assert "scanner version remains `2.6.0`" in release
     assert "changes after v0.10.11" in unreleased
     assert "release disposition" in checklist

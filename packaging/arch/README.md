@@ -171,11 +171,14 @@ review state and the tray remain available.
 Current hook failure behavior:
 
 - Missing package archive targets are reported as warnings and do not block by
-  themselves.
-- If AuraScan finds a blocking issue, it exits non-zero and pacman should stop
-  the transaction.
+  themselves. Cache entries whose own `.PKGINFO` identity cannot be verified
+  are skipped the same way; a cache hit must prove the package name before it
+  is scanned, and AuraScan notes when a cached copy is audited.
+- If AuraScan finds a blocking issue, it exits non-zero and the hook's
+  `AbortOnFail` aborts the pacman transaction.
 - If `clamscan` is unavailable, AuraScan prints a warning and skips AV scanning.
-- If `/usr/bin/aurascan` is missing, pacman cannot run the hook command; recover
-  by reinstalling AuraScan or removing the stale hook from the hook directory.
+- If `/usr/bin/aurascan` is missing, pacman cannot run the hook command and
+  refuses the transaction; recover by reinstalling AuraScan or removing the
+  stale hook from the hook directory.
 - Scanner errors that produce blocking findings block. Non-blocking unavailable
   optional tools are reported and the conservative scan continues.

@@ -2,7 +2,7 @@ import argparse
 import os
 from pathlib import Path
 import sys
-from typing import List
+from typing import Callable, List, Optional
 
 from aurascan.core.agent import run_agent, run_agent_escalation
 from aurascan.core.config import load_env, user_env_path
@@ -20,6 +20,11 @@ from aurascan.core.incident_followup import (
 )
 from aurascan.core.incident_cli import run_incident_command
 from aurascan.core.instruction_cli import run_instruction_audit
+from aurascan.core.package_archive import (
+    PACKAGE_IDENTITY_RESOLVED,
+    PackageIdentityCapture,
+    capture_package_identity,
+)
 from aurascan.core.recovery_cli import run_recovery
 from aurascan.core.security_audit import run_security_audit
 from aurascan.core.upgrade_followup import build_upgrade_runtime
@@ -191,23 +196,72 @@ def read_pacman_hook_targets(stream) -> List[str]:
     return stream.read().splitlines()
 
 
-def resolve_pacman_hook_target(target: str, cache_dir: Path = Path("/var/cache/pacman/pkg")) -> str:
+def _hook_scan_identity_matches(
+    archive: Path,
+    target: str,
+    identity_capture: Callable[[Path], PackageIdentityCapture],
+) -> bool:
+    """Return True when the archive's own metadata proves it is ``target``.
+
+    A bare file-name match is not enough: the package cache is user-writable,
+    so a same-prefix decoy or a stale corrupted archive could otherwise shadow
+    the package pacman is about to install.  Entries whose identity cannot be
+    proven are skipped rather than scanned or trusted.
+    """
+
+    try:
+        captured = identity_capture(archive)
+    except (OSError, ValueError):
+        return False
+    if captured.status != PACKAGE_IDENTITY_RESOLVED:
+        return False
+    return captured.name == target
+
+
+def resolve_pacman_hook_target(
+    target: str,
+    cache_dir: Path = Path("/var/cache/pacman/pkg"),
+    identity_capture: Optional[Callable[[Path], PackageIdentityCapture]] = None,
+) -> str:
     if os.path.exists(target):
         return target
-    matches = list(cache_dir.glob(f"{target}-*.pkg.tar.zst"))
+    capture = identity_capture or capture_package_identity
+    matches = [
+        path
+        for path in cache_dir.glob(f"{target}-*.pkg.tar.zst")
+        if _hook_scan_identity_matches(path, target, capture)
+    ]
     if not matches:
         return ""
-    return str(max(matches, key=lambda path: path.stat().st_mtime))
+    try:
+        return str(max(matches, key=lambda path: path.stat().st_mtime))
+    except OSError:
+        return ""
 
 
-def scan_pacman_hook_targets(engine: AuraScanEngine, targets: List[str], *, cache_dir: Path = Path("/var/cache/pacman/pkg"), stderr=None) -> bool:
+def scan_pacman_hook_targets(
+    engine: AuraScanEngine,
+    targets: List[str],
+    *,
+    cache_dir: Path = Path("/var/cache/pacman/pkg"),
+    stderr=None,
+    identity_capture: Optional[Callable[[Path], PackageIdentityCapture]] = None,
+) -> bool:
     stderr = stderr or sys.stderr
     failed = False
     for target in targets:
-        resolved = resolve_pacman_hook_target(target, cache_dir=cache_dir)
+        resolved = resolve_pacman_hook_target(
+            target, cache_dir=cache_dir, identity_capture=identity_capture
+        )
         if not resolved:
             print(f"[AuraScan] Warning: Could not locate package file for {target}", file=stderr)
             continue
+        if resolved != target:
+            print(
+                f"[AuraScan] Note: auditing cached archive {resolved}; "
+                "this may not be the archive pacman is about to install",
+                file=stderr,
+            )
         if not engine.scan_package(resolved):
             failed = True
     return not failed

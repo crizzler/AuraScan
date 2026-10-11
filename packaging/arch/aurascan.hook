@@ -9,3 +9,4 @@ Description = Auditing package archives with AuraScan...
 When = PreTransaction
 Exec = /usr/bin/aurascan
 NeedsTargets
+AbortOnFail

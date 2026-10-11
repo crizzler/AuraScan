@@ -651,13 +651,18 @@ def test_classify_git_sources(source, fragment_type):
     assert refs[0].fragment_type == fragment_type
 
 
-def test_skip_on_https_archive_creates_manual_review_warning():
+def test_skip_on_https_archive_blocks_instead_of_manual_review():
     refs, _ = parse_pkgbuild('source=("https://example.invalid/demo.tar.gz")\nsha256sums=(SKIP)\n')
     result = SourceAcquisitionResult(refs[0], status="failed")
 
     findings = ChecksumVerifier().verify(result)
 
-    assert any(f.rule_id == "SOURCE-CHECKSUM-SKIP" and f.severity == Severity.HIGH and f.requires_manual_review for f in findings)
+    assert any(
+        f.rule_id == "SOURCE-CHECKSUM-SKIP"
+        and f.severity == Severity.HIGH
+        and f.blocks_installation
+        for f in findings
+    )
 
 
 def test_skip_on_git_full_commit_creates_lower_warning():
@@ -1886,3 +1891,171 @@ def test_skip_key_unavailable_remains_manual_review(tmp_path: Path, monkeypatch)
 
     assert any(f.rule_id == "SOURCE-CHECKSUM-SKIP" and f.requires_manual_review for f in results[0].findings)
     assert any(f.rule_id == "KEY_UNAVAILABLE" for f in results[0].findings)
+
+
+class StubHttpFetcher:
+    """Minimal HttpSourceFetcher replacement writing deterministic bytes."""
+
+    def __init__(self, payload: bytes):
+        self.payload = payload
+        self.calls = 0
+
+    def fetch(self, ref, output_dir):
+        self.calls += 1
+        target = Path(output_dir) / ref.filename
+        target.write_bytes(self.payload)
+        return SourceAcquisitionResult(
+            ref,
+            target,
+            ref.resolved,
+            len(self.payload),
+            hashlib.sha256(self.payload).hexdigest(),
+            "acquired",
+        )
+
+
+def remote_source_ref(name="demo.tar.gz", kind=SourceKind.http, checksum="SKIP", validpgpkeys=(), index=0):
+    url = f"https://example.invalid/{name}"
+    return SourceReference(url, url, index, name, index, checksum, "sha256", kind, validpgpkeys=list(validpgpkeys))
+
+
+def test_remote_source_same_name_divergence_blocks(tmp_path: Path):
+    pkg_dir = tmp_path / "pkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "demo.tar.gz").write_bytes(b"planted bytes")
+    fetcher = SourceFetcher(policy=SourcePolicy(), http_fetcher=StubHttpFetcher(b"downloaded bytes"))
+
+    results = fetcher.acquire_all([remote_source_ref()], pkg_dir)
+
+    assert results[0].status == "acquired"
+    assert any(
+        f.rule_id == "SOURCE-LOCAL-REUSE-DIVERGENCE" and f.blocks_installation
+        for f in results[0].findings
+    )
+    shutil.rmtree(fetcher.last_output_dir, ignore_errors=True)
+
+
+def test_remote_source_identical_same_name_file_is_silent(tmp_path: Path):
+    pkg_dir = tmp_path / "pkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "demo.tar.gz").write_bytes(b"identical bytes")
+    fetcher = SourceFetcher(policy=SourcePolicy(), http_fetcher=StubHttpFetcher(b"identical bytes"))
+
+    results = fetcher.acquire_all([remote_source_ref()], pkg_dir)
+
+    assert results[0].status == "acquired"
+    assert not any(f.rule_id == "SOURCE-LOCAL-REUSE-DIVERGENCE" for f in results[0].findings)
+    shutil.rmtree(fetcher.last_output_dir, ignore_errors=True)
+
+
+def test_remote_source_link_at_checkout_name_blocks(tmp_path: Path):
+    pkg_dir = tmp_path / "pkg"
+    pkg_dir.mkdir()
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside bytes")
+    os.symlink(outside, pkg_dir / "demo.tar.gz")
+    fetcher = SourceFetcher(policy=SourcePolicy(), http_fetcher=StubHttpFetcher(b"downloaded bytes"))
+
+    results = fetcher.acquire_all([remote_source_ref()], pkg_dir)
+
+    assert any(
+        f.rule_id == "SOURCE-LOCAL-REUSE-DIVERGENCE" and f.blocks_installation
+        for f in results[0].findings
+    )
+    shutil.rmtree(fetcher.last_output_dir, ignore_errors=True)
+
+
+def test_remote_source_oversized_same_name_file_blocks(tmp_path: Path):
+    pkg_dir = tmp_path / "pkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "demo.tar.gz").write_bytes(b"x" * 64)
+    fetcher = SourceFetcher(
+        policy=SourcePolicy(max_download_size=16),
+        http_fetcher=StubHttpFetcher(b"y" * 8),
+    )
+
+    results = fetcher.acquire_all([remote_source_ref()], pkg_dir)
+
+    assert any(
+        f.rule_id == "SOURCE-LOCAL-REUSE-DIVERGENCE" and f.blocks_installation
+        for f in results[0].findings
+    )
+    shutil.rmtree(fetcher.last_output_dir, ignore_errors=True)
+
+
+def test_remote_source_absence_remains_silent(tmp_path: Path):
+    pkg_dir = tmp_path / "pkg"
+    pkg_dir.mkdir()
+    fetcher = SourceFetcher(policy=SourcePolicy(), http_fetcher=StubHttpFetcher(b"downloaded bytes"))
+
+    results = fetcher.acquire_all([remote_source_ref()], pkg_dir)
+
+    assert not any(f.rule_id == "SOURCE-LOCAL-REUSE-DIVERGENCE" for f in results[0].findings)
+    shutil.rmtree(fetcher.last_output_dir, ignore_errors=True)
+
+
+def test_remote_signature_same_name_divergence_blocks(tmp_path: Path):
+    pkg_dir = tmp_path / "pkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "src.tar.gz.sig").write_bytes(b"planted signature")
+    fetcher = SourceFetcher(policy=SourcePolicy(), http_fetcher=StubHttpFetcher(b"downloaded signature"))
+    sig_ref = remote_source_ref("src.tar.gz.sig", kind=SourceKind.signature)
+
+    results = fetcher.acquire_all([sig_ref], pkg_dir)
+
+    assert results[0].status == "acquired"
+    assert any(
+        f.rule_id == "SOURCE-LOCAL-REUSE-DIVERGENCE" and f.blocks_installation
+        for f in results[0].findings
+    )
+    shutil.rmtree(fetcher.last_output_dir, ignore_errors=True)
+
+
+def test_http_skip_with_verified_signature_keeps_sanctioned_path(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("aurascan.core.source_acquisition.shutil.which", lambda name: "/usr/bin/gpg")
+    pkg_dir = tmp_path / "pkg"
+    pkg_dir.mkdir()
+    key_file = tmp_path / "key.asc"
+    key_file.write_text("public key", encoding="utf-8")
+    fetcher = SourceFetcher(
+        policy=SourcePolicy(),
+        http_fetcher=StubHttpFetcher(b"downloaded bytes"),
+        signature_verifier=SignatureVerifier(
+            key_provider=StaticKeyProvider(key_file),
+            runner=gpg_runner(),
+        ),
+    )
+    source_ref = remote_source_ref(validpgpkeys=[FULL_FP])
+    sig_ref = remote_source_ref("src.tar.gz.sig", kind=SourceKind.signature, validpgpkeys=[FULL_FP], index=1)
+
+    results = fetcher.acquire_all([source_ref, sig_ref], pkg_dir)
+
+    assert any(f.rule_id == "SIGNATURE-VERIFIED" for f in results[0].findings)
+    assert not any(f.rule_id == "SOURCE-CHECKSUM-SKIP" for f in results[0].findings)
+    shutil.rmtree(fetcher.last_output_dir, ignore_errors=True)
+
+
+def test_http_skip_remains_blocking_when_signature_invalid(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("aurascan.core.source_acquisition.shutil.which", lambda name: "/usr/bin/gpg")
+    pkg_dir = tmp_path / "pkg"
+    pkg_dir.mkdir()
+    key_file = tmp_path / "key.asc"
+    key_file.write_text("public key", encoding="utf-8")
+    fetcher = SourceFetcher(
+        policy=SourcePolicy(),
+        http_fetcher=StubHttpFetcher(b"downloaded bytes"),
+        signature_verifier=SignatureVerifier(
+            key_provider=StaticKeyProvider(key_file),
+            runner=gpg_runner(verify_returncode=1),
+        ),
+    )
+    source_ref = remote_source_ref(validpgpkeys=[FULL_FP])
+    sig_ref = remote_source_ref("src.tar.gz.sig", kind=SourceKind.signature, validpgpkeys=[FULL_FP], index=1)
+
+    results = fetcher.acquire_all([source_ref, sig_ref], pkg_dir)
+
+    assert any(
+        f.rule_id == "SOURCE-CHECKSUM-SKIP" and f.blocks_installation
+        for f in results[0].findings
+    )
+    shutil.rmtree(fetcher.last_output_dir, ignore_errors=True)

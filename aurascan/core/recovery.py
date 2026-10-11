@@ -814,7 +814,32 @@ def _read_snapshots(root: Path) -> List[Dict[str, object]]:
     for entry in entries:
         if entry.is_symlink() or not entry.name.isdigit() or (entry / "snapshot").is_symlink() or not (entry / "snapshot").is_dir():
             continue
-        snapshots.append({"id": int(entry.name), "path": f"/.snapshots/{entry.name}/snapshot"})
+        info_path = entry / "snapshot_info.xml"
+        date = ""
+        description = ""
+        if _root_owned_target_file(info_path, root, max_size=64 * 1024):
+            try:
+                text = info_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+            match = re.search(r"<date>([^<]{1,64})</date>", text)
+            if match:
+                date = match.group(1).strip()
+            match = re.search(r"<description>([^<]{1,200})</description>", text)
+            if match:
+                description = match.group(1).strip()
+        if not date:
+            # A directory without Snapper's own metadata is not a snapshot
+            # snapper itself can operate on, and its provenance cannot be
+            # shown to the user; target-chosen directories must not steer
+            # recovery actions.
+            continue
+        snapshots.append({
+            "id": int(entry.name),
+            "path": f"/.snapshots/{entry.name}/snapshot",
+            "date": date,
+            "description": description,
+        })
     return snapshots
 
 
@@ -1130,6 +1155,8 @@ def _collect_target_journal_findings(
         "--boot=0",
         "--priority=0..4",
         "--no-pager",
+        "_COMM=systemd",
+        "_PID=1",
         f"--lines={RECOVERY_MAX_JOURNAL}",
     ]
     try:
@@ -1487,12 +1514,15 @@ def prepare_recovery_actions(
         ))
     snapshot_relevant = bool(categories & {"bootloader", "kernel_module", "initramfs", "package_transaction", "boot_config"})
     if target.snapshots and snapshot_relevant:
-        snapshot_id = str(target.snapshots[-1].get("id"))
+        chosen = target.snapshots[-1]
+        snapshot_id = str(chosen.get("id"))
+        snapshot_date = str(chosen.get("date") or "").strip()
+        provenance = f" (created {snapshot_date})" if snapshot_date else " (unknown creation time)"
         actions.append(RecoveryAction(
             _action_id("snapshot_test_boot", snapshot_id),
             "snapshot_test_boot",
             "Prepare a one-shot snapshot test boot",
-            f"AuraScan can prepare a one-time boot of snapshot {snapshot_id} without making it the permanent default.",
+            f"AuraScan can prepare a one-time boot of snapshot {snapshot_id}{provenance} without making it the permanent default. The snapshot list is read from the target; verify the creation time predates the incident before booting it as the machine root.",
             Severity.MEDIUM,
             {"snapshot_id": snapshot_id, "category": "snapshot"},
             [["aurascan-recovery-snapshot-boot", snapshot_id]],
@@ -1500,13 +1530,14 @@ def prepare_recovery_actions(
             target.bootloader.kind == "systemd-boot" and target.filesystem == "btrfs",
             True,
             "The permanent default is preserved; AuraScan owns the generated snapshot entry and replaces it on a later test.",
+            confirmation_phrase=f"TEST BOOT SNAPSHOT {snapshot_id}",
         ))
         phrase = f"RESTORE SNAPSHOT {snapshot_id}"
         actions.append(RecoveryAction(
             _action_id("snapshot_restore", snapshot_id),
             "snapshot_restore",
             "Restore a Btrfs/Snapper snapshot",
-            f"AuraScan can create a pre-recovery snapshot and restore snapshot {snapshot_id} after explicit typed confirmation.",
+            f"AuraScan can create a pre-recovery snapshot and restore snapshot {snapshot_id}{provenance} after explicit typed confirmation. The snapshot list is read from the target; confirm the creation time predates the incident.",
             Severity.CRITICAL,
             {"snapshot_id": snapshot_id, "category": "snapshot"},
             [["arch-chroot", str(root), "snapper", "rollback", snapshot_id]],
@@ -1688,7 +1719,7 @@ def _probe_failed_services(report: RecoveryReport, runner: Callable, which: Call
         return "unavailable", "Persistent target journal data is unavailable."
     code, output = _run_bounded(
         runner,
-        ["journalctl", f"--directory={journal_root}", "--boot=0", "--priority=0..3", "--no-pager", f"--lines={RECOVERY_MAX_JOURNAL}"],
+        ["journalctl", f"--directory={journal_root}", "--boot=0", "--priority=0..3", "--no-pager", f"--lines={RECOVERY_MAX_JOURNAL}", "_COMM=systemd", "_PID=1"],
         timeout=45,
         max_chars=12000,
     )

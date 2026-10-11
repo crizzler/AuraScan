@@ -960,6 +960,10 @@ as source-owned directory subtrees during the ordinary walk rather than
 enumerating an already-populated upstream cache. An exact statically required
 child overrides that subtree exclusion and receives the ordinary bounded
 no-follow capture; a symlink or wrong-type checkout root fails closed. An
+observed declared checkout directory is recorded in the snapshot and reported
+as `AUR-REPO-PREEXISTING-VCS-CHECKOUT-001`, because makepkg reuses it after
+checking only its configured origin URL and the walk does not inspect its
+content. An
 ambiguous source declaration must retain the existing fail-closed source-parser
 behavior rather than guessing an exclusion. In particular, a normally declared
 upstream binary archive does not receive this repository-embedded finding
@@ -976,6 +980,10 @@ Keep the correlation tiers separate:
 
 - `AUR-REPO-OPAQUE-ARTIFACT-001` is MEDIUM, non-hard-blocking,
   acceptance-eligible manual-review presence evidence.
+- `AUR-REPO-PREEXISTING-VCS-CHECKOUT-001` is MEDIUM, non-hard-blocking,
+  acceptance-eligible manual-review evidence that a declared checkout
+  directory exists beside the PKGBUILD and may be reused by makepkg instead
+  of the inspected remote revision.
 - `AUR-REPO-OPAQUE-BINARY-001` is HIGH and manual-review eligible only when
   static package control text installs, copies, or moves the exact artifact into
   `$pkgdir`, including a descendant of an exact recursively transferred
@@ -1357,7 +1365,14 @@ or revisions and every acquisition status. Reject source/key URLs with
 userinfo, localhost, or non-public IP literals before the initial request and
 after redirects; strip userinfo, query strings, and fragments from persisted
 URL metadata. Document that this lexical boundary does not eliminate DNS
-rebinding rather than claiming a complete network sandbox.
+rebinding rather than claiming a complete network sandbox. Bind the deep-static
+verdict to makepkg's actual source resolution: an existing same-named
+package-directory file that differs from the inspected download blocks, and an
+HTTP/HTTPS archive declared with `sha256sums=SKIP` blocks unless a detached
+signature verifies against a declared `validpgpkeys` entry. A real declared
+checksum is what binds the bytes makepkg's own client fetches; for a SKIP
+entry covered only by a detached signature, the inspected download and the
+builder's separate download cannot be proven byte-identical.
 
 Treat source-array parsing as a refusal boundary, not a Bash evaluator. Support
 only bounded literal assignments/appends and simple constant interpolation.
@@ -1687,7 +1702,15 @@ diagnostics with command-specific mutation/escape checks, and constrained exact
 `/usr/bin/pacman` query, sync, or removal workflows. Reject every non-allowlisted
 program plus remote references, network/remote-shell clients, Git, AUR helpers,
 source/build front ends, interpreters, decoding/evaluation, shell expansion,
-redirection, and unsafe package-manager options. Pacman must reject `-U`,
+redirection, and unsafe package-manager options. Treat the sensitive-path
+denylist as part of this boundary: cover password-hash backups, Git/netrc/cloud
+credential stores, shell rc files and `*history` files on raw tokens and
+resolved paths, and keep provider-bound output redaction covering
+underscore-prefixed key names, `pass =` values and rc-file token exports.
+Keep the lexed text aligned
+with Bash's word boundaries: `#` starts a comment only at the start of a word
+and an escaped metacharacter stays inside its word, so no command text may be
+skipped during validation as comment-like. Pacman must reject `-U`,
 alternate root/config/keyring/hook paths, unsafe operation combinations, path
 targets, and direct modification of AuraScan. Capture and revalidate the
 package-managed `/usr/bin/sudo` and `/usr/bin/aurascan` identities before every
@@ -1730,7 +1753,12 @@ boundary and revalidate its exact device/inode, ownership, group, and mode
 immediately before invocation. The final file and path components must be
 root-owned, non-writable, regular/executable where applicable, and non-link.
 Hostile PATH resolution, a different installation, or replacement after the
-scan fails closed; never fall back to a bare `makepkg` name.
+scan fails closed; never fall back to a bare `makepkg` name. At the handoff
+the wrapper pins the scanned `./PKGBUILD` as makepkg's build script and
+refuses to run when the first readable user-level `makepkg.conf` (XDG path,
+else `$HOME/.makepkg.conf`) sets `BUILDFILE`, `DLAGENTS`, `VCSCLIENTS`, or
+`PACMAN`; the check reads a bounded snapshot and fails closed when the file
+cannot be verified.
 
 A `makepkg` shim earlier on `PATH` therefore also disables this entry point:
 the locator returns that shim, the trusted-tool boundary rejects it, and
@@ -1754,6 +1782,14 @@ makepkg. Include the resolved hook or its bounded failure-state identity in
 cache and review fingerprints: blocker reports may be cached for the same
 failure state, but an unresolved hook must never reuse or store an allow
 decision.
+
+After makepkg returns, read back every freshly written package archive in the
+build directory through the bounded `.INSTALL` reader. When the scan resolved
+a declared hook, a fresh package that lacks the hook member, cannot be
+inspected, or embeds different hook bytes returns a blocking
+`packaged_install_hook_mismatch` result. Document that this check cannot see
+archives outside the build directory, build-only invocations with no fresh
+archive, or the install that `-i` performs inside makepkg itself.
 
 If AuraScan blocks, `aurascan-makepkg` does not invoke makepkg. If AuraScan
 requires manual review, the wrapper also stops before makepkg by default. This
@@ -1870,15 +1906,22 @@ creating the package. The pacman hook remains conservative and does not
 currently provide a verified transaction context provider for smart fast path
 decisions.
 
+Cache-target resolution in the hook gate must bind a cache hit to the
+archive's own `.PKGINFO` package identity rather than a file-name prefix, skip
+entries that cannot be verified, and note when a cached copy (not the file
+being installed) is audited.
+
 `pip install` does not install pacman hooks. Release packages should install
 the hook as a package file, normally to `/usr/share/libalpm/hooks/aurascan.hook`.
 Manual local hooks live under `/etc/pacman.d/hooks/`, but users should remove
 manual hooks before uninstalling AuraScan. A hook pointing to a missing
 executable can break pacman transactions.
 
+Release-safe hook templates must declare `AbortOnFail`, and
+`is_release_safe_hook_template` refuses to certify a template without it.
 Current hook failure behavior is intentionally simple: missing archive targets
 are warnings and do not block by themselves; blocking findings return non-zero
-and should stop the pacman transaction. ClamAV runs only through captured and
+and the template's `AbortOnFail` aborts the pacman transaction. ClamAV runs only through captured and
 revalidated `/usr/bin/clamscan`, with symlink following, scan bytes, file count,
 recursion, and runtime bounded; database version checks likewise require
 trusted `/usr/bin/freshclam`. Use a fixed minimal environment, terminate option
@@ -1889,7 +1932,7 @@ times out, exceeds a bound, or exits with an error is blocking incomplete
 inspection. A missing or unsafe `clamscan` skips AV with a warning. A missing
 `/usr/bin/aurascan` executable is
 a hook installation problem that users recover from by reinstalling AuraScan or
-removing the stale hook.
+removing the stale hook; until then the failed hook refuses the transaction.
 
 Future AUR-helper integration should prefer configuring the helper's makepkg
 command, when supported, to call `aurascan-makepkg`. Future pacman hook context

@@ -51,7 +51,13 @@ candidate.
   `link -> target` detail. Verify the advisory explanation contract (bounded
   fixed facts, strict JSON, rejected actions/URLs/questions, JSON output
   excluded, fixed provider-failure notice) and the privileged-account
-  negatives. Package rules are `1.12.0`, the scanner version is `2.6.0`,
+  negatives. Verify the security-hardening batch from the external source
+  review: the Repair Agent comment-boundary, sensitive-path and redaction
+  coverage; the wrapper `BUILDFILE` pin and post-build install-hook
+  verification; HTTP-SKIP and local-reuse blocking plus the pre-existing VCS
+  checkout review finding; the hook cache-identity binding; and the recovery
+  executor, snapshot-provenance and journal-producer gates. Package rules are
+  `1.14.0`, the scanner version is `2.6.0`,
   repository snapshot identity is `1.3`, and the runtime-intelligence schema
   and engine capability are `2.0`; the general security-audit report and
   Instruction Guard schemas remain `1.0`. These shared scanning-boundary

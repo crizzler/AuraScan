@@ -54,7 +54,8 @@ PRIVATE_KEY_RE = re.compile(
 )
 URL_USERINFO_RE = re.compile(r"([a-z][a-z0-9+.-]*://)([^/\s:@]+):([^/\s@]+)@", re.IGNORECASE)
 SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(password|passwd|passphrase|secret|token|api[_-]?key|apikey|authorization|credential)"
+    r"(?i)(?<![\w-])([\w-]*)(password|passwd|passphrase|secret|pass|token|api[_-]?key|apikey|"
+    r"authorization|credential)([\w-]*)[\"']?"
     r"(\s*[:=]\s*)([^\s,;]+)"
 )
 HOME_PATH_RE = re.compile(r"/home/([A-Za-z0-9._-]+)")
@@ -1644,7 +1645,7 @@ def redact_followup_text(text: object) -> str:
     value = TERMINAL_CONTROL_RE.sub("", value)
     value = PRIVATE_KEY_RE.sub("<redacted-private-key>", value)
     value = URL_USERINFO_RE.sub(r"\1<redacted-user>:<redacted-password>@", value)
-    value = SECRET_ASSIGNMENT_RE.sub(r"\1\2<redacted>", value)
+    value = SECRET_ASSIGNMENT_RE.sub(r"\1\2\3\4<redacted>", value)
     value = HOME_PATH_RE.sub(lambda match: "/home/" + correlation_token("user", match.group(1)), value)
     value = MAC_RE.sub(lambda match: correlation_token("mac", match.group(0).lower()), value)
     value = IPV4_RE.sub(lambda match: correlation_token("ip", match.group(0)), value)

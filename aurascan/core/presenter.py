@@ -415,6 +415,14 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
         "not_prove": "This does not prove the file is Git-committed, installed, executed, malicious, or part of a compromise.",
         "action": "Verify why the artifact is present and establish its source and expected digest before trusting the package checkout.",
     },
+    "AUR-REPO-PREEXISTING-VCS-CHECKOUT-001": {
+        "title": "A declared VCS checkout directory already exists beside the PKGBUILD.",
+        "summary": "AuraScan observed a directory matching a declared version-control source checkout name; makepkg reuses such a directory after checking only its configured origin URL.",
+        "why": "The bytes makepkg builds may come from that local directory rather than the remote revision the inspection resolved, and the bounded provenance walk deliberately does not inspect its content.",
+        "checked": "AuraScan statically resolved the declared version-control checkout name and observed the directory during the bounded no-follow repository walk.",
+        "not_prove": "This does not prove the directory differs from the declared upstream revision, contains malicious content, or will be reused; a local checkout cache is common after an earlier build.",
+        "action": "Remove the pre-existing checkout directory, or verify it resolves to the declared remote revision and review its content manually, before building.",
+    },
     "AUR-REPO-OPAQUE-BINARY-001": {
         "title": "Package logic can install an undeclared opaque artifact.",
         "summary": "Package logic requests a copy of an executable-format or archive artifact from beside the PKGBUILD into $pkgdir without a matching static source entry.",
@@ -838,6 +846,14 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
         "checked": "AuraScan used bounded no-follow file-descriptor reads and required an unchanged regular file beneath the package directory.",
         "not_prove": "This does not prove malicious intent; it means the declared local source was not safely inspectable.",
         "action": "Use a complete package checkout containing ordinary local source files, then scan again before installing.",
+    },
+    "SOURCE-LOCAL-REUSE-DIVERGENCE": {
+        "title": "The build would reuse a same-named local file instead of the inspected download.",
+        "summary": "A file with the declared source's checkout name already exists in the package directory and does not match the bounded snapshot AuraScan downloaded and inspected.",
+        "why": "makepkg prefers an existing same-named file in the package directory before downloading a declared remote source, so the bytes being built would differ from the bytes AuraScan inspected.",
+        "checked": "AuraScan compared the existing same-named package-directory entry with the bounded acquired download for the declared source, without following links.",
+        "not_prove": "This does not prove malicious intent; it means the built bytes and the inspected bytes are not the same content.",
+        "action": "Remove or independently verify the same-named local file, then rescan before building or installing.",
     },
     "SOURCE-UNINSPECTED": {
         "title": "Deep source inspection is incomplete.",

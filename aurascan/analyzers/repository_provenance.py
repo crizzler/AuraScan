@@ -31,6 +31,7 @@ from aurascan.core.install_hook import (
     _SIMPLE_STDOUT_REDIRECTION_MARKER,
     _iter_shell_segments,
     _makepkg_checkout_relative_path,
+    _reference_uses_vcs_directory,
 )
 from aurascan.core.models import (
     AnalysisResult,
@@ -1886,6 +1887,23 @@ class RepositoryProvenanceAnalyzer:
             )
 
         declared_paths = self._declared_checkout_paths(references)
+        # A declared VCS checkout name that exists beside the PKGBUILD is
+        # pruned from the artifact walk as a source-owned subtree, but makepkg
+        # reuses such a directory after comparing only its configured origin
+        # URL.  Surface its presence so the verdict never silently binds the
+        # remote revision while the build consumes an uninspected local copy.
+        source_owned_subtrees = set(repository_snapshot.source_owned_subtrees)
+        preexisting_findings = [
+            finding
+            for reference in references
+            for finding in self._preexisting_vcs_checkout_findings(
+                reference,
+                source_owned_subtrees,
+                checkout_dir,
+                pkg_name,
+                pkg_ver,
+            )
+        ]
         artifacts = [
             artifact
             for artifact in repository_snapshot.artifacts
@@ -1895,7 +1913,7 @@ class RepositoryProvenanceAnalyzer:
             return AnalysisResult(
                 True,
                 "No undeclared opaque checkout artifacts were found.",
-                [],
+                preexisting_findings,
             )
 
         pkgbuild_commands = _scoped_commands(
@@ -2010,7 +2028,7 @@ class RepositoryProvenanceAnalyzer:
                 [finding],
             )
 
-        findings: List[Finding] = []
+        findings: List[Finding] = list(preexisting_findings)
         installed_destinations: Dict[str, Set[str]] = {}
         surviving_installed_destinations: Dict[str, Set[str]] = {}
         installed_destination_origins: Dict[
@@ -2274,6 +2292,66 @@ class RepositoryProvenanceAnalyzer:
                 # declaration.
                 paths.add(filename)
         return paths
+
+    def _preexisting_vcs_checkout_findings(
+        self,
+        reference: object,
+        source_owned_subtrees: Set[str],
+        checkout_dir: Path,
+        pkg_name: str,
+        pkg_ver: str,
+    ) -> List[Finding]:
+        """Flag a declared VCS checkout directory that makepkg could reuse.
+
+        The directory is deliberately pruned from artifact classification,
+        and source acquisition clones the declared remote URL into its own
+        private directory.  makepkg, however, prefers a same-named directory
+        beside the PKGBUILD and reuses it after checking only the configured
+        origin URL, so its content may differ from the inspected revision.
+        """
+
+        if not _reference_uses_vcs_directory(reference):
+            return []
+        checkout = self._safe_relative_path(
+            _makepkg_checkout_relative_path(reference)
+        )
+        if not checkout or checkout not in source_owned_subtrees:
+            return []
+        return [
+            Finding(
+                rule_id="AUR-REPO-PREEXISTING-VCS-CHECKOUT-001",
+                package_name=pkg_name,
+                package_version=pkg_ver,
+                phase=Phase.pkgbuild_static,
+                source=Source.deterministic_rule,
+                severity=Severity.MEDIUM,
+                confidence=Confidence.HIGH,
+                evidence_quality=EvidenceQuality.strong_heuristic,
+                file_path=str(checkout_dir / checkout),
+                explanation=(
+                    "A declared version-control source checkout directory already "
+                    "exists beside the PKGBUILD. makepkg reuses that directory "
+                    "after comparing only its configured origin URL, so the bytes "
+                    "makepkg builds may differ from the remote revision source "
+                    "acquisition inspected."
+                ),
+                recommendation=(
+                    "Remove the pre-existing checkout directory, or verify it "
+                    "resolves to the declared remote revision and review its "
+                    "content manually, before building."
+                ),
+                false_positive_notes=(
+                    "A local checkout cache is common after an earlier build. "
+                    "Static presence does not prove the directory diverges from "
+                    "the declared upstream revision or is malicious."
+                ),
+                blocks_installation=False,
+                requires_manual_review=True,
+                evidence_snippet=(
+                    "declared VCS checkout directory present beside the PKGBUILD"
+                ),
+            )
+        ]
 
     def _collect_transfers(self, commands: Sequence[_ScopedCommand]):
         collected = []

@@ -2292,7 +2292,14 @@ def is_release_safe_hook_template(path: Path) -> bool:
     except OSError:
         return False
     forbidden = ["/home/", ".venv", "PYTHONPATH", "--scan-context", "--deep-static"]
-    return "Exec = /usr/bin/aurascan" in text and not any(item in text for item in forbidden)
+    # A template that cannot abort its transaction does not enforce blocking
+    # verdicts, so it is not release-safe no matter how it is configured.
+    enforcing = any(line.strip() == "AbortOnFail" for line in text.splitlines())
+    return (
+        enforcing
+        and "Exec = /usr/bin/aurascan" in text
+        and not any(item in text for item in forbidden)
+    )
 
 
 def _prompt_provider(input_func: Callable[[str], str], default: str, stdout) -> str:

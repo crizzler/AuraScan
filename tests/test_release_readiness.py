@@ -50,6 +50,17 @@ def test_current_release_recovery_manifest_policy_is_versioned_and_fresh():
         )
 
 
+def test_recovery_builder_pins_match_current_release_metadata():
+    # The recovery builder validates its candidate against pinned identity
+    # constants; a stale pin silently prevents the release build (v0.10.11
+    # shipped v0.10.10 constants in its first candidate revision).
+    version = tomllib.loads(read_text("pyproject.toml"))["project"]["version"]
+    manifest = json.loads(read_text("aurascan/assets/aurascan-recovery-iso.json"))
+    builder = read_text("packaging/recovery/build-iso.sh")
+    assert f'readonly expected_release_version="{version}"' in builder
+    assert f'readonly expected_release_date="{manifest["released_at"]}"' in builder
+
+
 def test_pyproject_console_scripts_are_registered():
     data = tomllib.loads(read_text("pyproject.toml"))
 
@@ -690,7 +701,7 @@ def test_recovery_bearing_v01011_release_contract():
         "version": "0.10.11",
         "architecture": "x86_64",
         "filename": "aurascan-recovery-0.10.11-x86_64.iso",
-        "released_at": "2026-09-30",
+        "released_at": "2026-10-12",
     }
     assert set(manifest) == set(expected_manifest) | {"url", "sha256", "status"}
     assert {key: manifest[key] for key in expected_manifest} == expected_manifest

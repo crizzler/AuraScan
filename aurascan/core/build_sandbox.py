@@ -208,6 +208,7 @@ def sandbox_status(
     base_root: Path = AUR_SANDBOX_BASE_ROOT,
     tool_capture: Callable[..., Optional[TrustedTool]] = capture_trusted_system_tool,
     base_probe: Optional[Callable[[Path], Tuple[bool, str]]] = None,
+    config_probe: Optional[Callable[[], Tuple[bool, str]]] = None,
 ) -> SandboxStatus:
     """Describe whether the configured backend can build right now.
 
@@ -257,18 +258,15 @@ def sandbox_status(
             )
         identities.append(SandboxToolIdentity(tool.name, tool.path, tool.device, tool.inode))
 
-    for path, label in (
-        (AUR_SANDBOX_PACMAN_CONF, "devtools pacman configuration"),
-        (AUR_SANDBOX_MAKEPKG_CONF, "devtools makepkg configuration"),
-    ):
-        if not _safe_root_owned_file(path):
-            return SandboxStatus(
-                enabled=True,
-                available=False,
-                backend=config.backend,
-                reason=f"the {label} is missing or unsafe",
-                tools=tuple(identities),
-            )
+    config_ready, config_reason = (config_probe or _probe_config_paths)()
+    if not config_ready:
+        return SandboxStatus(
+            enabled=True,
+            available=False,
+            backend=config.backend,
+            reason=config_reason,
+            tools=tuple(identities),
+        )
 
     chroot = Path(base_root) / AUR_SANDBOX_CHROOT_NAME / "root"
     probe = base_probe or _probe_chroot_base
@@ -291,6 +289,16 @@ def sandbox_status(
         base_ready=True,
         tools=tuple(identities),
     )
+
+
+def _probe_config_paths() -> Tuple[bool, str]:
+    for path, label in (
+        (AUR_SANDBOX_PACMAN_CONF, "devtools pacman configuration"),
+        (AUR_SANDBOX_MAKEPKG_CONF, "devtools makepkg configuration"),
+    ):
+        if not _safe_root_owned_file(path):
+            return False, f"the {label} is missing or unsafe"
+    return True, ""
 
 
 def _probe_chroot_base(chroot: Path) -> Tuple[bool, str]:
@@ -363,6 +371,7 @@ def build_in_sandbox(
     tool_capture: Callable[..., Optional[TrustedTool]] = capture_trusted_system_tool,
     tool_revalidate: Callable[[TrustedTool], None] = revalidate_trusted_system_tool,
     base_probe: Optional[Callable[[Path], Tuple[bool, str]]] = None,
+    config_probe: Optional[Callable[[], Tuple[bool, str]]] = None,
 ) -> SandboxBuildResult:
     """Copy the reviewed checkout and build it inside the devtools chroot.
 
@@ -381,6 +390,7 @@ def build_in_sandbox(
         base_root=base_root,
         tool_capture=tool_capture,
         base_probe=base_probe,
+        config_probe=config_probe,
     )
     if not status.available:
         raise SandboxUnavailable(status.reason or "the isolated build backend is unavailable")

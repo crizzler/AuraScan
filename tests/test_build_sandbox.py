@@ -20,6 +20,14 @@ from aurascan.core.build_sandbox import (
 from aurascan.core.trusted_tools import TrustedTool
 
 
+@pytest.fixture(autouse=True)
+def allow_fixture_devtools_config(monkeypatch):
+    monkeypatch.setattr(
+        "aurascan.core.build_sandbox._probe_config_paths",
+        lambda: (True, ""),
+    )
+
+
 def _tool(name: str) -> TrustedTool:
     return TrustedTool(
         name=name,

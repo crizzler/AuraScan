@@ -395,14 +395,17 @@ Links that are absolute, escape the checkout, dangle, or point at directories,
 special files, pruned trees, or other links still produce the HIGH
 incomplete-coverage result above.
 
-A clean result is not a sandbox. AuraScan never executes package code, so an
-allowed build still runs on this machine through makepkg. When a reviewed
-package still needs hands-on testing, treat it as hostile: build and run it in
-a disposable local virtual machine (for example an Arch install ISO in QEMU
-with a snapshot or overlay disk, no shared folders, no host keys or
-credentials, and no network or an isolated one), never on the daily system. A
-single sandboxed run cannot prove that a package is safe; it only shows what
-that run did in that environment.
+A clean result is not a sandbox. AuraScan's default scan never executes
+package code, so an allowed build still runs on this machine through makepkg.
+The optional upgrade sandbox (`AURASCAN_AUR_SANDBOX=devtools`) executes a
+reviewed build inside a fresh devtools chroot and scans the produced archives,
+but a chroot shares the host kernel and one run cannot prove that a package is
+safe. When a reviewed package still needs hands-on testing, treat it as
+hostile: build and run it in a disposable local virtual machine (for example
+an Arch install ISO in QEMU with a snapshot or overlay disk, no shared
+folders, no host keys or credentials, and no network or an isolated one),
+never on the daily system. A single sandboxed run cannot prove that a package
+is safe; it only shows what that run did in that environment.
 
 This local check performs no network request, runs no native inspection tool,
 and never executes or extracts an artifact. A finding does not prove that the
@@ -1133,6 +1136,7 @@ aurascan upgrade --dry-run
 aurascan upgrade --verbose
 aurascan upgrade --json
 aurascan upgrade --aur-helper shelly
+aurascan upgrade --aur-sandbox devtools
 aurascan upgrade --no-ai
 aurascan upgrade --no-config-drift
 aurascan upgrade --no-kernel-module-autopilot
@@ -1154,6 +1158,19 @@ execution because AuraScan cannot yet prove that every package will pass
 through `aurascan-makepkg`. Run the repository upgrade with `--aur-helper none`,
 then inspect and build each AUR update through `aurascan-makepkg`. A model or
 `--yes` cannot override this blocker.
+
+With `AURASCAN_AUR_SANDBOX=devtools` (or `--aur-sandbox devtools`), the
+blocker is replaced by the advisory `UPG-AUR-BUILD-SANDBOXED` finding only
+when the backend is available. AuraScan then runs the repository transaction
+first, builds each pending AUR update inside a fresh private copy of the
+`extra-x86_64` devtools chroot, verifies the embedded install hook, scans every
+produced package archive, and installs only those scanned archives. The base
+chroot must be created once with the documented `mkarchroot` command; see
+`docs/AUR_SANDBOX_DESIGN.md`. The helper is never asked
+to build AUR packages in this path. A failed, timed-out, unavailable, or
+mismatched backend keeps the original hard blocker. This is risk reduction,
+not proof of safety: the chroot shares the host kernel and install hooks still
+run as root when the package is installed.
 
 In an interactive session, when this blocker is the only blocking finding and
 at least one repository package is planned, AuraScan offers a repository-only
@@ -1251,9 +1268,11 @@ finding or action, lower deterministic risk, mark an upgrade safe, or change a
 finding's blocking policy.
 
 The config keys are `AURASCAN_UPGRADE_PREFLIGHT_ENABLED`,
-`AURASCAN_UPGRADE_AUR_HELPER`, `AURASCAN_UPGRADE_PREFLIGHT_AI`, and
+`AURASCAN_UPGRADE_AUR_HELPER`, `AURASCAN_AUR_SANDBOX`,
+`AURASCAN_UPGRADE_PREFLIGHT_AI`, and
 `AURASCAN_KERNEL_MODULE_AUTOPILOT_ENABLED`.
 Supported helper values are `auto`, `paru`, `yay`, `shelly`, and `none`.
+Supported sandbox values are `off` (default) and `devtools`.
 `aurascan upgrade --enable-preflight` can temporarily override a disabled
 preflight setting, while `--disable-preflight` disables it for that invocation
 and does not run the upgrade command.
@@ -1818,6 +1837,7 @@ aurascan-makepkg --syncdeps
 aurascan-makepkg --aurascan-deep-static --syncdeps
 aurascan-makepkg --aurascan-json --syncdeps
 aurascan-makepkg --aurascan-scan-only
+aurascan-makepkg --aurascan-sandbox --syncdeps --install
 ```
 
 The wrapper scans the current directory's `PKGBUILD` before invoking the real
@@ -1831,6 +1851,14 @@ Preflight; `--aurascan-json` output never includes it. AuraScan-only flags use
 the `--aurascan-*` prefix and are stripped before makepkg receives its
 arguments. If AuraScan blocks or requires review, makepkg is not invoked by
 default.
+
+`--aurascan-sandbox` replaces the host `makepkg` invocation with the isolated
+devtools build: the reviewed checkout is copied into a private tree, built in a
+fresh `extra-x86_64` chroot, checked for the exact scanned `.INSTALL` bytes,
+and every produced package archive is scanned before `sudo pacman -U` runs.
+Without `--install`, the scanned artifacts are retained in the private tree and
+no package is installed. `--aurascan-json` is refused in this mode. This is
+risk reduction, not a sandbox guarantee; see `docs/AUR_SANDBOX_DESIGN.md`.
 
 After the scan, the wrapper accepts only a captured `/usr/bin/makepkg` whose
 path components and final file are root-owned, non-writable, regular,

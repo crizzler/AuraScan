@@ -14,11 +14,13 @@ from aurascan.core import repository_repair
 from aurascan.core import repository_state
 from aurascan.core import trusted_executable
 from aurascan.core import upgrade_preflight
+from aurascan.core.build_sandbox import SandboxStatus
 from aurascan.core.models import Severity
 from aurascan.core.security_audit import SecurityAuditReport
 from aurascan.core.upgrade_preflight_presenter import render_upgrade_preflight
 from aurascan.core.upgrade_models import ForeignPackageInfo, SystemSnapshot, UpgradePackage, UpgradePlan
 from aurascan.core.upgrade_preflight import (
+    EXIT_AUR_SANDBOX_FAILED,
     EXIT_PREFLIGHT_UNAVAILABLE,
     EXIT_PREFLIGHT_DISABLED,
     EXIT_UPGRADE_BLOCKED,
@@ -813,6 +815,169 @@ def test_planned_aur_build_creates_non_overridable_blocking_finding():
     assert report.action == "block"
     assert report.to_dict()["risk_summary"]["blocks_upgrade"] is True
     assert "aurascan-makepkg" in finding.recommended_action
+
+
+def test_sandbox_available_replaces_aur_block_with_medium_finding():
+    plan = UpgradePlan(
+        aur_packages=[UpgradePackage("demo-bin", "2", "1", package_type="aur")],
+        selected_helper="paru",
+        final_command=["/usr/bin/paru", "-Syu"],
+        command_source="paru",
+    )
+    status = SandboxStatus(
+        enabled=True,
+        available=True,
+        backend="devtools",
+        base_root="/var/lib/archbuild/extra-x86_64",
+        base_ready=True,
+    )
+
+    findings = analyze_upgrade_risks(plan, base_snapshot(), sandbox_status=status)
+
+    finding = next(item for item in findings if item.rule_id == "UPG-AUR-BUILD-SANDBOXED")
+    assert finding.severity == Severity.MEDIUM
+    assert finding.blocking is False
+    assert not any(item.rule_id == "UPG-AUR-BUILD-UNSCANNED" for item in findings)
+    assert "artifact-scan" in finding.evidence
+
+    unavailable_route = analyze_upgrade_risks(
+        plan, base_snapshot(), sandbox_status=status, sandbox_route=False
+    )
+    assert any(
+        item.rule_id == "UPG-AUR-BUILD-UNSCANNED" and item.blocking
+        for item in unavailable_route
+    )
+
+
+def test_requested_but_unavailable_sandbox_keeps_the_block():
+    plan = UpgradePlan(
+        aur_packages=[UpgradePackage("demo-bin", "2", "1", package_type="aur")],
+        selected_helper="paru",
+        final_command=["/usr/bin/paru", "-Syu"],
+        command_source="paru",
+    )
+    status = SandboxStatus(
+        enabled=True,
+        available=False,
+        backend="devtools",
+        reason="the trusted arch-nspawn helper is not installed",
+    )
+
+    findings = analyze_upgrade_risks(plan, base_snapshot(), sandbox_status=status)
+
+    finding = next(item for item in findings if item.rule_id == "UPG-AUR-BUILD-UNSCANNED")
+    assert finding.severity == Severity.CRITICAL
+    assert finding.blocking is True
+    assert "arch-nspawn" in finding.evidence
+    assert not any(item.rule_id == "UPG-AUR-BUILD-SANDBOXED" for item in findings)
+
+
+def test_sandbox_config_is_read_from_the_shared_environment():
+    config = upgrade_preflight.resolve_upgrade_config({"AURASCAN_AUR_SANDBOX": "devtools"})
+
+    assert config.error == ""
+    assert config.aur_sandbox == "devtools"
+
+
+def test_sandbox_route_requires_available_backend_and_aur_packages():
+    plan = UpgradePlan(aur_packages=[UpgradePackage("demo-bin", "2", "1", package_type="aur")])
+    status = SandboxStatus(enabled=True, available=True, backend="devtools")
+    report = UpgradePreflightReport(plan=plan, snapshot=base_snapshot(), sandbox=status)
+
+    assert upgrade_preflight.sandbox_aur_route_available(
+        report, UpgradeOptions(aur_sandbox="devtools")
+    ) is True
+    assert upgrade_preflight.sandbox_aur_route_available(
+        report, UpgradeOptions(aur_sandbox="devtools", dry_run=True)
+    ) is False
+    assert upgrade_preflight.sandbox_aur_route_available(
+        report, UpgradeOptions(aur_sandbox="off")
+    ) is False
+    report.sandbox = SandboxStatus(enabled=True, available=False, backend="devtools")
+    assert upgrade_preflight.sandbox_aur_route_available(
+        report, UpgradeOptions(aur_sandbox="devtools")
+    ) is False
+    report.sandbox = status
+    report.findings = [
+        UpgradeFinding(
+            rule_id="OTHER-BLOCK",
+            severity=Severity.HIGH,
+            title="other",
+            summary="other",
+            why_it_matters="other",
+            recommended_action="other",
+            blocking=True,
+        )
+    ]
+    assert upgrade_preflight.sandbox_aur_route_available(
+        report, UpgradeOptions(aur_sandbox="devtools")
+    ) is False
+
+
+def _run_sandboxed_route(report, monkeypatch, updates_result):
+    calls = []
+
+    def fake_run_upgrade(argv, **_kwargs):
+        calls.append(("upgrade", list(argv)))
+        return 0
+
+    def fake_updates(packages, **_kwargs):
+        calls.append(("aur", [item.name for item in packages]))
+        return updates_result
+
+    monkeypatch.setattr(upgrade_preflight, "run_upgrade", fake_run_upgrade)
+    monkeypatch.setattr(upgrade_preflight, "run_sandboxed_aur_updates", fake_updates)
+    code = upgrade_preflight._run_sandboxed_upgrade(
+        report,
+        UpgradeOptions(aur_sandbox="devtools", yes=True),
+        argv=["upgrade"],
+        runner=lambda *_args, **_kwargs: None,
+        which=lambda _name: "/usr/bin/example",
+        input_func=lambda _prompt: "",
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        snapshot=None,
+        urlopen=None,
+        config_drift_root=None,
+        config_drift_runner=lambda *_args, **_kwargs: None,
+        modules_root=Path("/usr/lib/modules"),
+        pacman_conf_path=Path("/etc/pacman.conf"),
+        repository_repair_backup_root=Path("/var/lib/aurascan"),
+        followup_context_root=None,
+        followup_interactive=False,
+        agent_escalation_provider=None,
+        aur_update_wrapper=lambda *_args, **_kwargs: "ok",
+    )
+    return code, calls
+
+
+def test_sandbox_route_replans_repository_only_then_builds(monkeypatch):
+    plan = UpgradePlan(aur_packages=[UpgradePackage("demo-bin", "2", "1", package_type="aur")])
+    report = UpgradePreflightReport(
+        plan=plan,
+        snapshot=base_snapshot(),
+        sandbox=SandboxStatus(enabled=True, available=True, backend="devtools"),
+    )
+
+    code, calls = _run_sandboxed_route(report, monkeypatch, (True, ""))
+
+    assert code == 0
+    assert calls[0][0] == "upgrade"
+    assert calls[0][1][-2:] == ["--aur-helper", "none"]
+    assert calls[1] == ("aur", ["demo-bin"])
+
+
+def test_sandbox_route_reports_partial_failure(monkeypatch):
+    plan = UpgradePlan(aur_packages=[UpgradePackage("demo-bin", "2", "1", package_type="aur")])
+    report = UpgradePreflightReport(
+        plan=plan,
+        snapshot=base_snapshot(),
+        sandbox=SandboxStatus(enabled=True, available=True, backend="devtools"),
+    )
+
+    code, _calls = _run_sandboxed_route(report, monkeypatch, (False, "review failed"))
+
+    assert code == EXIT_AUR_SANDBOX_FAILED
 
 
 def test_repository_health_detects_empty_mirrorlist_with_backup(tmp_path):

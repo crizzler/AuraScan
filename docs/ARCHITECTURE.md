@@ -200,6 +200,15 @@ Notably, **no analyzer executes a process** (INV-001). Analyzers obtain native
 tool results through the trusted adapters, so the execution boundary stays in
 one reviewable place.
 
+The opt-in isolated AUR build (`core/build_sandbox.py`) follows the same
+injected-runner pattern: `build_in_sandbox` accepts a runner whose default is
+`subprocess.run` and invokes the captured devtools helper inside a private
+copy of the reviewed checkout. It is not an analyzer and is never reachable
+from the default scan, preflight planning, AI output, or a package script.
+Its execution authority is real and under-reported by the process count above;
+treat `core/build_sandbox.py` and the wrapper's sandbox mode as the complete
+call-site boundary, and read `docs/AUR_SANDBOX_DESIGN.md` before changing it.
+
 ## Hotspots
 
 Ranked by mixed responsibility: `3 × capability categories + 2 × concern tags`,

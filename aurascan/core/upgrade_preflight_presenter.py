@@ -68,8 +68,18 @@ def render_upgrade_preflight(
         f"Repo upgrades: {len(report.plan.repo_packages)} | AUR upgrades: {len(report.plan.aur_packages)} | Removals/Replacements: {report.transaction_change_count()}",
         f"Risk: {color}{report.highest_severity.value}{reset} | Action: {color}{report.action.upper()}{reset} | Helper: {report.plan.selected_helper}",
         f"Planned command: {' '.join(report.plan.final_command) if report.plan.final_command else '(none)'}",
-        "-" * 50,
     ]
+    if (
+        report.sandbox
+        and report.sandbox.enabled
+        and report.sandbox.available
+        and report.plan.aur_packages
+    ):
+        lines.append(
+            f"AUR build route: isolated {report.sandbox.backend} backend "
+            "(repository handoff is pacman -Syu; the helper is not asked to build AUR packages)."
+        )
+    lines.append("-" * 50)
     lines.extend(check_summary_lines(report))
 
     if report.plan.preview_error:

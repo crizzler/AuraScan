@@ -23,6 +23,14 @@ from aurascan.core.aur_update_review import (
     aur_update_review_available,
     offer_aur_update_review,
     print_pending_aur_update_guidance,
+    run_sandboxed_aur_updates,
+)
+from aurascan.core.build_sandbox import (
+    AUR_SANDBOX_BACKENDS,
+    AUR_SANDBOX_ENV,
+    SandboxStatus,
+    resolve_sandbox_config,
+    sandbox_status,
 )
 from aurascan.core.config_drift import (
     CONFIG_DRIFT_AI_DIFFS_ENV,
@@ -75,12 +83,13 @@ from aurascan.core.trusted_executable import (
 from aurascan.core.trusted_executable import trusted_executable_stat as _trusted_executable_stat
 
 
-UPGRADE_PREFLIGHT_SCHEMA_VERSION = "1.3"
+UPGRADE_PREFLIGHT_SCHEMA_VERSION = "1.4"
 EXIT_PREFLIGHT_UNAVAILABLE = 20
 EXIT_USER_DECLINED = 21
 EXIT_PREFLIGHT_DISABLED = 22
 EXIT_UPGRADE_VERIFICATION_FAILED = 23
 EXIT_UPGRADE_BLOCKED = 24
+EXIT_AUR_SANDBOX_FAILED = 25
 EXIT_UPGRADE_COMMAND_FAILED_TO_START = 127
 PACMAN_PRINT_FORMAT = "%n\t%v\t%r\t%s\t%D\t%H\t%R"
 HIGH_RISK = {Severity.HIGH, Severity.CRITICAL}
@@ -315,6 +324,7 @@ class UpgradePreflightReport:
     kernel_module_check: Optional[KernelModuleCheck] = None
     repository_health: Optional[RepositoryHealthCheck] = None
     security_audit: Optional[SecurityAuditReport] = None
+    sandbox: Optional[SandboxStatus] = None
     schema_version: str = UPGRADE_PREFLIGHT_SCHEMA_VERSION
     scanner_version: str = SCANNER_VERSION
 
@@ -375,6 +385,7 @@ class UpgradePreflightReport:
             "kernel_module_check": self.kernel_module_check.to_dict() if self.kernel_module_check else {"enabled": False, "status": "not_run"},
             "repository_health": self.repository_health.to_dict() if self.repository_health else {"enabled": False, "status": "not_run"},
             "security_audit": self.security_audit.to_dict() if self.security_audit else {"enabled": False, "status": "not_run"},
+            "aur_sandbox": self.sandbox.to_dict() if self.sandbox else {"enabled": False, "status": "not_run"},
             "findings": [finding.to_dict() for finding in self.findings],
             "ai_review": dict(self.ai_review),
         }
@@ -387,6 +398,7 @@ class UpgradePreflightReport:
 class UpgradeConfig:
     preflight_enabled: bool = True
     aur_helper: str = "auto"
+    aur_sandbox: str = "off"
     ai_enabled: bool = True
     kernel_module_autopilot_enabled: bool = True
     trusted_handoff_enabled: bool = True
@@ -401,6 +413,7 @@ class UpgradeOptions:
     yes: bool = False
     no_ai: bool = False
     aur_helper: str = "auto"
+    aur_sandbox: str = "off"
     preflight_enabled: bool = True
     config_drift_enabled: bool = True
     config_drift_ai_diffs: bool = False
@@ -430,6 +443,12 @@ def build_upgrade_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--enable-preflight", action="store_true", help="run upgrade preflight even if disabled in config")
     preflight.add_argument("--disable-preflight", action="store_true", help="disable preflight for this invocation and do not run the upgrade")
     parser.add_argument("--aur-helper", choices=sorted(UPGRADE_AUR_HELPERS), default=None, help="AUR helper integration to use")
+    parser.add_argument(
+        "--aur-sandbox",
+        choices=sorted(AUR_SANDBOX_BACKENDS),
+        default=None,
+        help="build pending AUR updates inside an isolated devtools backend",
+    )
     return parser
 
 
@@ -466,10 +485,14 @@ def resolve_upgrade_config(env: Optional[Mapping[str, str]] = None) -> UpgradeCo
     aur_helper = source.get(UPGRADE_PREFLIGHT_AUR_HELPER_ENV, "auto").strip().lower() or "auto"
     if aur_helper not in UPGRADE_AUR_HELPERS:
         return UpgradeConfig(error=f"invalid {UPGRADE_PREFLIGHT_AUR_HELPER_ENV} value")
+    sandbox_config = resolve_sandbox_config(source)
+    if sandbox_config.error:
+        return UpgradeConfig(error=sandbox_config.error)
 
     return UpgradeConfig(
         preflight_enabled=bool(preflight_enabled),
         aur_helper=aur_helper,
+        aur_sandbox=sandbox_config.backend,
         ai_enabled=bool(ai_enabled),
         kernel_module_autopilot_enabled=bool(autopilot_enabled),
         trusted_handoff_enabled=bool(handoff_enabled),
@@ -485,6 +508,7 @@ def options_from_args(args: argparse.Namespace, env: Optional[Mapping[str, str]]
     if bool(getattr(args, "disable_preflight", False)):
         preflight_enabled = False
     aur_helper = str(args.aur_helper or config.aur_helper)
+    aur_sandbox = str(getattr(args, "aur_sandbox", None) or config.aur_sandbox)
     config_drift_enabled = bool(preflight_enabled and drift_config.enabled and not getattr(args, "no_config_drift", False))
     config_drift_ai_diffs = bool(getattr(args, "config_drift_ai_diffs", False) or drift_config.ai_diffs == "always")
     kernel_module_autopilot_enabled = bool(config.kernel_module_autopilot_enabled and not getattr(args, "no_kernel_module_autopilot", False))
@@ -496,6 +520,7 @@ def options_from_args(args: argparse.Namespace, env: Optional[Mapping[str, str]]
         yes=bool(args.yes),
         no_ai=bool(args.no_ai) or not config.ai_enabled,
         aur_helper=aur_helper,
+        aur_sandbox=aur_sandbox,
         preflight_enabled=preflight_enabled,
         config_drift_enabled=config_drift_enabled,
         config_drift_ai_diffs=config_drift_ai_diffs,
@@ -667,6 +692,28 @@ def run_upgrade(
         return 0
     if options.json_output and not options.yes:
         return 0
+    if sandbox_aur_route_available(report, options):
+        return _run_sandboxed_upgrade(
+            report,
+            options,
+            argv=argv,
+            runner=runner,
+            which=which,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+            snapshot=snapshot,
+            urlopen=urlopen,
+            config_drift_root=config_drift_root,
+            config_drift_runner=config_drift_runner,
+            modules_root=modules_root,
+            pacman_conf_path=pacman_conf_path,
+            repository_repair_backup_root=repository_repair_backup_root,
+            followup_context_root=followup_context_root,
+            followup_interactive=followup_interactive,
+            agent_escalation_provider=agent_escalation_provider,
+            aur_update_wrapper=aur_update_wrapper,
+        )
     if report.blocks_upgrade:
         if offer_repository_only_continuation(report, options, input_func=input_func, stdout=stdout, stderr=stderr):
             print(
@@ -859,6 +906,104 @@ def run_upgrade(
             agent_escalation_provider=agent_escalation_provider,
         )
     return result_code
+
+
+def sandbox_aur_route_available(report: UpgradePreflightReport, options: UpgradeOptions) -> bool:
+    """Whether the isolated AUR build replaces the helper source-build handoff."""
+
+    return bool(
+        options.aur_sandbox != "off"
+        and report.sandbox is not None
+        and report.sandbox.enabled
+        and report.sandbox.available
+        and report.plan.aur_packages
+        and not report.blocks_upgrade
+        and not options.dry_run
+        and not options.json_output
+    )
+
+
+def _run_sandboxed_upgrade(
+    report: UpgradePreflightReport,
+    options: UpgradeOptions,
+    *,
+    argv: Optional[Sequence[str]],
+    runner: Callable,
+    which: Callable[[str], Optional[str]],
+    input_func: Callable[[str], str],
+    stdout,
+    stderr,
+    snapshot: Optional[SystemSnapshot],
+    urlopen: Optional[Callable],
+    config_drift_root: Optional[Path],
+    config_drift_runner: Callable,
+    modules_root: Path,
+    pacman_conf_path: Path,
+    repository_repair_backup_root: Path,
+    followup_context_root: Optional[Path],
+    followup_interactive: Optional[bool],
+    agent_escalation_provider: Optional[Callable],
+    aur_update_wrapper: Optional[Callable],
+) -> int:
+    """Apply the repository transaction, then build AUR updates in isolation.
+
+    The repository handoff is re-planned with ``--aur-helper none`` so no
+    helper can acquire or build the pending AUR packages. The isolated build
+    runs only after that transaction verifies, and every produced archive is
+    scanned before the wrapper's install step.
+    """
+
+    sandbox = report.sandbox
+    if sandbox is None or not report.plan.aur_packages:
+        return EXIT_UPGRADE_BLOCKED
+    count = len(report.plan.aur_packages)
+    label = "update" if count == 1 else "updates"
+    print(
+        f"[AuraScan] {count} pending AUR {label} will be built in the {sandbox.backend} sandbox "
+        "after the repository upgrade, and installed only after the artifact scan.",
+        file=stdout,
+        flush=True,
+    )
+    status = run_upgrade(
+        list(argv or []) + ["--aur-helper", "none"],
+        runner=runner,
+        which=which,
+        input_func=input_func,
+        stdout=stdout,
+        stderr=stderr,
+        snapshot=snapshot,
+        urlopen=urlopen,
+        config_drift_root=config_drift_root,
+        config_drift_runner=config_drift_runner,
+        modules_root=modules_root,
+        pacman_conf_path=pacman_conf_path,
+        repository_repair_backup_root=repository_repair_backup_root,
+        followup_context_root=followup_context_root,
+        followup_interactive=followup_interactive,
+        agent_escalation_provider=agent_escalation_provider,
+        aur_update_wrapper=aur_update_wrapper,
+    )
+    if status != 0:
+        return status
+    ok, detail = run_sandboxed_aur_updates(
+        report.plan.aur_packages,
+        stdout=stdout,
+        stderr=stderr,
+        wrapper_provider=aur_update_wrapper,
+        runner=runner,
+        which=which,
+    )
+    if not ok:
+        print(
+            f"[AuraScan] The repository upgrade completed, but the isolated AUR build did not: {detail}.",
+            file=stderr,
+        )
+        print(
+            "[AuraScan] Not every pending AUR update was installed; review the per-package output above.",
+            file=stderr,
+        )
+        return EXIT_AUR_SANDBOX_FAILED
+    return 0
 
 
 def refresh_upgrade_preflight(
@@ -1591,6 +1736,22 @@ def security_audit_upgrade_findings(
     return findings
 
 
+def _upgrade_sandbox_status(options: UpgradeOptions) -> Optional[SandboxStatus]:
+    """Describe the configured AUR sandbox without starting a build."""
+
+    if options.aur_sandbox == "off":
+        return None
+    config = resolve_sandbox_config({AUR_SANDBOX_ENV: options.aur_sandbox})
+    if config.error:
+        return SandboxStatus(
+            enabled=True,
+            available=False,
+            backend=options.aur_sandbox,
+            reason=config.error,
+        )
+    return sandbox_status(config)
+
+
 def run_upgrade_preflight(
     options: UpgradeOptions,
     *,
@@ -1628,12 +1789,22 @@ def run_upgrade_preflight(
         except UnsafeUpgradeExecutable as exc:
             plan.preview_error = f"upgrade executable trust check failed during kernel queries: {exc}"
     progress("Evaluating deterministic upgrade risks.")
+    sandbox = _upgrade_sandbox_status(options)
+    sandbox_route = bool(
+        sandbox is not None
+        and sandbox.enabled
+        and sandbox.available
+        and not options.json_output
+        and not options.dry_run
+    )
     findings = analyze_upgrade_risks(
         plan,
         system_snapshot,
         kernel_module_check=kernel_module_check,
         kernel_module_autopilot_enabled=options.kernel_module_autopilot_enabled,
         repository_health=repository_health,
+        sandbox_status=sandbox,
+        sandbox_route=sandbox_route,
     )
     security_report = None
     if options.security_audit_enabled:
@@ -1656,6 +1827,8 @@ def run_upgrade_preflight(
                 kernel_module_check=kernel_module_check,
                 kernel_module_autopilot_enabled=options.kernel_module_autopilot_enabled,
                 repository_health=repository_health,
+                sandbox_status=sandbox,
+                sandbox_route=sandbox_route,
             )
         else:
             findings.extend(security_audit_upgrade_findings(security_report, plan))
@@ -1666,6 +1839,7 @@ def run_upgrade_preflight(
         kernel_module_check=kernel_module_check,
         repository_health=repository_health,
         security_audit=security_report,
+        sandbox=sandbox,
     )
     if not options.no_ai:
         progress("Requesting AI advisory review.")
@@ -2033,6 +2207,8 @@ def analyze_upgrade_risks(
     kernel_module_check: Optional[KernelModuleCheck] = None,
     kernel_module_autopilot_enabled: bool = False,
     repository_health: Optional[RepositoryHealthCheck] = None,
+    sandbox_status: Optional[SandboxStatus] = None,
+    sandbox_route: bool = True,
 ) -> List[UpgradeFinding]:
     findings: List[UpgradeFinding] = []
     updated_names = set(plan.package_names())
@@ -2064,16 +2240,35 @@ def analyze_upgrade_risks(
         return findings
 
     if plan.aur_packages:
-        findings.append(_finding(
-            "UPG-AUR-BUILD-UNSCANNED",
-            Severity.CRITICAL,
-            "Automatic AUR source-build handoff is blocked.",
-            "The helper query found planned AUR package builds, but AuraScan cannot prove that the helper will route each build through AuraScan's scan wrapper.",
-            "An AUR helper can acquire and execute package build instructions after preflight. A trusted helper binary does not establish trust in the PKGBUILD, install hook, or downloaded sources it will process.",
-            "Run the repository-only upgrade with --aur-helper none. Inspect and build each AUR update through aurascan-makepkg before installing it.",
-            f"planned AUR builds={len(plan.aur_packages)}; helper={plan.selected_helper}; verified scan-wrapper integration=no",
-            blocking=True,
-        ))
+        if (
+            sandbox_route
+            and sandbox_status is not None
+            and sandbox_status.enabled
+            and sandbox_status.available
+        ):
+            findings.append(_finding(
+                "UPG-AUR-BUILD-SANDBOXED",
+                Severity.MEDIUM,
+                "Pending AUR updates will be built in an isolated sandbox.",
+                f"The helper query found {len(plan.aur_packages)} planned AUR package build(s). AuraScan will upgrade repository packages first, then build each AUR update in the {sandbox_status.backend} backend and scan the produced package archives before installation.",
+                "The isolated build still executes package code. Isolation keeps the build away from your home, credentials, and AuraScan state, but a passing scan and one build do not prove that the package is safe.",
+                "Keep the sandbox base root-owned and review the per-package build and scan output; a blocked artifact is never installed.",
+                f"planned AUR builds={len(plan.aur_packages)}; backend={sandbox_status.backend}; base={sandbox_status.base_root}; route=sandboxed-build+artifact-scan",
+            ))
+        else:
+            unavailable = ""
+            if sandbox_status is not None and sandbox_status.enabled:
+                unavailable = f"; requested sandbox unavailable={sandbox_status.reason}"
+            findings.append(_finding(
+                "UPG-AUR-BUILD-UNSCANNED",
+                Severity.CRITICAL,
+                "Automatic AUR source-build handoff is blocked.",
+                "The helper query found planned AUR package builds, but AuraScan cannot prove that the helper will route each build through AuraScan's scan wrapper.",
+                "An AUR helper can acquire and execute package build instructions after preflight. A trusted helper binary does not establish trust in the PKGBUILD, install hook, or downloaded sources it will process.",
+                "Run the repository-only upgrade with --aur-helper none. Inspect and build each AUR update through aurascan-makepkg before installing it, or enable the isolated devtools backend with AURASCAN_AUR_SANDBOX=devtools.",
+                f"planned AUR builds={len(plan.aur_packages)}; helper={plan.selected_helper}; verified scan-wrapper integration=no{unavailable}",
+                blocking=True,
+            ))
 
     if plan.helper_error:
         severity = Severity.MEDIUM if snapshot.foreign_packages else Severity.LOW

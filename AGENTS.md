@@ -111,7 +111,14 @@ model choice does not change AuraScan's runtime AI defaults or safety policy.
   child output. A stopped client does not cancel an accepted service transaction.
 - Never execute a PKGBUILD, `.install` hook, downloaded source, malware sample,
   package payload, agent instruction file, imported resource, hook/config
-  command, or fixture command while analyzing or testing it.
+  command, or fixture command while analyzing or testing it. The only
+  sanctioned exception is the explicit, opt-in isolated AUR build
+  (`AURASCAN_AUR_SANDBOX=devtools`): a reviewed checkout in a fresh devtools
+  chroot, never the daily environment, with the produced archives hash-bound
+  and scanned before installation. It is risk reduction, not a sandbox
+  guarantee; every missing backend, tool, artifact or hook proof stays fail
+  closed. No analyzer, default scan, preflight planner, helper, AI output or
+  package script may start it.
 - Keep the default scan local and non-fetching. Network source acquisition is
   allowed only in an existing explicit workflow such as `--deep-static`.
 - Keep AI opt-in and use it only when explicitly enabled. Cloud providers require their own key; local

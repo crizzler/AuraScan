@@ -128,6 +128,19 @@ also print the display-only finding explanation described in section 5. The
 stage runs only after a successful repository-only upgrade, and it never
 routes a build through the AUR helper.
 
+The opt-in isolated AUR build (`core/build_sandbox.py`) is a separate,
+consented execution boundary. With `AURASCAN_AUR_SANDBOX=devtools`, a
+reviewed checkout is copied into a private `0700` tree and built inside a
+fresh `extra-x86_64` devtools chroot. The produced archives are hashed,
+checked against the scanned `.INSTALL` bytes, scanned by the package
+analyzers, and only then installed through trusted `sudo pacman -U`. Fixed
+absolute tools, a reduced environment, bounded input and artifacts, and
+fail-closed handling of every missing proof are mandatory. This is not a
+sandbox guarantee: the chroot shares the host kernel, `.INSTALL` hooks still
+run as root at installation time, and the base chroot is trusted
+infrastructure whose history AuraScan cannot prove. See
+`docs/AUR_SANDBOX_DESIGN.md`.
+
 ### 7. Privileged repair and recovery actions
 
 | Aspect | Detail |

@@ -1504,14 +1504,16 @@ Shelly AUR JSON query. Repo package previews should come from pacman's `--print
 must be repository-only pacman rather than a fresh helper transaction that
 could expand after preflight. If it finds any planned AUR build, emit blocking
 `UPG-AUR-BUILD-UNSCANNED`; the helper is never asked to build AUR packages.
-The only supported AUR build path is per-package `aurascan-makepkg`
-integration, implemented by the guided AUR update stage below: after a
-successful repository-only transaction, AuraScan may download one pending AUR
-package itself and drive the wrapper through a review-only step and then a
-consented build. Do not simulate that integration with a flag or environment
-marker, and never route it through the helper. Preflight planning itself must
-not run makepkg, build AUR packages, inspect AUR sources, or execute package
-code; acquisition exists only inside the consented guided stage.
+The supported AUR build paths are per-package `aurascan-makepkg` integration
+and the opt-in isolated stage described below. The guided AUR update stage
+downloads one pending AUR package itself and drives the wrapper through a
+review-only step and then a consented build. The isolated stage replaces the
+guided build step with a devtools chroot build when
+`AURASCAN_AUR_SANDBOX=devtools` is set and the backend is available. Do not
+simulate either integration with a flag or environment marker, and never route
+it through the helper. Preflight planning itself must not run makepkg, build
+AUR packages, inspect AUR sources, or execute package code; acquisition exists
+only inside the reviewed stage.
 
 Capture `/usr/bin/sudo`, `/usr/bin/pacman`, and the absolute path returned for a
 selected helper as executable identities. Reject final files or path components
@@ -1523,7 +1525,7 @@ bare command name after a trust check fails.
 
 Upgrade preflight is enabled by default. The wizard may write
 `AURASCAN_UPGRADE_PREFLIGHT_ENABLED`, `AURASCAN_UPGRADE_AUR_HELPER`,
-`AURASCAN_UPGRADE_PREFLIGHT_AI`, and
+`AURASCAN_AUR_SANDBOX`, `AURASCAN_UPGRADE_PREFLIGHT_AI`, and
 `AURASCAN_KERNEL_MODULE_AUTOPILOT_ENABLED` to user config. If preflight is
 disabled, `aurascan upgrade` must not silently run a raw package-manager
 upgrade; it should report that preflight did not run and exit without invoking
@@ -1609,6 +1611,61 @@ research, download and build it by hand:
 
 The stage must not run during preflight planning, must never route a build
 through the AUR helper, and must never weaken the blocker above.
+
+### Isolated AUR build stage
+
+`core/build_sandbox.py` owns the opt-in isolated build. It is a separate
+evidence and execution boundary, not part of the deterministic scan:
+
+- config is `AURASCAN_AUR_SANDBOX=off|devtools` (default `off`) plus an
+  optional `AURASCAN_AUR_SANDBOX_WORK_ROOT` (default `/var/tmp`). Only
+  `devtools` is implemented; the backend is never enabled by a package script,
+  helper configuration, AI output or repository content;
+- `sandbox_status` only inspects fixed paths. It requires the trusted
+  `/usr/bin/arch-nspawn`, `/usr/bin/mkarchroot`, `/usr/bin/sudo`,
+  `/usr/bin/cp` and `/usr/bin/rm` identities, the root-owned devtools
+  `multilib.conf` and makepkg configuration files, and a root-owned, non-symlink,
+  non-group/world-writable `/var/lib/archbuild/extra-x86_64/root` with a
+  `.arch-chroot` marker. The base is created once by the operator with the
+  documented `mkarchroot` command; AuraScan never creates it during an
+  upgrade. The standard `extra-x86_64-build` symlink is not used because
+  `makechrootpkg` hard-codes `--skipinteg`. It never starts a build;
+- `build_in_sandbox` copies the reviewed checkout into a private `0700` tree,
+  pruning `.git`/`.hg`/`.svn` and generated `src`/`pkg` trees. It rejects
+  escaping links, linked directories, and special files. It copies the base
+  chroot into the same private tree, uses a private package cache, runs
+  `arch-nspawn` with a fixed setup script, and removes the tree afterwards.
+  It bounds entries, copied bytes, artifact count, per-artifact bytes and
+  total artifact bytes;
+- the build environment is reduced to `PATH=/usr/bin:/bin`, a private `HOME`
+  and `TMPDIR`, `LC_ALL=C`, `LANG=C`, `TZ=UTC`, and `USER`/`LOGNAME`/`TERM`.
+  Host-side commands are argument vectors. Inside the chroot, a fixed script
+  creates the build user and execs `makepkg`; it never evaluates checkout
+  text. `makepkg` receives only the bounded argument set
+  (`--syncdeps`, `--nocheck`, `--clean`, `--cleanbuild`, `--needed`,
+  `--force`, `--noconfirm`, `--noprogressbar`); `--install` is stripped because
+  installation is a separate post-scan host step;
+- every fresh package archive is hashed and bound by name, size and SHA-256.
+  The build fails closed if no fresh archive appears. A produced package must
+  embed the exact scanned `.INSTALL` bytes; a mismatch blocks the handoff;
+- `aurascan-makepkg --aurascan-sandbox` runs the same scan, review and
+  post-build checks as the normal wrapper, then scans every produced archive
+  with the package analyzers. Only a clean artifact scan reaches
+  `sudo pacman -U`; with `--install` absent, artifacts are retained in the
+  private tree only after a clean scan. JSON output is refused in this mode;
+- the upgrade route (`UPG-AUR-BUILD-SANDBOXED`, MEDIUM) is available only when
+  the backend is enabled and available. It replans the transaction with
+  `--aur-helper none`, verifies the repository handoff first, and then runs
+  `run_sandboxed_aur_updates` without per-package prompts. A missing backend,
+  failed build, blocked artifact scan, dependency cycle, over-long dependency
+  chain, or unresolved build dependency keeps the pending update uninstalled
+  and returns `EXIT_AUR_SANDBOX_FAILED` (25). Declared AUR build dependencies
+  are built first through the same reviewed route, bounded by
+  `AUR_DEPENDENCY_CHAIN_LIMIT`;
+- the module never claims that a build proves safety. The chroot shares the
+  host kernel, `.INSTALL` hooks still run as root at install time, and the
+  base chroot is trusted infrastructure whose history AuraScan cannot prove.
+  See `docs/AUR_SANDBOX_DESIGN.md`.
 
 ### Advisory finding explanation
 
@@ -1735,6 +1792,7 @@ aurascan-makepkg --aurascan-deep-static --syncdeps
 aurascan-makepkg --aurascan-offline --aurascan-no-auto-key-fetch --syncdeps
 aurascan-makepkg --aurascan-update-scan-policy smart --syncdeps
 aurascan-makepkg --aurascan-scan-only
+aurascan-makepkg --aurascan-sandbox --syncdeps --install
 ```
 
 The wrapper looks for `PKGBUILD` in the current directory, runs AuraScan first,
@@ -1747,6 +1805,15 @@ review, or pass) but never records a review acceptance and never invokes
 makepkg; blocked and review-required packages return their normal exit codes
 and messages. It exists for guided workflows that must show the verdict before
 any build consent, and it must never be treated as a build handoff.
+
+`--aurascan-sandbox` runs the same scan and review, then hands the build to
+`core/build_sandbox.py` instead of host `makepkg`. It requires
+`AURASCAN_AUR_SANDBOX=devtools`, refuses `--aurascan-json`, strips `--install`
+from the sandbox arguments, verifies the packaged `.INSTALL` bytes against the
+scanned hook, scans each produced archive with the package analyzers, and only
+then runs trusted `sudo pacman -U` when `--install` was requested. Without
+`--install`, artifacts are retained after a clean scan. See the isolated AUR
+build stage above and `docs/AUR_SANDBOX_DESIGN.md`.
 
 After scanning, capture only `/usr/bin/makepkg` through the shared trusted-tool
 boundary and revalidate its exact device/inode, ownership, group, and mode

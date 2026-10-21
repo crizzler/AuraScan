@@ -701,7 +701,7 @@ def test_recovery_bearing_v01011_release_contract():
         "version": "0.10.11",
         "architecture": "x86_64",
         "filename": "aurascan-recovery-0.10.11-x86_64.iso",
-        "released_at": "2026-10-12",
+        "released_at": "2026-10-21",
     }
     assert set(manifest) == set(expected_manifest) | {"url", "sha256", "status"}
     assert {key: manifest[key] for key in expected_manifest} == expected_manifest

@@ -69,6 +69,17 @@ def run_aur_update_wrapper(makepkg_args, cwd, stdout, stderr):
         WRAPPER_RESULT_TOOL_UNAVAILABLE,
     )
 
+    sandbox_config = None
+    if "--aurascan-sandbox" in makepkg_args:
+        from aurascan.core.build_sandbox import SandboxConfig, resolve_sandbox_config
+
+        configured = resolve_sandbox_config(os.environ)
+        sandbox_config = SandboxConfig(
+            backend="devtools",
+            work_root=configured.work_root,
+            timeout_seconds=configured.timeout_seconds,
+        )
+
     try:
         code = makepkg_wrapper.run(
             list(makepkg_args),
@@ -76,6 +87,7 @@ def run_aur_update_wrapper(makepkg_args, cwd, stdout, stderr):
             stdout=stdout,
             stderr=stderr,
             sudo_invalidator=makepkg_wrapper.invalidate_cached_sudo,
+            sandbox_config=sandbox_config,
         )
     except Exception:  # bounded: a failed guided step must not abort the upgrade flow
         return WRAPPER_RESULT_FAILED
@@ -85,7 +97,10 @@ def run_aur_update_wrapper(makepkg_args, cwd, stdout, stderr):
         return WRAPPER_RESULT_BLOCKED
     if code == makepkg_wrapper.EXIT_MANUAL_REVIEW:
         return WRAPPER_RESULT_REVIEW_REQUIRED
-    if code == makepkg_wrapper.EXIT_MAKEPKG_NOT_FOUND:
+    if code in {
+        makepkg_wrapper.EXIT_MAKEPKG_NOT_FOUND,
+        makepkg_wrapper.EXIT_SANDBOX_UNAVAILABLE,
+    }:
         return WRAPPER_RESULT_TOOL_UNAVAILABLE
     return WRAPPER_RESULT_FAILED
 

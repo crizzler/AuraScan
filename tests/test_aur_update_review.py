@@ -16,7 +16,9 @@ from aurascan.core.aur_update_review import (
     WRAPPER_RESULT_OK,
     WRAPPER_RESULT_REVIEW_REQUIRED,
     WRAPPER_RESULT_TOOL_UNAVAILABLE,
+    AcquiredAurPackage,
     AurUpdateAcquisitionError,
+    GuidedBuildDependencies,
     acquire_aur_package,
     aur_package_git_url,
     aur_update_review_available,
@@ -24,6 +26,7 @@ from aurascan.core.aur_update_review import (
     offer_aur_update_review,
     query_installed_package_version,
     read_captured_pkgbuild,
+    run_sandboxed_aur_updates,
 )
 from aurascan.core.trusted_executable import TrustedExecutable
 from aurascan.core.trusted_tools import TrustedTool, TrustedToolError
@@ -914,3 +917,127 @@ def test_read_captured_pkgbuild_is_bounded(tmp_path, monkeypatch):
 
     monkeypatch.setattr("aurascan.core.aur_update_review.MAX_CAPTURED_PKGBUILD_BYTES", 4)
     assert read_captured_pkgbuild(pkgbuild) is None
+
+
+# -- non-interactive sandbox flow ----------------------------------------
+
+
+def _acquired(tmp_path, name="demo-bin"):
+    checkout = tmp_path / name
+    checkout.mkdir()
+    (checkout / "PKGBUILD").write_text(f"pkgname={name}\npkgver=2\n", encoding="utf-8")
+    return AcquiredAurPackage(name=name, path=checkout, revision="a" * 40)
+
+
+def test_sandboxed_aur_flow_reviews_then_builds_and_verifies(tmp_path, monkeypatch):
+    provider = FakeWrapperProvider([WRAPPER_RESULT_OK, WRAPPER_RESULT_OK])
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    monkeypatch.setattr(
+        "aurascan.core.aur_update_review.acquire_aur_package",
+        lambda *_args, **_kwargs: _acquired(tmp_path),
+    )
+    monkeypatch.setattr(
+        "aurascan.core.aur_update_review.check_guided_build_dependencies",
+        lambda *_args, **_kwargs: GuidedBuildDependencies((), (), (), ()),
+    )
+    monkeypatch.setattr(
+        "aurascan.core.aur_update_review.query_installed_package_version",
+        lambda *_args, **_kwargs: "2",
+    )
+
+    ok, detail = run_sandboxed_aur_updates(
+        [package()],
+        stdout=stdout,
+        stderr=stderr,
+        wrapper_provider=provider,
+        work_root=tmp_path / "aur-updates",
+    )
+
+    assert ok is True
+    assert detail == ""
+    assert [arguments for arguments, _cwd in provider.calls] == [
+        [AUR_SCAN_ONLY_ARGUMENT],
+        ["--aurascan-sandbox", *AUR_BUILD_MAKEPKG_ARGUMENTS],
+    ]
+    assert "Verified: demo-bin 2 is installed." in stdout.getvalue()
+
+
+def test_sandboxed_aur_flow_stops_when_review_blocks(tmp_path, monkeypatch):
+    provider = FakeWrapperProvider([WRAPPER_RESULT_BLOCKED])
+    monkeypatch.setattr(
+        "aurascan.core.aur_update_review.acquire_aur_package",
+        lambda *_args, **_kwargs: _acquired(tmp_path),
+    )
+
+    ok, detail = run_sandboxed_aur_updates(
+        [package()],
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        wrapper_provider=provider,
+        work_root=tmp_path / "aur-updates",
+    )
+
+    assert ok is False
+    assert "did not pass the review step" in detail
+    assert len(provider.calls) == 1
+
+
+def test_sandboxed_aur_flow_builds_aur_dependency_first(tmp_path, monkeypatch):
+    checks = []
+
+    def dependency_check(_content, **_kwargs):
+        checks.append(1)
+        if len(checks) == 1:
+            return GuidedBuildDependencies((), (), (), ("dep-aur",))
+        return GuidedBuildDependencies((), (), (), ())
+
+    provider = FakeWrapperProvider(
+        [
+            WRAPPER_RESULT_OK,
+            WRAPPER_RESULT_OK,
+            WRAPPER_RESULT_OK,
+            WRAPPER_RESULT_OK,
+        ]
+    )
+    monkeypatch.setattr(
+        "aurascan.core.aur_update_review.acquire_aur_package",
+        lambda name, **_kwargs: _acquired(tmp_path, name),
+    )
+    monkeypatch.setattr(
+        "aurascan.core.aur_update_review.check_guided_build_dependencies",
+        dependency_check,
+    )
+    monkeypatch.setattr(
+        "aurascan.core.aur_update_review.query_installed_package_version",
+        lambda name, **_kwargs: "2",
+    )
+
+    ok, detail = run_sandboxed_aur_updates(
+        [package()],
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        wrapper_provider=provider,
+        work_root=tmp_path / "aur-updates",
+    )
+
+    assert ok is True
+    assert detail == ""
+    assert [cwd.name for _arguments, cwd in provider.calls] == [
+        "demo-bin",
+        "dep-aur",
+        "dep-aur",
+        "demo-bin",
+    ]
+
+
+def test_sandboxed_aur_flow_requires_provider():
+    ok, detail = run_sandboxed_aur_updates(
+        [package()],
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        wrapper_provider=None,
+    )
+
+    assert ok is False
+    assert "provider" in detail

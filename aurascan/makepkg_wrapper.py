@@ -12,6 +12,15 @@ from pathlib import Path
 from typing import Callable, List, Mapping, Optional, Sequence, TextIO
 
 from aurascan.analyzers.history import HistoryAnalyzer
+from aurascan.core.build_sandbox import (
+    SandboxBuildError,
+    SandboxConfig,
+    SandboxUnavailable,
+    build_in_sandbox,
+    cleanup_sandbox_build,
+    resolve_sandbox_config,
+    sandbox_status,
+)
 from aurascan.core.engine import AuraScanEngine
 from aurascan.core.finding_explainer import scan_explanation_lines
 from aurascan.core.install_hook import (
@@ -25,6 +34,14 @@ from aurascan.core.package_archive import (
     PACKAGE_HOOK_RESOLVED,
     PackageInstallHookCapture,
     capture_package_install_hook,
+)
+from aurascan.core.trusted_executable import (
+    TRUSTED_PACMAN_PATH,
+    TRUSTED_SUDO_PATH,
+    TrustedExecutable,
+    UnsafeUpgradeExecutable,
+    capture_trusted_executable,
+    run_trusted_command,
 )
 from aurascan.core.trusted_tools import (
     TrustedTool,
@@ -51,6 +68,8 @@ EXIT_USAGE = 2
 EXIT_SCAN_BLOCKED = 17
 EXIT_MANUAL_REVIEW = 18
 EXIT_REVIEW_NOT_FOUND = 19
+EXIT_SANDBOX_FAILED = 124
+EXIT_SANDBOX_UNAVAILABLE = 125
 EXIT_MAKEPKG_NOT_FOUND = 127
 
 # Cached sudo credentials are an execution primitive for package code that
@@ -70,6 +89,7 @@ _BOOL_FLAGS = {
     "--aurascan-no-auto-key-fetch": "no_auto_key_fetch",
     "--aurascan-json": "json_output",
     "--aurascan-scan-only": "scan_only",
+    "--aurascan-sandbox": "sandbox",
     "--aurascan-verbose": "verbose",
     "--aurascan-remember-review": "remember_review",
     "--aurascan-review-once": "review_once",
@@ -211,6 +231,7 @@ class MakepkgWrapperOptions:
     trusted_key_dirs: List[str] = field(default_factory=list)
     json_output: bool = False
     scan_only: bool = False
+    sandbox: bool = False
     verbose: bool = False
     accept_review: str = ""
     adjudication_label: str = ""
@@ -245,6 +266,9 @@ def run(
     review_store: Optional[ReviewDecisionStore] = None,
     environ: Optional[Mapping[str, str]] = None,
     install_hook_capture: Callable[..., PackageInstallHookCapture] = None,
+    sandbox_config=None,
+    sandbox_runner: Optional[Callable[..., object]] = None,
+    pacman_capture: Optional[Callable[..., Optional[TrustedExecutable]]] = None,
     stdout: TextIO = None,
     stderr: TextIO = None,
 ) -> int:
@@ -574,6 +598,31 @@ def run(
     sudo_invalidation = sudo_invalidator()
     if sudo_invalidation.detail:
         scan_warnings = list(scan_warnings) + [sudo_invalidation.detail]
+    if options.sandbox:
+        if sandbox_config is None:
+            configured = resolve_sandbox_config(os.environ)
+            sandbox_config = SandboxConfig(
+                backend="devtools",
+                work_root=configured.work_root,
+                timeout_seconds=configured.timeout_seconds,
+            )
+        return _run_sandboxed_handoff(
+            options,
+            report,
+            pkgbuild_path,
+            cwd_path,
+            final_scan_input,
+            engine,
+            stdout,
+            stderr,
+            scan_warnings,
+            install_hook_capture=install_hook_capture,
+            sandbox_config=sandbox_config,
+            sandbox_runner=sandbox_runner or subprocess.run,
+            pacman_runner=subprocess_run,
+            pacman_capture=pacman_capture or capture_trusted_executable,
+            environment=makepkg_environment,
+        )
     handoff_started = time.time()
     result = subprocess_run(
         # Pin the build script through makepkg's trailing argument-assignment
@@ -856,6 +905,170 @@ def _emit_packaged_install_hook_mismatch(
     return EXIT_SCAN_BLOCKED
 
 
+def _wants_host_install(makepkg_args: Sequence[str]) -> bool:
+    return any(arg in {"--install", "-i"} for arg in makepkg_args)
+
+
+def _run_sandboxed_handoff(
+    options: MakepkgWrapperOptions,
+    report,
+    pkgbuild_path: Path,
+    cwd_path: Path,
+    scan_input: PackageScanInput,
+    engine,
+    stdout: TextIO,
+    stderr: TextIO,
+    scan_warnings,
+    *,
+    install_hook_capture: Callable[..., PackageInstallHookCapture],
+    sandbox_config,
+    sandbox_runner: Callable[..., object],
+    pacman_runner: Callable[..., object],
+    pacman_capture: Callable[..., Optional[TrustedExecutable]],
+    environment: Mapping[str, str],
+) -> int:
+    """Build the scanned checkout in the isolated backend, then gate install.
+
+    The build produces fresh package archives in a private tree. Each archive
+    must embed the scanned install hook and pass the package analyzer before
+    any ``pacman -U`` handoff. A build-only invocation retains the tree so the
+    caller can inspect the artifacts; the guided workflow requests ``--install``
+    and the tree is removed after the transaction.
+    """
+
+    if not sandbox_config.enabled:
+        print(
+            "[AuraScan] The isolated build was requested but AURASCAN_AUR_SANDBOX is off. "
+            "Set AURASCAN_AUR_SANDBOX=devtools to enable it.",
+            file=stderr,
+        )
+        return EXIT_SANDBOX_UNAVAILABLE
+    status = sandbox_status(sandbox_config)
+    if not status.available:
+        print(
+            f"[AuraScan] The isolated build backend is unavailable: {status.reason}.",
+            file=stderr,
+        )
+        return EXIT_SANDBOX_UNAVAILABLE
+    print(
+        f"[AuraScan] Building {pkgbuild_path.parent.name} inside the devtools sandbox "
+        f"(base={status.base_root}).",
+        file=stdout,
+        flush=True,
+    )
+    try:
+        result = build_in_sandbox(
+            cwd_path,
+            config=sandbox_config,
+            makepkg_args=options.makepkg_args,
+            runner=sandbox_runner,
+            environ=environment,
+        )
+    except SandboxUnavailable as exc:
+        print(f"[AuraScan] The isolated build backend is unavailable: {exc}.", file=stderr)
+        return EXIT_SANDBOX_UNAVAILABLE
+    except SandboxBuildError as exc:
+        print(f"[AuraScan] The isolated build failed: {exc}.", file=stderr)
+        return EXIT_SANDBOX_FAILED
+
+    wants_install = _wants_host_install(options.makepkg_args)
+    retain_artifacts = False
+    try:
+        hook_problem = _packaged_install_hook_problem(
+            Path(result.package_dir) if result.package_dir else result.build_root,
+            result.started_at,
+            scan_input,
+            install_hook_capture,
+        )
+        if hook_problem is not None:
+            return _emit_packaged_install_hook_mismatch(
+                options,
+                report,
+                pkgbuild_path,
+                stdout,
+                scan_warnings,
+                0,
+                hook_problem,
+            )
+        for artifact in result.artifacts:
+            print(
+                f"[AuraScan] Scanning built package {artifact.name} "
+                f"(sha256 {artifact.sha256[:12]}, {artifact.size} bytes).",
+                file=stdout,
+                flush=True,
+            )
+            if not engine.scan_package(artifact.path):
+                print(
+                    "[AuraScan] BLOCKED: the built package did not pass the artifact scan. "
+                    "It was not installed.",
+                    file=stderr,
+                )
+                print(
+                    "[AuraScan] To retain the built artifacts for inspection, rerun "
+                    "aurascan-makepkg --aurascan-sandbox --syncdeps in this directory.",
+                    file=stderr,
+                )
+                return EXIT_SCAN_BLOCKED
+            artifact_risk = _risk_summary_from_engine(engine)
+            if _risk_blocks(artifact_risk) or _risk_requires_review(artifact_risk):
+                print(
+                    "[AuraScan] MANUAL REVIEW: the built package needs a review decision before installation. "
+                    "It was not installed.",
+                    file=stderr,
+                )
+                print(
+                    "[AuraScan] To retain the built artifacts for review, rerun "
+                    "aurascan-makepkg --aurascan-sandbox --syncdeps in this directory.",
+                    file=stderr,
+                )
+                return EXIT_MANUAL_REVIEW
+        if not wants_install:
+            retain_artifacts = True
+            print(
+                f"[AuraScan] Isolated build artifacts are retained under {result.build_root}.",
+                file=stdout,
+            )
+            for artifact in result.artifacts:
+                print(
+                    f"[AuraScan]   {artifact.name} sha256={artifact.sha256}",
+                    file=stdout,
+                )
+            print(
+                "[AuraScan] Rescan them before installation, then remove that directory. "
+                "It includes the private chroot copy, so removal may require sudo.",
+                file=stdout,
+            )
+            return 0
+        try:
+            sudo = pacman_capture("sudo", TRUSTED_SUDO_PATH)
+            pacman = pacman_capture("pacman", TRUSTED_PACMAN_PATH)
+        except UnsafeUpgradeExecutable as exc:
+            print(
+                f"[AuraScan] The trusted sudo/pacman identity is unavailable: {exc}.",
+                file=stderr,
+            )
+            return EXIT_SANDBOX_FAILED
+        if sudo is None or pacman is None:
+            print(
+                "[AuraScan] The trusted sudo/pacman identity is unavailable; the scanned artifacts were not installed.",
+                file=stderr,
+            )
+            return EXIT_SANDBOX_FAILED
+        print("[AuraScan] Installing the scanned sandbox artifacts through pacman.", file=stdout)
+        install_result = run_trusted_command(
+            [sudo.path, pacman.path, "-U", *[artifact.path for artifact in result.artifacts]],
+            [sudo, pacman],
+            runner=pacman_runner,
+            check=False,
+        )
+        return int(getattr(install_result, "returncode", 1))
+    finally:
+        if not retain_artifacts:
+            warning = cleanup_sandbox_build(result)
+            if warning:
+                print(f"[AuraScan] {warning}", file=stderr)
+
+
 def parse_args(argv: List[str]) -> MakepkgWrapperOptions:
     options = MakepkgWrapperOptions()
     i = 0
@@ -905,6 +1118,10 @@ def parse_args(argv: List[str]) -> MakepkgWrapperOptions:
         )
     if options.review_once:
         options.remember_review = False
+    if options.sandbox and options.json_output:
+        raise WrapperArgumentError("--aurascan-sandbox does not support --aurascan-json")
+    if options.sandbox and options.scan_only:
+        raise WrapperArgumentError("--aurascan-sandbox cannot be combined with --aurascan-scan-only")
     return options
 
 

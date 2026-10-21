@@ -50,6 +50,7 @@ from aurascan.core.pkgbuild_dependencies import (
     declared_build_dependencies,
     dependency_token_valid,
 )
+from aurascan.core.build_sandbox import AUR_SANDBOX_PACMAN_CONF
 from aurascan.core.trusted_executable import (
     TRUSTED_PACMAN_PATH,
     TrustedExecutable,
@@ -754,6 +755,156 @@ def offer_aur_update_review(
             pacman_revalidate=pacman_revalidate,
         )
     return True
+
+
+def run_sandboxed_aur_updates(
+    packages: Sequence[UpgradePackage],
+    *,
+    stdout: TextIO,
+    stderr: TextIO,
+    wrapper_provider: Optional[Callable[..., str]] = None,
+    work_root: Optional[Path] = None,
+    runner: Callable[..., object] = run_bounded_trusted_tool,
+    which: Callable[[str], Optional[str]] = shutil.which,
+    tool_capture: Callable[..., Optional[TrustedTool]] = capture_trusted_system_tool,
+    tool_revalidate: Callable[[TrustedTool], None] = revalidate_trusted_system_tool,
+    pacman_runner: Callable[..., object] = subprocess.run,
+    pacman_capture: Callable[..., Optional[TrustedExecutable]] = capture_trusted_executable,
+    pacman_revalidate: Callable[[TrustedExecutable], None] = revalidate_trusted_executable,
+    chain: Tuple[str, ...] = (),
+) -> Tuple[bool, str]:
+    """Build each pending AUR update in the isolated backend, without prompts.
+
+    This is the non-interactive continuation of the upgrade workflow. It keeps
+    the same review-first boundary as the guided flow: a package is downloaded
+    with the trusted Git boundary, reviewed through the wrapper, and only then
+    handed to the sandbox build. Declared AUR build dependencies are built the
+    same way first, bounded by the same dependency-chain cap as the guided
+    flow. Any failure stops before the next package so the repository
+    transaction is never described as a complete upgrade.
+    """
+
+    if wrapper_provider is None or not packages:
+        return False, "no sandbox build provider is available"
+    if len(chain) > AUR_DEPENDENCY_CHAIN_LIMIT:
+        return False, "the AUR dependency chain exceeds its bound"
+    resolved_work_root = Path(work_root) if work_root is not None else default_aur_update_work_root()
+
+    def dependency_pacman_runner(command, **kwargs):
+        argv = list(command)
+        if argv and argv[0] == TRUSTED_PACMAN_PATH:
+            argv = [argv[0], "--config", str(AUR_SANDBOX_PACMAN_CONF)] + argv[1:]
+        return pacman_runner(argv, **kwargs)
+
+    for package in packages:
+        name = str(getattr(package, "name", "") or "")
+        if name in chain:
+            return False, f"an AUR dependency cycle was detected at {name}"
+        print(f"[AuraScan] Downloading {name} from the Arch User Repository...", file=stdout)
+        try:
+            acquired = acquire_aur_package(
+                name,
+                work_root=resolved_work_root,
+                runner=runner,
+                which=which,
+                tool_capture=tool_capture,
+                tool_revalidate=tool_revalidate,
+            )
+        except AurUpdateAcquisitionError as exc:
+            return False, f"could not download {name}: {exc}"
+        print(
+            f"[AuraScan] Reviewing {name} (AUR revision {acquired.revision[:12]})...",
+            file=stdout,
+        )
+        review_result = wrapper_provider(
+            [AUR_SCAN_ONLY_ARGUMENT],
+            acquired.path,
+            stdout,
+            stderr,
+        )
+        if review_result != WRAPPER_RESULT_OK:
+            return False, f"{name} did not pass the review step ({review_result})"
+        content = read_captured_pkgbuild(acquired.path / "PKGBUILD")
+        if content is not None:
+            dependencies = check_guided_build_dependencies(
+                content,
+                work_root=resolved_work_root,
+                pacman_runner=dependency_pacman_runner,
+                pacman_capture=pacman_capture,
+                pacman_revalidate=pacman_revalidate,
+                runner=runner,
+                which=which,
+                tool_capture=tool_capture,
+                tool_revalidate=tool_revalidate,
+            )
+            if dependencies is not None and dependencies.aur_only:
+                for dependency in dependencies.aur_only[:MAX_SHOWN_DEPENDENCIES]:
+                    print(
+                        f"[AuraScan] Building AUR dependency {dependency} for {name} in the isolated sandbox...",
+                        file=stdout,
+                    )
+                    ok, detail = run_sandboxed_aur_updates(
+                        [UpgradePackage(name=dependency, repo="aur", package_type="aur")],
+                        stdout=stdout,
+                        stderr=stderr,
+                        wrapper_provider=wrapper_provider,
+                        work_root=resolved_work_root,
+                        runner=runner,
+                        which=which,
+                        tool_capture=tool_capture,
+                        tool_revalidate=tool_revalidate,
+                        pacman_runner=pacman_runner,
+                        pacman_capture=pacman_capture,
+                        pacman_revalidate=pacman_revalidate,
+                        chain=chain + (name,),
+                    )
+                    if not ok:
+                        return False, f"dependency {dependency} for {name} failed: {detail}"
+                dependencies = check_guided_build_dependencies(
+                    content,
+                    work_root=resolved_work_root,
+                    pacman_runner=dependency_pacman_runner,
+                    pacman_capture=pacman_capture,
+                    pacman_revalidate=pacman_revalidate,
+                    runner=runner,
+                    which=which,
+                    tool_capture=tool_capture,
+                    tool_revalidate=tool_revalidate,
+                ) if content is not None else None
+            if dependencies is not None and dependencies.aur_only:
+                blocked = ", ".join(dependencies.aur_only[:MAX_SHOWN_DEPENDENCIES])
+                return False, (
+                    f"{name} still declares unreviewed AUR build dependencies: {blocked}"
+                )
+            if dependencies is not None and dependencies.unresolved:
+                blocked = ", ".join(dependencies.unresolved[:MAX_SHOWN_DEPENDENCIES])
+                return False, f"{name} declares unresolvable build dependencies: {blocked}"
+        print(f"[AuraScan] Building {name} in the isolated sandbox...", file=stdout)
+        build_result = wrapper_provider(
+            ["--aurascan-sandbox", *AUR_BUILD_MAKEPKG_ARGUMENTS],
+            acquired.path,
+            stdout,
+            stderr,
+        )
+        if build_result != WRAPPER_RESULT_OK:
+            return False, f"{name} did not complete the isolated build and install ({build_result})"
+        installed = query_installed_package_version(
+            name,
+            runner=pacman_runner,
+            executable_capture=pacman_capture,
+            executable_revalidate=pacman_revalidate,
+        )
+        expected = str(getattr(package, "new_version", "") or "").strip()
+        if installed and expected and installed == expected:
+            print(f"[AuraScan] Verified: {name} {installed} is installed.", file=stdout)
+        elif installed:
+            print(f"[AuraScan] Installed {name} {installed}.", file=stdout)
+        else:
+            print(
+                f"[AuraScan] {name} was built and installed, but the installed version could not be verified with pacman.",
+                file=stderr,
+            )
+    return True, ""
 
 
 def _handle_single_aur_update(

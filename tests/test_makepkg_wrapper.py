@@ -2,6 +2,7 @@ import io
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -27,9 +28,17 @@ from aurascan.core.review import (
     get_non_acceptance_blockers,
 )
 from aurascan.core.trusted_tools import TrustedTool, TrustedToolError
+from aurascan.core.build_sandbox import (
+    SandboxArtifact,
+    SandboxBuildResult,
+    SandboxConfig,
+    SandboxStatus,
+)
+from aurascan.core.trusted_executable import TrustedExecutable
 from aurascan.makepkg_wrapper import (
     EXIT_MANUAL_REVIEW,
     EXIT_MAKEPKG_NOT_FOUND,
+    EXIT_SANDBOX_UNAVAILABLE,
     EXIT_SCAN_BLOCKED,
     EXIT_USAGE,
     locate_real_makepkg,
@@ -99,11 +108,25 @@ class FakeEngine:
         return self.scan_ok
 
 
-def fake_engine_factory(order, **engine_options):
+class SandboxFakeEngine(FakeEngine):
+    def __init__(self, order, *, package_scan_ok=True, package_scan_report=None, **kwargs):
+        super().__init__(order, **kwargs)
+        self.package_scan_ok = package_scan_ok
+        self.package_scan_report = package_scan_report
+        self.scanned_packages = []
+
+    def scan_package(self, pkg_path):
+        self.scanned_packages.append(pkg_path)
+        if self.package_scan_report is not None:
+            self.last_report = self.package_scan_report
+        return self.package_scan_ok
+
+
+def fake_engine_factory(order, *, engine_class=FakeEngine, **engine_options):
     created = []
 
     def factory(**kwargs):
-        created.append((kwargs, FakeEngine(order, **engine_options)))
+        created.append((kwargs, engine_class(order, **engine_options)))
         return created[-1][1]
 
     return factory, created
@@ -2873,3 +2896,205 @@ def test_json_scan_never_requests_an_advisory_explanation(tmp_path, monkeypatch)
     assert "Fixture explanation." not in stdout.getvalue()
     assert "explanation" not in data
     assert "makepkg" in order
+
+def _sandbox_result(tmp_path):
+    root = tmp_path / "aurascan-devbuild-test"
+    root.mkdir()
+    artifact = root / "demo-1.0-1-x86_64.pkg.tar.zst"
+    artifact.write_bytes(b"artifact")
+    return SandboxBuildResult(
+        backend="devtools",
+        build_root=root,
+        artifacts=(
+            SandboxArtifact(
+                name=artifact.name,
+                path=str(artifact),
+                size=8,
+                sha256="a" * 64,
+            ),
+        ),
+        duration_seconds=1.0,
+        started_at=time.time(),
+        command=("/usr/bin/arch-nspawn",),
+    )
+
+
+def _sandbox_run(tmp_path, order, *, engine_class=SandboxFakeEngine, args=None, sandbox_config="default", pacman_calls=None, package_scan_ok=True, package_scan_report=None):
+    factory, created = fake_engine_factory(
+        order,
+        engine_class=engine_class,
+        package_scan_ok=package_scan_ok,
+        package_scan_report=package_scan_report,
+    )
+
+    def capture(name, path):
+        return TrustedExecutable(name, path, 1, 2, 0, 0, 0o100755)
+
+    def trusted(command, executables, **kwargs):
+        if pacman_calls is not None:
+            pacman_calls.append((list(command), dict(kwargs)))
+        return Completed(0)
+
+    import aurascan.makepkg_wrapper as wrapper
+
+    original = wrapper.run_trusted_command
+    wrapper.run_trusted_command = trusted
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    try:
+        code = run(
+            args if args is not None else ["--aurascan-sandbox", "--syncdeps", "--install"],
+            cwd=tmp_path,
+            engine_factory=factory,
+            makepkg_locator=lambda: "/usr/bin/makepkg",
+            subprocess_run=fake_makepkg_runner(order, []),
+            sandbox_config=(
+                SandboxConfig("devtools", tmp_path / "work")
+                if sandbox_config == "default"
+                else sandbox_config
+            ),
+            pacman_capture=capture,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    finally:
+        wrapper.run_trusted_command = original
+    return code, created, stdout, stderr
+
+
+def test_wrapper_sandbox_scans_artifact_before_install(tmp_path, monkeypatch):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
+    result = _sandbox_result(tmp_path)
+    monkeypatch.setattr(makepkg_wrapper, "build_in_sandbox", lambda *args, **kwargs: result)
+    monkeypatch.setattr(
+        makepkg_wrapper,
+        "sandbox_status",
+        lambda *args, **kwargs: SandboxStatus(True, True, "devtools", base_ready=True),
+    )
+    pacman_calls = []
+    code, created, _stdout, _stderr = _sandbox_run(tmp_path, [], pacman_calls=pacman_calls)
+    assert code == 0
+    assert created[0][1].scanned_packages == [result.artifacts[0].path]
+    assert pacman_calls[0][0] == [
+        "/usr/bin/sudo",
+        "/usr/bin/pacman",
+        "-U",
+        result.artifacts[0].path,
+    ]
+    assert not result.build_root.exists()
+
+
+def test_wrapper_sandbox_scan_block_skips_install(tmp_path, monkeypatch):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
+    result = _sandbox_result(tmp_path)
+    monkeypatch.setattr(makepkg_wrapper, "build_in_sandbox", lambda *args, **kwargs: result)
+    monkeypatch.setattr(
+        makepkg_wrapper,
+        "sandbox_status",
+        lambda *args, **kwargs: SandboxStatus(True, True, "devtools", base_ready=True),
+    )
+    pacman_calls = []
+    code, _created, _stdout, stderr = _sandbox_run(
+        tmp_path, [], pacman_calls=pacman_calls, package_scan_ok=False
+    )
+    assert code == EXIT_SCAN_BLOCKED
+    assert pacman_calls == []
+    assert "did not pass the artifact scan" in stderr.getvalue()
+    assert not result.build_root.exists()
+
+
+def test_wrapper_sandbox_flag_enables_backend_without_environment(tmp_path, monkeypatch):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
+    result = _sandbox_result(tmp_path)
+    monkeypatch.setattr(makepkg_wrapper, "build_in_sandbox", lambda *args, **kwargs: result)
+    monkeypatch.setattr(
+        makepkg_wrapper,
+        "sandbox_status",
+        lambda *args, **kwargs: SandboxStatus(True, True, "devtools", base_ready=True),
+    )
+    monkeypatch.delenv("AURASCAN_AUR_SANDBOX", raising=False)
+    pacman_calls = []
+    code, _created, _stdout, _stderr = _sandbox_run(
+        tmp_path, [], sandbox_config=None, pacman_calls=pacman_calls
+    )
+    assert code == 0
+    assert pacman_calls
+
+
+def test_wrapper_sandbox_manual_review_skips_install(tmp_path, monkeypatch):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
+    result = _sandbox_result(tmp_path)
+    monkeypatch.setattr(makepkg_wrapper, "build_in_sandbox", lambda *args, **kwargs: result)
+    monkeypatch.setattr(
+        makepkg_wrapper,
+        "sandbox_status",
+        lambda *args, **kwargs: SandboxStatus(True, True, "devtools", base_ready=True),
+    )
+    pacman_calls = []
+    code, _created, _stdout, stderr = _sandbox_run(
+        tmp_path,
+        [],
+        pacman_calls=pacman_calls,
+        package_scan_report={
+            "risk_summary": {
+                "blocks_installation": False,
+                "requires_manual_review": True,
+                "recommended_action": "manual_review",
+                "action": "REVIEW",
+            }
+        },
+    )
+    assert code == EXIT_MANUAL_REVIEW
+    assert pacman_calls == []
+    assert "MANUAL REVIEW" in stderr.getvalue()
+    assert not result.build_root.exists()
+
+
+def test_wrapper_sandbox_build_only_retains_artifacts(tmp_path, monkeypatch):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
+    result = _sandbox_result(tmp_path)
+    monkeypatch.setattr(makepkg_wrapper, "build_in_sandbox", lambda *args, **kwargs: result)
+    monkeypatch.setattr(
+        makepkg_wrapper,
+        "sandbox_status",
+        lambda *args, **kwargs: SandboxStatus(True, True, "devtools", base_ready=True),
+    )
+    code, _created, stdout, _stderr = _sandbox_run(
+        tmp_path, [], args=["--aurascan-sandbox", "--syncdeps"]
+    )
+    assert code == 0
+    assert result.build_root.exists()
+    assert "retained" in stdout.getvalue()
+
+
+def test_wrapper_sandbox_unavailable_stops_before_build(tmp_path, monkeypatch):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("the sandbox build must not start when unavailable")
+
+    monkeypatch.setattr(makepkg_wrapper, "build_in_sandbox", forbidden)
+    monkeypatch.setattr(
+        makepkg_wrapper,
+        "sandbox_status",
+        lambda *args, **kwargs: SandboxStatus(
+            True, False, "devtools", reason="the trusted helper is missing"
+        ),
+    )
+    code, _created, _stdout, stderr = _sandbox_run(tmp_path, [])
+    assert code == EXIT_SANDBOX_UNAVAILABLE
+    assert "trusted helper is missing" in stderr.getvalue()
+
+
+def test_wrapper_sandbox_refuses_json(tmp_path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
+    code = run(
+        ["--aurascan-sandbox", "--aurascan-json"],
+        cwd=tmp_path,
+        engine_factory=fake_engine_factory([])[0],
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner([], []),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+    assert code == EXIT_USAGE

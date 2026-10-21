@@ -6,7 +6,7 @@
   "architecture": "x86_64",
   "filename": "aurascan-recovery-0.10.11-x86_64.iso",
   "released_at": "2026-10-21",
-  "url": "",
-  "sha256": "",
-  "status": "build-required"
+  "url": "https://github.com/crizzler/AuraScan/releases/download/v0.10.11/aurascan-recovery-0.10.11-x86_64.iso",
+  "sha256": "df78c277c73349bab532c890789a476d0746a5a2b9dbab10307fd0c6c482841c",
+  "status": "release-ready"
 }

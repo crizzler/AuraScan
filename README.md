@@ -397,7 +397,8 @@ incomplete-coverage result above.
 
 A clean result is not a sandbox. AuraScan's default scan never executes
 package code, so an allowed build still runs on this machine through makepkg.
-The optional upgrade sandbox (`AURASCAN_AUR_SANDBOX=devtools`) executes a
+The optional upgrade sandbox (`AURASCAN_AUR_SANDBOX=devtools`,
+`--aur-sandbox devtools`, or the interactive sandbox choice) executes a
 reviewed build inside a fresh devtools chroot and scans the produced archives,
 but a chroot shares the host kernel and one run cannot prove that a package is
 safe. When a reviewed package still needs hands-on testing, treat it as
@@ -1173,13 +1174,15 @@ not proof of safety: the chroot shares the host kernel and install hooks still
 run as root when the package is installed.
 
 In an interactive session, when this blocker is the only blocking finding and
-at least one repository package is planned, AuraScan offers a repository-only
-continuation instead of stopping at the message: it asks whether to run the
-repository-only upgrade now, re-runs the preflight bound to a repository-only
-plan, and lists each pending AUR update. Declining the offer, running with
-`--yes` or `--json`, or having no interactive answer keeps the hard stop
-exactly as before. The offer never clears the blocker, never runs the AUR
-helper, and never installs an AUR update.
+at least one repository package is planned, AuraScan offers the isolated AUR
+build as the default continuation when the devtools backend is available,
+with repository-only and keep-blocked alternatives. The sandboxed choice
+re-runs the preflight with `--aur-sandbox devtools`, applies the repository
+transaction first, then builds, scans, and installs each pending AUR update.
+Without an available backend it offers the repository-only continuation
+instead. `--yes`, `--json`, dry runs, and runs with no interactive answer keep
+the hard stop exactly as before. None of the choices clears the blocker, runs
+the AUR helper, or installs an unverified AUR archive.
 
 After the repository-only upgrade completes successfully - or directly when
 you decline it or have no repository updates pending - AuraScan offers to
@@ -1272,7 +1275,9 @@ The config keys are `AURASCAN_UPGRADE_PREFLIGHT_ENABLED`,
 `AURASCAN_UPGRADE_PREFLIGHT_AI`, and
 `AURASCAN_KERNEL_MODULE_AUTOPILOT_ENABLED`.
 Supported helper values are `auto`, `paru`, `yay`, `shelly`, and `none`.
-Supported sandbox values are `off` (default) and `devtools`.
+Supported sandbox values are `off` (configured default) and `devtools`; an
+interactive upgrade offers `devtools` as the default choice when the backend
+is available, while non-interactive runs keep the blocker.
 `aurascan upgrade --enable-preflight` can temporarily override a disabled
 preflight setting, while `--disable-preflight` disables it for that invocation
 and does not run the upgrade command.

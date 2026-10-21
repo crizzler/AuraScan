@@ -128,8 +128,9 @@ also print the display-only finding explanation described in section 5. The
 stage runs only after a successful repository-only upgrade, and it never
 routes a build through the AUR helper.
 
-The opt-in isolated AUR build (`core/build_sandbox.py`) is a separate,
-consented execution boundary. With `AURASCAN_AUR_SANDBOX=devtools`, a
+The explicitly consented isolated AUR build (`core/build_sandbox.py`) is a
+separate execution boundary. With `AURASCAN_AUR_SANDBOX=devtools`,
+`--aur-sandbox devtools`, or an accepted interactive sandbox choice, a
 reviewed checkout is copied into a private `0700` tree and built inside a
 fresh `extra-x86_64` devtools chroot. The produced archives are hashed,
 checked against the scanned `.INSTALL` bytes, scanned by the package

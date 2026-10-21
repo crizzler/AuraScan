@@ -1614,13 +1614,16 @@ through the AUR helper, and must never weaken the blocker above.
 
 ### Isolated AUR build stage
 
-`core/build_sandbox.py` owns the opt-in isolated build. It is a separate
-evidence and execution boundary, not part of the deterministic scan:
+`core/build_sandbox.py` owns the explicitly consented isolated build. It is a
+separate evidence and execution boundary, not part of the deterministic scan:
 
 - config is `AURASCAN_AUR_SANDBOX=off|devtools` (default `off`) plus an
   optional `AURASCAN_AUR_SANDBOX_WORK_ROOT` (default `/var/tmp`). Only
-  `devtools` is implemented; the backend is never enabled by a package script,
-  helper configuration, AI output or repository content;
+  `devtools` is implemented; the backend is never enabled automatically by a
+  package script, helper configuration, AI output or repository content. An
+  interactive upgrade may offer the sandbox as the default continuation, and
+  the user's answer is the explicit per-run consent; `--yes`, `--json`, and
+  dry runs keep the hard stop;
 - `sandbox_status` only inspects fixed paths. It requires the trusted
   `/usr/bin/arch-nspawn`, `/usr/bin/mkarchroot`, `/usr/bin/sudo`,
   `/usr/bin/cp` and `/usr/bin/rm` identities, the root-owned devtools
@@ -1654,7 +1657,8 @@ evidence and execution boundary, not part of the deterministic scan:
   `sudo pacman -U`; with `--install` absent, artifacts are retained in the
   private tree only after a clean scan. JSON output is refused in this mode;
 - the upgrade route (`UPG-AUR-BUILD-SANDBOXED`, MEDIUM) is available only when
-  the backend is enabled and available. It replans the transaction with
+  the backend is enabled explicitly or selected from the interactive offer and
+  the backend passes its availability checks. It replans the transaction with
   `--aur-helper none`, verifies the repository handoff first, and then runs
   `run_sandboxed_aur_updates` without per-package prompts. A missing backend,
   failed build, blocked artifact scan, dependency cycle, over-long dependency

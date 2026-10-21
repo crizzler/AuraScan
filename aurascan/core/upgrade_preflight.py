@@ -715,29 +715,48 @@ def run_upgrade(
             aur_update_wrapper=aur_update_wrapper,
         )
     if report.blocks_upgrade:
-        if offer_repository_only_continuation(report, options, input_func=input_func, stdout=stdout, stderr=stderr):
+        continuation = offer_aur_build_continuation(
+            report,
+            options,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        rerun_kwargs = dict(
+            runner=runner,
+            which=which,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+            snapshot=snapshot,
+            urlopen=urlopen,
+            config_drift_root=config_drift_root,
+            config_drift_runner=config_drift_runner,
+            modules_root=modules_root,
+            pacman_conf_path=pacman_conf_path,
+            repository_repair_backup_root=repository_repair_backup_root,
+            followup_context_root=followup_context_root,
+            followup_interactive=followup_interactive,
+            agent_escalation_provider=agent_escalation_provider,
+            aur_update_wrapper=aur_update_wrapper,
+        )
+        if continuation == "sandbox":
+            print(
+                "[AuraScan] Continuing with the isolated devtools AUR build route.",
+                file=stdout,
+            )
+            return run_upgrade(
+                list(argv or []) + ["--aur-sandbox", "devtools"],
+                **rerun_kwargs,
+            )
+        if continuation == "repository":
             print(
                 "[AuraScan] Continuing with the repository-only upgrade. The AUR update(s) below stay pending.",
                 file=stdout,
             )
             status = run_upgrade(
                 list(argv or []) + ["--aur-helper", "none"],
-                runner=runner,
-                which=which,
-                input_func=input_func,
-                stdout=stdout,
-                stderr=stderr,
-                snapshot=snapshot,
-                urlopen=urlopen,
-                config_drift_root=config_drift_root,
-                config_drift_runner=config_drift_runner,
-                modules_root=modules_root,
-                pacman_conf_path=pacman_conf_path,
-                repository_repair_backup_root=repository_repair_backup_root,
-                followup_context_root=followup_context_root,
-                followup_interactive=followup_interactive,
-                agent_escalation_provider=agent_escalation_provider,
-                aur_update_wrapper=aur_update_wrapper,
+                **rerun_kwargs,
             )
             handled = False
             if status == 0:
@@ -1140,48 +1159,86 @@ def repository_only_continuation_available(report: UpgradePreflightReport, optio
     return all(finding.rule_id == AUR_BUILD_BLOCK_RULE_ID for finding in blocking)
 
 
-def offer_repository_only_continuation(
+def offer_aur_build_continuation(
     report: UpgradePreflightReport,
     options: UpgradeOptions,
     *,
     input_func: Callable[[str], str],
     stdout,
     stderr,
-) -> bool:
-    """Interview the user about the documented continuation past the blocker.
+) -> str:
+    """Interview the user about the documented AUR build continuations.
 
-    Returns True only after an explicit interactive choice to continue with a
-    repository-only transaction. The caller then re-runs the preflight bound to
-    a repository-only plan before any package-manager command can run, so the
-    AUR helper is never invoked and the blocker is never waived by an answer.
+    Returns ``"sandbox"`` after explicit consent to build in the isolated
+    devtools backend, ``"repository"`` for a repository-only transaction, or
+    ``""`` when the upgrade stays blocked. The caller re-runs the preflight
+    with the selected route before any package-manager or build command can
+    run, so the AUR helper is never invoked and the blocker is never waived by
+    an answer.
     """
     if not repository_only_continuation_available(report, options):
-        return False
+        return ""
     repo_count = len(report.plan.repo_packages)
     aur_count = len(report.plan.aur_packages)
     repo_label = "repository package" if repo_count == 1 else "repository packages"
     aur_label = "AUR update" if aur_count == 1 else "AUR updates"
-    print("\n[AuraScan] Repository-only continuation", file=stdout)
-    print(
-        "[AuraScan] The AUR source-build blocker applies to the automatic helper handoff; "
-        "the repository part of this upgrade is not affected.",
-        file=stdout,
-    )
-    print(
-        f"[AuraScan] AuraScan can update the {repo_count} planned {repo_label} through pacman now "
-        f"and leave the {aur_count} {aur_label} below pending.",
-        file=stdout,
-    )
-    print_pending_aur_update_guidance(report.plan.aur_packages, stream=stdout)
+    sandbox = None
+    if options.aur_sandbox == "off":
+        config = resolve_sandbox_config({AUR_SANDBOX_ENV: "devtools"})
+        if not config.error:
+            sandbox = sandbox_status(config)
+    sandbox_available = bool(sandbox is not None and sandbox.enabled and sandbox.available)
+    if sandbox_available:
+        print("\n[AuraScan] Isolated AUR build available", file=stdout)
+        print(
+            "[AuraScan] The automatic helper handoff is blocked because AuraScan cannot prove "
+            "that it routes every AUR build through its scan wrapper.",
+            file=stdout,
+        )
+        print(
+            f"[AuraScan] AuraScan can update the {repo_count} planned {repo_label} through pacman, "
+            f"then build the {aur_count} {aur_label} in the private {sandbox.backend} chroot, "
+            "scan the produced package, and install only a passing artifact.",
+            file=stdout,
+        )
+        print(
+            "[AuraScan] The sandbox still executes package build code; it is risk reduction, "
+            "not proof that the package is safe.",
+            file=stdout,
+        )
+        print_pending_aur_update_guidance(report.plan.aur_packages, stream=stdout)
+        print("[AuraScan] Options:", file=stdout)
+        print("[AuraScan]   [s] Sandboxed AUR build plus repository upgrade (default)", file=stdout)
+        print("[AuraScan]   [r] Repository-only upgrade; leave the AUR update(s) pending", file=stdout)
+        print("[AuraScan]   [n] Keep the upgrade blocked", file=stdout)
+        prompt = "Choice [S/r/n] "
+    else:
+        print("\n[AuraScan] Repository-only continuation", file=stdout)
+        print(
+            "[AuraScan] The AUR source-build blocker applies to the automatic helper handoff; "
+            "the repository part of this upgrade is not affected.",
+            file=stdout,
+        )
+        print(
+            f"[AuraScan] AuraScan can update the {repo_count} planned {repo_label} through pacman now "
+            f"and leave the {aur_count} {aur_label} below pending.",
+            file=stdout,
+        )
+        print_pending_aur_update_guidance(report.plan.aur_packages, stream=stdout)
+        prompt = "Run the repository-only upgrade now? [y/N] "
     try:
-        answer = input_func("Run the repository-only upgrade now? [y/N] ").strip().lower()
+        answer = input_func(prompt).strip().lower()
     except (EOFError, KeyboardInterrupt):
         print("\n[AuraScan] No interactive answer received; keeping the upgrade blocked.", file=stderr)
-        return False
-    if answer in {"y", "yes", "r", "repo", "repository"}:
-        return True
-    print("[AuraScan] Repository-only continuation declined. Keeping the upgrade blocked.", file=stderr)
-    return False
+        return ""
+    if sandbox_available and answer in {"", "s", "sandbox", "devtools", "y", "yes"}:
+        return "sandbox"
+    if answer in {"r", "repo", "repository"} or (
+        not sandbox_available and answer in {"y", "yes"}
+    ):
+        return "repository"
+    print("[AuraScan] AUR build continuation declined. Keeping the upgrade blocked.", file=stderr)
+    return ""
 
 
 def verify_upgrade_handoff(plan: UpgradePlan, *, runner: Callable = subprocess.run) -> List[str]:

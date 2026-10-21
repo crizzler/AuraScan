@@ -90,6 +90,21 @@ def trusted_upgrade_executables(monkeypatch):
     monkeypatch.setattr(trusted_executable, "revalidate_trusted_executable", lambda _executable: None)
 
 
+@pytest.fixture(autouse=True)
+def sandbox_offer_unavailable(monkeypatch):
+    # Keep the interactive sandbox offer out of unrelated interview tests; the
+    # dedicated offer test replaces this probe with an available backend.
+    monkeypatch.setattr(
+        upgrade_preflight,
+        "sandbox_status",
+        lambda *_args, **_kwargs: SandboxStatus(
+            enabled=False,
+            available=False,
+            backend="devtools",
+        ),
+    )
+
+
 class FakeResponse:
     def __init__(self, payload):
         self.payload = payload
@@ -1710,6 +1725,94 @@ def test_aur_build_block_interview_runs_repository_only_upgrade():
     assert "Upgrade blocked" not in stderr.getvalue()
 
 
+def test_aur_build_block_interview_defaults_to_isolated_sandbox(monkeypatch):
+    monkeypatch.setattr(
+        upgrade_preflight,
+        "sandbox_status",
+        lambda *_args, **_kwargs: SandboxStatus(
+            enabled=True,
+            available=True,
+            backend="devtools",
+        ),
+    )
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+        ("/usr/bin/shelly", "--version"): completed("3.0.1\n"),
+        ("/usr/bin/shelly", "list-updates", "aur", "--json"): completed(
+            '[{"Name":"demo-bin","OldVersion":"1","Version":"2"}]\n'
+        ),
+        ("/usr/bin/shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"): completed(returncode=0),
+    })
+    real_run_upgrade = upgrade_preflight.run_upgrade
+    calls = []
+
+    def fake_run_upgrade(argv, **_kwargs):
+        calls.append(list(argv))
+        return 0
+
+    monkeypatch.setattr(upgrade_preflight, "run_upgrade", fake_run_upgrade)
+    prompts = []
+    stdout = io.StringIO()
+    status = real_run_upgrade(
+        ["--no-ai", "--aur-helper", "shelly"],
+        runner=runner,
+        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
+        snapshot=base_snapshot(),
+        input_func=lambda prompt: prompts.append(prompt) or "",
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    assert status == 0
+    assert prompts == ["Choice [S/r/n] "]
+    assert calls == [["--no-ai", "--aur-helper", "shelly", "--aur-sandbox", "devtools"]]
+    assert "Isolated AUR build available" in stdout.getvalue()
+    assert "Continuing with the isolated devtools AUR build route." in stdout.getvalue()
+
+
+def test_aur_build_block_interview_can_choose_repository_when_sandbox_offered(monkeypatch):
+    monkeypatch.setattr(
+        upgrade_preflight,
+        "sandbox_status",
+        lambda *_args, **_kwargs: SandboxStatus(
+            enabled=True,
+            available=True,
+            backend="devtools",
+        ),
+    )
+    monkeypatch.setattr(upgrade_preflight, "offer_aur_update_review", lambda *_args, **_kwargs: True)
+    runner = FakeRunner({
+        tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
+        ("/usr/bin/shelly", "--version"): completed("3.0.1\n"),
+        ("/usr/bin/shelly", "list-updates", "aur", "--json"): completed(
+            '[{"Name":"demo-bin","OldVersion":"1","Version":"2"}]\n'
+        ),
+        ("/usr/bin/shelly", "upgrade", "all", "--no-flatpak", "--no-appimage"): completed(returncode=0),
+    })
+    real_run_upgrade = upgrade_preflight.run_upgrade
+    calls = []
+
+    def fake_run_upgrade(argv, **_kwargs):
+        calls.append(list(argv))
+        return 0
+
+    monkeypatch.setattr(upgrade_preflight, "run_upgrade", fake_run_upgrade)
+    stdout = io.StringIO()
+    status = real_run_upgrade(
+        ["--no-ai", "--aur-helper", "shelly"],
+        runner=runner,
+        which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
+        snapshot=base_snapshot(),
+        input_func=lambda _prompt: "r",
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    assert status == 0
+    assert calls == [["--no-ai", "--aur-helper", "shelly", "--aur-helper", "none"]]
+    assert "Continuing with the repository-only upgrade." in stdout.getvalue()
+
+
 def test_aur_build_block_interview_declined_keeps_hard_stop():
     runner = FakeRunner({
         tuple(preview_cmd()): completed("glibc\t2.40-1\tcore\t1\t\t\t\n"),
@@ -1727,7 +1830,7 @@ def test_aur_build_block_interview_declined_keeps_hard_stop():
         runner=runner,
         which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
         snapshot=base_snapshot(),
-        input_func=lambda _prompt: "",
+        input_func=lambda _prompt: "n",
         stdout=io.StringIO(),
         stderr=stderr,
     )

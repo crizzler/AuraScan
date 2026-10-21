@@ -19,8 +19,9 @@ from the AUR build path, not teaching the helper to use one.
 
 ## What the sandbox changes
 
-When `AURASCAN_AUR_SANDBOX=devtools` is set and the backend is available, the
-upgrade flow:
+When the route is enabled explicitly (`AURASCAN_AUR_SANDBOX=devtools` or
+`--aur-sandbox devtools`) or accepted from the interactive offer described
+below, and the backend is available, the upgrade flow:
 
 1. replans the transaction with `--aur-helper none`;
 2. applies and verifies the repository transaction through the trusted
@@ -72,8 +73,11 @@ still never asked to build AUR packages.
 
 ## Invariants
 
-- Opt-in only. The default is `off`; no package script, AI response, or helper
-  configuration can enable it.
+- Explicit consent only. The configured default is `off`; no package script,
+  AI response, or helper configuration can enable it automatically. An
+  interactive upgrade may offer the sandbox as the default continuation after
+  showing the blocker and the risk; pressing Enter or answering `s` is the
+  explicit per-run consent, and declining keeps the hard stop.
 - Fixed absolute tools. `arch-nspawn`, `mkarchroot`, `sudo`, `cp`, and `rm`
   are captured as root-owned, non-writable, non-symlink identities and
   revalidated before the build. The standard `extra-x86_64-build` entry point
@@ -101,7 +105,11 @@ still never asked to build AUR packages.
 | `AURASCAN_AUR_SANDBOX_WORK_ROOT` | absolute directory | `/var/tmp` |
 | `aurascan upgrade --aur-sandbox` | `off`, `devtools` | config value |
 
-The base chroot is created once, outside AuraScan, with the documented
+In an interactive upgrade, when the configured value is `off` and the backend
+is available, the AUR-build prompt offers the sandbox as its default choice;
+the other choices are repository-only and keep-blocked. `--yes`, `--json`, and
+dry runs keep the original hard stop. The base chroot is created once, outside
+AuraScan, with the documented
 `mkarchroot` command; AuraScan refuses to start a build without it. Each build
 copies the base into a private tree (`cp -a --reflink=auto`), uses a private
 package cache under that tree, and removes the whole tree afterwards. The host

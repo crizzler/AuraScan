@@ -1260,8 +1260,43 @@ def test_incident_runtime_provider_is_required_for_live_sessions(tmp_path):
 
     prompts = []
 
+    # Deterministic collection seams: collection availability must not leak the
+    # host environment into this workflow assertion.  The isolated release build
+    # runs the suite under an underprivileged UID where the live journal is
+    # unreadable, which previously turned this dry run into an "unavailable"
+    # incident instead of the empty-but-collected one under test.
+    def runner(command, **_kwargs):
+        command = list(command)
+        if command and command[0].endswith("journalctl"):
+            if "--list-boots" in command:
+                return subprocess.CompletedProcess(
+                    command, 0, json.dumps([{"index": 0, "boot_id": "a" * 32}]), ""
+                )
+            if "--output=json" in command:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    json.dumps(
+                        {
+                            "__CURSOR": "s=fixture",
+                            "__REALTIME_TIMESTAMP": "1700000000000000",
+                            "MESSAGE": "fixture journal record",
+                            "PRIORITY": "6",
+                            "_BOOT_ID": "a" * 32,
+                        }
+                    )
+                    + "\n",
+                    "",
+                )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def which(name):
+        return f"/usr/bin/{name}" if name in {"journalctl", "coredumpctl"} else None
+
     status = run_incidents(
         ["--dry-run"],
+        runner=runner,
+        which=which,
         input_func=lambda prompt: prompts.append(prompt) or "",
         stdout=io.StringIO(),
         stderr=io.StringIO(),

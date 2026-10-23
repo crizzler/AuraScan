@@ -131,7 +131,12 @@ def _require_root():
         raise IntelligenceError("administrative authorization required; run this operation with sudo")
 
 
-def _status(json_mode=False, include_services=False):
+def intelligence_status_metadata() -> dict:
+    """Return intelligence status without printing or changing local state.
+
+    Callers that only need read-only evidence (for example the desktop UI
+    snapshot) use this instead of capturing ``_status`` output.
+    """
     metadata = load_intelligence_snapshot().metadata()
     try:
         assert_production_trust_configured()
@@ -139,6 +144,11 @@ def _status(json_mode=False, include_services=False):
         metadata["update_channel"] = "configured"
     except IntelligenceError:
         metadata["update_channel"] = "unconfigured"
+    return metadata
+
+
+def _status(json_mode=False, include_services=False):
+    metadata = intelligence_status_metadata()
     if include_services:
         metadata["status_schema"] = STATUS_SCHEMA
         metadata.update(_service_status())

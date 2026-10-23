@@ -102,7 +102,7 @@ policy authoritative over optional AI.
 | Intelligence | Independently signed detection data, reviewed advisories, one captured snapshot per operation |
 | Endpoint monitoring | Configuration-drift review, security audit of installed state and package history, hardware and module health signals |
 | Response and recovery | Incident diagnosis, guarded repair planning, optional recovery boot environment |
-| Interface | CLI, tray, setup wizard and doctor, guided triage, contextual follow-up |
+| Interface | CLI, tray, desktop snapshot, setup wizard and doctor, guided triage, contextual follow-up |
 
 The trust model is static-first: AuraScan reads untrusted package, source, and
 agent-control content without executing it, reports what it could and could not
@@ -1441,6 +1441,29 @@ The agent is foreground-only. JSON output, noninteractive workflows, pacman
 hooks, package-manager `--yes`, incident collectors, background services, and
 AuraScan Recovery cannot start it. Background Safe Autopilot retains its
 two-recipe deterministic allowlist.
+
+## Desktop Evidence Snapshot
+
+`aurascan ui` prints the read-only evidence snapshot consumed by the optional
+desktop evidence console. The console is a development prototype; its design
+and contract live in
+[`docs/DESKTOP_UI_DESIGN.md`](docs/DESKTOP_UI_DESIGN.md).
+
+```bash
+aurascan ui
+aurascan ui --json
+```
+
+The snapshot is one bounded JSON object with the contract string
+`aurascan-ui/1`. It composes check evidence, the detection-data identity, and
+pending incident counts that AuraScan already owns. It exits 0 whenever the
+snapshot is produced: `doctor.ok` carries the health conclusion, so an
+actionable state is not reported as a command failure.
+
+`aurascan ui` never changes policy or local state, never calls a model, never
+runs a package manager, never executes package or fixture content, and opens no
+network listener. Fields are whitelisted and bounded; malformed or oversized
+evidence fails the whole snapshot instead of rendering a partial view.
 
 ## AuraScan Updater Tray Icon
 

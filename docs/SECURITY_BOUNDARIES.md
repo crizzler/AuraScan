@@ -215,6 +215,25 @@ local programs cannot create a service-disable action.
 | Prohibited | Pruning manifest trust/review state; leaving a queued AI job pointing at a deleted report; silently invalidating user state |
 | Evidence | Approvals are machine-and-UID bound; a rebuilt host cannot restore them |
 
+### 11. Desktop UI snapshot
+
+| Aspect | Detail |
+| --- | --- |
+| Trusted side | The deterministic checks and loaders that already own each piece of evidence |
+| Untrusted side | Nothing is executed; the optional renderer is a pure view over emitted JSON |
+| Validation | Contract string, whitelisted fields, bounded check and marker counts, known status vocabularies; any mismatch rejects the whole snapshot |
+| Allowed authority | Read existing local evidence and print it to stdout |
+| Prohibited | Mutating state, calling a model, opening a listener, running a package manager, executing package or fixture content, certifying safety |
+| Evidence | Doctor checks, detection-data identity, and pending incident counts only |
+
+`aurascan ui` composes only evidence that another AuraScan workflow already
+produced. It does not add a policy decision. A desktop shell, when one ships,
+receives no authority from rendering the snapshot: its actions are enumerated
+intent IDs that the Python core revalidates under the existing consent rules,
+and a compromised renderer can misdisplay evidence but cannot change a
+deterministic result, install a package, or establish trust. An unavailable
+incident state is reported as unavailable, never as zero.
+
 ## Prohibited capability combinations
 
 The audit tool enforces the mechanically checkable subset (see

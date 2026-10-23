@@ -107,7 +107,9 @@ domain   ←   catalog
   Command dispatch belongs here too, including flags that control another
   subsystem: `core/incident_cli.py` owns the automation-control flags that used
   to live in the incident workflow, and application code may not import it back
-  (INV-007).
+  (INV-007). `core/ui_cli.py` composes the read-only `aurascan-ui/1` desktop
+  snapshot from existing evidence; it owns no rules, no state, and no
+  privileged capability.
 
 Renderer modules and their inputs:
 

@@ -36,6 +36,10 @@ review_decisions.db
 scancache.db
 history.db
 
+# Desktop UI prototype
+node_modules/
+desktop/src/fixtures/local.*.json
+
 # Local scratch/demo files from manual scanner experiments
 /PKGBUILD.*
 /test_pkgbuild*

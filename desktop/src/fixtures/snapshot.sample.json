@@ -1,0 +1,119 @@
+{
+  "app": {
+    "platform": "linux",
+    "python": "3.14.0",
+    "version": "0.10.19"
+  },
+  "contract": "aurascan-ui/1",
+  "doctor": {
+    "ok": false,
+    "checks": [
+      {
+        "name": "distro_compatibility",
+        "status": "ok",
+        "message": "Distro compatibility: Arch Linux (supported)",
+        "details": { "id": "arch", "name": "Arch Linux", "support_tier": "supported", "arch_family": true }
+      },
+      {
+        "name": "package_manager_capabilities",
+        "status": "ok",
+        "message": "Package-manager tools found: makepkg, pacman, pacman-conf, vercmp",
+        "details": { "tools": { "pacman": "/usr/bin/pacman", "makepkg": "/usr/bin/makepkg", "vercmp": "/usr/bin/vercmp" }, "missing": [] }
+      },
+      {
+        "name": "desktop_session",
+        "status": "ok",
+        "message": "Desktop session: kde (wayland); tray support: best",
+        "details": { "session_type": "wayland", "primary_desktop": "kde", "tray_support": "best" }
+      },
+      {
+        "name": "config_file",
+        "status": "ok",
+        "message": "User configuration file present"
+      },
+      {
+        "name": "config_permissions",
+        "status": "ok",
+        "message": "Configuration permissions are private"
+      },
+      {
+        "name": "ai_provider",
+        "status": "ok",
+        "message": "AI provider: deepseek (configured, disabled)"
+      },
+      {
+        "name": "ai_key",
+        "status": "ok",
+        "message": "AI provider key present for deepseek"
+      },
+      {
+        "name": "instruction_guard_monitor",
+        "status": "ok",
+        "message": "Instruction Guard monitor unit is installed"
+      },
+      {
+        "name": "incident_maintenance_health",
+        "status": "warn",
+        "message": "Incident maintenance last result is stale"
+      },
+      {
+        "name": "incident_pstore",
+        "status": "warn",
+        "message": "Persistent storage has no readable crash records"
+      },
+      {
+        "name": "recovery_iso",
+        "status": "error",
+        "message": "Recovery ISO manifest does not describe this AuraScan release"
+      },
+      {
+        "name": "recovery_bootloader",
+        "status": "warn",
+        "message": "Bootloader integration is not configured for recovery"
+      },
+      {
+        "name": "security_arch_audit",
+        "status": "warn",
+        "message": "arch-audit is not installed; official advisory checks are limited"
+      },
+      {
+        "name": "tool_clamscan",
+        "status": "ok",
+        "message": "Optional tool found: clamscan"
+      },
+      {
+        "name": "tool_bsdtar",
+        "status": "ok",
+        "message": "Optional tool found: bsdtar"
+      },
+      {
+        "name": "local_pacman_hook",
+        "status": "ok",
+        "message": "Local pacman hook enforces AuraScan scanning"
+      },
+      {
+        "name": "hung_applications",
+        "status": "ok",
+        "message": "No wait-then-read pipe deadlocks detected"
+      }
+    ]
+  },
+  "generated_at": 1792757134,
+  "incidents": {
+    "available": true,
+    "pending": 2,
+    "unseen": 1,
+    "highest_severity": "HIGH"
+  },
+  "intelligence": {
+    "automatic_updates": false,
+    "digest": "83147e60e2bb002fcb4676d56f929aed423a86c87fab298823f06d6f9f6e7b17",
+    "identity": "bc9a8403c5bc89cc15f4ba051b9353c63893c4a6c2f65ddae6cebf26e72de36f",
+    "reviewed_at": "2026-09-16",
+    "schema_version": "2.0",
+    "sequence": 0,
+    "source": "bundled",
+    "status": "bundled",
+    "update_channel": "unconfigured"
+  }
+}

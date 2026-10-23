@@ -751,6 +751,39 @@ detection, not pasted-command/link preflight, privileged fanotify or process
 interception, or a same-UID containment mechanism. Same-UID malware can attack
 user state and root malware can defeat the monitor.
 
+## Desktop UI contract
+
+`docs/DESKTOP_UI_DESIGN.md` owns the design. The implementation is split so the
+evidence contract can be reviewed separately from any renderer.
+
+- `aurascan ui --json` (`aurascan/core/ui_cli.py`) is the only backend surface
+  added for the desktop UI. It is a presentation entry point: bounded,
+  read-only, no AI call, no package-manager invocation, no listener, and no
+  state mutation. Severity, confidence, and coverage are consumed from existing
+  evidence and never computed there.
+- `build_ui_snapshot` is pure and takes injected evidence plus a timestamp, so
+  the contract is testable without a host, a clock, or a package manager. Keep
+  host access in the provider functions.
+- The contract string is frozen for this phase. Adding a field is allowed;
+  removing, renaming, or retyping one needs `aurascan-ui/2` and a renderer
+  parser update in the same change.
+- Evidence that cannot be read degrades to an explicit unavailable state
+  (incidents) or a bounded failure (doctor), never to a zero or an empty list
+  that would read as "nothing found".
+- `tests/test_ui_contract.py` pins the envelope, the doctor fields the renderer
+  parses, the bounds, and the absence of side effects. A backend change that
+  breaks the UI must fail that file.
+- The renderer lives in `desktop/`. It is not part of the `aurascan` Python
+  package, not an AUR dependency, and not required by any CLI path. It builds
+  and tests headlessly with `npm run typecheck`, `npm test`, and `npm run
+  build`; a Node CI job is added when the app starts shipping.
+- The renderer must fail closed: an unknown contract, unknown check status,
+  missing evidence, or more than 1000 checks means "render nothing and explain
+  why", never a partial view with an optimistic tone.
+- Actions, when they are added, are enumerated intent IDs revalidated by the
+  core. The renderer never receives a command string, a free path, or execution
+  authority.
+
 ## Curated Fixture Pack
 
 The curated fixture pack lives under `tests/fixtures/curated_packages/`.

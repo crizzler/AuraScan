@@ -175,7 +175,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Repair agent command:\n"
             "  aurascan agent      Open the foreground contextual repair agent.\n\n"
             "Desktop command:\n"
-            "  aurascan updater   Run or configure the AuraScan Updater tray applet.\n\n"
+            "  aurascan updater   Run or configure the AuraScan Updater tray applet.\n"
+            "  aurascan ui        Emit a read-only evidence snapshot for desktop UIs.\n\n"
             "Pacman hook mode: when no --pkg or --pkgbuild is supplied, AuraScan "
             "reads pacman NeedsTargets from stdin and scans package archives. This "
             "mode is conservative, does not prove update context for smart fast "
@@ -537,6 +538,9 @@ def main(argv=None):
         sys.exit(run_security_audit(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "updater":
         sys.exit(run_updater(raw_argv[1:]))
+    if raw_argv and raw_argv[0] == "ui":
+        from aurascan.core.ui_cli import run_ui
+        sys.exit(run_ui(raw_argv[1:]))
     if raw_argv and raw_argv[0] == "ask":
         sys.exit(run_ask(
             raw_argv[1:],

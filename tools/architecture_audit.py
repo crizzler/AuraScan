@@ -102,6 +102,7 @@ UI_ENTRY_SUFFIXES = (
     "core.intelligence_cli",
     "core.recovery_cli",
     "core.incident_cli",
+    "core.ui_cli",
 )
 
 # Generic lifecycle frameworks. They coordinate operations that the lifecycle
@@ -1191,6 +1192,7 @@ def assign_layer(module_name: str, relative_path: str) -> str:
             "intelligence_cli",
             "recovery_cli",
             "incident_cli",
+            "ui_cli",
             "scan_report_presenter",
         ):
             return "presentation"

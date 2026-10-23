@@ -1,5 +1,7 @@
+from io import StringIO
 from pathlib import Path
 
+from aurascan import setup_wizard
 from aurascan.core.process_deadlocks import (
     cached_downgrade_path,
     detect_wait_then_read_deadlocks,
@@ -104,3 +106,26 @@ def test_doctor_parser_accepts_hung_application_repair_flag():
     args = build_doctor_parser().parse_args(["--fix-hung-apps"])
 
     assert args.fix_hung_apps is True
+
+
+def test_run_doctor_fix_hung_apps_passes_explicit_stderr(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(setup_wizard, "build_doctor_checks", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        setup_wizard,
+        "run_doctor_hung_application_repair",
+        lambda **kwargs: captured.update(kwargs) or 0,
+    )
+    stdout = StringIO()
+    stderr = StringIO()
+
+    status = setup_wizard.run_doctor(
+        ["--fix-hung-apps"],
+        stdout=stdout,
+        stderr=stderr,
+        proc_root=tmp_path / "proc",
+    )
+
+    assert status == 0
+    assert captured["stderr"] is stderr
+    assert captured["proc_root"] == tmp_path / "proc"

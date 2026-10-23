@@ -64,7 +64,7 @@ def test_pyproject_console_scripts_are_registered():
     data = tomllib.loads(read_text("pyproject.toml"))
 
     scripts = data["project"]["scripts"]
-    assert data["project"]["version"] == "0.10.18"
+    assert data["project"]["version"] == "0.10.19"
     assert scripts["aurascan"] == "aurascan.cli:main"
     assert scripts["aurascan-makepkg"] == "aurascan.makepkg_wrapper:main"
     assert data["project"]["requires-python"] == ">=3.8"

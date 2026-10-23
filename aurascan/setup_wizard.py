@@ -1117,6 +1117,7 @@ def run_doctor(
     argv=None,
     *,
     stdout=None,
+    stderr=None,
     env_path: Optional[Path] = None,
     env: Optional[Mapping[str, str]] = None,
     urlopen: Optional[Callable] = None,
@@ -1152,6 +1153,7 @@ def run_doctor(
     proc_root: Path = Path("/proc"),
 ) -> int:
     stdout = stdout or sys.stdout
+    stderr = stderr or sys.stderr
     args = build_doctor_parser().parse_args(argv)
     checks = build_doctor_checks(
         env_path=env_path or user_env_path(),

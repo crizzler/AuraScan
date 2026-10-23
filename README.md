@@ -42,16 +42,17 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
-The [v0.10.11 release](docs/releases/v0.10.11.md) makes `aurascan upgrade`
-handle pending AUR updates end to end: it offers a repository-only
-continuation, downloads each AUR update through the trusted Git boundary,
-reviews it with the normal scan, checks its declared build dependencies with
-read-only pacman queries, and builds and installs it through `aurascan-makepkg`
-only after a passing review and explicit consent. Blocks and reviews now name
-the failing entry, and an advisory AI explanation can restate what AuraScan
-found without ever changing a deterministic result. This is a recovery-bearing
-release with a fresh validated image; its release note records the exact image
-identity, build and boot gates, validation, and remaining limitations.
+The [v0.10.12 release](docs/releases/v0.10.12.md) is a package-only update
+that makes pacman-hook upgrades reliable for verified official repository
+packages. The hook binds a cached archive to the root-owned pacman sync
+databases by filename and SHA-256; verified official archives use a fast
+deterministic install-hook scan, routine systemd service management is
+LOW/non-manual, and auxiliary ClamAV/AI scans are skipped. Local, AUR,
+unknown, or checksum-mismatched archives keep the full scan and blocking
+behavior, and the hook now prints one compact transaction summary with the
+blocked package names and rule IDs. The v0.10.11 recovery image remains the
+retained, validated image; the v0.10.12 release note records that ISO and
+local-UKI gates were not rerun.
 
 ## What You Can Try Now
 

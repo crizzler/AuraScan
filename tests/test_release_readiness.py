@@ -52,12 +52,11 @@ def test_current_release_recovery_manifest_policy_is_versioned_and_fresh():
 
 def test_recovery_builder_pins_match_current_release_metadata():
     # The recovery builder validates its candidate against pinned identity
-    # constants; a stale pin silently prevents the release build (v0.10.11
-    # shipped v0.10.10 constants in its first candidate revision).
-    version = tomllib.loads(read_text("pyproject.toml"))["project"]["version"]
+    # constants; a package-only release retains the preceding image, so the
+    # builder pin follows the manifest image version, not the application.
     manifest = json.loads(read_text("aurascan/assets/aurascan-recovery-iso.json"))
     builder = read_text("packaging/recovery/build-iso.sh")
-    assert f'readonly expected_release_version="{version}"' in builder
+    assert f'readonly expected_release_version="{manifest["version"]}"' in builder
     assert f'readonly expected_release_date="{manifest["released_at"]}"' in builder
 
 
@@ -65,7 +64,7 @@ def test_pyproject_console_scripts_are_registered():
     data = tomllib.loads(read_text("pyproject.toml"))
 
     scripts = data["project"]["scripts"]
-    assert data["project"]["version"] == "0.10.11"
+    assert data["project"]["version"] == "0.10.12"
     assert scripts["aurascan"] == "aurascan.cli:main"
     assert scripts["aurascan-makepkg"] == "aurascan.makepkg_wrapper:main"
     assert data["project"]["requires-python"] == ">=3.8"
@@ -662,12 +661,8 @@ def test_recovery_bearing_v01011_release_contract():
 
     release_text = read_text("docs/releases/v0.10.11.md")
     release = " ".join(release_text.lower().split())
-    unreleased = normalized("docs/releases/unreleased.md")
     checklist = normalized("docs/RELEASE_CHECKLIST.md")
     announcement = normalized("docs/ANNOUNCEMENT.md")
-    pkgbuild = read_text("packaging/arch/PKGBUILD")
-    srcinfo = read_text("packaging/arch/.SRCINFO")
-    recovery_source = read_text("aurascan/core/recovery_cli.py")
     profile = read_text("packaging/recovery/archiso/profiledef.sh")
     archiso_issue = read_text("packaging/recovery/archiso/airootfs/etc/issue")
     uki_issue = read_text("packaging/recovery/rootfs/etc/issue")
@@ -677,18 +672,10 @@ def test_recovery_bearing_v01011_release_contract():
     assert "aurascan-recovery-0.10.11-x86_64.iso" in release
     assert "package-scanner rule version advances from `1.10.0` to `1.14.0`" in release
     assert "scanner version remains `2.6.0`" in release
-    assert "changes after v0.10.11" in unreleased
     assert "release disposition" in checklist
     assert "strictly smaller than 2 gib (2,147,483,648 bytes)" in checklist
     assert "for v0.10.11" in checklist
     assert "v0.10.11 release" in announcement
-    assert "pkgver=0.10.11" in pkgbuild
-    assert "pkgrel=1" in pkgbuild
-    assert "sha256sums=('SKIP')" in pkgbuild or re.search(r"sha256sums=\('[0-9a-f]{64}'\)", pkgbuild)
-    assert "\tpkgver = 0.10.11" in srcinfo
-    assert "aurascan-0.10.11.tar.gz" in srcinfo
-    assert "\tsha256sums = SKIP" in srcinfo or re.search(r"\tsha256sums = [0-9a-f]{64}", srcinfo)
-    assert 'return "0.10.11-dev"' in recovery_source
     assert ': "${AURASCAN_RECOVERY_VERSION:' in profile
     assert 'iso_version="$AURASCAN_RECOVERY_VERSION"' in profile
     assert "AuraScan Recovery v@AURASCAN_VERSION@" in archiso_issue
@@ -696,8 +683,8 @@ def test_recovery_bearing_v01011_release_contract():
     assert "v0.6.0" not in uki_issue
     expected_manifest = {
         "schema": "aurascan_recovery_iso/2.0",
-        "application_version": "0.10.11",
-        "release_disposition": "recovery-bearing",
+        "application_version": "0.10.12",
+        "release_disposition": "package-only",
         "version": "0.10.11",
         "architecture": "x86_64",
         "filename": "aurascan-recovery-0.10.11-x86_64.iso",
@@ -745,9 +732,56 @@ def test_recovery_bearing_v01011_release_contract():
         ):
             assert outcome in release
 
+def test_package_only_v01012_release_contract():
+    def normalized(relative: str) -> str:
+        return " ".join(read_text(relative).lower().split())
+
+    release_text = read_text("docs/releases/v0.10.12.md")
+    release = " ".join(release_text.lower().split())
+    unreleased = normalized("docs/releases/unreleased.md")
+    announcement = normalized("docs/ANNOUNCEMENT.md")
+    pkgbuild = read_text("packaging/arch/PKGBUILD")
+    srcinfo = read_text("packaging/arch/.SRCINFO")
+    recovery_source = read_text("aurascan/core/recovery_cli.py")
+    manifest = json.loads(read_text("aurascan/assets/aurascan-recovery-iso.json"))
+
+    assert "package-only release" in release
+    assert "iso and local-uki gates were not rerun for v0.10.12" in release
+    assert "aurascan-recovery-0.10.11-x86_64.iso" in release
+    assert (
+        "https://github.com/crizzler/AuraScan/releases/download/v0.10.11/"
+        "aurascan-recovery-0.10.11-x86_64.iso"
+    ) in release_text
+    assert "df78c277c73349bab532c890789a476d0746a5a2b9dbab10307fd0c6c482841c" in release_text
+    assert "changes after v0.10.12" in unreleased
+    assert "v0.10.12 release" in announcement
+    assert "pkgver=0.10.12" in pkgbuild
+    assert "pkgrel=1" in pkgbuild
+    assert "sha256sums=('SKIP')" in pkgbuild or re.search(r"sha256sums=\('[0-9a-f]{64}'\)", pkgbuild)
+    assert "\tpkgver = 0.10.12" in srcinfo
+    assert "aurascan-0.10.12.tar.gz" in srcinfo
+    assert "\tsha256sums = SKIP" in srcinfo or re.search(r"\tsha256sums = [0-9a-f]{64}", srcinfo)
+    assert 'return "0.10.12-dev"' in recovery_source
+    expected_manifest = {
+        "schema": "aurascan_recovery_iso/2.0",
+        "application_version": "0.10.12",
+        "release_disposition": "package-only",
+        "version": "0.10.11",
+        "architecture": "x86_64",
+        "filename": "aurascan-recovery-0.10.11-x86_64.iso",
+        "released_at": "2026-10-21",
+    }
+    assert set(manifest) == set(expected_manifest) | {"url", "sha256", "status"}
+    assert {key: manifest[key] for key in expected_manifest} == expected_manifest
+    assert manifest["status"] == "release-ready"
+    assert manifest["url"] == (
+        "https://github.com/crizzler/AuraScan/releases/download/v0.10.11/"
+        "aurascan-recovery-0.10.11-x86_64.iso"
+    )
+    assert manifest["sha256"] == "df78c277c73349bab532c890789a476d0746a5a2b9dbab10307fd0c6c482841c"
+
     if os.environ.get("AURASCAN_RELEASE_FINAL") == "1":
-        assert os.environ.get("AURASCAN_RELEASE_TAG") == "v0.10.11"
-        assert manifest["status"] == "release-ready"
+        assert os.environ.get("AURASCAN_RELEASE_TAG") == "v0.10.12"
         forbidden_release_phrases = (
             "pending",
             "publication remains blocked",

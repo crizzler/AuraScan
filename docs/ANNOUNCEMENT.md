@@ -9,6 +9,14 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
+The v0.10.12 release is a package-only reliability update. Verified official
+repository archives now use a fast deterministic pacman-hook scan: routine
+systemd service management is LOW/non-manual, auxiliary ClamAV/AI scans are
+skipped, and local or AUR archives keep the full scan and blocking behavior.
+The hook prints one compact transaction summary and names blocked packages
+with their rule IDs. The v0.10.11 recovery image remains the retained image;
+ISO and local-UKI gates were not rerun for v0.10.12.
+
 The v0.10.11 release adds a guided AUR update flow to `aurascan upgrade`.
 After the repository-only continuation it can download a pending AUR update
 through the trusted Git boundary, review it with the normal scan (including

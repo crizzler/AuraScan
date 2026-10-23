@@ -144,6 +144,16 @@ COMMENT_FILTERED_RULE_IDS = {
     "SYS-CRON-FILE-001",
 }
 
+# Routine service management in an official repository package's install hook
+# is normal packaging behavior.  These rules remain HIGH/manual-review for
+# AUR, local, PKGBUILD and deep-static evidence; only the verified-official
+# built-package context relaxes them.
+OFFICIAL_PACKAGE_INSTALL_HOOK_REVIEW_RULES = frozenset({
+    "SYS-SYSTEMD-AUTO-001",
+    "SYS-SYSTEMD-USER-001",
+    "SYS-SYSTEMD-UNIT-001",
+})
+
 SECRET_FREE_EVIDENCE = {
     "PRIV-SUDOERS-NOPASSWD-001": "sudoers policy grants passwordless execution",
     "PRIV-SUDOERS-DROPIN-001": "package logic targets a sudoers policy path",
@@ -178,7 +188,7 @@ class DeterministicAnalyzer(BaseAnalyzer):
         self.intelligence_snapshot = (intelligence_snapshot if intelligence_snapshot is not None
                                       else bundled_snapshot())
 
-    def analyze_package(self, pkg_path: str) -> AnalysisResult:
+    def analyze_package(self, pkg_path: str, *, official_repo: bool = False) -> AnalysisResult:
         captured = capture_package_install_hook(Path(pkg_path))
         if captured.status == PACKAGE_HOOK_ABSENT:
             return AnalysisResult(True, "No package install hook was declared.", [])
@@ -213,6 +223,7 @@ class DeterministicAnalyzer(BaseAnalyzer):
             str(pkg_path) + "::/.INSTALL",
             captured.content,
             Phase.install_hook_static,
+            official_repo=official_repo,
         )
         safe = not any(finding.blocks_installation for finding in findings)
         return AnalysisResult(
@@ -223,7 +234,7 @@ class DeterministicAnalyzer(BaseAnalyzer):
             findings,
         )
 
-    def analyze_content(self, pkg_path: str, content: str, phase: Phase, pkg_name: str = "unknown", pkg_ver: str = "unknown") -> List[Finding]:
+    def analyze_content(self, pkg_path: str, content: str, phase: Phase, pkg_name: str = "unknown", pkg_ver: str = "unknown", official_repo: bool = False) -> List[Finding]:
         findings = []
         lines = content.splitlines()
         for i, line in enumerate(lines):
@@ -238,20 +249,47 @@ class DeterministicAnalyzer(BaseAnalyzer):
                 match = rule.pattern.search(evidence_line)
                 if match:
                     matched_rule_ids.add(rule.rule_id)
+                    severity = rule.severity
+                    requires_manual_review = not rule.blocks
+                    explanation = rule.explanation
+                    recommendation = "Review the script to determine if this pattern is legitimate or malicious."
+                    false_positive_notes = None
+                    if (
+                        official_repo
+                        and phase == Phase.install_hook_static
+                        and rule.rule_id in OFFICIAL_PACKAGE_INSTALL_HOOK_REVIEW_RULES
+                    ):
+                        severity = Severity.LOW
+                        requires_manual_review = False
+                        explanation = (
+                            "Official repository package install hook contains routine systemd "
+                            "service management. This is normal package behavior and is recorded "
+                            "for completeness."
+                        )
+                        recommendation = (
+                            "No action is required for the routine service management itself; "
+                            "review the package's upstream purpose if it is unexpected."
+                        )
+                        false_positive_notes = (
+                            "The archive filename and bytes match the pacman sync database checksum; "
+                            "service enablement in an official package's install hook is routine "
+                            "packaging behavior."
+                        )
                     finding = Finding(
                         rule_id=rule.rule_id,
                         package_name=pkg_name,
                         package_version=pkg_ver,
                         phase=phase,
                         source=Source.deterministic_rule,
-                        severity=rule.severity,
+                        severity=severity,
                         confidence=Confidence.CONFIRMED,
                         evidence_quality=EvidenceQuality.confirmed_static_pattern,
                         file_path=pkg_path,
-                        explanation=rule.explanation,
-                        recommendation="Review the script to determine if this pattern is legitimate or malicious.",
+                        explanation=explanation,
+                        recommendation=recommendation,
+                        false_positive_notes=false_positive_notes,
                         blocks_installation=rule.blocks,
-                        requires_manual_review=not rule.blocks,
+                        requires_manual_review=requires_manual_review,
                         evidence_snippet=SECRET_FREE_EVIDENCE.get(rule.rule_id, evidence_line.strip()),
                         line_number=i+1
                     )

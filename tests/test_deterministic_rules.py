@@ -7,8 +7,10 @@ from aurascan.core.models import Phase, Severity
 AUR_HOST = "aur.archlinux." + "org"
 
 
-def analyze_text(text: str, phase=Phase.pkgbuild_static):
-    return DeterministicAnalyzer().analyze_content("PKGBUILD", text, phase)
+def analyze_text(text: str, phase=Phase.pkgbuild_static, official_repo: bool = False):
+    return DeterministicAnalyzer().analyze_content(
+        "PKGBUILD", text, phase, official_repo=official_repo
+    )
 
 
 def rule_ids(findings):
@@ -360,6 +362,20 @@ def test_systemd_enable_in_install_hook_requires_review():
     auto = finding(findings, "SYS-SYSTEMD-AUTO-001")
     assert auto.severity == Severity.HIGH
     assert auto.requires_manual_review is True
+
+
+def test_official_package_install_hook_service_enable_is_routine_low_risk():
+    findings = analyze_text(
+        "post_install() {\n  systemctl enable demo.service\n}\n",
+        Phase.install_hook_static,
+        official_repo=True,
+    )
+
+    auto = finding(findings, "SYS-SYSTEMD-AUTO-001")
+    assert auto.severity == Severity.LOW
+    assert auto.requires_manual_review is False
+    assert auto.blocks_installation is False
+    assert "routine systemd" in auto.explanation
 
 
 def test_systemd_user_service_persistence_detected():

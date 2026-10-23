@@ -57,6 +57,15 @@ lexical URL check does not eliminate DNS rebinding.
 | Prohibited | Executing the hook; relying on ClamAV or AI as the only install-hook check |
 | Evidence | Incomplete capture is reported as incomplete coverage, never as "no hook" |
 
+Pacman-hook provenance is bound to the root-owned sync databases. A cached
+archive is treated as official only when its filename and streamed SHA-256
+both match a repository `%FILENAME%`/`%SHA256SUM%` binding; unknown, stale, or
+mismatched archives stay on the full scan. Verified official archives use the
+deterministic install-hook analyzer, with routine systemd service management
+recorded as LOW/non-manual and auxiliary ClamAV/AI skipped. This provenance
+check is not a proof of safety: it identifies the repository bytes, not their
+runtime behavior, and deterministic malicious-control findings still block.
+
 ### 4. Agent-control and instruction files
 
 | Aspect | Detail |

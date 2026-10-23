@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 from typing import Callable, List, Optional
 
+from aurascan.analyzers.deterministic import DeterministicAnalyzer
 from aurascan.core.agent import run_agent, run_agent_escalation
 from aurascan.core.config import load_env, user_env_path
 from aurascan.core.config_drift import (
@@ -24,6 +25,11 @@ from aurascan.core.package_archive import (
     PACKAGE_IDENTITY_RESOLVED,
     PackageIdentityCapture,
     capture_package_identity,
+)
+from aurascan.core.pacman_sync_db import (
+    OfficialPackageIndex,
+    load_official_package_index,
+    package_matches_official,
 )
 from aurascan.core.recovery_cli import run_recovery
 from aurascan.core.security_audit import run_security_audit
@@ -260,10 +266,22 @@ def scan_pacman_hook_targets(
     *,
     cache_dir: Path = Path("/var/cache/pacman/pkg"),
     stderr=None,
+    stdout=None,
     identity_capture: Optional[Callable[[Path], PackageIdentityCapture]] = None,
+    official_index: Optional[OfficialPackageIndex] = None,
 ) -> bool:
     stderr = stderr or sys.stderr
+    stdout = stdout or sys.stdout
     failed = False
+    official_count = 0
+    local_count = 0
+    blocked = []
+    if official_index is not None and not official_index.complete:
+        print(
+            f"[AuraScan] Warning: the official package index is incomplete "
+            f"({official_index.reason}); unknown archives receive the full scan.",
+            file=stderr,
+        )
     for target in targets:
         resolved = resolve_pacman_hook_target(
             target, cache_dir=cache_dir, identity_capture=identity_capture
@@ -277,8 +295,48 @@ def scan_pacman_hook_targets(
                 "this may not be the archive pacman is about to install",
                 file=stderr,
             )
-        if not engine.scan_package(resolved):
+        official = bool(
+            official_index is not None
+            and package_matches_official(Path(resolved), official_index)
+        )
+        if official:
+            deterministic = [
+                analyzer
+                for analyzer in getattr(engine, "analyzers", [])
+                if isinstance(analyzer, DeterministicAnalyzer)
+            ]
+            ok = engine.scan_package(
+                resolved,
+                analyzers=deterministic,
+                official_repo=True,
+                quiet=True,
+            )
+            official_count += 1
+        else:
+            ok = engine.scan_package(resolved)
+            local_count += 1
+        if not ok:
             failed = True
+            report = getattr(engine, "last_report", None)
+            rules = []
+            if isinstance(report, dict):
+                for finding in report.get("findings", []):
+                    if isinstance(finding, dict) and finding.get("blocks_installation"):
+                        rule_id = finding.get("rule_id") or ""
+                        if rule_id and rule_id not in rules:
+                            rules.append(rule_id)
+            reason = ", ".join(rules[:3]) if rules else "blocking finding"
+            blocked.append(f"{target} ({reason})")
+    print(
+        f"[AuraScan] Transaction audit: {official_count} verified official package(s) "
+        f"checked with the fast deterministic hook policy; {local_count} "
+        "local/unknown package(s) received the full scan.",
+        file=stdout,
+    )
+    if blocked:
+        shown = ", ".join(blocked[:10])
+        suffix = " ..." if len(blocked) > 10 else ""
+        print(f"[AuraScan] Blocked package(s): {shown}{suffix}", file=stderr)
     return not failed
 
 
@@ -386,7 +444,8 @@ def main(argv=None):
     if not targets:
         return
 
-    if not scan_pacman_hook_targets(engine, targets):
+    official_index = load_official_package_index()
+    if not scan_pacman_hook_targets(engine, targets, official_index=official_index):
         print("\n[AuraScan] Transaction blocked due to security threats.", file=sys.stderr)
         sys.exit(1)
 

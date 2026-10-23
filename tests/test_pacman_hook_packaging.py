@@ -1,4 +1,5 @@
 from io import StringIO
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -9,6 +10,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised by the Python 3.8 CI job
     import tomli as tomllib
 
+from aurascan.analyzers.deterministic import DeterministicAnalyzer
 from aurascan.cli import (
     build_parser,
     read_pacman_hook_targets,
@@ -19,6 +21,7 @@ from aurascan.core.package_archive import (
     PACKAGE_IDENTITY_RESOLVED,
     PackageIdentityCapture,
 )
+from aurascan.core.pacman_sync_db import OfficialPackageIndex
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -495,3 +498,85 @@ def test_hook_scan_notes_cache_resolved_archive(tmp_path):
     assert ok is True
     assert engine.scanned == [str(package)]
     assert "auditing cached archive" in stderr.getvalue()
+
+
+class FakeOfficialHookEngine:
+    def __init__(self, result=True):
+        self.analyzers = [DeterministicAnalyzer()]
+        self.result = result
+        self.calls = []
+
+    def scan_package(self, path, **kwargs):
+        self.calls.append((path, kwargs))
+        return self.result
+
+
+def test_hook_scan_uses_fast_path_for_verified_official_archive(tmp_path):
+    package = tmp_path / "demo-1.0-1-x86_64.pkg.tar.zst"
+    payload = b"official package bytes"
+    package.write_bytes(payload)
+    checksum = hashlib.sha256(payload).hexdigest()
+    index = OfficialPackageIndex({package.name: checksum}, True)
+    engine = FakeOfficialHookEngine(True)
+    stdout = StringIO()
+
+    ok = scan_pacman_hook_targets(
+        engine,
+        [str(package)],
+        cache_dir=tmp_path,
+        stdout=stdout,
+        stderr=StringIO(),
+        official_index=index,
+    )
+
+    assert ok is True
+    assert len(engine.calls) == 1
+    path, kwargs = engine.calls[0]
+    assert path == str(package)
+    assert kwargs["official_repo"] is True
+    assert kwargs["quiet"] is True
+    assert kwargs["analyzers"] == engine.analyzers
+    assert "1 verified official package(s)" in stdout.getvalue()
+    assert "0 local/unknown package(s)" in stdout.getvalue()
+
+
+def test_hook_scan_uses_full_path_when_official_checksum_does_not_match(tmp_path):
+    package = tmp_path / "demo-1.0-1-x86_64.pkg.tar.zst"
+    package.write_bytes(b"replaced package bytes")
+    index = OfficialPackageIndex({package.name: "a" * 64}, True)
+    engine = FakeHookEngine([True])
+    stdout = StringIO()
+
+    ok = scan_pacman_hook_targets(
+        engine,
+        [str(package)],
+        cache_dir=tmp_path,
+        stdout=stdout,
+        stderr=StringIO(),
+        official_index=index,
+    )
+
+    assert ok is True
+    assert engine.scanned == [str(package)]
+    assert "0 verified official package(s)" in stdout.getvalue()
+    assert "1 local/unknown package(s)" in stdout.getvalue()
+
+
+def test_hook_scan_warns_when_official_index_is_incomplete(tmp_path):
+    package = tmp_path / "demo-1.0-1-x86_64.pkg.tar.zst"
+    package.write_bytes(b"fixture")
+    engine = FakeHookEngine([True])
+    stderr = StringIO()
+    index = OfficialPackageIndex({}, False, "no sync databases found")
+
+    ok = scan_pacman_hook_targets(
+        engine,
+        [str(package)],
+        cache_dir=tmp_path,
+        stdout=StringIO(),
+        stderr=stderr,
+        official_index=index,
+    )
+
+    assert ok is True
+    assert "official package index is incomplete" in stderr.getvalue()

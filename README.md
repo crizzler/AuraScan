@@ -1948,8 +1948,22 @@ archive, or an entry whose identity cannot be read is skipped instead of being
 trusted, and AuraScan notes when it audits a cached copy rather than the file
 being installed. Missing archive targets are reported as warnings and do not
 block by themselves. Blocking findings make AuraScan exit non-zero and the
-hook's `AbortOnFail` aborts the pacman transaction.
-ClamAV runs only when `PATH` resolves to a captured, root-owned, non-writable
+hook's `AbortOnFail` aborts the pacman transaction, with the blocked package
+names and rule IDs printed in the final summary.
+
+The hook also reads the root-owned pacman sync databases and binds a cached
+archive to its repository `%FILENAME%` and `%SHA256SUM%`. A verified official
+repository archive receives a fast deterministic install-hook scan: routine
+systemd service management in its install hook is recorded as LOW without
+manual review, and auxiliary ClamAV and AI scans are skipped. The fast path
+still blocks deterministic malicious behavior (remote execution, credential
+access, unsafe SUID/SGID installation, or an unreadable install hook). A local,
+AUR, unknown, or checksum-mismatched archive receives the full scan. An
+unreadable sync database marks the index incomplete; unknown archives then
+stay on the full-scan path. The hook prints one compact transaction summary
+and a full report only for a package with a warning or blocking finding.
+ClamAV runs for local and unverified archives only when `PATH` resolves to a
+captured, root-owned, non-writable
 `/usr/bin/clamscan`, which AuraScan revalidates immediately before the bounded
 scan. Database version reporting uses the same policy for
 `/usr/bin/freshclam`. Symlink following, recursion, scanned bytes, file count,

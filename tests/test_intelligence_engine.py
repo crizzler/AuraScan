@@ -192,7 +192,7 @@ def test_built_package_uses_one_snapshot_and_never_caches(tmp_path, monkeypatch)
     observations = []
 
     class ObservingDeterministic(DeterministicAnalyzer):
-        def analyze_package(self, _path):
+        def analyze_package(self, _path, **_kwargs):
             observations.append(self.intelligence_snapshot)
             current[0] = updated
             return AnalysisResult(True, "Inert phase observation")

@@ -105,7 +105,7 @@ class AuraScanEngine:
         if not self.json_output:
             print(msg, file=sys.stderr if is_err else sys.stdout)
 
-    def scan_package(self, pkg_path: str, pkg_name: str = "unknown", pkg_ver: str = "unknown") -> bool:
+    def scan_package(self, pkg_path: str, pkg_name: str = "unknown", pkg_ver: str = "unknown", *, analyzers=None, official_repo: bool = False, quiet: bool = False) -> bool:
         # Built-package analyzers still consume a filesystem path independently.
         # Do not read or write their cache until all phases share one immutable,
         # no-follow archive snapshot and digest.
@@ -117,8 +117,11 @@ class AuraScanEngine:
         source_acquisition = []
         is_safe = True
 
-        for analyzer in self.analyzers:
-            result = analyzer.analyze_package(pkg_path)
+        for analyzer in (self.analyzers if analyzers is None else analyzers):
+            if isinstance(analyzer, DeterministicAnalyzer):
+                result = analyzer.analyze_package(pkg_path, official_repo=official_repo)
+            else:
+                result = analyzer.analyze_package(pkg_path)
             all_findings.extend(self._filter_findings_for_mode(result.findings))
             if self.deep_static:
                 source_acquisition.extend(getattr(analyzer, "last_source_acquisition", []))
@@ -131,6 +134,10 @@ class AuraScanEngine:
 
         if self.json_output:
             print(json.dumps(out_dict, indent=2))
+        elif quiet and not report.risk_summary.blocks_installation and not report.risk_summary.requires_manual_review:
+            # The pacman hook prints one compact transaction summary instead of
+            # a full report for every verified official package.
+            pass
         else:
             print(render_scan_report(report, verbose=self.verbose))
 

@@ -1982,6 +1982,18 @@ archive's own `.PKGINFO` package identity rather than a file-name prefix, skip
 entries that cannot be verified, and note when a cached copy (not the file
 being installed) is audited.
 
+Official-repository provenance is a separate bounded check. `pacman_sync_db`
+reads the root-owned sync databases, binds `%FILENAME%` to `%SHA256SUM%`, and
+requires both the cached archive name and streamed bytes to match before the
+archive is treated as official. A verified official archive uses the
+deterministic install-hook analyzer only; ClamAV, AI, history and dynamic
+analyzers are skipped for it, and routine `SYS-SYSTEMD-*` service management in
+its install hook is recorded as LOW without manual review. A missing, corrupt,
+stale, or checksum-mismatched binding leaves the archive on the full-scan path;
+the index never turns an unknown archive into an official one. The hook prints
+one transaction summary, full reports only for warnings/blocks, and the blocked
+package names with their rule IDs.
+
 `pip install` does not install pacman hooks. Release packages should install
 the hook as a package file, normally to `/usr/share/libalpm/hooks/aurascan.hook`.
 Manual local hooks live under `/etc/pacman.d/hooks/`, but users should remove
@@ -1992,7 +2004,8 @@ Release-safe hook templates must declare `AbortOnFail`, and
 `is_release_safe_hook_template` refuses to certify a template without it.
 Current hook failure behavior is intentionally simple: missing archive targets
 are warnings and do not block by themselves; blocking findings return non-zero
-and the template's `AbortOnFail` aborts the pacman transaction. ClamAV runs only through captured and
+and the template's `AbortOnFail` aborts the pacman transaction. ClamAV runs for
+local and unverified archives only through captured and
 revalidated `/usr/bin/clamscan`, with symlink following, scan bytes, file count,
 recursion, and runtime bounded; database version checks likewise require
 trusted `/usr/bin/freshclam`. Use a fixed minimal environment, terminate option

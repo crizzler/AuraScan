@@ -22,6 +22,7 @@ from aurascan.core.ai_provider import parse_bool as parse_config_bool
 from aurascan.core.aur_update_review import (
     aur_update_review_available,
     offer_aur_update_review,
+    pending_aur_update_lines,
     print_pending_aur_update_guidance,
     run_sandboxed_aur_updates,
 )
@@ -1206,12 +1207,14 @@ def offer_aur_build_continuation(
             "not proof that the package is safe.",
             file=stdout,
         )
-        print_pending_aur_update_guidance(report.plan.aur_packages, stream=stdout)
+        print("[AuraScan] Pending AUR update(s):", file=stdout)
+        for line in pending_aur_update_lines(report.plan.aur_packages):
+            print(f"[AuraScan]   {line}", file=stdout)
         print("[AuraScan] Options:", file=stdout)
         print("[AuraScan]   [s] Sandboxed AUR build plus repository upgrade (default)", file=stdout)
         print("[AuraScan]   [r] Repository-only upgrade; leave the AUR update(s) pending", file=stdout)
         print("[AuraScan]   [n] Keep the upgrade blocked", file=stdout)
-        prompt = "Choice [S/r/n] "
+        prompt = "Choice [s/r/n] (default: s) "
     else:
         print("\n[AuraScan] Repository-only continuation", file=stdout)
         print(

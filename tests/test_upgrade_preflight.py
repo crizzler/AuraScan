@@ -1725,7 +1725,8 @@ def test_aur_build_block_interview_runs_repository_only_upgrade():
     assert "Upgrade blocked" not in stderr.getvalue()
 
 
-def test_aur_build_block_interview_defaults_to_isolated_sandbox(monkeypatch):
+@pytest.mark.parametrize("answer", ["", "s", "S"])
+def test_aur_build_block_interview_defaults_to_isolated_sandbox(monkeypatch, answer):
     monkeypatch.setattr(
         upgrade_preflight,
         "sandbox_status",
@@ -1758,13 +1759,14 @@ def test_aur_build_block_interview_defaults_to_isolated_sandbox(monkeypatch):
         runner=runner,
         which=lambda name: "/usr/bin/shelly" if name == "shelly" else None,
         snapshot=base_snapshot(),
-        input_func=lambda prompt: prompts.append(prompt) or "",
+        input_func=lambda prompt: prompts.append(prompt) or answer,
         stdout=stdout,
         stderr=io.StringIO(),
     )
 
     assert status == 0
-    assert prompts == ["Choice [S/r/n] "]
+    assert prompts == ["Choice [s/r/n] (default: s) "]
+    assert "aurascan-makepkg --syncdeps" not in stdout.getvalue()
     assert calls == [["--no-ai", "--aur-helper", "shelly", "--aur-sandbox", "devtools"]]
     assert "Isolated AUR build available" in stdout.getvalue()
     assert "Continuing with the isolated devtools AUR build route." in stdout.getvalue()

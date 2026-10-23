@@ -21,6 +21,7 @@ _PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9@._+-]+$")
 class InstalledPackageRecord:
     version: str
     install_date: int = 0
+    size: int = 0
 
 
 @dataclass
@@ -292,9 +293,13 @@ def load_installed_package_records(
             return {}, "malformed_local_package_db"
         install_date_text = desc.get("INSTALLDATE", "")
         install_date = int(install_date_text) if install_date_text.isdigit() else 0
+        size_text = desc.get("SIZE", "")
+        size = int(size_text) if size_text.isdigit() else 0
         if name in records and records[name].version != version:
             return {}, "duplicate_local_package_db_entry"
-        records[name] = InstalledPackageRecord(version=version, install_date=install_date)
+        records[name] = InstalledPackageRecord(
+            version=version, install_date=install_date, size=size
+        )
     return records, ""
 
 

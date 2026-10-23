@@ -24,7 +24,7 @@ def test_load_installed_package_records_includes_install_date(tmp_path):
     entry = root / "demo-1.0-1"
     entry.mkdir(parents=True)
     (entry / "desc").write_text(
-        "%NAME%\ndemo\n\n%VERSION%\n1.0-1\n\n%INSTALLDATE%\n123456\n"
+        "%NAME%\ndemo\n\n%VERSION%\n1.0-1\n\n%INSTALLDATE%\n123456\n\n%SIZE%\n98765\n"
     )
 
     records, error = load_installed_package_records(local_db_root=root)
@@ -32,6 +32,7 @@ def test_load_installed_package_records_includes_install_date(tmp_path):
     assert error == ""
     assert records["demo"].version == "1.0-1"
     assert records["demo"].install_date == 123456
+    assert records["demo"].size == 98765
 
 
 def test_load_installed_package_records_rejects_malformed_entry(tmp_path):

@@ -57,6 +57,7 @@ def test_collect_runtime_link_issues_finds_unknown_soname(tmp_path):
         linker_cache=set(),
         providers={"libc.so.6": frozenset({"glibc"})},
         root=root,
+        desktop_only=False,
     )
 
     assert scan.notes == []
@@ -80,6 +81,7 @@ def test_collect_runtime_link_issues_accepts_provided_or_bundled_library(tmp_pat
         linker_cache={"libc.so.6"},
         providers={},
         root=root,
+        desktop_only=False,
     )
 
     assert not any(issue.soname == "libc.so.6" for issue in scan.issues)

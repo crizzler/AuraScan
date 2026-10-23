@@ -2000,10 +2000,12 @@ Runtime-link aftercare is separate from package-content scanning. After an
 AuraScan-orchestrated upgrade verifies its planned versions, the changed
 repository packages' installed files are inspected with a bounded static ELF
 reader (`core/runtime_links.py`). It reads program headers and the dynamic
-section only, never executes the binary or the dynamic loader. A soname is
-accepted when the linker cache or the same package contains it; otherwise the
-bounded sync-database `%PROVIDES%` index is used to find a unique official
-provider. Only a unique missing provider is offered for installation, through
+section only, never executes the binary or the dynamic loader. Only packages
+that ship a desktop launcher are selected by default, and recent doctor
+selection is ordered by install time and installed size so a large application
+is inspected before the bounded scan stops. A soname is accepted when the
+linker cache or the same package contains it; otherwise the bounded
+sync-database `%PROVIDES%` index is used to find a unique official provider. Only a unique missing provider is offered for installation, through
 the same captured sudo/pacman identity and revalidation used by the upgrade
 handoff. `aurascan doctor --fix-runtime-links` applies the same check to
 recently installed packages (or explicit `--runtime-link-package` names).

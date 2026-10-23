@@ -1213,7 +1213,7 @@ def run_doctor_runtime_link_repair(
     stderr,
     package_names: Optional[List[str]] = None,
     recent_days: int = 30,
-    max_packages: int = 50,
+    max_packages: int = 100,
 ) -> int:
     """Repair missing shared-library providers for recent package updates."""
 
@@ -1240,11 +1240,16 @@ def run_doctor_runtime_link_repair(
             print(f"[AuraScan] Runtime-link check skipped: {error}.", file=stderr)
             return 0
         cutoff = int(time.time()) - max(1, recent_days) * 86400
-        selected = sorted(
-            name
+        recent = [
+            (name, record)
             for name, record in records.items()
             if record.install_date >= cutoff
-        )[:max_packages]
+        ]
+        recent.sort(
+            key=lambda item: (item[1].install_date, item[1].size, item[0]),
+            reverse=True,
+        )
+        selected = [name for name, _record in recent[:max_packages]]
     if not selected:
         print(
             f"[AuraScan] No packages installed in the last {recent_days} days need a runtime-link check.",

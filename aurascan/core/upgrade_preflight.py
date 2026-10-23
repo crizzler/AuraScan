@@ -1689,6 +1689,13 @@ def run_upgrade_runtime_link_aftercare(
             return
         provider_index = load_official_package_index()
         installed_records, _installed_error = load_installed_package_records()
+        packages.sort(
+            key=lambda name: (
+                installed_records.get(name).size if name in installed_records else 0,
+                name,
+            ),
+            reverse=True,
+        )
         scan = collect_runtime_link_issues(
             packages,
             query_runner=_trusted_upgrade_query_runner(plan, runner),

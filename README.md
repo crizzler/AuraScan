@@ -42,7 +42,7 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
-The [v0.10.16 release](docs/releases/v0.10.16.md) is a package-only follow-up
+The [v0.10.17 release](docs/releases/v0.10.17.md) is a package-only follow-up
 that makes pacman-hook upgrades reliable and adds runtime-library repair after
 AuraScan-orchestrated upgrades. The hook binds a cached archive to the
 root-owned pacman sync databases by filename and SHA-256, accepts a matching
@@ -59,7 +59,7 @@ most every two seconds. Changed repository packages are checked statically for
 missing ELF `DT_NEEDED` libraries after an upgrade; a unique official provider
 can be installed through the trusted sudo/pacman handoff, or checked directly
 with `aurascan doctor --fix-runtime-links`. The v0.10.11 recovery image
-remains the retained, validated image; the v0.10.16 release note records that
+remains the retained, validated image; the v0.10.17 release note records that
 ISO and local-UKI gates were not rerun.
 
 ## What You Can Try Now

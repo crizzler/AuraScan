@@ -325,6 +325,7 @@ def collect_runtime_link_issues(
     providers: Mapping[str, frozenset],
     root: Path = Path("/"),
     max_files: int = MAX_SCAN_FILES,
+    desktop_only: bool = True,
 ) -> RuntimeLinkScan:
     """Find missing ELF dependencies in the installed files of ``packages``.
 
@@ -338,10 +339,15 @@ def collect_runtime_link_issues(
     notes: List[str] = []
     seen: Set[Tuple[str, str, str]] = set()
     checked = 0
-    for package in sorted(set(packages)):
+    for package in dict.fromkeys(packages):
         paths, note = package_file_paths(package, query_runner=query_runner)
         if note:
             notes.append(f"{package}: {note}")
+            continue
+        if desktop_only and not any(
+            path.startswith("/usr/share/applications/") and path.endswith(".desktop")
+            for path in paths
+        ):
             continue
         bundled = {Path(path).name for path in paths}
         candidates = _candidate_files(paths, root)

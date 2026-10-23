@@ -789,9 +789,17 @@ evidence contract can be reviewed separately from any renderer.
 - A renderer change that needs a new field must extend `project_scan_report`
   and `MAX_FINDINGS` handling together, and keep
   `tests/test_ui_report.py` plus the desktop fixture shape in sync.
-- Actions, when they are added, are enumerated intent IDs revalidated by the
-  core. The renderer never receives a command string, a free path, or execution
-  authority.
+- Actions are defined only in `aurascan/core/ui_actions.py`. The renderer gets an
+  ID and declared arguments, never a command. `read_only` actions may be
+  requested; `terminal_only` actions (sudo package install or downgrade) may
+  not. `build_action_argv` validates every substituted value (absolute path, no
+  leading dash, no control characters, bounded length) and rejects undeclared
+  names. Any future renderer-requestable mutation sets
+  `confirmation: "hash_bound"` and must call `verify_report_binding` with the
+  exact report bytes before acting.
+- The renderer never receives a command string, a free path, or execution
+  authority. An action that changes local state without passing through the
+  catalog and the binding check is a boundary break.
 
 ## Curated Fixture Pack
 

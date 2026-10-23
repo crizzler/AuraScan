@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import sample from "./fixtures/snapshot.sample.json";
 import { countChecks, parseSnapshot } from "./contract";
 import { About } from "./views/About";
+import { Actions } from "./views/Actions";
 import { Checks } from "./views/Checks";
 import { Incidents } from "./views/Incidents";
 import { Overview } from "./views/Overview";
@@ -10,6 +11,7 @@ import { Report } from "./views/Report";
 
 const VIEWS = [
   { id: "report", label: "Report", hint: "scan" },
+  { id: "actions", label: "Actions", hint: "intents" },
   { id: "overview", label: "Overview", hint: "state" },
   { id: "checks", label: "Checks", hint: "evidence" },
   { id: "incidents", label: "Incidents", hint: "attention" },
@@ -20,6 +22,7 @@ type ViewId = (typeof VIEWS)[number]["id"];
 
 const DESCRIPTIONS: Record<ViewId, string> = {
   report: "Static evidence for one package or PKGBUILD, with its coverage limits.",
+  actions: "The fixed action catalog. The renderer selects IDs, never commands.",
   overview: "Machine state, detection-data identity, and pending attention.",
   checks: "Every collected check, grouped by subsystem.",
   incidents: "Crash markers that were collected for this user.",
@@ -61,7 +64,11 @@ function ParseFailure({ reason }: { reason: string }) {
 export function App() {
   const parsed = useMemo(() => parseSnapshot(sample), []);
   const [view, setView] = useState<ViewId>(
-    parsed.ok && parsed.snapshot.report ? "report" : "overview"
+    parsed.ok && parsed.snapshot.report
+      ? "report"
+      : parsed.ok && parsed.snapshot.actions
+        ? "actions"
+        : "overview"
   );
 
   if (!parsed.ok) {
@@ -78,6 +85,8 @@ export function App() {
     switch (entry.id) {
       case "report":
         return Boolean(snapshot.report);
+      case "actions":
+        return Boolean(snapshot.actions);
       case "overview":
       case "checks":
         return Boolean(snapshot.doctor);
@@ -92,19 +101,30 @@ export function App() {
   const reportMeta = snapshot.report
     ? `${plural(snapshot.report.counts.total, "finding")} · ${blocking} blocking`
     : "";
+  const actionsMeta = snapshot.actions ? plural(snapshot.actions.length, "action") : "";
   const meta =
     active.id === "report"
       ? reportMeta
-      : counts
-        ? `${plural(counts.error, "error")} · ${plural(counts.warn, "warning")}`
-        : reportMeta;
-  const hasError = active.id === "report" ? blocking > 0 : (counts?.error ?? 0) > 0;
+      : active.id === "actions"
+        ? actionsMeta
+        : counts
+          ? `${plural(counts.error, "error")} · ${plural(counts.warn, "warning")}`
+          : reportMeta || actionsMeta;
+  const hasError =
+    active.id === "actions"
+      ? false
+      : active.id === "report"
+        ? blocking > 0
+        : (counts?.error ?? 0) > 0;
   const hintFor = (id: ViewId): string | number => {
     if (id === "checks" && snapshot.doctor) {
       return snapshot.doctor.checks.length;
     }
     if (id === "report" && snapshot.report) {
       return snapshot.report.counts.total;
+    }
+    if (id === "actions" && snapshot.actions) {
+      return snapshot.actions.length;
     }
     return VIEWS.find((entry) => entry.id === id)?.hint ?? "";
   };
@@ -153,6 +173,7 @@ export function App() {
         </header>
 
         {view === "report" && snapshot.report && <Report report={snapshot.report} />}
+        {view === "actions" && snapshot.actions && <Actions actions={snapshot.actions} />}
         {view === "overview" && snapshot.doctor && (
           <Overview
             doctor={snapshot.doctor}

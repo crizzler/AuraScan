@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from aurascan.core.text_safety import sanitize_terminal_text
+from aurascan.core.ui_actions import action_catalog
 
 UI_CONTRACT = "aurascan-ui/1"
 CHECK_STATUSES = ("ok", "warn", "error")
@@ -343,6 +344,26 @@ def build_report_snapshot(
     }
 
 
+def build_actions_snapshot(
+    *,
+    actions: Sequence[Mapping[str, object]],
+    app_version: str,
+    generated_at: int,
+    python_version: str,
+    platform_name: str,
+) -> Dict[str, object]:
+    return {
+        "actions": [dict(action) for action in actions],
+        "app": {
+            "version": app_version,
+            "python": python_version,
+            "platform": platform_name,
+        },
+        "contract": UI_CONTRACT,
+        "generated_at": int(generated_at),
+    }
+
+
 def build_ui_snapshot(
     *,
     doctor_checks: Sequence[Mapping[str, object]],
@@ -494,13 +515,35 @@ def _print_report_summary(snapshot: Mapping[str, object], stream) -> None:
     )
 
 
+def _print_actions_summary(snapshot: Mapping[str, object], stream) -> None:
+    print("AuraScan actions ({0})".format(snapshot["contract"]), file=stream)
+    for action in snapshot["actions"]:
+        scope = (
+            "renderer may request"
+            if action["renderer_may_request"]
+            else "terminal only"
+        )
+        print(
+            "  - {0} [{1}] {2}".format(action["id"], action["kind"], scope),
+            file=stream,
+        )
+    print(
+        "  The renderer supplies an action ID and declared arguments, never a command.",
+        file=stream,
+    )
+    print(
+        "  Mutating actions require a fresh confirmation of the exact command.",
+        file=stream,
+    )
+
+
 def build_ui_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aurascan ui",
         description=(
             "Emit a read-only evidence snapshot for AuraScan desktop user "
-            "interfaces, or project a saved AuraScan JSON report. The command "
-            "never changes policy or local state."
+            "interfaces, project a saved AuraScan JSON report, or list the fixed "
+            "action catalog. The command never changes policy or local state."
         ),
     )
     parser.add_argument(
@@ -509,11 +552,18 @@ def build_ui_parser() -> argparse.ArgumentParser:
         dest="json_mode",
         help="emit the aurascan-ui/1 snapshot as JSON",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--report",
         type=Path,
         metavar="FILE",
         help="project a saved AuraScan JSON report instead of live evidence",
+    )
+    mode.add_argument(
+        "--actions",
+        action="store_true",
+        dest="actions_mode",
+        help="list the fixed desktop action catalog instead of live evidence",
     )
     return parser
 
@@ -538,7 +588,15 @@ def run_ui(
     report_source = report_loader or load_report_file
     timestamp = int(now() if callable(now) else time.time())
     try:
-        if args.report is not None:
+        if args.actions_mode:
+            snapshot = build_actions_snapshot(
+                actions=action_catalog(),
+                app_version=installed_app_version(),
+                generated_at=timestamp,
+                python_version=platform.python_version(),
+                platform_name=sys.platform,
+            )
+        elif args.report is not None:
             snapshot = build_report_snapshot(
                 report=report_source(args.report),
                 app_version=installed_app_version(),
@@ -574,6 +632,8 @@ def run_ui(
         return 1
     if args.json_mode:
         print(json.dumps(snapshot, indent=2, sort_keys=True), file=stdout)
+    elif args.actions_mode:
+        _print_actions_summary(snapshot, stdout)
     elif args.report is not None:
         _print_report_summary(snapshot, stdout)
     else:

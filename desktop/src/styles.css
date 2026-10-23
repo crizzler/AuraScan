@@ -605,6 +605,76 @@ ul {
   overflow-wrap: anywhere;
 }
 
+.action-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.action {
+  padding: 12px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.action__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.action__label {
+  font-weight: 600;
+}
+
+.action__id {
+  color: var(--text-faint);
+}
+
+.action__summary {
+  margin-top: 6px;
+}
+
+.action__args {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.action__args-label {
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.argv {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  background: var(--surface-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.action__notes {
+  margin-top: 8px;
+  color: var(--text-faint);
+  font-size: 12.5px;
+}
+
 @media (max-width: 860px) {
   .app {
     grid-template-columns: minmax(0, 1fr);

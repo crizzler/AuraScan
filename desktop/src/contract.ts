@@ -9,11 +9,14 @@
 export const UI_CONTRACT = "aurascan-ui/1";
 export const MAX_CHECKS = 1000;
 export const MAX_FINDINGS = 500;
+export const MAX_ACTIONS = 50;
 
 export type CheckStatus = "ok" | "warn" | "error";
 export type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN";
 export type Confidence = "LOW" | "MEDIUM" | "HIGH" | "CONFIRMED";
 export type ReportAction = "ALLOW" | "WARN" | "MANUAL_REVIEW" | "BLOCK" | "BLOCKED";
+export type ActionKind = "read_only" | "terminal_only";
+export type ActionConfirmation = "none" | "hash_bound" | "terminal_only";
 
 export interface DoctorCheck {
   name: string;
@@ -54,6 +57,24 @@ export interface AppPayload {
   platform: string;
 }
 
+export interface ActionArgument {
+  name: string;
+  kind: string;
+  label: string;
+}
+
+export interface ActionSpec {
+  id: string;
+  label: string;
+  summary: string;
+  kind: ActionKind;
+  confirmation: ActionConfirmation;
+  renderer_may_request: boolean;
+  arguments: ActionArgument[];
+  argv_preview: string[];
+  notes: string;
+}
+
 export interface ReportFinding {
   rule_id: string;
   severity: Severity;
@@ -81,8 +102,7 @@ export interface ReportRisk {
   reason: string;
 }
 
-export interface ReportPayload {
-  schema_version: string;
+export interface ReportPayload {  schema_version: string;
   scanner_version: string;
   package: {
     name: string;
@@ -111,6 +131,7 @@ export interface Snapshot {
   intelligence?: IntelligencePayload;
   incidents?: IncidentsPayload;
   report?: ReportPayload;
+  actions?: ActionSpec[];
 }
 
 export type ParseResult =
@@ -121,6 +142,9 @@ const CHECK_STATUSES: CheckStatus[] = ["ok", "warn", "error"];
 const SEVERITIES: Severity[] = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"];
 const CONFIDENCES: Confidence[] = ["LOW", "MEDIUM", "HIGH", "CONFIRMED"];
 const REPORT_ACTIONS: ReportAction[] = ["ALLOW", "WARN", "MANUAL_REVIEW", "BLOCK", "BLOCKED"];
+const ACTION_KINDS: ActionKind[] = ["read_only", "terminal_only"];
+const ACTION_CONFIRMATIONS: ActionConfirmation[] = ["none", "hash_bound", "terminal_only"];
+const ACTION_ID = /^[a-z][a-z0-9_]{0,63}$/;
 
 const INTELLIGENCE_STRING_KEYS = [
   "source",
@@ -372,6 +396,79 @@ function parseReport(raw: unknown): ReportPayload | null {
   }
 }
 
+function parseAction(raw: unknown): ActionSpec {
+  const entry = requireRecord(raw, "action is not an object");
+  const id = requireString(entry.id, "action has no identifier");
+  if (!ACTION_ID.test(id)) {
+    throw new Error("action identifier is malformed");
+  }
+  const kind = requireString(entry.kind, "action has no kind");
+  if (!ACTION_KINDS.includes(kind as ActionKind)) {
+    throw new Error("action has an unsupported kind");
+  }
+  const confirmation = requireString(entry.confirmation, "action has no confirmation");
+  if (!ACTION_CONFIRMATIONS.includes(confirmation as ActionConfirmation)) {
+    throw new Error("action has an unsupported confirmation");
+  }
+  const rendererMayRequest = requireBoolean(
+    entry.renderer_may_request,
+    "action has no request flag"
+  );
+  if (kind === "read_only" && !rendererMayRequest) {
+    throw new Error("read-only action is not requestable");
+  }
+  if (kind === "terminal_only" && rendererMayRequest) {
+    throw new Error("terminal-only action is requestable");
+  }
+  const rawArguments = entry.arguments;
+  if (!Array.isArray(rawArguments)) {
+    throw new Error("action arguments are malformed");
+  }
+  const argumentsList = rawArguments.map((argument) => {
+    const record = requireRecord(argument, "action argument is not an object");
+    return {
+      name: requireString(record.name, "action argument has no name"),
+      kind: requireString(record.kind, "action argument has no kind"),
+      label: requireString(record.label, "action argument has no label")
+    };
+  });
+  const rawArgv = entry.argv_preview;
+  if (
+    !Array.isArray(rawArgv) ||
+    rawArgv.length === 0 ||
+    rawArgv.length > 32 ||
+    !rawArgv.every((part) => typeof part === "string")
+  ) {
+    throw new Error("action argument vector is malformed");
+  }
+  return {
+    id,
+    label: requireString(entry.label, "action has no label"),
+    summary: requireString(entry.summary, "action has no summary"),
+    kind: kind as ActionKind,
+    confirmation: confirmation as ActionConfirmation,
+    renderer_may_request: rendererMayRequest,
+    arguments: argumentsList,
+    argv_preview: rawArgv as string[],
+    notes: requireString(entry.notes, "action has no notes")
+  };
+}
+
+function parseActions(raw: unknown): ActionSpec[] | null {
+  try {
+    if (!Array.isArray(raw) || raw.length > MAX_ACTIONS) {
+      throw new Error("action catalog is missing or exceeds the contract bound");
+    }
+    const actions = raw.map(parseAction);
+    if (new Set(actions.map((action) => action.id)).size !== actions.length) {
+      throw new Error("action identifiers are duplicated");
+    }
+    return actions;
+  } catch {
+    return null;
+  }
+}
+
 export function parseSnapshot(raw: unknown): ParseResult {
   if (!isRecord(raw)) {
     return fail("snapshot is not an object");
@@ -434,8 +531,16 @@ export function parseSnapshot(raw: unknown): ParseResult {
     snapshot.report = report;
   }
 
-  if (!snapshot.doctor && !snapshot.report) {
-    return fail("snapshot carries no evidence section");
+  if (raw.actions !== undefined) {
+    const actions = parseActions(raw.actions);
+    if (actions === null) {
+      return fail("action catalog is malformed");
+    }
+    snapshot.actions = actions;
+  }
+
+  if (!snapshot.doctor && !snapshot.report && !snapshot.actions) {
+    return fail("snapshot carries no evidence or action section");
   }
 
   return { ok: true, snapshot };

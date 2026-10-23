@@ -1,4 +1,72 @@
 {
+  "actions": [
+    {
+      "arguments": [{ "kind": "existing_file", "label": "Package archive", "name": "package_path" }],
+      "argv_preview": ["aurascan", "--pkg", "{package_path}", "--json"],
+      "confirmation": "none",
+      "id": "scan_package",
+      "kind": "read_only",
+      "label": "Scan a package archive",
+      "notes": "Read-only. It inspects archive bytes and never installs anything.",
+      "renderer_may_request": true,
+      "summary": "Audit one package archive with the default deterministic rules and return the bounded report projection."
+    },
+    {
+      "arguments": [{ "kind": "existing_file", "label": "PKGBUILD file", "name": "pkgbuild_path" }],
+      "argv_preview": ["aurascan", "--pkgbuild", "{pkgbuild_path}", "--json"],
+      "confirmation": "none",
+      "id": "scan_pkgbuild",
+      "kind": "read_only",
+      "label": "Scan a PKGBUILD",
+      "notes": "Read-only. The build script is parsed, never executed.",
+      "renderer_may_request": true,
+      "summary": "Audit one PKGBUILD and its declared install hooks with the default deterministic rules."
+    },
+    {
+      "arguments": [{ "kind": "existing_file", "label": "Report file", "name": "report_path" }],
+      "argv_preview": ["aurascan", "ui", "--report", "{report_path}", "--json"],
+      "confirmation": "none",
+      "id": "project_report",
+      "kind": "read_only",
+      "label": "Open a saved report",
+      "notes": "Read-only. Raw package bytes and absolute paths stay out of the view.",
+      "renderer_may_request": true,
+      "summary": "Render a previously produced AuraScan JSON report."
+    },
+    {
+      "arguments": [],
+      "argv_preview": ["aurascan", "ui", "--json"],
+      "confirmation": "none",
+      "id": "refresh_snapshot",
+      "kind": "read_only",
+      "label": "Refresh the evidence snapshot",
+      "notes": "Read-only. It runs no package manager and contacts no model.",
+      "renderer_may_request": true,
+      "summary": "Re-collect local check, detection-data and incident evidence."
+    },
+    {
+      "arguments": [],
+      "argv_preview": ["aurascan", "doctor", "--fix-runtime-links"],
+      "confirmation": "terminal_only",
+      "id": "repair_runtime_links",
+      "kind": "terminal_only",
+      "label": "Repair missing shared libraries",
+      "notes": "Installs packages through sudo, so it stays in the terminal and is never requested by the renderer.",
+      "renderer_may_request": false,
+      "summary": "Scan recent package updates for missing shared libraries and offer the official provider packages."
+    },
+    {
+      "arguments": [],
+      "argv_preview": ["aurascan", "doctor", "--fix-hung-apps"],
+      "confirmation": "terminal_only",
+      "id": "repair_hung_application",
+      "kind": "terminal_only",
+      "label": "Repair a hung application",
+      "notes": "Downgrades a package through sudo, so it stays in the terminal and is never requested by the renderer.",
+      "renderer_may_request": false,
+      "summary": "Diagnose a wait-then-read pipe deadlock and offer a cached older package build."
+    }
+  ],
   "app": {
     "platform": "linux",
     "python": "3.14.0",

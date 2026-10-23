@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import sample from "./fixtures/snapshot.sample.json";
 import {
+  MAX_ACTIONS,
   MAX_CHECKS,
   MAX_FINDINGS,
   UI_CONTRACT,
@@ -28,6 +29,7 @@ describe("parseSnapshot", () => {
     expect(result.snapshot.doctor?.checks.length).toBe(sample.doctor.checks.length);
     expect(result.snapshot.incidents?.highest_severity).toBe("HIGH");
     expect(result.snapshot.report?.package.name).toBe("example-pkg");
+    expect(result.snapshot.actions?.length).toBe(6);
   });
 
   it("rejects an unknown contract instead of guessing", () => {
@@ -133,7 +135,8 @@ describe("parseSnapshot", () => {
         "doctor",
         "intelligence",
         "incidents",
-        "report"
+        "report",
+        "actions"
       ]);
     }
   });
@@ -195,10 +198,91 @@ describe("report mode", () => {
       mutate((value) => {
         value.doctor = undefined;
         value.report = undefined;
+        value.actions = undefined;
       })
     );
 
-    expect(result).toEqual({ ok: false, reason: "snapshot carries no evidence section" });
+    expect(result).toEqual({
+      ok: false,
+      reason: "snapshot carries no evidence or action section"
+    });
+  });
+});
+
+describe("action catalog", () => {
+  it("accepts an actions-only snapshot", () => {
+    const result = parseSnapshot(
+      mutate((value) => {
+        value.doctor = undefined;
+        value.intelligence = undefined;
+        value.incidents = undefined;
+        value.report = undefined;
+      })
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    expect(result.snapshot.report).toBeUndefined();
+    expect(result.snapshot.actions?.map((action) => action.id)).toContain("scan_package");
+    expect(
+      result.snapshot.actions?.filter((action) => action.renderer_may_request).length
+    ).toBe(4);
+  });
+
+  it("rejects an unknown action kind", () => {
+    const result = parseSnapshot(
+      mutate((value) => {
+        const actions = value.actions as Array<Record<string, unknown>>;
+        actions[0].kind = "shell";
+      })
+    );
+
+    expect(result).toEqual({ ok: false, reason: "action catalog is malformed" });
+  });
+
+  it("rejects a terminal-only action that claims to be requestable", () => {
+    const result = parseSnapshot(
+      mutate((value) => {
+        const actions = value.actions as Array<Record<string, unknown>>;
+        actions[4].renderer_may_request = true;
+      })
+    );
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects duplicate action identifiers", () => {
+    const result = parseSnapshot(
+      mutate((value) => {
+        const actions = value.actions as Array<Record<string, unknown>>;
+        actions[1].id = actions[0].id;
+      })
+    );
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects an action beyond the catalog bound", () => {
+    const result = parseSnapshot(
+      mutate((value) => {
+        value.actions = Array.from({ length: MAX_ACTIONS + 1 }, () => null);
+      })
+    );
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects a malformed argument vector", () => {
+    const result = parseSnapshot(
+      mutate((value) => {
+        const actions = value.actions as Array<Record<string, unknown>>;
+        actions[0].argv_preview = "aurascan --pkg example";
+      })
+    );
+
+    expect(result.ok).toBe(false);
   });
 });
 

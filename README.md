@@ -1453,6 +1453,7 @@ and contract live in
 aurascan ui
 aurascan ui --json
 aurascan ui --report scan-report.json --json
+aurascan ui --actions --json
 ```
 
 The snapshot is one bounded JSON object with the contract string
@@ -1466,6 +1467,11 @@ evidence. The projection drops raw package bytes, absolute paths, finding
 identifiers and file hashes, sanitizes display text, and rejects unknown
 severity, confidence, or risk vocabularies. It is a reading surface, not an
 evidence export.
+
+`--actions` lists the fixed action catalog a desktop shell may run. The renderer
+selects an action ID and declared arguments, never a command; actions that
+install or downgrade packages stay terminal-only and require a fresh
+confirmation.
 
 `aurascan ui` never changes policy or local state, never calls a model, never
 runs a package manager, never executes package or fixture content, and opens no

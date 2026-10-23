@@ -241,6 +241,13 @@ severity, confidence, or risk vocabularies. The file read and the displayed
 finding and message counts are bounded, and truncation is disclosed rather than
 silent.
 
+`aurascan ui --actions` publishes the fixed action catalog. The renderer selects
+an action ID and declared arguments and never supplies an executable, a flag, or
+a command string. Read-only actions may be requested; actions that install or
+downgrade packages through sudo stay terminal-only. Any future renderer-
+requestable mutation must bind the exact report bytes the user saw and revalidate
+that binding in the core before acting.
+
 ## Prohibited capability combinations
 
 The audit tool enforces the mechanically checkable subset (see

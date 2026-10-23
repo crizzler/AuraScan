@@ -1,10 +1,10 @@
 # AuraScan Desktop UI Design
 
-Status: design accepted. Phases 1 and 2 plus the phase 3 report reader are
-implemented in the working tree and not released. Nothing in this document
-describes shipped behavior until the phase table marks a phase released. The
-renderer under `desktop/` is a development prototype; it is not packaged, not
-installed by `aurascan`, and not part of any release artifact.
+Status: design accepted. Phases 1 through 3 are implemented in the working tree
+and not released. Nothing in this document describes shipped behavior until the
+phase table marks a phase released. The renderer under `desktop/` is a
+development prototype; it is not packaged, not installed by `aurascan`, and not
+part of any release artifact.
 
 ## Why a desktop UI
 
@@ -183,6 +183,52 @@ Projection rules are deliberately stricter than the raw report:
 - no doctor run, intelligence read, incident read, AI call or package-manager
   invocation happens in report mode.
 
+### Action catalog
+
+`aurascan ui --actions --json` returns the only actions the desktop shell may
+run. IDs live in `aurascan/core/ui_actions.py`:
+
+```json
+{
+  "contract": "aurascan-ui/1",
+  "generated_at": 1792757134,
+  "app": { "version": "0.10.19", "python": "3.14.0", "platform": "linux" },
+  "actions": [
+    {
+      "id": "scan_package",
+      "label": "Scan a package archive",
+      "summary": "...",
+      "kind": "read_only",
+      "confirmation": "none",
+      "renderer_may_request": true,
+      "arguments": [{ "name": "package_path", "kind": "existing_file",
+                      "label": "Package archive" }],
+      "argv_preview": ["aurascan", "--pkg", "{package_path}", "--json"],
+      "notes": "..."
+    }
+  ]
+}
+```
+
+Rules:
+
+- Action IDs are fixed in the catalog. A renderer that receives an unknown ID
+  must not invent one, and the catalog is never assembled by the renderer.
+- The renderer supplies an ID and only the declared arguments. It never supplies
+  an executable, a flag, or a command string.
+- `read_only` actions (`scan_package`, `scan_pkgbuild`, `project_report`,
+  `refresh_snapshot`) may be requested. `terminal_only` actions
+  (`repair_runtime_links`, `repair_hung_application`) install or downgrade
+  packages through sudo and stay in the terminal.
+- `argv_preview` is display text produced by the core. It is shown for
+  transparency; it is not a command the renderer may run.
+- `build_action_argv` validates every substituted value before use: absolute
+  path, no leading dash, no control characters, bounded length, and no
+  undeclared argument names.
+- Any future renderer-requestable mutation must set `confirmation: "hash_bound"`
+  and call `verify_report_binding` with the exact report bytes the user saw
+  before the core acts. A mismatch fails closed.
+
 ## Transport and process model
 
 ```text
@@ -299,7 +345,7 @@ are always paired with text (never color alone).
 | 0 | This design document | reviewed, contract frozen as `aurascan-ui/1` | done |
 | 1 | `aurascan ui --json` snapshot + contract tests | bounded, side-effect-free, pinned by tests | implemented, unreleased |
 | 2 | Read-only renderer over the real snapshot | overview, checks, incidents; fail-closed parser | prototype implemented, unreleased |
-| 3 | Scan report reading + action center | fixed action IDs, hash-bound consent, revalidation tests | report reading implemented; action center not started |
+| 3 | Scan report reading + action center | fixed action IDs, hash-bound consent, revalidation tests | implemented; action execution lands with the shell |
 | 4 | Electron shell + `aurascan-desktop` packaging | sandbox/CSP preflight, e2e on static build | not started |
 
 Phases 1 and 2 exist in the working tree but are not released and are not part

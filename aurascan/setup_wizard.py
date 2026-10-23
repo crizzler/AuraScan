@@ -275,6 +275,11 @@ def build_doctor_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help="limit --fix-runtime-links to an installed package (repeatable)",
     )
+    parser.add_argument(
+        "--fix-hung-apps",
+        action="store_true",
+        help="diagnose wait-then-read process deadlocks and offer a cached package downgrade",
+    )
     return parser
 
 
@@ -1144,6 +1149,7 @@ def run_doctor(
     agent_audit_root: Optional[Path] = None,
     agent_runtime_root: Path = Path("/run/aurascan-agent"),
     input_func: Callable[[str], str] = input,
+    proc_root: Path = Path("/proc"),
 ) -> int:
     stdout = stdout or sys.stdout
     args = build_doctor_parser().parse_args(argv)
@@ -1180,6 +1186,7 @@ def run_doctor(
         agent_root_policy_uid=agent_root_policy_uid,
         agent_audit_root=agent_audit_root,
         agent_runtime_root=agent_runtime_root,
+        proc_root=proc_root,
     )
     has_error = any(check.status == "error" for check in checks)
     if args.json_mode:
@@ -1201,6 +1208,18 @@ def run_doctor(
             stdout=stdout,
             stderr=stderr,
             package_names=list(args.runtime_link_package or []),
+        )
+    if args.fix_hung_apps:
+        if args.json_mode:
+            print("[AuraScan] --fix-hung-apps cannot be combined with --json.", file=stderr)
+            return 1
+        return run_doctor_hung_application_repair(
+            runner=runner,
+            which=which,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+            proc_root=proc_root,
         )
     return 1 if has_error else 0
 
@@ -1317,6 +1336,7 @@ def build_doctor_checks(
     agent_root_policy_uid: int = 0,
     agent_audit_root: Optional[Path] = None,
     agent_runtime_root: Path = Path("/run/aurascan-agent"),
+    proc_root: Path = Path("/proc"),
 ) -> List[DoctorCheck]:
     checks: List[DoctorCheck] = []
     file_values = _safe_read_env(env_path)
@@ -2366,7 +2386,183 @@ def build_doctor_checks(
 
     checks.append(_check_executable(executable_path))
     checks.extend(_hook_checks(local_hook_path=local_hook_path, packaged_hook_path=packaged_hook_path))
+    checks.append(_hung_application_check(proc_root=proc_root))
     return checks
+
+
+def _hung_application_check(*, proc_root: Path = Path("/proc")) -> DoctorCheck:
+    from aurascan.core.process_deadlocks import detect_wait_then_read_deadlocks
+
+    try:
+        deadlocks = detect_wait_then_read_deadlocks(proc_root=proc_root)
+    except OSError as exc:
+        return DoctorCheck(
+            "hung_applications",
+            "warn",
+            f"Hung-application check could not read process state: {exc}",
+        )
+    if not deadlocks:
+        return DoctorCheck(
+            "hung_applications",
+            "ok",
+            "No wait-then-read process deadlock detected.",
+        )
+    first = deadlocks[0]
+    message = (
+        f"{first.parent_comm} (pid {first.parent_pid}) is waiting for "
+        f"{first.child_comm} (pid {first.child_pid}), which is blocked writing to a pipe; "
+        "this is a process deadlock, not a missing library."
+    )
+    return DoctorCheck(
+        "hung_applications",
+        "warn",
+        message,
+        {
+            "count": len(deadlocks),
+            "deadlocks": [
+                {
+                    "parent_pid": item.parent_pid,
+                    "parent_comm": item.parent_comm,
+                    "parent_executable": item.parent_executable,
+                    "child_pid": item.child_pid,
+                    "child_wchan": item.child_wchan,
+                    "age_seconds": round(item.age_seconds, 1),
+                }
+                for item in deadlocks[:8]
+            ],
+        },
+    )
+
+
+def _package_for_executable(
+    executable: str,
+    *,
+    runner: Callable,
+    which: Callable[[str], Optional[str]],
+) -> str:
+    pacman = which("pacman")
+    if not pacman or not executable:
+        return ""
+    output = run_bounded_command(
+        runner,
+        [pacman, "-Qo", executable],
+        max_chars=4096,
+        timeout=10,
+    )
+    if output.returncode != 0:
+        return ""
+    first = output.stdout.strip().splitlines()
+    if not first:
+        return ""
+    return first[0].split(None, 1)[0]
+
+
+def run_doctor_hung_application_repair(
+    *,
+    runner: Callable,
+    which: Callable[[str], Optional[str]],
+    input_func: Callable[[str], str],
+    stdout,
+    stderr,
+    proc_root: Path = Path("/proc"),
+) -> int:
+    """Offer a cached downgrade for a detected wait-then-read deadlock."""
+
+    from aurascan.core.local_package_db import load_installed_package_records
+    from aurascan.core.process_deadlocks import (
+        cached_downgrade_path,
+        detect_wait_then_read_deadlocks,
+    )
+    from aurascan.core.trusted_executable import (
+        TRUSTED_PACMAN_PATH,
+        TRUSTED_SUDO_PATH,
+        UnsafeUpgradeExecutable,
+        capture_trusted_executable,
+        run_trusted_command,
+    )
+
+    try:
+        deadlocks = detect_wait_then_read_deadlocks(proc_root=proc_root)
+    except OSError as exc:
+        print(f"[AuraScan] Hung-application check skipped: {exc}.", file=stderr)
+        return 0
+    if not deadlocks:
+        print("[AuraScan] No wait-then-read process deadlock is currently visible.", file=stdout)
+        return 0
+    records, _records_error = load_installed_package_records()
+    seen_packages = set()
+    for deadlock in deadlocks:
+        package = _package_for_executable(
+            deadlock.parent_executable, runner=runner, which=which
+        )
+        if package and package in seen_packages:
+            continue
+        if package:
+            seen_packages.add(package)
+        installed_version = records.get(package).version if package in records else ""
+        print(
+            f"\n[AuraScan] Hung application: {deadlock.parent_comm} "
+            f"(pid {deadlock.parent_pid}) is waiting for lsmod "
+            f"(pid {deadlock.child_pid}, {deadlock.child_wchan}).",
+            file=stdout,
+        )
+        if package:
+            print(f"[AuraScan] Package: {package} {installed_version}".rstrip(), file=stdout)
+        cached = cached_downgrade_path(
+            package=package,
+            installed_version=installed_version,
+        ) if package and installed_version else None
+        if cached is not None:
+            print(f"[AuraScan] Cached prior version: {cached}", file=stdout)
+            answer = "n"
+            try:
+                answer = input_func(
+                    "Install the cached prior version now? [y/N] "
+                ).strip().lower()
+            except EOFError:
+                pass
+            if answer in {"y", "yes"}:
+                try:
+                    pacman = capture_trusted_executable("pacman", TRUSTED_PACMAN_PATH)
+                    command = [pacman.path, "-U", "--noconfirm", str(cached)]
+                    executables = [pacman]
+                    try:
+                        sudo = capture_trusted_executable("sudo", TRUSTED_SUDO_PATH)
+                        command.insert(0, sudo.path)
+                        executables.insert(0, sudo)
+                    except UnsafeUpgradeExecutable:
+                        if hasattr(os, "geteuid") and os.geteuid() != 0:
+                            raise
+                    result = run_trusted_command(
+                        command, executables, runner=runner, check=False
+                    )
+                except (OSError, UnsafeUpgradeExecutable) as exc:
+                    print(f"[AuraScan] Downgrade failed to start: {exc}.", file=stderr)
+                    continue
+                if int(getattr(result, "returncode", 1)) == 0:
+                    print(
+                        f"[AuraScan] Installed cached prior version of {package}. "
+                        "Restart the application after closing the hung instance.",
+                        file=stdout,
+                    )
+                else:
+                    print(
+                        f"[AuraScan] Downgrade exited with status "
+                        f"{getattr(result, 'returncode', 'unknown')}.",
+                        file=stderr,
+                    )
+                continue
+        print(
+            "[AuraScan] Recommendation: downgrade to a cached prior package build, "
+            "or add the package to IgnorePkg under [options] until a fixed build ships.",
+            file=stdout,
+        )
+        if package:
+            print(
+                f"[AuraScan] Manual command: sudo pacman -U /var/cache/pacman/pkg/<older-{package}>.pkg.tar.zst",
+                file=stdout,
+            )
+    return 0
 
 
 def install_pacman_hook(

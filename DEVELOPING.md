@@ -1996,6 +1996,15 @@ local/unknown archive. Keep this output line-based and ASCII: pacman captures
 scriptlet output through a pipe, so Python must flush every progress line and
 must not depend on a terminal carriage-return spinner.
 
+`aurascan doctor` also performs a read-only `/proc` check for the narrow
+wait-then-read deadlock shape: a parent sleeping in a wait syscall with an
+`lsmod` child blocked in `anon_pipe_write`. This is process-state evidence, not
+a missing-library result. `--fix-hung-apps` reports the parent/child and
+package, offers the newest cached older build, and only runs `pacman -U`
+through the trusted sudo/pacman handoff after confirmation. It never edits
+`pacman.conf`; IgnorePkg remains a documented manual option. The diagnostic
+does not signal, attach to, or execute the inspected application.
+
 Runtime-link aftercare is separate from package-content scanning. After an
 AuraScan-orchestrated upgrade verifies its planned versions, the changed
 repository packages' installed files are inspected with a bounded static ELF

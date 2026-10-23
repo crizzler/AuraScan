@@ -42,7 +42,7 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
-The [v0.10.17 release](docs/releases/v0.10.17.md) is a package-only follow-up
+The [v0.10.18 release](docs/releases/v0.10.18.md) is a package-only follow-up
 that makes pacman-hook upgrades reliable and adds runtime-library repair after
 AuraScan-orchestrated upgrades. The hook binds a cached archive to the
 root-owned pacman sync databases by filename and SHA-256, accepts a matching
@@ -58,9 +58,11 @@ prints a flushed start line, the current archive, and an ASCII progress bar at
 most every two seconds. Changed repository packages are checked statically for
 missing ELF `DT_NEEDED` libraries after an upgrade; a unique official provider
 can be installed through the trusted sudo/pacman handoff, or checked directly
-with `aurascan doctor --fix-runtime-links`. The v0.10.11 recovery image
-remains the retained, validated image; the v0.10.17 release note records that
-ISO and local-UKI gates were not rerun.
+with `aurascan doctor --fix-runtime-links`. `aurascan doctor` also detects a
+wait-then-read process deadlock, such as Goverlay 1.9.4 waiting forever for
+`lsmod`, and `--fix-hung-apps` offers a cached older package build when one is
+available. The v0.10.11 recovery image remains the retained, validated image;
+the v0.10.18 release note records that ISO and local-UKI gates were not rerun.
 
 ## What You Can Try Now
 

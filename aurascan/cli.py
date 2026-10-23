@@ -246,6 +246,10 @@ def resolve_pacman_hook_target(
 ) -> str:
     if os.path.exists(target):
         return target
+    if "/" in target or os.sep in target:
+        # A path that does not exist is not a cache package name; never feed it
+        # into a glob pattern.
+        return ""
     capture = identity_capture or capture_package_identity
     matches = [
         path
@@ -276,6 +280,7 @@ def scan_pacman_hook_targets(
     official_count = 0
     local_count = 0
     blocked = []
+    review = []
     if official_index is not None and not official_index.complete:
         print(
             f"[AuraScan] Warning: the official package index is incomplete "
@@ -289,12 +294,6 @@ def scan_pacman_hook_targets(
         if not resolved:
             print(f"[AuraScan] Warning: Could not locate package file for {target}", file=stderr)
             continue
-        if resolved != target:
-            print(
-                f"[AuraScan] Note: auditing cached archive {resolved}; "
-                "this may not be the archive pacman is about to install",
-                file=stderr,
-            )
         official = bool(
             official_index is not None
             and package_matches_official(Path(resolved), official_index)
@@ -315,9 +314,9 @@ def scan_pacman_hook_targets(
         else:
             ok = engine.scan_package(resolved)
             local_count += 1
+        report = getattr(engine, "last_report", None)
         if not ok:
             failed = True
-            report = getattr(engine, "last_report", None)
             rules = []
             if isinstance(report, dict):
                 for finding in report.get("findings", []):
@@ -327,6 +326,16 @@ def scan_pacman_hook_targets(
                             rules.append(rule_id)
             reason = ", ".join(rules[:3]) if rules else "blocking finding"
             blocked.append(f"{target} ({reason})")
+        elif isinstance(report, dict) and report.get("risk_summary", {}).get("requires_manual_review"):
+            rules = []
+            for finding in report.get("findings", []):
+                if not isinstance(finding, dict) or not finding.get("requires_manual_review"):
+                    continue
+                rule_id = finding.get("rule_id") or ""
+                if rule_id and rule_id not in rules:
+                    rules.append(rule_id)
+            reason = ", ".join(rules[:3]) if rules else "manual review"
+            review.append(f"{target} ({reason})")
     print(
         f"[AuraScan] Transaction audit: {official_count} verified official package(s) "
         f"checked with the fast deterministic hook policy; {local_count} "
@@ -337,6 +346,13 @@ def scan_pacman_hook_targets(
         shown = ", ".join(blocked[:10])
         suffix = " ..." if len(blocked) > 10 else ""
         print(f"[AuraScan] Blocked package(s): {shown}{suffix}", file=stderr)
+    if review:
+        shown = ", ".join(review[:10])
+        suffix = " ..." if len(review) > 10 else ""
+        print(
+            f"[AuraScan] Review advisory (not blocking): {shown}{suffix}",
+            file=stderr,
+        )
     return not failed
 
 

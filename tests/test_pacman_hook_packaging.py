@@ -484,7 +484,34 @@ def test_hook_scan_blocking_result_returns_failure(tmp_path):
     assert engine.scanned == [str(package)]
 
 
-def test_hook_scan_notes_cache_resolved_archive(tmp_path):
+def test_hook_scan_reports_nonblocking_review_advisory(tmp_path):
+    package = tmp_path / "demo-1.0-1-x86_64.pkg.tar.zst"
+    package.write_bytes(b"fixture")
+
+    class ReviewHookEngine:
+        def __init__(self):
+            self.last_report = {
+                "risk_summary": {"requires_manual_review": True},
+                "findings": [
+                    {"rule_id": "CLAMAV-INCOMPLETE", "requires_manual_review": True}
+                ],
+            }
+
+        def scan_package(self, path):
+            return True
+
+    stderr = StringIO()
+
+    ok = scan_pacman_hook_targets(
+        ReviewHookEngine(), [str(package)], cache_dir=tmp_path, stderr=stderr
+    )
+
+    assert ok is True
+    assert "Review advisory (not blocking)" in stderr.getvalue()
+    assert "CLAMAV-INCOMPLETE" in stderr.getvalue()
+
+
+def test_hook_scan_resolves_package_name_without_cache_warning(tmp_path):
     package = tmp_path / "demo-1.0-1-x86_64.pkg.tar.zst"
     package.write_bytes(b"fixture")
     engine = FakeHookEngine([True])
@@ -497,7 +524,23 @@ def test_hook_scan_notes_cache_resolved_archive(tmp_path):
 
     assert ok is True
     assert engine.scanned == [str(package)]
-    assert "auditing cached archive" in stderr.getvalue()
+    assert "auditing cached archive" not in stderr.getvalue()
+
+
+def test_hook_scan_missing_absolute_path_warns_without_failing(tmp_path):
+    engine = FakeHookEngine([])
+    stderr = StringIO()
+
+    ok = scan_pacman_hook_targets(
+        engine,
+        ["/missing/demo-1.0-1-x86_64.pkg.tar.zst"],
+        cache_dir=tmp_path,
+        stderr=stderr,
+    )
+
+    assert ok is True
+    assert engine.scanned == []
+    assert "Could not locate package file" in stderr.getvalue()
 
 
 class FakeOfficialHookEngine:
@@ -516,7 +559,7 @@ def test_hook_scan_uses_fast_path_for_verified_official_archive(tmp_path):
     payload = b"official package bytes"
     package.write_bytes(payload)
     checksum = hashlib.sha256(payload).hexdigest()
-    index = OfficialPackageIndex({package.name: checksum}, True)
+    index = OfficialPackageIndex({package.name: frozenset({checksum})}, True)
     engine = FakeOfficialHookEngine(True)
     stdout = StringIO()
 
@@ -543,7 +586,7 @@ def test_hook_scan_uses_fast_path_for_verified_official_archive(tmp_path):
 def test_hook_scan_uses_full_path_when_official_checksum_does_not_match(tmp_path):
     package = tmp_path / "demo-1.0-1-x86_64.pkg.tar.zst"
     package.write_bytes(b"replaced package bytes")
-    index = OfficialPackageIndex({package.name: "a" * 64}, True)
+    index = OfficialPackageIndex({package.name: frozenset({"a" * 64})}, True)
     engine = FakeHookEngine([True])
     stdout = StringIO()
 

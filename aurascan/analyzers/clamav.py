@@ -110,9 +110,15 @@ class ClamAVAnalyzer(BaseAnalyzer):
                 confidence=Confidence.MEDIUM,
                 evidence_quality=EvidenceQuality.weak_heuristic,
                 file_path=str(pkg_path),
-                explanation="ClamAV scan timed out. This may be a denial of service attempt.",
-                recommendation="Investigate the package contents manually.",
-                blocks_installation=True,
+                explanation=(
+                    "The auxiliary ClamAV signature scan exceeded its time bound. "
+                    "This is an incomplete scan, not malware evidence."
+                ),
+                recommendation=(
+                    "Deterministic package checks still apply. Inspect the package "
+                    "independently if complete signature coverage is required."
+                ),
+                blocks_installation=False,
                 requires_manual_review=True,
             )
             return AnalysisResult(False, "Clamscan timed out", [finding])
@@ -160,11 +166,14 @@ class ClamAVAnalyzer(BaseAnalyzer):
             evidence_quality=EvidenceQuality.weak_heuristic,
             file_path=str(pkg_path),
             explanation=(
-                "The trusted ClamAV process started but did not complete a bounded scan. "
-                "Its raw diagnostics were discarded."
+                "The auxiliary ClamAV process started but did not complete a bounded scan. "
+                "Its raw diagnostics were discarded; an incomplete scan is not malware evidence."
             ),
-            recommendation="Do not install until the file can be scanned completely or inspected independently.",
-            blocks_installation=True,
+            recommendation=(
+                "Deterministic package checks still apply. Inspect the package independently "
+                "if complete signature coverage is required."
+            ),
+            blocks_installation=False,
             requires_manual_review=True,
             evidence_snippet="ClamAV inspection did not complete within its safety bounds",
         )

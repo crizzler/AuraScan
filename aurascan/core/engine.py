@@ -112,7 +112,8 @@ class AuraScanEngine:
         self._capture_intelligence()
         pkg_name, pkg_ver = self._resolve_package_identity(pkg_path, pkg_name, pkg_ver)
 
-        self._print(f"\n[AuraScan] --- Auditing Package: {pkg_path} ---", True)
+        if not quiet:
+            self._print(f"\n[AuraScan] --- Auditing Package: {pkg_path} ---", True)
         all_findings = self._intelligence_findings(pkg_name, pkg_ver)
         source_acquisition = []
         is_safe = True

@@ -91,6 +91,24 @@ def test_clamav_confirmed_hit_becomes_critical_and_blocks():
     assert risk.blocks_installation is True
 
 
+def test_incomplete_clamav_scan_requires_review_without_blocking():
+    finding = make_finding(
+        source=Source.clamav,
+        rule_id="CLAMAV-INCOMPLETE",
+        severity=Severity.HIGH,
+        confidence=Confidence.MEDIUM,
+        evidence_quality=EvidenceQuality.weak_heuristic,
+        blocks_installation=False,
+        requires_manual_review=True,
+    )
+
+    risk = RiskEngine().evaluate([finding])
+
+    assert risk.blocks_installation is False
+    assert risk.requires_manual_review is True
+    assert risk.action == RecommendedAction.manual_review
+
+
 def test_deterministic_credential_exfil_pattern_becomes_critical():
     finding = make_finding(
         rule_id="CRED-SSH-001",

@@ -46,7 +46,26 @@ def test_official_index_binds_repository_filename_to_sha256(tmp_path):
     index = load_official_package_index(tmp_path)
 
     assert index.complete is True
-    assert index.filenames == {package.name: checksum}
+    assert index.filenames == {package.name: frozenset({checksum})}
+    assert package_matches_official(package, index) is True
+
+
+def test_official_index_accepts_duplicate_filename_from_another_repository(tmp_path):
+    package = tmp_path / "demo-1.0-1-x86_64.pkg.tar.zst"
+    repository_checksum = _write_package(package, b"rebuild-bytes")
+    other_checksum = hashlib.sha256(b"upstream-bytes").hexdigest()
+    _write_sync_db(
+        tmp_path / "extra.db",
+        [("demo-1.0-1/desc", _descriptor(package.name, other_checksum))],
+    )
+    _write_sync_db(
+        tmp_path / "cachyos.db",
+        [("demo-1.0-1/desc", _descriptor(package.name, repository_checksum))],
+    )
+
+    index = load_official_package_index(tmp_path)
+
+    assert index.filenames == {package.name: frozenset({other_checksum, repository_checksum})}
     assert package_matches_official(package, index) is True
 
 

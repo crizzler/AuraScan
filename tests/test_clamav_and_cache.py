@@ -150,7 +150,7 @@ def test_clamav_tool_replacement_fails_before_runner(monkeypatch, tmp_path: Path
     assert calls == []
 
 
-def test_clamav_nonzero_error_is_an_incomplete_blocker(monkeypatch, tmp_path: Path):
+def test_clamav_nonzero_error_requires_review_without_blocking(monkeypatch, tmp_path: Path):
     tool = TrustedTool(
         "clamscan",
         "/usr/bin/clamscan",
@@ -180,8 +180,39 @@ def test_clamav_nonzero_error_is_an_incomplete_blocker(monkeypatch, tmp_path: Pa
 
     assert result.is_safe is False
     assert result.findings[0].rule_id == "CLAMAV-INCOMPLETE"
-    assert result.findings[0].blocks_installation is True
+    assert result.findings[0].blocks_installation is False
+    assert result.findings[0].requires_manual_review is True
     assert "example.invalid" not in result.findings[0].explanation
+
+
+def test_clamav_timeout_requires_review_without_blocking(monkeypatch, tmp_path: Path):
+    tool = TrustedTool(
+        "clamscan",
+        "/usr/bin/clamscan",
+        1,
+        2,
+        0,
+        0,
+        stat.S_IFREG | 0o755,
+    )
+    monkeypatch.setattr(
+        "aurascan.analyzers.clamav.capture_trusted_system_tool",
+        lambda *_args, **_kwargs: tool,
+    )
+    monkeypatch.setattr(
+        "aurascan.analyzers.clamav.revalidate_trusted_system_tool",
+        lambda observed: observed,
+    )
+
+    def _timeout(args, **kwargs):
+        raise subprocess.TimeoutExpired(args, 60)
+
+    result = ClamAVAnalyzer(runner=_timeout).analyze_package(str(tmp_path / "fixture"))
+
+    assert result.is_safe is False
+    assert result.findings[0].rule_id == "CLAMAV-TIMEOUT"
+    assert result.findings[0].blocks_installation is False
+    assert result.findings[0].requires_manual_review is True
 
 
 def test_clamav_signature_and_path_are_terminal_safe():

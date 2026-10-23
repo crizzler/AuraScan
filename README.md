@@ -42,17 +42,18 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
-The [v0.10.12 release](docs/releases/v0.10.12.md) is a package-only update
+The [v0.10.13 release](docs/releases/v0.10.13.md) is a package-only update
 that makes pacman-hook upgrades reliable for verified official repository
 packages. The hook binds a cached archive to the root-owned pacman sync
-databases by filename and SHA-256; verified official archives use a fast
-deterministic install-hook scan, routine systemd service management is
-LOW/non-manual, and auxiliary ClamAV/AI scans are skipped. Local, AUR,
-unknown, or checksum-mismatched archives keep the full scan and blocking
-behavior, and the hook now prints one compact transaction summary with the
-blocked package names and rule IDs. The v0.10.11 recovery image remains the
-retained, validated image; the v0.10.12 release note records that ISO and
-local-UKI gates were not rerun.
+databases by filename and SHA-256, accepts a matching checksum from any
+configured repository rebuild, and uses a fast deterministic install-hook scan
+for those archives. Routine systemd service management is LOW/non-manual, and
+auxiliary ClamAV/AI scans are skipped. A ClamAV timeout or incomplete scan is
+reported as a non-blocking review advisory, while confirmed signatures and
+deterministic CRITICAL findings still block. Local, AUR, unknown, or
+checksum-mismatched archives keep the full scan and blocking behavior. The
+v0.10.11 recovery image remains the retained, validated image; the v0.10.13
+release note records that ISO and local-UKI gates were not rerun.
 
 ## What You Can Try Now
 

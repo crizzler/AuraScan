@@ -29,9 +29,14 @@ _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 @dataclass(frozen=True)
 class OfficialPackageIndex:
-    """Repository filename -> SHA-256 bindings from the pacman sync databases."""
+    """Repository filename -> accepted SHA-256 bindings from the sync databases.
 
-    filenames: Mapping[str, str]
+    The same filename can be published by more than one configured repository
+    (for example an Arch and a CachyOS rebuild).  A cached archive is official
+    when its bytes match any repository entry for that filename.
+    """
+
+    filenames: Mapping[str, frozenset]
     complete: bool
     reason: str = ""
 
@@ -60,7 +65,7 @@ def load_official_package_index(
     official one.
     """
 
-    filenames: Dict[str, str] = {}
+    filenames: Dict[str, set] = {}
     problems = []
     try:
         databases = sorted(sync_dir.glob("*.db"))
@@ -95,14 +100,14 @@ def load_official_package_index(
                         filename = fields.get("filename", "")
                         checksum = fields.get("sha256sum", "").lower()
                         if filename and _HASH_RE.match(checksum):
-                            filenames[Path(filename).name] = checksum
+                            filenames.setdefault(Path(filename).name, set()).add(checksum)
             except (OSError, tarfile.TarError, EOFError, ValueError):
                 problems.append("sync database could not be read")
     except OSError:
         problems.append("sync database could not be read")
 
     return OfficialPackageIndex(
-        filenames=filenames,
+        filenames={name: frozenset(checksums) for name, checksums in filenames.items()},
         complete=not problems,
         reason="; ".join(dict.fromkeys(problems))[:300],
     )
@@ -136,4 +141,4 @@ def package_matches_official(path: Path, index: OfficialPackageIndex) -> bool:
     if not expected:
         return False
     observed = package_sha256(path)
-    return bool(observed) and observed == expected
+    return bool(observed) and observed in expected

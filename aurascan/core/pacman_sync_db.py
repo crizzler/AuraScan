@@ -15,9 +15,9 @@ import hashlib
 import re
 import stat
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Mapping, Optional
+from typing import Dict, List, Mapping, Optional
 
 SYNC_DB_DIR = Path("/var/lib/pacman/sync")
 MAX_DB_BYTES = 128 * 1024 * 1024
@@ -39,18 +39,37 @@ class OfficialPackageIndex:
     filenames: Mapping[str, frozenset]
     complete: bool
     reason: str = ""
+    providers: Mapping[str, frozenset] = field(default_factory=dict)
 
 
-def _parse_desc(data: bytes) -> Dict[str, str]:
-    fields: Dict[str, str] = {}
+def _parse_desc(data: bytes) -> Dict[str, List[str]]:
+    fields: Dict[str, List[str]] = {}
     current = ""
     for line in data.decode("utf-8", "replace").splitlines():
         if len(line) >= 2 and line.startswith("%") and line.endswith("%"):
             current = line.strip("%").lower()
+            fields.setdefault(current, [])
             continue
         if current and line:
-            fields[current] = line
+            fields[current].append(line)
     return fields
+
+
+def _provided_sonames(provide: str) -> List[str]:
+    """Expand an Arch ``provides`` entry into likely soname lookups."""
+
+    name, separator, version = provide.partition("=")
+    name = name.strip()
+    if not name or not re.fullmatch(r"[A-Za-z0-9@._+:-]+", name):
+        return []
+    if not name.endswith(".so"):
+        return [name]
+    names = [name]
+    if separator and version:
+        soname_version = version.split("-", 1)[0].strip()
+        if soname_version:
+            names.append(f"{name}.{soname_version}")
+    return names
 
 
 def load_official_package_index(
@@ -66,6 +85,7 @@ def load_official_package_index(
     """
 
     filenames: Dict[str, set] = {}
+    providers: Dict[str, set] = {}
     problems = []
     try:
         databases = sorted(sync_dir.glob("*.db"))
@@ -97,10 +117,15 @@ def load_official_package_index(
                             problems.append("description could not be read")
                             continue
                         fields = _parse_desc(extracted.read(MAX_DESC_BYTES))
-                        filename = fields.get("filename", "")
-                        checksum = fields.get("sha256sum", "").lower()
+                        filename = (fields.get("filename") or [""])[0]
+                        checksum = (fields.get("sha256sum") or [""])[0].lower()
                         if filename and _HASH_RE.match(checksum):
                             filenames.setdefault(Path(filename).name, set()).add(checksum)
+                        package_name = (fields.get("name") or [""])[0]
+                        if package_name and re.fullmatch(r"[A-Za-z0-9@._+-]+", package_name):
+                            for provide in fields.get("provides", []):
+                                for soname in _provided_sonames(provide):
+                                    providers.setdefault(soname, set()).add(package_name)
             except (OSError, tarfile.TarError, EOFError, ValueError):
                 problems.append("sync database could not be read")
     except OSError:
@@ -110,6 +135,7 @@ def load_official_package_index(
         filenames={name: frozenset(checksums) for name, checksums in filenames.items()},
         complete=not problems,
         reason="; ".join(dict.fromkeys(problems))[:300],
+        providers={name: frozenset(packages) for name, packages in providers.items()},
     )
 
 

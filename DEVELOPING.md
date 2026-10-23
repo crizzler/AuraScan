@@ -1996,6 +1996,20 @@ local/unknown archive. Keep this output line-based and ASCII: pacman captures
 scriptlet output through a pipe, so Python must flush every progress line and
 must not depend on a terminal carriage-return spinner.
 
+Runtime-link aftercare is separate from package-content scanning. After an
+AuraScan-orchestrated upgrade verifies its planned versions, the changed
+repository packages' installed files are inspected with a bounded static ELF
+reader (`core/runtime_links.py`). It reads program headers and the dynamic
+section only, never executes the binary or the dynamic loader. A soname is
+accepted when the linker cache or the same package contains it; otherwise the
+bounded sync-database `%PROVIDES%` index is used to find a unique official
+provider. Only a unique missing provider is offered for installation, through
+the same captured sudo/pacman identity and revalidation used by the upgrade
+handoff. `aurascan doctor --fix-runtime-links` applies the same check to
+recently installed packages (or explicit `--runtime-link-package` names).
+Unreadable file lists, ambiguous providers, incomplete ELF reads, and scan
+bounds remain visible limitations rather than proof that a package is healthy.
+
 Official-repository provenance is a separate bounded check. `pacman_sync_db`
 reads the root-owned sync databases, binds `%FILENAME%` to `%SHA256SUM%`, and
 requires both the cached archive name and streamed bytes to match before the

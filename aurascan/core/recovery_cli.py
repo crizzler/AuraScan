@@ -138,7 +138,7 @@ def recovery_version() -> str:
     try:
         return importlib.metadata.version("aurascan")
     except importlib.metadata.PackageNotFoundError:
-        return "0.10.15-dev"
+        return "0.10.16-dev"
 
 
 def rooted(root: Path, path: Path) -> Path:

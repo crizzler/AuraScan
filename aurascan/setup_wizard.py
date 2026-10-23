@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional
@@ -262,6 +263,18 @@ def build_doctor_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--json", action="store_true", dest="json_mode", help="emit doctor results as JSON")
     parser.add_argument("--check-ai", action="store_true", help="run one harmless provider connectivity check")
+    parser.add_argument(
+        "--fix-runtime-links",
+        action="store_true",
+        help="scan recently installed packages for missing shared libraries and install official providers",
+    )
+    parser.add_argument(
+        "--runtime-link-package",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="limit --fix-runtime-links to an installed package (repeatable)",
+    )
     return parser
 
 
@@ -1130,6 +1143,7 @@ def run_doctor(
     agent_root_policy_uid: int = 0,
     agent_audit_root: Optional[Path] = None,
     agent_runtime_root: Path = Path("/run/aurascan-agent"),
+    input_func: Callable[[str], str] = input,
 ) -> int:
     stdout = stdout or sys.stdout
     args = build_doctor_parser().parse_args(argv)
@@ -1177,7 +1191,91 @@ def run_doctor(
         print("AuraScan doctor", file=stdout)
         for check in checks:
             print(_format_check_line(check), file=stdout)
+    if args.fix_runtime_links:
+        if args.json_mode:
+            print("[AuraScan] --fix-runtime-links cannot be combined with --json.", file=stderr)
+            return 1
+        return run_doctor_runtime_link_repair(
+            runner=runner,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+            package_names=list(args.runtime_link_package or []),
+        )
     return 1 if has_error else 0
+
+
+def run_doctor_runtime_link_repair(
+    *,
+    runner: Callable,
+    input_func: Callable[[str], str],
+    stdout,
+    stderr,
+    package_names: Optional[List[str]] = None,
+    recent_days: int = 30,
+    max_packages: int = 50,
+) -> int:
+    """Repair missing shared-library providers for recent package updates."""
+
+    from aurascan.core.local_package_db import load_installed_package_records
+    from aurascan.core.trusted_executable import (
+        TRUSTED_PACMAN_PATH,
+        TRUSTED_SUDO_PATH,
+        UnsafeUpgradeExecutable,
+        capture_trusted_executable,
+    )
+    from aurascan.core.upgrade_models import UpgradePackage, UpgradePlan
+    from aurascan.core.upgrade_preflight import UpgradeOptions, run_upgrade_runtime_link_aftercare
+
+    package_re = re.compile(r"^[A-Za-z0-9@._+-]{1,200}$")
+    requested = [name for name in (package_names or []) if package_re.fullmatch(name)]
+    if package_names and len(requested) != len(package_names):
+        print("[AuraScan] Runtime-link package names must be plain package names.", file=stderr)
+        return 1
+    if requested:
+        selected = sorted(set(requested))[:max_packages]
+    else:
+        records, error = load_installed_package_records()
+        if error:
+            print(f"[AuraScan] Runtime-link check skipped: {error}.", file=stderr)
+            return 0
+        cutoff = int(time.time()) - max(1, recent_days) * 86400
+        selected = sorted(
+            name
+            for name, record in records.items()
+            if record.install_date >= cutoff
+        )[:max_packages]
+    if not selected:
+        print(
+            f"[AuraScan] No packages installed in the last {recent_days} days need a runtime-link check.",
+            file=stdout,
+        )
+        return 0
+    try:
+        pacman = capture_trusted_executable("pacman", TRUSTED_PACMAN_PATH)
+        trusted = {"pacman": pacman}
+        try:
+            trusted["sudo"] = capture_trusted_executable("sudo", TRUSTED_SUDO_PATH)
+        except UnsafeUpgradeExecutable:
+            pass
+    except UnsafeUpgradeExecutable as exc:
+        print(f"[AuraScan] Runtime-link repair is unavailable: {exc}.", file=stderr)
+        return 1
+    plan = UpgradePlan(
+        repo_packages=[
+            UpgradePackage(name=name, new_version="installed") for name in selected
+        ],
+        trusted_executables=trusted,
+    )
+    run_upgrade_runtime_link_aftercare(
+        UpgradeOptions(),
+        plan=plan,
+        runner=runner,
+        input_func=input_func,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    return 0
 
 
 def build_doctor_checks(

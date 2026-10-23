@@ -898,6 +898,14 @@ def run_upgrade(
             return EXIT_UPGRADE_VERIFICATION_FAILED
         print_verified_upgrade_summary(report.plan, options, stdout=stdout, stderr=stderr)
         run_upgrade_kernel_module_aftercare(options, plan=report.plan, runner=runner, stdout=stdout, stderr=stderr, snapshot=snapshot, modules_root=modules_root)
+        run_upgrade_runtime_link_aftercare(
+            options,
+            plan=report.plan,
+            runner=runner,
+            input_func=input_func,
+            stdout=stdout,
+            stderr=stderr,
+        )
         run_upgrade_config_drift("after", options, input_func=input_func, stdout=stdout, stderr=stderr, root=config_drift_root, snapshot=snapshot, runner=config_drift_runner)
     else:
         print_upgrade_failure_diagnosis(report.plan, options, runner=runner, urlopen=urlopen, stdout=stdout, stderr=stderr)
@@ -1634,6 +1642,165 @@ def run_upgrade_kernel_module_aftercare(
         print("No new kernel transaction is visible in aftercare; reboot only if the package manager requested it.", file=stream)
     for issue in check.fixable_issues + check.unfixable_issues:
         print(f"- {issue.summary}", file=stream)
+
+
+def run_upgrade_runtime_link_aftercare(
+    options: UpgradeOptions,
+    *,
+    plan: UpgradePlan,
+    runner: Callable,
+    input_func: Callable[[str], str],
+    stdout,
+    stderr,
+) -> None:
+    """Detect missing ELF dependencies in packages changed by the upgrade.
+
+    A repository rebuild can add a shared-library ``DT_NEEDED`` entry without
+    declaring the provider package.  The dynamic linker then fails before an
+    application starts.  This check reads ELF metadata only and installs only a
+    uniquely resolved official provider through the same trusted sudo/pacman
+    boundary used by the upgrade handoff.
+    """
+
+    if options.json_output or options.dry_run:
+        return
+    packages = sorted(
+        {
+            package.name
+            for package in plan.repo_packages
+            if package.name and package.new_version
+        }
+    )
+    if not packages:
+        return
+    stream = stdout
+    try:
+        from aurascan.core.local_package_db import load_installed_package_records
+        from aurascan.core.pacman_sync_db import load_official_package_index
+        from aurascan.core.runtime_links import (
+            collect_runtime_link_issues,
+            load_linker_cache,
+            missing_provider_candidates,
+        )
+
+        linker_cache, linker_note = load_linker_cache(runner)
+        if linker_note:
+            print(f"[AuraScan] Runtime library check skipped: {linker_note}.", file=stderr)
+            return
+        provider_index = load_official_package_index()
+        installed_records, _installed_error = load_installed_package_records()
+        scan = collect_runtime_link_issues(
+            packages,
+            query_runner=_trusted_upgrade_query_runner(plan, runner),
+            linker_cache=linker_cache,
+            providers=provider_index.providers,
+            max_files=20000,
+        )
+    except (OSError, UnsafeUpgradeExecutable, ValueError) as exc:
+        print(f"[AuraScan] Runtime library check skipped: {exc}.", file=stderr)
+        return
+    if not scan.issues and not scan.notes:
+        return
+    print("\n[AuraScan] Runtime library check", file=stream)
+    for issue in scan.issues[:12]:
+        provider_text = ", ".join(issue.providers) if issue.providers else "no official provider found"
+        print(
+            f"- {issue.package}: {issue.file_path} needs {issue.soname} "
+            f"(provider: {provider_text})",
+            file=stream,
+        )
+    if len(scan.issues) > 12:
+        print(f"- {len(scan.issues) - 12} additional runtime-link issue(s)", file=stream)
+    for note in scan.notes[:6]:
+        print(f"- {note}", file=stream)
+    if not scan.issues:
+        return
+    ambiguous = sorted({issue.soname for issue in scan.issues if len(issue.providers) > 1})
+    installed_versions = {name: record.version for name, record in installed_records.items()}
+    providers = missing_provider_candidates(scan.issues, installed_versions)
+    if ambiguous:
+        print(
+            "AuraScan will not guess between multiple providers for: "
+            + ", ".join(ambiguous[:6])
+            + ". Install the intended provider manually.",
+            file=stream,
+        )
+        return
+    if not providers:
+        print(
+            "No missing official provider package was found. Install the required "
+            "library manually or report the package to its repository.",
+            file=stream,
+        )
+        return
+    if not options.yes:
+        answer = ""
+        try:
+            answer = input_func(
+                "Install missing runtime provider package(s) "
+                f"{', '.join(providers)} now? [Y/n] "
+            ).strip().lower()
+        except EOFError:
+            answer = "n"
+        if answer not in {"", "y", "yes"}:
+            print("[AuraScan] Runtime provider installation skipped.", file=stream)
+            return
+    try:
+        result = run_trusted_package_install(plan, providers, runner=runner)
+    except (OSError, UnsafeUpgradeExecutable) as exc:
+        print(f"[AuraScan] Runtime provider installation failed: {exc}.", file=stderr)
+        return
+    returncode = int(getattr(result, "returncode", 1))
+    if returncode != 0:
+        print(
+            f"[AuraScan] Runtime provider installation exited with status {returncode}.",
+            file=stderr,
+        )
+        return
+    print(
+        "[AuraScan] Installed runtime provider package(s): " + ", ".join(providers),
+        file=stream,
+    )
+    cache_after, _after_note = load_linker_cache(runner)
+    remaining = sorted(
+        {
+            issue.soname
+            for issue in scan.issues
+            if issue.soname not in cache_after
+        }
+    )
+    if remaining:
+        print(
+            "AuraScan still cannot resolve: "
+            + ", ".join(remaining[:8])
+            + ". Run ldconfig or inspect the provider package manually.",
+            file=stderr,
+        )
+
+
+def run_trusted_package_install(
+    plan: UpgradePlan,
+    packages: Sequence[str],
+    *,
+    runner: Callable,
+):
+    """Install official provider packages through the bound sudo/pacman plan."""
+
+    package_re = re.compile(r"^[A-Za-z0-9@._+-]{1,200}$")
+    if not packages or any(not package_re.fullmatch(name) for name in packages):
+        raise UnsafeUpgradeExecutable("runtime provider package name is invalid")
+    pacman = plan.trusted_executables.get("pacman")
+    if pacman is None:
+        raise UnsafeUpgradeExecutable("trusted pacman identity is unavailable")
+    command = [pacman.path, "-S", "--needed", "--noconfirm", *packages]
+    executables = [pacman]
+    sudo = plan.trusted_executables.get("sudo")
+    if sudo is not None:
+        command.insert(0, sudo.path)
+        executables.insert(0, sudo)
+    elif hasattr(os, "geteuid") and os.geteuid() != 0:
+        raise UnsafeUpgradeExecutable("root or trusted sudo is required to install runtime providers")
+    return run_trusted_command(command, executables, runner=runner, check=False)
 
 
 def run_upgrade_config_drift(

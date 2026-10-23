@@ -47,7 +47,24 @@ def test_official_index_binds_repository_filename_to_sha256(tmp_path):
 
     assert index.complete is True
     assert index.filenames == {package.name: frozenset({checksum})}
+    assert index.providers == {}
     assert package_matches_official(package, index) is True
+
+
+def test_official_index_maps_soname_provides_to_package(tmp_path):
+    payload = (
+        "%FILENAME%\nsimdutf-9.2.1-2-x86_64.pkg.tar.zst\n\n"
+        "%NAME%\nsimdutf\n\n"
+        "%VERSION%\n9.2.1-2\n\n"
+        "%SHA256SUM%\n" + "a" * 64 + "\n\n"
+        "%PROVIDES%\nlibsimdutf.so=36-64\n\n"
+    ).encode("utf-8")
+    _write_sync_db(tmp_path / "extra.db", [("simdutf-9.2.1-2/desc", payload)])
+
+    index = load_official_package_index(tmp_path)
+
+    assert index.providers["libsimdutf.so.36"] == frozenset({"simdutf"})
+    assert index.providers["libsimdutf.so"] == frozenset({"simdutf"})
 
 
 def test_official_index_accepts_duplicate_filename_from_another_repository(tmp_path):

@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import sample from "./fixtures/snapshot.sample.json";
-import { MAX_CHECKS, UI_CONTRACT, countChecks, parseSnapshot, shortDigest } from "./contract";
+import {
+  MAX_CHECKS,
+  MAX_FINDINGS,
+  UI_CONTRACT,
+  countChecks,
+  parseSnapshot,
+  shortDigest
+} from "./contract";
 
 function mutate(change: (value: Record<string, unknown>) => void): unknown {
   const copy = JSON.parse(JSON.stringify(sample)) as Record<string, unknown>;
@@ -18,8 +25,9 @@ describe("parseSnapshot", () => {
       return;
     }
     expect(result.snapshot.contract).toBe(UI_CONTRACT);
-    expect(result.snapshot.doctor.checks.length).toBe(sample.doctor.checks.length);
-    expect(result.snapshot.incidents.highest_severity).toBe("HIGH");
+    expect(result.snapshot.doctor?.checks.length).toBe(sample.doctor.checks.length);
+    expect(result.snapshot.incidents?.highest_severity).toBe("HIGH");
+    expect(result.snapshot.report?.package.name).toBe("example-pkg");
   });
 
   it("rejects an unknown contract instead of guessing", () => {
@@ -104,7 +112,7 @@ describe("parseSnapshot", () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.snapshot.incidents.available).toBe(false);
+      expect(result.snapshot.incidents?.available).toBe(false);
     }
   });
 
@@ -124,9 +132,73 @@ describe("parseSnapshot", () => {
         "app",
         "doctor",
         "intelligence",
-        "incidents"
+        "incidents",
+        "report"
       ]);
     }
+  });
+});
+
+describe("report mode", () => {
+  it("accepts a report-only snapshot without live sections", () => {
+    const result = parseSnapshot(
+      mutate((value) => {
+        value.doctor = undefined;
+        value.intelligence = undefined;
+        value.incidents = undefined;
+      })
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    expect(result.snapshot.doctor).toBeUndefined();
+    expect(result.snapshot.report?.findings.length).toBe(2);
+    expect(result.snapshot.report?.counts.by_severity.HIGH).toBe(1);
+  });
+
+  it("rejects an unknown report severity", () => {
+    const result = parseSnapshot(
+      mutate((value) => {
+        const report = value.report as { findings: Array<Record<string, unknown>> };
+        report.findings[0].severity = "SEVERE";
+      })
+    );
+
+    expect(result).toEqual({ ok: false, reason: "report evidence is malformed" });
+  });
+
+  it("rejects a report without a package", () => {
+    const result = parseSnapshot(
+      mutate((value) => {
+        (value.report as Record<string, unknown>).package = undefined;
+      })
+    );
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects a report beyond the finding bound", () => {
+    const result = parseSnapshot(
+      mutate((value) => {
+        const report = value.report as { findings: unknown[] };
+        report.findings = Array.from({ length: MAX_FINDINGS + 1 }, () => null);
+      })
+    );
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects a snapshot with no evidence section", () => {
+    const result = parseSnapshot(
+      mutate((value) => {
+        value.doctor = undefined;
+        value.report = undefined;
+      })
+    );
+
+    expect(result).toEqual({ ok: false, reason: "snapshot carries no evidence section" });
   });
 });
 

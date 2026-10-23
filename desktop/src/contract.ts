@@ -8,9 +8,12 @@
 
 export const UI_CONTRACT = "aurascan-ui/1";
 export const MAX_CHECKS = 1000;
+export const MAX_FINDINGS = 500;
 
 export type CheckStatus = "ok" | "warn" | "error";
 export type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN";
+export type Confidence = "LOW" | "MEDIUM" | "HIGH" | "CONFIRMED";
+export type ReportAction = "ALLOW" | "WARN" | "MANUAL_REVIEW" | "BLOCK" | "BLOCKED";
 
 export interface DoctorCheck {
   name: string;
@@ -51,13 +54,63 @@ export interface AppPayload {
   platform: string;
 }
 
+export interface ReportFinding {
+  rule_id: string;
+  severity: Severity;
+  confidence: Confidence;
+  evidence_quality: string;
+  phase: string;
+  source: string;
+  file_name: string;
+  line_number: number | null;
+  title: string;
+  summary: string;
+  recommendation: string;
+  checked: string;
+  not_checked: string;
+  blocks_installation: boolean;
+  requires_manual_review: boolean;
+}
+
+export interface ReportRisk {
+  severity: Severity;
+  action: ReportAction;
+  recommended_action: string;
+  blocks_installation: boolean;
+  requires_manual_review: boolean;
+  reason: string;
+}
+
+export interface ReportPayload {
+  schema_version: string;
+  scanner_version: string;
+  package: {
+    name: string;
+    version: string;
+    pkgbase: string;
+    maintainer: string;
+  };
+  risk: ReportRisk | null;
+  counts: {
+    total: number;
+    by_severity: Record<"LOW" | "MEDIUM" | "HIGH" | "CRITICAL", number>;
+    blocking: number;
+    manual_review: number;
+    truncated: boolean;
+  };
+  findings: ReportFinding[];
+  messages: string[];
+  context: Record<string, string>;
+}
+
 export interface Snapshot {
   contract: string;
   generated_at: number;
   app: AppPayload;
-  doctor: DoctorPayload;
-  intelligence: IntelligencePayload;
-  incidents: IncidentsPayload;
+  doctor?: DoctorPayload;
+  intelligence?: IntelligencePayload;
+  incidents?: IncidentsPayload;
+  report?: ReportPayload;
 }
 
 export type ParseResult =
@@ -66,6 +119,8 @@ export type ParseResult =
 
 const CHECK_STATUSES: CheckStatus[] = ["ok", "warn", "error"];
 const SEVERITIES: Severity[] = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"];
+const CONFIDENCES: Confidence[] = ["LOW", "MEDIUM", "HIGH", "CONFIRMED"];
+const REPORT_ACTIONS: ReportAction[] = ["ALLOW", "WARN", "MANUAL_REVIEW", "BLOCK", "BLOCKED"];
 
 const INTELLIGENCE_STRING_KEYS = [
   "source",
@@ -177,6 +232,146 @@ function parseIncidents(raw: unknown): IncidentsPayload | null {
   };
 }
 
+function requireRecord(value: unknown, reason: string): Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new Error(reason);
+  }
+  return value;
+}
+
+function requireString(value: unknown, reason: string): string {
+  if (typeof value !== "string") {
+    throw new Error(reason);
+  }
+  return value;
+}
+
+function requireNumber(value: unknown, reason: string): number {
+  if (!isFiniteNumber(value)) {
+    throw new Error(reason);
+  }
+  return value;
+}
+
+function requireBoolean(value: unknown, reason: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new Error(reason);
+  }
+  return value;
+}
+
+function parseFinding(raw: unknown): ReportFinding {
+  const entry = requireRecord(raw, "report finding is not an object");
+  const severity = requireString(entry.severity, "report finding has no severity");
+  if (!SEVERITIES.includes(severity as Severity)) {
+    throw new Error("report finding has an unsupported severity");
+  }
+  const confidence = requireString(entry.confidence, "report finding has no confidence");
+  if (!CONFIDENCES.includes(confidence as Confidence)) {
+    throw new Error("report finding has an unsupported confidence");
+  }
+  const ruleId = requireString(entry.rule_id, "report finding has no rule identifier");
+  if (ruleId.length === 0) {
+    throw new Error("report finding has no rule identifier");
+  }
+  const line = entry.line_number;
+  if (line !== null && !isFiniteNumber(line)) {
+    throw new Error("report finding has an invalid line number");
+  }
+  return {
+    rule_id: ruleId,
+    severity: severity as Severity,
+    confidence: confidence as Confidence,
+    evidence_quality: requireString(entry.evidence_quality, "report finding has no evidence quality"),
+    phase: requireString(entry.phase, "report finding has no phase"),
+    source: requireString(entry.source, "report finding has no source"),
+    file_name: requireString(entry.file_name, "report finding has no file name"),
+    line_number: line === null ? null : line,
+    title: requireString(entry.title, "report finding has no title"),
+    summary: requireString(entry.summary, "report finding has no summary"),
+    recommendation: requireString(entry.recommendation, "report finding has no recommendation"),
+    checked: requireString(entry.checked, "report finding has no checked text"),
+    not_checked: requireString(entry.not_checked, "report finding has no not-checked text"),
+    blocks_installation: requireBoolean(entry.blocks_installation, "report finding has no blocking flag"),
+    requires_manual_review: requireBoolean(entry.requires_manual_review, "report finding has no review flag")
+  };
+}
+
+function parseReport(raw: unknown): ReportPayload | null {
+  try {
+    const report = requireRecord(raw, "report evidence is not an object");
+    const pkg = requireRecord(report.package, "report package is missing");
+    const counts = requireRecord(report.counts, "report counts are missing");
+    const bySeverity = requireRecord(counts.by_severity, "report severity counts are missing");
+    const rawFindings = report.findings;
+    if (!Array.isArray(rawFindings) || rawFindings.length > MAX_FINDINGS) {
+      throw new Error("report findings are missing or exceed the contract bound");
+    }
+
+    let risk: ReportRisk | null = null;
+    if (report.risk !== null && report.risk !== undefined) {
+      const entry = requireRecord(report.risk, "report risk is malformed");
+      const severity = requireString(entry.severity, "report risk has no severity");
+      if (!SEVERITIES.includes(severity as Severity)) {
+        throw new Error("report risk has an unsupported severity");
+      }
+      const action = requireString(entry.action, "report risk has no action");
+      if (!REPORT_ACTIONS.includes(action as ReportAction)) {
+        throw new Error("report risk has an unsupported action");
+      }
+      risk = {
+        severity: severity as Severity,
+        action: action as ReportAction,
+        recommended_action: requireString(entry.recommended_action, "report risk has no recommended action"),
+        blocks_installation: requireBoolean(entry.blocks_installation, "report risk has no blocking flag"),
+        requires_manual_review: requireBoolean(entry.requires_manual_review, "report risk has no review flag"),
+        reason: requireString(entry.reason, "report risk has no reason")
+      };
+    }
+
+    const messages = Array.isArray(report.messages)
+      ? report.messages.filter((message): message is string => typeof message === "string")
+      : [];
+    const context: Record<string, string> = {};
+    if (isRecord(report.context)) {
+      for (const [key, value] of Object.entries(report.context)) {
+        if (typeof value === "string") {
+          context[key] = value;
+        }
+      }
+    }
+
+    return {
+      schema_version: requireString(report.schema_version, "report has no schema version"),
+      scanner_version: requireString(report.scanner_version, "report has no scanner version"),
+      package: {
+        name: requireString(pkg.name, "report has no package name"),
+        version: requireString(pkg.version, "report package version is malformed"),
+        pkgbase: requireString(pkg.pkgbase, "report package pkgbase is malformed"),
+        maintainer: requireString(pkg.maintainer, "report package maintainer is malformed")
+      },
+      risk,
+      counts: {
+        total: requireNumber(counts.total, "report total is malformed"),
+        by_severity: {
+          LOW: requireNumber(bySeverity.LOW, "report severity counts are malformed"),
+          MEDIUM: requireNumber(bySeverity.MEDIUM, "report severity counts are malformed"),
+          HIGH: requireNumber(bySeverity.HIGH, "report severity counts are malformed"),
+          CRITICAL: requireNumber(bySeverity.CRITICAL, "report severity counts are malformed")
+        },
+        blocking: requireNumber(counts.blocking, "report blocking count is malformed"),
+        manual_review: requireNumber(counts.manual_review, "report manual-review count is malformed"),
+        truncated: requireBoolean(counts.truncated, "report truncation flag is malformed")
+      },
+      findings: rawFindings.map(parseFinding),
+      messages,
+      context
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function parseSnapshot(raw: unknown): ParseResult {
   if (!isRecord(raw)) {
     return fail("snapshot is not an object");
@@ -198,36 +393,52 @@ export function parseSnapshot(raw: unknown): ParseResult {
     return fail("app identity is missing or malformed");
   }
 
-  const doctor = raw.doctor;
-  if (!isRecord(doctor) || typeof doctor.ok !== "boolean") {
-    return fail("doctor evidence is missing or malformed");
-  }
-  const checks = parseChecks(doctor.checks);
-  if (checks === null) {
-    return fail("doctor evidence contains an unsupported check entry");
-  }
-
-  const intelligence = parseIntelligence(raw.intelligence);
-  if (intelligence === null) {
-    return fail("intelligence evidence is malformed");
-  }
-
-  const incidents = parseIncidents(raw.incidents);
-  if (incidents === null) {
-    return fail("incident evidence is malformed");
-  }
-
-  return {
-    ok: true,
-    snapshot: {
-      contract: UI_CONTRACT,
-      generated_at: raw.generated_at,
-      app: { version: app.version, python: app.python, platform: app.platform },
-      doctor: { ok: doctor.ok, checks },
-      intelligence,
-      incidents
-    }
+  const snapshot: Snapshot = {
+    contract: UI_CONTRACT,
+    generated_at: raw.generated_at,
+    app: { version: app.version, python: app.python, platform: app.platform }
   };
+
+  if (raw.doctor !== undefined) {
+    if (!isRecord(raw.doctor) || typeof raw.doctor.ok !== "boolean") {
+      return fail("doctor evidence is malformed");
+    }
+    const checks = parseChecks(raw.doctor.checks);
+    if (checks === null) {
+      return fail("doctor evidence contains an unsupported check entry");
+    }
+    snapshot.doctor = { ok: raw.doctor.ok, checks };
+  }
+
+  if (raw.intelligence !== undefined) {
+    const intelligence = parseIntelligence(raw.intelligence);
+    if (intelligence === null) {
+      return fail("intelligence evidence is malformed");
+    }
+    snapshot.intelligence = intelligence;
+  }
+
+  if (raw.incidents !== undefined) {
+    const incidents = parseIncidents(raw.incidents);
+    if (incidents === null) {
+      return fail("incident evidence is malformed");
+    }
+    snapshot.incidents = incidents;
+  }
+
+  if (raw.report !== undefined) {
+    const report = parseReport(raw.report);
+    if (report === null) {
+      return fail("report evidence is malformed");
+    }
+    snapshot.report = report;
+  }
+
+  if (!snapshot.doctor && !snapshot.report) {
+    return fail("snapshot carries no evidence section");
+  }
+
+  return { ok: true, snapshot };
 }
 
 export function countChecks(checks: DoctorCheck[]): Record<CheckStatus, number> {

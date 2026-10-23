@@ -115,5 +115,72 @@
     "source": "bundled",
     "status": "bundled",
     "update_channel": "unconfigured"
+  },
+  "report": {
+    "context": {
+      "scan_context": "unknown",
+      "scan_context_source": "default",
+      "scan_policy": "full"
+    },
+    "counts": {
+      "blocking": 0,
+      "by_severity": { "CRITICAL": 0, "HIGH": 1, "LOW": 1, "MEDIUM": 0 },
+      "manual_review": 1,
+      "total": 2,
+      "truncated": false
+    },
+    "findings": [
+      {
+        "blocks_installation": false,
+        "checked": "Package control text.",
+        "confidence": "MEDIUM",
+        "evidence_quality": "strong_heuristic",
+        "file_name": "PKGBUILD",
+        "line_number": 21,
+        "not_checked": "Whether the referenced file is read at build time.",
+        "phase": "pkgbuild_static",
+        "recommendation": "Confirm the reference is expected for this package.",
+        "requires_manual_review": true,
+        "rule_id": "CRED-ENV-001",
+        "severity": "HIGH",
+        "source": "deterministic_rule",
+        "summary": "Attempted read of ~/.env file.",
+        "title": ""
+      },
+      {
+        "blocks_installation": false,
+        "checked": "Acquired source archive contents.",
+        "confidence": "LOW",
+        "evidence_quality": "weak_heuristic",
+        "file_name": "app.min.js",
+        "line_number": null,
+        "not_checked": "Whether the bundled code is reachable at runtime.",
+        "phase": "source_archive_scan",
+        "recommendation": "Inspect the bundle only if the package requires it.",
+        "requires_manual_review": false,
+        "rule_id": "DEEPSTATIC-MINIFIED-FILE",
+        "severity": "LOW",
+        "source": "deterministic_rule",
+        "summary": "Minified file detected in acquired source.",
+        "title": ""
+      }
+    ],
+    "messages": ["Scanned"],
+    "package": {
+      "maintainer": "example",
+      "name": "example-pkg",
+      "pkgbase": "example-pkg",
+      "version": "1.0-1"
+    },
+    "risk": {
+      "action": "MANUAL_REVIEW",
+      "blocks_installation": false,
+      "reason": "manual review required",
+      "recommended_action": "manual_review",
+      "requires_manual_review": true,
+      "severity": "HIGH"
+    },
+    "schema_version": "1.0",
+    "scanner_version": "2.6.0"
   }
 }

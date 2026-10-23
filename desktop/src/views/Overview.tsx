@@ -1,18 +1,24 @@
-import type { Snapshot } from "../contract";
+import type { DoctorPayload, IncidentsPayload, IntelligencePayload } from "../contract";
 import { countChecks, shortDigest } from "../contract";
 import { StatusBadge } from "../components/StatusBadge";
 
-export function Overview({ snapshot }: { snapshot: Snapshot }) {
-  const counts = countChecks(snapshot.doctor.checks);
-  const intelligence = snapshot.intelligence;
-  const incidents = snapshot.incidents;
+export function Overview({
+  doctor,
+  intelligence,
+  incidents
+}: {
+  doctor: DoctorPayload;
+  intelligence?: IntelligencePayload;
+  incidents?: IncidentsPayload;
+}) {
+  const counts = countChecks(doctor.checks);
 
   return (
     <div className="stack">
       <section className="card">
         <header className="card__header">
           <h2>System checks</h2>
-          <StatusBadge tone={snapshot.doctor.ok ? "ok" : "error"} label={snapshot.doctor.ok ? "NO ERRORS" : "ATTENTION"} />
+          <StatusBadge tone={doctor.ok ? "ok" : "error"} label={doctor.ok ? "NO ERRORS" : "ATTENTION"} />
         </header>
         <div className="stat-grid">
           <div className="stat">
@@ -28,7 +34,7 @@ export function Overview({ snapshot }: { snapshot: Snapshot }) {
             <span className="stat__label">errors</span>
           </div>
           <div className="stat">
-            <span className="stat__value">{snapshot.doctor.checks.length}</span>
+            <span className="stat__value">{doctor.checks.length}</span>
             <span className="stat__label">checks collected</span>
           </div>
         </div>
@@ -43,76 +49,86 @@ export function Overview({ snapshot }: { snapshot: Snapshot }) {
           <header className="card__header">
             <h2>Detection data</h2>
             <StatusBadge
-              tone={intelligence.status === "unavailable" ? "unavailable" : "neutral"}
-              label={intelligence.status.toUpperCase()}
+              tone={!intelligence || intelligence.status === "unavailable" ? "unavailable" : "neutral"}
+              label={(intelligence?.status ?? "unavailable").toUpperCase()}
             />
           </header>
-          <dl className="kv">
-            <div>
-              <dt>Source</dt>
-              <dd>{intelligence.source ?? "—"}</dd>
-            </div>
-            <div>
-              <dt>Update channel</dt>
-              <dd>{intelligence.update_channel ?? "—"}</dd>
-            </div>
-            <div>
-              <dt>Schema / sequence</dt>
-              <dd>
-                {intelligence.schema_version ?? "—"} / {intelligence.sequence ?? "—"}
-              </dd>
-            </div>
-            <div>
-              <dt>Reviewed</dt>
-              <dd>{intelligence.reviewed_at ?? "—"}</dd>
-            </div>
-            <div>
-              <dt>Identity</dt>
-              <dd className="mono" title={intelligence.identity}>
-                {shortDigest(intelligence.identity)}
-              </dd>
-            </div>
-            <div>
-              <dt>Digest</dt>
-              <dd className="mono" title={intelligence.digest}>
-                {shortDigest(intelligence.digest)}
-              </dd>
-            </div>
-          </dl>
+          {intelligence ? (
+            <dl className="kv">
+              <div>
+                <dt>Source</dt>
+                <dd>{intelligence.source ?? "—"}</dd>
+              </div>
+              <div>
+                <dt>Update channel</dt>
+                <dd>{intelligence.update_channel ?? "—"}</dd>
+              </div>
+              <div>
+                <dt>Schema / sequence</dt>
+                <dd>
+                  {intelligence.schema_version ?? "—"} / {intelligence.sequence ?? "—"}
+                </dd>
+              </div>
+              <div>
+                <dt>Reviewed</dt>
+                <dd>{intelligence.reviewed_at ?? "—"}</dd>
+              </div>
+              <div>
+                <dt>Identity</dt>
+                <dd className="mono" title={intelligence.identity}>
+                  {shortDigest(intelligence.identity)}
+                </dd>
+              </div>
+              <div>
+                <dt>Digest</dt>
+                <dd className="mono" title={intelligence.digest}>
+                  {shortDigest(intelligence.digest)}
+                </dd>
+              </div>
+            </dl>
+          ) : (
+            <p className="empty">
+              Detection-data identity was not included in this snapshot.
+            </p>
+          )}
         </section>
 
         <section className="card">
           <header className="card__header">
             <h2>Incidents</h2>
-            {incidents.available && incidents.highest_severity ? (
+            {incidents && incidents.available && incidents.highest_severity ? (
               <StatusBadge tone={incidents.highest_severity} />
             ) : (
-              <StatusBadge tone={incidents.available ? "neutral" : "unavailable"} />
+              <StatusBadge tone={incidents && incidents.available ? "neutral" : "unavailable"} />
             )}
           </header>
-          {incidents.available ? (
-            <>
-              <div className="stat-grid stat-grid--tight">
-                <div className="stat">
-                  <span className="stat__value">{incidents.pending}</span>
-                  <span className="stat__label">pending markers</span>
+          {incidents ? (
+            incidents.available ? (
+              <>
+                <div className="stat-grid stat-grid--tight">
+                  <div className="stat">
+                    <span className="stat__value">{incidents.pending}</span>
+                    <span className="stat__label">pending markers</span>
+                  </div>
+                  <div className="stat">
+                    <span className="stat__value">{incidents.unseen}</span>
+                    <span className="stat__label">unseen</span>
+                  </div>
                 </div>
-                <div className="stat">
-                  <span className="stat__value">{incidents.unseen}</span>
-                  <span className="stat__label">unseen</span>
-                </div>
-              </div>
-              <p className="card__note">
-                {incidents.pending === 0
-                  ? "No incident markers are currently pending."
-                  : "Markers describe collected crash evidence. Resolution requires a guided review."}
+                <p className="card__note">
+                  {incidents.pending === 0
+                    ? "No incident markers are currently pending."
+                    : "Markers describe collected crash evidence. Resolution requires a guided review."}
+                </p>
+              </>
+            ) : (
+              <p className="empty">
+                Incident state could not be read. Counts are withheld rather than shown
+                as zero.
               </p>
-            </>
+            )
           ) : (
-            <p className="empty">
-              Incident state could not be read. Counts are withheld rather than shown
-              as zero.
-            </p>
+            <p className="empty">Incident state was not included in this snapshot.</p>
           )}
         </section>
       </div>

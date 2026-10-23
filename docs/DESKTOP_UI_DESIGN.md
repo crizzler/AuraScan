@@ -1,10 +1,10 @@
 # AuraScan Desktop UI Design
 
-Status: design accepted. Phases 1 and 2 are implemented in the working tree and
-not released. Nothing in this document describes shipped behavior until the
-phase table marks a phase released. The renderer under `desktop/` is a
-development prototype; it is not packaged, not installed by `aurascan`, and not
-part of any release artifact.
+Status: design accepted. Phases 1 and 2 plus the phase 3 report reader are
+implemented in the working tree and not released. Nothing in this document
+describes shipped behavior until the phase table marks a phase released. The
+renderer under `desktop/` is a development prototype; it is not packaged, not
+installed by `aurascan`, and not part of any release artifact.
 
 ## Why a desktop UI
 
@@ -131,6 +131,58 @@ Rules:
 
 `incidents.highest_severity` is `null` when no markers are pending.
 
+At least one evidence section (`doctor` or `report`) must be present; a snapshot
+carrying neither is rejected.
+
+### Report mode
+
+`aurascan ui --report FILE --json` projects one saved AuraScan JSON report into
+the same envelope and skips live evidence collection entirely:
+
+```json
+{
+  "contract": "aurascan-ui/1",
+  "generated_at": 1792757134,
+  "app": { "version": "0.10.19", "python": "3.14.0", "platform": "linux" },
+  "report": {
+    "schema_version": "1.0",
+    "scanner_version": "2.6.0",
+    "package": { "name": "example-pkg", "version": "1.0-1",
+                 "pkgbase": "", "maintainer": "" },
+    "risk": { "severity": "HIGH", "action": "MANUAL_REVIEW",
+              "blocks_installation": false, "requires_manual_review": true,
+              "recommended_action": "manual_review", "reason": "..." },
+    "counts": { "total": 2, "by_severity": { "LOW": 1, "MEDIUM": 0,
+                 "HIGH": 1, "CRITICAL": 0 }, "blocking": 0,
+                "manual_review": 1, "truncated": false },
+    "findings": [ReportFinding, "..."],
+    "messages": ["Scanned"],
+    "context": { "scan_policy": "full" }
+  }
+}
+```
+
+`ReportFinding` carries the rule ID, severity, confidence, evidence quality,
+phase, source, a basename-only location, the one-based line number, title,
+summary, recommendation, checked and not-checked text, and the two policy
+flags.
+
+Projection rules are deliberately stricter than the raw report:
+
+- raw package bytes are never copied: `evidence_snippet`, `raw_output` and
+  `technical_details` stay in the terminal;
+- absolute paths are reduced to the basename, so a saved snapshot does not leak
+  a build root or a user name;
+- finding identifiers, file hashes and source-acquisition internals are dropped;
+- display text passes `core/text_safety.sanitize_terminal_text`;
+- the file read is bounded to 16 MiB and display to 500 findings; counts always
+  cover the full report and `truncated` is disclosed. Messages are limited to
+  20 entries of 300 characters;
+- an unknown severity, confidence, risk action, rule-identifier shape, or a
+  non-object finding rejects the whole snapshot;
+- no doctor run, intelligence read, incident read, AI call or package-manager
+  invocation happens in report mode.
+
 ## Transport and process model
 
 ```text
@@ -247,7 +299,7 @@ are always paired with text (never color alone).
 | 0 | This design document | reviewed, contract frozen as `aurascan-ui/1` | done |
 | 1 | `aurascan ui --json` snapshot + contract tests | bounded, side-effect-free, pinned by tests | implemented, unreleased |
 | 2 | Read-only renderer over the real snapshot | overview, checks, incidents; fail-closed parser | prototype implemented, unreleased |
-| 3 | Scan report reading + action center | fixed action IDs, hash-bound consent, revalidation tests | not started |
+| 3 | Scan report reading + action center | fixed action IDs, hash-bound consent, revalidation tests | report reading implemented; action center not started |
 | 4 | Electron shell + `aurascan-desktop` packaging | sandbox/CSP preflight, e2e on static build | not started |
 
 Phases 1 and 2 exist in the working tree but are not released and are not part

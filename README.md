@@ -1452,6 +1452,7 @@ and contract live in
 ```bash
 aurascan ui
 aurascan ui --json
+aurascan ui --report scan-report.json --json
 ```
 
 The snapshot is one bounded JSON object with the contract string
@@ -1459,6 +1460,12 @@ The snapshot is one bounded JSON object with the contract string
 pending incident counts that AuraScan already owns. It exits 0 whenever the
 snapshot is produced: `doctor.ok` carries the health conclusion, so an
 actionable state is not reported as a command failure.
+
+`--report` projects a saved AuraScan JSON report instead of collecting live
+evidence. The projection drops raw package bytes, absolute paths, finding
+identifiers and file hashes, sanitizes display text, and rejects unknown
+severity, confidence, or risk vocabularies. It is a reading surface, not an
+evidence export.
 
 `aurascan ui` never changes policy or local state, never calls a model, never
 runs a package manager, never executes package or fixture content, and opens no

@@ -14,16 +14,30 @@ import argparse
 import importlib.metadata
 import json
 import platform
+import re
 import sys
 import time
 from collections.abc import Mapping as MappingABC
+from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from aurascan.core.text_safety import sanitize_terminal_text
 
 UI_CONTRACT = "aurascan-ui/1"
 CHECK_STATUSES = ("ok", "warn", "error")
 SEVERITY_RANK = {"UNKNOWN": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 MAX_CHECKS = 1000
 MAX_MARKERS = 100
+MAX_REPORT_BYTES = 16 * 1024 * 1024
+MAX_FINDINGS = 500
+MAX_MESSAGES = 20
+MAX_FINDING_SUMMARY = 800
+MAX_FINDING_TEXT = 400
+MAX_MESSAGE_TEXT = 300
+REPORT_SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+REPORT_CONFIDENCES = ("LOW", "MEDIUM", "HIGH", "CONFIRMED")
+REPORT_ACTIONS = ("ALLOW", "WARN", "MANUAL_REVIEW", "BLOCK", "BLOCKED")
+RULE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 INTELLIGENCE_KEYS = (
     "status",
     "source",
@@ -131,6 +145,201 @@ def _project_incidents(
         "pending": min(len(markers), MAX_MARKERS),
         "unseen": min(len(unseen_markers), MAX_MARKERS),
         "highest_severity": highest,
+    }
+
+
+def _bounded_text(value: object, limit: int) -> str:
+    return sanitize_terminal_text(value, max_chars=limit)
+
+
+def _bounded_label(value: object, limit: int = 40) -> str:
+    return sanitize_terminal_text(value, max_chars=limit)
+
+
+def _basename(value: object) -> str:
+    text = sanitize_terminal_text(value, max_chars=1024)
+    if not text:
+        return ""
+    try:
+        name = Path(text).name
+    except (OSError, ValueError):
+        return ""
+    return sanitize_terminal_text(name, max_chars=128)
+
+
+def _project_risk(risk: Optional[Mapping[str, object]]) -> Optional[Dict[str, object]]:
+    if risk is None:
+        return None
+    if not isinstance(risk, MappingABC):
+        raise UISnapshotError("report risk summary is not an object")
+    severity = risk.get("severity")
+    if severity not in REPORT_SEVERITIES:
+        raise UISnapshotError("report risk summary has an unsupported severity")
+    action = risk.get("action")
+    if not isinstance(action, str):
+        raise UISnapshotError("report risk summary has no action")
+    action = action.upper()
+    if action not in REPORT_ACTIONS:
+        raise UISnapshotError("report risk summary has an unsupported action")
+    return {
+        "severity": severity,
+        "action": action,
+        "recommended_action": _bounded_label(risk.get("recommended_action"), 32),
+        "blocks_installation": bool(risk.get("blocks_installation")),
+        "requires_manual_review": bool(risk.get("requires_manual_review")),
+        "reason": _bounded_text(risk.get("reason"), MAX_FINDING_TEXT),
+    }
+
+
+def _project_finding(finding: Mapping[str, object]) -> Dict[str, object]:
+    rule_id = finding.get("rule_id")
+    if not isinstance(rule_id, str) or not RULE_ID_PATTERN.match(rule_id):
+        raise UISnapshotError("report finding has an unsupported rule identifier")
+    severity = finding.get("severity")
+    if severity not in REPORT_SEVERITIES:
+        raise UISnapshotError("report finding has an unsupported severity")
+    confidence = finding.get("confidence")
+    if confidence not in REPORT_CONFIDENCES:
+        raise UISnapshotError("report finding has an unsupported confidence")
+    line = finding.get("line_number")
+    line_number = line if type(line) is int and 0 < line < 10 ** 7 else None
+    return {
+        "rule_id": rule_id,
+        "severity": severity,
+        "confidence": confidence,
+        "evidence_quality": _bounded_label(finding.get("evidence_quality"), 40),
+        "phase": _bounded_label(finding.get("phase"), 40),
+        "source": _bounded_label(finding.get("source"), 40),
+        "file_name": _basename(finding.get("file_path")),
+        "line_number": line_number,
+        "title": _bounded_text(finding.get("user_title"), 200),
+        "summary": _bounded_text(
+            finding.get("user_summary") or finding.get("explanation"),
+            MAX_FINDING_SUMMARY,
+        ),
+        "recommendation": _bounded_text(
+            finding.get("recommended_user_action") or finding.get("recommendation"),
+            MAX_FINDING_TEXT,
+        ),
+        "checked": _bounded_text(
+            finding.get("what_aurascan_checked"), MAX_FINDING_TEXT
+        ),
+        "not_checked": _bounded_text(
+            finding.get("what_aurascan_did_not_check"), MAX_FINDING_TEXT
+        ),
+        "blocks_installation": bool(finding.get("blocks_installation")),
+        "requires_manual_review": bool(finding.get("requires_manual_review")),
+    }
+
+
+def project_scan_report(report: Mapping[str, object]) -> Dict[str, object]:
+    """Project a saved ``ScanReport`` JSON into the bounded UI contract.
+
+    Raw package bytes (``evidence_snippet``, ``raw_output``,
+    ``technical_details``), absolute paths, finding identifiers and file hashes
+    are deliberately dropped: the renderer is a view, not an evidence export.
+    """
+
+    if not isinstance(report, MappingABC):
+        raise UISnapshotError("report is not a JSON object")
+    schema_version = report.get("schema_version")
+    if not isinstance(schema_version, str) or not schema_version:
+        raise UISnapshotError("report has no schema version")
+    package = report.get("package_metadata")
+    if not isinstance(package, MappingABC):
+        raise UISnapshotError("report has no package metadata")
+    name = package.get("name")
+    if not isinstance(name, str) or not name:
+        raise UISnapshotError("report has no package name")
+    findings = report.get("findings")
+    if not isinstance(findings, list):
+        raise UISnapshotError("report has no findings list")
+
+    projected_findings: List[Dict[str, object]] = []
+    severity_counts = {severity: 0 for severity in REPORT_SEVERITIES}
+    blocking = 0
+    manual_review = 0
+    for entry in findings:
+        if not isinstance(entry, MappingABC):
+            raise UISnapshotError("report finding is not an object")
+        projected = _project_finding(entry)
+        severity_counts[projected["severity"]] += 1
+        blocking += 1 if projected["blocks_installation"] else 0
+        manual_review += 1 if projected["requires_manual_review"] else 0
+        if len(projected_findings) < MAX_FINDINGS:
+            projected_findings.append(projected)
+
+    messages: List[str] = []
+    raw_messages = report.get("messages")
+    if isinstance(raw_messages, list):
+        for message in raw_messages[:MAX_MESSAGES]:
+            text = _bounded_text(message, MAX_MESSAGE_TEXT)
+            if text:
+                messages.append(text)
+
+    context: Dict[str, object] = {}
+    for key in ("scan_policy", "scan_context", "scan_context_source"):
+        value = report.get(key)
+        if isinstance(value, str) and value:
+            context[key] = _bounded_label(value, 64)
+
+    return {
+        "schema_version": _bounded_label(schema_version, 32),
+        "scanner_version": _bounded_label(report.get("scanner_version"), 32),
+        "package": {
+            "name": _bounded_label(name, 128),
+            "version": _bounded_label(package.get("version"), 64),
+            "pkgbase": _bounded_label(package.get("pkgbase"), 128),
+            "maintainer": _bounded_label(package.get("maintainer"), 128),
+        },
+        "risk": _project_risk(report.get("risk_summary")),
+        "counts": {
+            "total": len(findings),
+            "by_severity": severity_counts,
+            "blocking": blocking,
+            "manual_review": manual_review,
+            "truncated": len(findings) > MAX_FINDINGS,
+        },
+        "findings": projected_findings,
+        "messages": messages,
+        "context": context,
+    }
+
+
+def load_report_file(path: Path) -> Mapping[str, object]:
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(MAX_REPORT_BYTES + 1)
+    except OSError:
+        raise UISnapshotError("report file could not be read") from None
+    if len(data) > MAX_REPORT_BYTES:
+        raise UISnapshotError("report file exceeds the contract bound")
+    try:
+        parsed = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise UISnapshotError("report file is not a valid AuraScan JSON report") from None
+    if not isinstance(parsed, MappingABC):
+        raise UISnapshotError("report file is not a JSON object")
+    return parsed
+
+
+def build_report_snapshot(
+    *,
+    report: Mapping[str, object],
+    app_version: str,
+    generated_at: int,
+    python_version: str,
+    platform_name: str,
+) -> Dict[str, object]:
+    return {
+        "app": {
+            "version": app_version,
+            "python": python_version,
+            "platform": platform_name,
+        },
+        "contract": UI_CONTRACT,
+        "generated_at": int(generated_at),
+        "report": project_scan_report(report),
     }
 
 
@@ -243,12 +452,55 @@ def _print_summary(snapshot: Mapping[str, object], stream) -> None:
     )
 
 
+def _print_report_summary(snapshot: Mapping[str, object], stream) -> None:
+    report = snapshot["report"]
+    package = report["package"]
+    risk = report["risk"]
+    counts = report["counts"]
+    print("AuraScan report ({0})".format(snapshot["contract"]), file=stream)
+    identity = "{0} {1}".format(package["name"], package["version"]).strip()
+    print("  Package: {0}".format(identity), file=stream)
+    if risk:
+        print(
+            "  Risk: {0} ({1})".format(risk["severity"], risk["action"]),
+            file=stream,
+        )
+    print(
+        "  Findings: {0} total, {1} blocking, {2} manual review".format(
+            counts["total"], counts["blocking"], counts["manual_review"]
+        ),
+        file=stream,
+    )
+    for finding in report["findings"][:5]:
+        location = finding["file_name"] or "report"
+        if finding["line_number"]:
+            location = "{0}:{1}".format(location, finding["line_number"])
+        print(
+            "  - {0} [{1}] {2}".format(
+                finding["rule_id"], finding["severity"], location
+            ),
+            file=stream,
+        )
+    if counts["truncated"]:
+        print(
+            "  Display truncated to {0} findings; counts cover the full report.".format(
+                MAX_FINDINGS
+            ),
+            file=stream,
+        )
+    print(
+        "  Evidence only: this report is not a certification of safety.",
+        file=stream,
+    )
+
+
 def build_ui_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aurascan ui",
         description=(
             "Emit a read-only evidence snapshot for AuraScan desktop user "
-            "interfaces. The command never changes policy or local state."
+            "interfaces, or project a saved AuraScan JSON report. The command "
+            "never changes policy or local state."
         ),
     )
     parser.add_argument(
@@ -256,6 +508,12 @@ def build_ui_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="json_mode",
         help="emit the aurascan-ui/1 snapshot as JSON",
+    )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        metavar="FILE",
+        help="project a saved AuraScan JSON report instead of live evidence",
     )
     return parser
 
@@ -269,6 +527,7 @@ def run_ui(
     intelligence_provider: Optional[Callable] = None,
     incidents_provider: Optional[Callable] = None,
     now: Optional[Callable[[], float]] = None,
+    report_loader: Optional[Callable] = None,
 ) -> int:
     args = build_ui_parser().parse_args(argv)
     stdout = stdout or sys.stdout
@@ -276,21 +535,31 @@ def run_ui(
     doctor_provider = doctor_checks_provider or _default_doctor_checks
     intelligence_source = intelligence_provider or _default_intelligence
     incident_source = incidents_provider or _default_incidents
+    report_source = report_loader or load_report_file
     timestamp = int(now() if callable(now) else time.time())
     try:
-        doctor_checks = doctor_provider()
-        markers, unseen_markers, incidents_available = incident_source()
-        snapshot = build_ui_snapshot(
-            doctor_checks=doctor_checks,
-            intelligence=intelligence_source(),
-            markers=markers,
-            unseen_markers=unseen_markers,
-            app_version=installed_app_version(),
-            generated_at=timestamp,
-            python_version=platform.python_version(),
-            platform_name=sys.platform,
-            incidents_available=incidents_available,
-        )
+        if args.report is not None:
+            snapshot = build_report_snapshot(
+                report=report_source(args.report),
+                app_version=installed_app_version(),
+                generated_at=timestamp,
+                python_version=platform.python_version(),
+                platform_name=sys.platform,
+            )
+        else:
+            doctor_checks = doctor_provider()
+            markers, unseen_markers, incidents_available = incident_source()
+            snapshot = build_ui_snapshot(
+                doctor_checks=doctor_checks,
+                intelligence=intelligence_source(),
+                markers=markers,
+                unseen_markers=unseen_markers,
+                app_version=installed_app_version(),
+                generated_at=timestamp,
+                python_version=platform.python_version(),
+                platform_name=sys.platform,
+                incidents_available=incidents_available,
+            )
     except UISnapshotError as exc:
         print(
             "[AuraScan] Desktop snapshot unavailable: {0}".format(exc),
@@ -305,6 +574,8 @@ def run_ui(
         return 1
     if args.json_mode:
         print(json.dumps(snapshot, indent=2, sort_keys=True), file=stdout)
+    elif args.report is not None:
+        _print_report_summary(snapshot, stdout)
     else:
         _print_summary(snapshot, stdout)
     return 0

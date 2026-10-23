@@ -234,6 +234,13 @@ and a compromised renderer can misdisplay evidence but cannot change a
 deterministic result, install a package, or establish trust. An unavailable
 incident state is reported as unavailable, never as zero.
 
+`aurascan ui --report FILE` reads a saved report as bounded data. It never
+executes or re-scans anything, drops raw package bytes, absolute paths, finding
+identifiers and file hashes, sanitizes display text, and rejects unknown
+severity, confidence, or risk vocabularies. The file read and the displayed
+finding and message counts are bounded, and truncation is disclosed rather than
+silent.
+
 ## Prohibited capability combinations
 
 The audit tool enforces the mechanically checkable subset (see

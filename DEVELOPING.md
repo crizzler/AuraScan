@@ -780,6 +780,15 @@ evidence contract can be reviewed separately from any renderer.
 - The renderer must fail closed: an unknown contract, unknown check status,
   missing evidence, or more than 1000 checks means "render nothing and explain
   why", never a partial view with an optimistic tone.
+- `aurascan ui --report FILE` projects a saved report for the renderer. The
+  projection is stricter than the report: no `evidence_snippet`, `raw_output`,
+  `technical_details`, absolute paths, finding IDs or file hashes; display text
+  goes through `core/text_safety`; the file read, finding count and message
+  count are bounded; unknown vocabulary rejects the snapshot. Report mode must
+  never collect live evidence or call a provider.
+- A renderer change that needs a new field must extend `project_scan_report`
+  and `MAX_FINDINGS` handling together, and keep
+  `tests/test_ui_report.py` plus the desktop fixture shape in sync.
 - Actions, when they are added, are enumerated intent IDs revalidated by the
   core. The renderer never receives a command string, a free path, or execution
   authority.

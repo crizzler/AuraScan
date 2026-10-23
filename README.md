@@ -42,9 +42,9 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
-The [v0.10.14 release](docs/releases/v0.10.14.md) is a package-only follow-up
-that makes pacman-hook upgrades reliable and honest about which archive was
-scanned. The hook binds a cached archive to the root-owned pacman sync
+The [v0.10.15 release](docs/releases/v0.10.15.md) is a package-only follow-up
+that makes pacman-hook upgrades reliable, honest about which archive was
+scanned, and visibly active while the audit runs. The hook binds a cached archive to the root-owned pacman sync
 databases by filename and SHA-256, accepts a matching checksum from any
 configured repository rebuild, and uses a fast deterministic install-hook scan
 for those archives. Routine systemd service management is LOW/non-manual, and
@@ -53,9 +53,10 @@ reported as a non-blocking review advisory, while confirmed signatures and
 deterministic CRITICAL findings still block. A cache archive older than the
 installed package is skipped with a clear warning instead of being reported as
 the transaction package; local `-U` files can be scanned explicitly with
-`aurascan --pkg <file>`. The v0.10.11 recovery image remains the retained,
-validated image; the v0.10.14 release note records that ISO and local-UKI gates
-were not rerun.
+`aurascan --pkg <file>`. During a long transaction the hook prints a flushed
+start line, the current archive, and an ASCII progress bar at most every two
+seconds. The v0.10.11 recovery image remains the retained, validated image; the
+v0.10.15 release note records that ISO and local-UKI gates were not rerun.
 
 ## What You Can Try Now
 

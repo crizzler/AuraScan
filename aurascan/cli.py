@@ -2,6 +2,7 @@ import argparse
 import os
 from pathlib import Path
 import sys
+import time
 from typing import Callable, List, Mapping, Optional
 
 from aurascan.analyzers.deterministic import DeterministicAnalyzer
@@ -333,24 +334,64 @@ def scan_pacman_hook_targets(
         if key not in identity_cache:
             identity_cache[key] = capture(path)
         return identity_cache[key]
+
+    total = len(targets)
+    started = time.monotonic()
+    last_progress = [started]
+
+    def report_progress(done: int) -> None:
+        if not total:
+            return
+        now = time.monotonic()
+        if done != total and now - last_progress[0] < 2.0:
+            return
+        percent = done * 100 // total
+        filled = min(20, percent // 5)
+        bar = "#" * filled + "-" * (20 - filled)
+        elapsed = int(now - started)
+        print(
+            f"[AuraScan] [{bar}] {done}/{total} archives checked ({percent}%, {elapsed}s)",
+            file=stdout,
+            flush=True,
+        )
+        last_progress[0] = now
+
+    if total:
+        print(
+            f"[AuraScan] Auditing {total} package archive(s)... "
+            "Verified official archives use the fast checksum path; local or AUR "
+            "archives may take longer.",
+            file=stdout,
+            flush=True,
+        )
     if official_index is not None and not official_index.complete:
         print(
             f"[AuraScan] Warning: the official package index is incomplete "
             f"({official_index.reason}); unknown archives receive the full scan.",
             file=stderr,
         )
-    for target in targets:
+    for index, target in enumerate(targets, 1):
         resolved = resolve_pacman_hook_target(
             target, cache_dir=cache_dir, identity_capture=cached_capture
         )
         if not resolved:
             print(f"[AuraScan] Warning: Could not locate package file for {target}", file=stderr)
+            report_progress(index)
             continue
         official = bool(
             official_index is not None
             and package_matches_official(Path(resolved), official_index)
         )
         if official:
+            if total <= 20 or index == 1:
+                target_text = sanitize_terminal_text(
+                    target, max_chars=256, single_line=True
+                )
+                print(
+                    f"[AuraScan] Current archive {index}/{total}: {target_text}...",
+                    file=stdout,
+                    flush=True,
+                )
             deterministic = [
                 analyzer
                 for analyzer in getattr(engine, "analyzers", [])
@@ -390,7 +431,17 @@ def scan_pacman_hook_targets(
                     file=stderr,
                 )
                 stale_count += 1
+                report_progress(index)
                 continue
+            target_text = sanitize_terminal_text(
+                target, max_chars=256, single_line=True
+            )
+            print(
+                f"[AuraScan] Full scan {index}/{total}: {target_text} "
+                "(local/unknown archive; this can take longer)...",
+                file=stdout,
+                flush=True,
+            )
             ok = engine.scan_package(resolved)
             local_count += 1
         report = getattr(engine, "last_report", None)
@@ -415,6 +466,7 @@ def scan_pacman_hook_targets(
                     rules.append(rule_id)
             reason = ", ".join(rules[:3]) if rules else "manual review"
             review.append(f"{target} ({reason})")
+        report_progress(index)
     stale_note = (
         f" {stale_count} stale cache archive(s) were skipped." if stale_count else ""
     )
@@ -423,6 +475,7 @@ def scan_pacman_hook_targets(
         f"checked with the fast deterministic hook policy; {local_count} "
         f"local/unknown package(s) received the full scan.{stale_note}",
         file=stdout,
+        flush=True,
     )
     if blocked:
         shown = ", ".join(blocked[:10])

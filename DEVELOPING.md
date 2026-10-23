@@ -1989,6 +1989,13 @@ local `-U` archive. This avoids reporting an unrelated older version, such as
 an old 0.6.0 cache entry during a 0.10.x local install, as if it were the
 transaction package.
 
+The hook prints a flushed start line before the first archive, the current
+archive for small transactions or the first archive, a bounded 20-column ASCII
+progress bar at most every two seconds, and a full-scan notice before a
+local/unknown archive. Keep this output line-based and ASCII: pacman captures
+scriptlet output through a pipe, so Python must flush every progress line and
+must not depend on a terminal carriage-return spinner.
+
 Official-repository provenance is a separate bounded check. `pacman_sync_db`
 reads the root-owned sync databases, binds `%FILENAME%` to `%SHA256SUM%`, and
 requires both the cached archive name and streamed bytes to match before the

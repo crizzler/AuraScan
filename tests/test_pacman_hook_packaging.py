@@ -598,6 +598,61 @@ def test_hook_scan_uses_fast_path_for_verified_official_archive(tmp_path):
     assert "0 local/unknown package(s)" in stdout.getvalue()
 
 
+def test_hook_scan_reports_progress_and_current_archive(tmp_path):
+    demo = tmp_path / "demo-1.0-1-x86_64.pkg.tar.zst"
+    other = tmp_path / "other-2.0-1-x86_64.pkg.tar.zst"
+    demo.write_bytes(b"demo")
+    other.write_bytes(b"other")
+    identity = identity_by_filename({demo.name: "demo", other.name: "other"})
+    index = OfficialPackageIndex(
+        {
+            demo.name: frozenset({hashlib.sha256(b"demo").hexdigest()}),
+            other.name: frozenset({hashlib.sha256(b"other").hexdigest()}),
+        },
+        True,
+    )
+    engine = FakeOfficialHookEngine(True)
+    stdout = StringIO()
+
+    ok = scan_pacman_hook_targets(
+        engine,
+        ["demo", "other"],
+        cache_dir=tmp_path,
+        stdout=stdout,
+        stderr=StringIO(),
+        identity_capture=identity,
+        official_index=index,
+    )
+
+    output = stdout.getvalue()
+    assert ok is True
+    assert len(engine.calls) == 2
+    assert "Auditing 2 package archive(s)" in output
+    assert "Current archive 1/2: demo" in output
+    assert "Current archive 2/2: other" in output
+    assert "2/2 archives checked (100%" in output
+
+
+def test_hook_scan_announces_full_local_scan(tmp_path):
+    package = tmp_path / "demo-1.0-1-x86_64.pkg.tar.zst"
+    package.write_bytes(b"fixture")
+    engine = FakeHookEngine([True])
+    stdout = StringIO()
+
+    ok = scan_pacman_hook_targets(
+        engine,
+        ["demo"],
+        cache_dir=tmp_path,
+        stdout=stdout,
+        stderr=StringIO(),
+        identity_capture=identity_by_filename({package.name: "demo"}),
+    )
+
+    assert ok is True
+    assert "Full scan 1/1: demo" in stdout.getvalue()
+    assert "local/unknown archive; this can take longer" in stdout.getvalue()
+
+
 def test_hook_scan_skips_cache_archive_older_than_installed(tmp_path):
     package = tmp_path / "demo-0.6.0-1-x86_64.pkg.tar.zst"
     package.write_bytes(b"stale")

@@ -3,6 +3,7 @@ import subprocess
 from aurascan.core.local_package_db import (
     LocalPackageDbContextProvider,
     compare_versions_with_vercmp,
+    load_installed_package_records,
     parse_pkgbuild_candidate_metadata,
 )
 from aurascan.core.update_policy import ScanContext, ScanContextSource
@@ -16,6 +17,33 @@ def write_local_db_entry(root, name, version, *, malformed=False):
     else:
         (entry / "desc").write_text(f"%NAME%\n{name}\n\n%VERSION%\n{version}\n")
     return entry
+
+
+def test_load_installed_package_records_includes_install_date(tmp_path):
+    root = tmp_path / "local"
+    entry = root / "demo-1.0-1"
+    entry.mkdir(parents=True)
+    (entry / "desc").write_text(
+        "%NAME%\ndemo\n\n%VERSION%\n1.0-1\n\n%INSTALLDATE%\n123456\n"
+    )
+
+    records, error = load_installed_package_records(local_db_root=root)
+
+    assert error == ""
+    assert records["demo"].version == "1.0-1"
+    assert records["demo"].install_date == 123456
+
+
+def test_load_installed_package_records_rejects_malformed_entry(tmp_path):
+    root = tmp_path / "local"
+    entry = root / "demo-1.0-1"
+    entry.mkdir(parents=True)
+    (entry / "desc").write_text("%NAME%\ndemo\n")
+
+    records, error = load_installed_package_records(local_db_root=root)
+
+    assert records == {}
+    assert error == "malformed_local_package_db"
 
 
 def provider(tmp_path, content, *, versions=None, compare=None):

@@ -2,7 +2,7 @@ import argparse
 import os
 from pathlib import Path
 import sys
-from typing import Callable, List, Optional
+from typing import Callable, List, Mapping, Optional
 
 from aurascan.analyzers.deterministic import DeterministicAnalyzer
 from aurascan.core.agent import run_agent, run_agent_escalation
@@ -21,6 +21,11 @@ from aurascan.core.incident_followup import (
 )
 from aurascan.core.incident_cli import run_incident_command
 from aurascan.core.instruction_cli import run_instruction_audit
+from aurascan.core.local_package_db import (
+    DEFAULT_LOCAL_PACKAGE_DB_ROOT,
+    InstalledPackageRecord,
+    load_installed_package_records,
+)
 from aurascan.core.package_archive import (
     PACKAGE_IDENTITY_RESOLVED,
     PackageIdentityCapture,
@@ -33,6 +38,7 @@ from aurascan.core.pacman_sync_db import (
 )
 from aurascan.core.recovery_cli import run_recovery
 from aurascan.core.security_audit import run_security_audit
+from aurascan.core.text_safety import sanitize_terminal_text
 from aurascan.core.upgrade_followup import build_upgrade_runtime
 from aurascan.core.upgrade_preflight import refresh_upgrade_preflight, run_upgrade
 from aurascan.core.updater_tray import run_updater
@@ -244,12 +250,11 @@ def resolve_pacman_hook_target(
     cache_dir: Path = Path("/var/cache/pacman/pkg"),
     identity_capture: Optional[Callable[[Path], PackageIdentityCapture]] = None,
 ) -> str:
-    if os.path.exists(target):
-        return target
     if "/" in target or os.sep in target:
-        # A path that does not exist is not a cache package name; never feed it
-        # into a glob pattern.
-        return ""
+        # Only an explicit path may be used directly.  A bare hook target is a
+        # package name, so a same-named file or directory in the hook's working
+        # directory must not shadow the cache lookup.
+        return target if os.path.exists(target) else ""
     capture = identity_capture or capture_package_identity
     matches = [
         path
@@ -264,6 +269,38 @@ def resolve_pacman_hook_target(
         return ""
 
 
+def _stale_cached_archive(
+    archive: Path,
+    target: str,
+    installed_records: Mapping[str, InstalledPackageRecord],
+    identity_capture: Callable[[Path], PackageIdentityCapture],
+) -> Optional[PackageIdentityCapture]:
+    """Return identity when a cache archive predates the installed package.
+
+    A `pacman -U` target reaches the hook as a package name.  If the only
+    cached archive is an older version, scanning it would label the report with
+    unrelated bytes (for example, an old 0.6.0 package during a 0.10.x local
+    install).  `INSTALLDATE` lets us detect that case without querying pacman.
+    """
+
+    record = installed_records.get(target)
+    if record is None or record.install_date <= 0:
+        return None
+    try:
+        captured = identity_capture(archive)
+    except (OSError, ValueError):
+        return None
+    if not captured.inspectable or captured.name != target:
+        return None
+    if captured.version == record.version:
+        return None
+    try:
+        archive_mtime = archive.stat().st_mtime
+    except OSError:
+        return None
+    return captured if archive_mtime < record.install_date else None
+
+
 def scan_pacman_hook_targets(
     engine: AuraScanEngine,
     targets: List[str],
@@ -273,14 +310,29 @@ def scan_pacman_hook_targets(
     stdout=None,
     identity_capture: Optional[Callable[[Path], PackageIdentityCapture]] = None,
     official_index: Optional[OfficialPackageIndex] = None,
+    installed_records: Optional[Mapping[str, InstalledPackageRecord]] = None,
+    local_package_db_root: Path = DEFAULT_LOCAL_PACKAGE_DB_ROOT,
 ) -> bool:
     stderr = stderr or sys.stderr
     stdout = stdout or sys.stdout
     failed = False
     official_count = 0
     local_count = 0
+    stale_count = 0
     blocked = []
     review = []
+    if installed_records is None:
+        installed_records, _error = load_installed_package_records(
+            local_db_root=local_package_db_root
+        )
+    capture = identity_capture or capture_package_identity
+    identity_cache = {}
+
+    def cached_capture(path: Path) -> PackageIdentityCapture:
+        key = str(path)
+        if key not in identity_cache:
+            identity_cache[key] = capture(path)
+        return identity_cache[key]
     if official_index is not None and not official_index.complete:
         print(
             f"[AuraScan] Warning: the official package index is incomplete "
@@ -289,7 +341,7 @@ def scan_pacman_hook_targets(
         )
     for target in targets:
         resolved = resolve_pacman_hook_target(
-            target, cache_dir=cache_dir, identity_capture=identity_capture
+            target, cache_dir=cache_dir, identity_capture=cached_capture
         )
         if not resolved:
             print(f"[AuraScan] Warning: Could not locate package file for {target}", file=stderr)
@@ -312,6 +364,33 @@ def scan_pacman_hook_targets(
             )
             official_count += 1
         else:
+            stale = _stale_cached_archive(
+                Path(resolved), target, installed_records, cached_capture
+            )
+            if stale is not None:
+                installed_version = installed_records[target].version
+                archive_text = sanitize_terminal_text(
+                    str(resolved), max_chars=1024, single_line=True
+                )
+                target_text = sanitize_terminal_text(
+                    target, max_chars=256, single_line=True
+                )
+                scanned_version = sanitize_terminal_text(
+                    stale.version, max_chars=128, single_line=True
+                )
+                installed_text = sanitize_terminal_text(
+                    installed_version, max_chars=128, single_line=True
+                )
+                print(
+                    f"[AuraScan] Warning: cached archive {archive_text} contains "
+                    f"{target_text} {scanned_version}, which is older than the "
+                    f"installed {target_text} {installed_text}; it was not scanned "
+                    "because it is not the package this transaction is installing. "
+                    "For a local -U file, scan it explicitly: aurascan --pkg <file>",
+                    file=stderr,
+                )
+                stale_count += 1
+                continue
             ok = engine.scan_package(resolved)
             local_count += 1
         report = getattr(engine, "last_report", None)
@@ -336,10 +415,13 @@ def scan_pacman_hook_targets(
                     rules.append(rule_id)
             reason = ", ".join(rules[:3]) if rules else "manual review"
             review.append(f"{target} ({reason})")
+    stale_note = (
+        f" {stale_count} stale cache archive(s) were skipped." if stale_count else ""
+    )
     print(
         f"[AuraScan] Transaction audit: {official_count} verified official package(s) "
         f"checked with the fast deterministic hook policy; {local_count} "
-        "local/unknown package(s) received the full scan.",
+        f"local/unknown package(s) received the full scan.{stale_note}",
         file=stdout,
     )
     if blocked:

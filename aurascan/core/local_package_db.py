@@ -11,9 +11,16 @@ from aurascan.core.update_policy import ScanContext, ScanContextSource
 
 
 DEFAULT_LOCAL_PACKAGE_DB_ROOT = Path("/var/lib/pacman/local")
+MAX_LOCAL_PACKAGE_DB_ENTRIES = 10000
 VersionCompare = Callable[[str, str], Optional[int]]
 
 _PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9@._+-]+$")
+
+
+@dataclass(frozen=True)
+class InstalledPackageRecord:
+    version: str
+    install_date: int = 0
 
 
 @dataclass
@@ -155,28 +162,8 @@ class LocalPackageDbContextProvider:
         )
 
     def _load_installed_packages(self) -> Tuple[Dict[str, str], str]:
-        if not self.local_db_root.exists() or not self.local_db_root.is_dir():
-            return {}, "local_package_db_missing"
-
-        installed: Dict[str, str] = {}
-        for child in sorted(self.local_db_root.iterdir()):
-            if not child.is_dir():
-                continue
-            desc_path = child / "desc"
-            if not desc_path.exists():
-                return {}, "malformed_local_package_db"
-            try:
-                desc = _parse_pacman_desc(desc_path.read_text(encoding="utf-8", errors="replace"))
-            except OSError:
-                return {}, "local_package_db_read_error"
-            name = desc.get("NAME", "")
-            version = desc.get("VERSION", "")
-            if not name or not version:
-                return {}, "malformed_local_package_db"
-            if name in installed and installed[name] != version:
-                return {}, "duplicate_local_package_db_entry"
-            installed[name] = version
-        return installed, ""
+        records, error = load_installed_package_records(local_db_root=self.local_db_root)
+        return {name: record.version for name, record in records.items()}, error
 
     def _compare_versions(self, installed_version: str, candidate_version: str) -> Optional[int]:
         try:
@@ -266,6 +253,49 @@ def parse_pkgbuild_candidate_metadata(content: str) -> CandidatePackageMetadata:
         proof_reasons=reasons,
         proof_errors=sorted(set(errors)),
     )
+
+
+def load_installed_package_records(
+    *,
+    local_db_root: Path = DEFAULT_LOCAL_PACKAGE_DB_ROOT,
+) -> Tuple[Dict[str, InstalledPackageRecord], str]:
+    """Load bounded installed name/version/install-date evidence.
+
+    The second value is an empty string on success or a coverage reason when
+    the database is missing, malformed, oversized, or unreadable.
+    """
+
+    root = Path(local_db_root)
+    if not root.exists() or not root.is_dir():
+        return {}, "local_package_db_missing"
+    try:
+        children = sorted(root.iterdir())
+    except OSError:
+        return {}, "local_package_db_read_error"
+    if len(children) > MAX_LOCAL_PACKAGE_DB_ENTRIES:
+        return {}, "local_package_db_entry_limit"
+
+    records: Dict[str, InstalledPackageRecord] = {}
+    for child in children:
+        if not child.is_dir():
+            continue
+        desc_path = child / "desc"
+        if not desc_path.exists():
+            return {}, "malformed_local_package_db"
+        try:
+            desc = _parse_pacman_desc(desc_path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            return {}, "local_package_db_read_error"
+        name = desc.get("NAME", "")
+        version = desc.get("VERSION", "")
+        if not name or not version:
+            return {}, "malformed_local_package_db"
+        install_date_text = desc.get("INSTALLDATE", "")
+        install_date = int(install_date_text) if install_date_text.isdigit() else 0
+        if name in records and records[name].version != version:
+            return {}, "duplicate_local_package_db_entry"
+        records[name] = InstalledPackageRecord(version=version, install_date=install_date)
+    return records, ""
 
 
 def compare_versions_with_vercmp(installed_version: str, candidate_version: str, *, timeout: float = 2.0) -> Optional[int]:

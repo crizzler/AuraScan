@@ -17,6 +17,7 @@ from aurascan.cli import (
     resolve_pacman_hook_target,
     scan_pacman_hook_targets,
 )
+from aurascan.core.local_package_db import InstalledPackageRecord
 from aurascan.core.package_archive import (
     PACKAGE_IDENTITY_RESOLVED,
     PackageIdentityCapture,
@@ -396,6 +397,20 @@ def test_hook_target_resolution_uses_existing_path(tmp_path):
     assert resolve_pacman_hook_target(str(package), cache_dir=tmp_path) == str(package)
 
 
+def test_hook_target_resolution_does_not_use_same_named_cwd_entry(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    package = cache / "demo-1.0-1-x86_64.pkg.tar.zst"
+    package.write_bytes(b"fixture")
+    (tmp_path / "demo").mkdir()
+    monkeypatch.chdir(tmp_path)
+    identity = identity_by_filename({package.name: "demo"})
+
+    assert resolve_pacman_hook_target(
+        "demo", cache_dir=cache, identity_capture=identity
+    ) == str(package)
+
+
 def identity_by_filename(mapping):
     """Build a fake archive-identity capture from a filename -> package map."""
 
@@ -581,6 +596,63 @@ def test_hook_scan_uses_fast_path_for_verified_official_archive(tmp_path):
     assert kwargs["analyzers"] == engine.analyzers
     assert "1 verified official package(s)" in stdout.getvalue()
     assert "0 local/unknown package(s)" in stdout.getvalue()
+
+
+def test_hook_scan_skips_cache_archive_older_than_installed(tmp_path):
+    package = tmp_path / "demo-0.6.0-1-x86_64.pkg.tar.zst"
+    package.write_bytes(b"stale")
+    os.utime(package, (1, 1))
+    identity = lambda _path: PackageIdentityCapture(
+        PACKAGE_IDENTITY_RESOLVED, name="demo", version="0.6.0-1"
+    )
+    engine = FakeHookEngine([])
+    stderr = StringIO()
+    stdout = StringIO()
+
+    ok = scan_pacman_hook_targets(
+        engine,
+        ["demo"],
+        cache_dir=tmp_path,
+        stderr=stderr,
+        stdout=stdout,
+        identity_capture=identity,
+        installed_records={
+            "demo": InstalledPackageRecord(version="0.10.13-1", install_date=1000)
+        },
+    )
+
+    assert ok is True
+    assert engine.scanned == []
+    assert "older than the installed demo 0.10.13-1" in stderr.getvalue()
+    assert "not the package this transaction is installing" in stderr.getvalue()
+    assert "aurascan --pkg <file>" in stderr.getvalue()
+    assert "1 stale cache archive(s) were skipped" in stdout.getvalue()
+
+
+def test_hook_scan_accepts_cache_archive_newer_than_installed(tmp_path):
+    package = tmp_path / "demo-1.1-1-x86_64.pkg.tar.zst"
+    package.write_bytes(b"new")
+    os.utime(package, (2000, 2000))
+    identity = lambda _path: PackageIdentityCapture(
+        PACKAGE_IDENTITY_RESOLVED, name="demo", version="1.1-1"
+    )
+    engine = FakeHookEngine([True])
+    stderr = StringIO()
+
+    ok = scan_pacman_hook_targets(
+        engine,
+        ["demo"],
+        cache_dir=tmp_path,
+        stderr=stderr,
+        identity_capture=identity,
+        installed_records={
+            "demo": InstalledPackageRecord(version="1.0-1", install_date=1000)
+        },
+    )
+
+    assert ok is True
+    assert engine.scanned == [str(package)]
+    assert "older than" not in stderr.getvalue()
 
 
 def test_hook_scan_uses_full_path_when_official_checksum_does_not_match(tmp_path):

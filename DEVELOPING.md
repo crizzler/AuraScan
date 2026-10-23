@@ -1978,9 +1978,16 @@ currently provide a verified transaction context provider for smart fast path
 decisions.
 
 Cache-target resolution in the hook gate must bind a cache hit to the
-archive's own `.PKGINFO` package identity rather than a file-name prefix, skip
-entries that cannot be verified, and note when a cached copy (not the file
-being installed) is audited.
+archive's own `.PKGINFO` package identity rather than a file-name prefix and
+skip entries that cannot be verified. A bare hook target is always a package
+name, never a same-named path in the hook's working directory. The local
+pacman database supplies each installed package's version and `INSTALLDATE`; a
+cached archive whose version differs and whose mtime predates that install
+date is stale evidence rather than the package being installed. The hook skips
+it and prints an explicit warning with the `aurascan --pkg <file>` route for a
+local `-U` archive. This avoids reporting an unrelated older version, such as
+an old 0.6.0 cache entry during a 0.10.x local install, as if it were the
+transaction package.
 
 Official-repository provenance is a separate bounded check. `pacman_sync_db`
 reads the root-owned sync databases, binds `%FILENAME%` to `%SHA256SUM%`, and

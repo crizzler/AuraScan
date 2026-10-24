@@ -25,6 +25,7 @@ function runCli(args, options) {
   const input = options && typeof options.input === "string" ? options.input : null;
   const parse = (options && options.parse) || helpers.parseSnapshot;
   const failure = (options && options.failure) || "AuraScan could not produce a snapshot";
+  const okExitCodes = (options && options.okExitCodes) || [0];
   return new Promise((resolve) => {
     let settled = false;
     let stdout = "";
@@ -82,7 +83,7 @@ function runCli(args, options) {
         finish({ ok: false, error: "AuraScan did not answer in time" });
         return;
       }
-      if (code !== 0) {
+      if (!okExitCodes.includes(code)) {
         finish({ ok: false, error: failure });
         return;
       }
@@ -133,6 +134,46 @@ function storeAiKey(provider, secret) {
       ? result
       : { ok: false, error: "AuraScan refused that credential" }
   );
+}
+
+function requestReview() {
+  const args = helpers.actionArgv("instruction_review");
+  if (args === null) {
+    return Promise.resolve({ ok: false, error: "Unsupported desktop action" });
+  }
+  return runCli(args, {
+    parse: helpers.parseReview,
+    failure: "Instruction Guard has no review to show",
+    // 1 is EXIT_REVIEW: the payload is complete and requires attention.
+    okExitCodes: [0, 1]
+  });
+}
+
+function scanInstructions() {
+  const args = helpers.actionArgv("instruction_scan");
+  if (args === null) {
+    return Promise.resolve({ ok: false, error: "Unsupported desktop action" });
+  }
+  return runCli(args, {
+    parse: helpers.parseReview,
+    failure: "Instruction Guard scan did not complete",
+    okExitCodes: [0, 1]
+  });
+}
+
+function instructionAction(actionId, fileId, reportId, sha256) {
+  const args = helpers.actionArgv(actionId, {
+    file_id: fileId,
+    report_id: reportId,
+    sha256
+  });
+  if (args === null) {
+    return Promise.resolve({ ok: false, error: "Unsupported desktop action" });
+  }
+  return runCli(args, {
+    parse: helpers.parseInstructionAction,
+    failure: "AuraScan refused that instruction action"
+  });
 }
 
 function hardenContents(contents) {
@@ -193,6 +234,18 @@ function registerIpc() {
     storeAiKey(provider, secret)
   );
 
+  ipcMain.handle("aurascan:instruction-review", () => requestReview());
+
+  ipcMain.handle("aurascan:instruction-scan", () => scanInstructions());
+
+  ipcMain.handle("aurascan:instruction-approve", (_event, fileId, reportId, sha256) =>
+    instructionAction("instruction_approve", fileId, reportId, sha256)
+  );
+
+  ipcMain.handle("aurascan:instruction-disable", (_event, fileId, reportId, sha256) =>
+    instructionAction("instruction_disable", fileId, reportId, sha256)
+  );
+
   ipcMain.handle("aurascan:open-report", async (event) => {
     const parent = BrowserWindow.fromWebContents(event.sender);
     const options = {
@@ -229,6 +282,13 @@ async function runSelfTest() {
     settings.ok
       ? `[aurascan-desktop] self-test settings=${settings.payload.schema}`
       : "[aurascan-desktop] self-test settings unavailable"
+  );
+
+  const review = await requestReview();
+  console.log(
+    review.ok
+      ? `[aurascan-desktop] self-test review=${review.payload.schema} candidates=${review.payload.candidates.length}`
+      : "[aurascan-desktop] self-test review unavailable"
   );
 
   const window = createWindow(false);
@@ -317,6 +377,51 @@ async function runSelfTest() {
         }
         console.log(
           `[aurascan-desktop] self-test settings view ok cells=${settingsView.cells}`
+        );
+      }
+
+      if (settings.ok) {
+        const instructionView = await window.webContents.executeJavaScript(`
+          new Promise((resolve) => {
+            const deadline = Date.now() + 8000;
+            const step = () => {
+              const buttons = Array.from(document.querySelectorAll('nav button'));
+              const target = buttons.find((button) =>
+                (button.textContent || '').includes('Agent files')
+              );
+              if (!target) {
+                if (Date.now() > deadline) {
+                  resolve({ ok: false, view: '', body: 0 });
+                  return;
+                }
+                setTimeout(step, 50);
+                return;
+              }
+              target.click();
+              setTimeout(() => {
+                const heading = document.querySelector('main h1');
+                const cards = document.querySelectorAll('main section.card');
+                resolve({
+                  ok: Boolean(heading && heading.textContent === 'Agent files' && cards.length > 0),
+                  view: heading ? heading.textContent : '',
+                  body: cards.length
+                });
+              }, 600);
+            };
+            step();
+          })
+        `);
+        if (!instructionView || instructionView.ok !== true) {
+          console.log(
+            `[aurascan-desktop] self-test instruction view failed view=${String(
+              instructionView && instructionView.view
+            )} cards=${String(instructionView && instructionView.body)}`
+          );
+          app.exit(1);
+          return;
+        }
+        console.log(
+          `[aurascan-desktop] self-test instruction view ok cards=${instructionView.body}`
         );
       }
 

@@ -29,38 +29,45 @@ describe("desktopBridge", () => {
 
   it("forwards every fixed operation", async () => {
     const calls: string[] = [];
+    const record = (name: string) => {
+      calls.push(name);
+      return Promise.resolve({ ok: true as const, payload: {} });
+    };
     installBridge({
-      refresh: () => {
-        calls.push("refresh");
-        return Promise.resolve({ ok: true, payload: { contract: "aurascan-ui/1" } });
-      },
-      openReport: () => {
-        calls.push("open");
-        return Promise.resolve({ ok: false, canceled: true });
-      },
-      readSettings: () => {
-        calls.push("settings");
-        return Promise.resolve({ ok: true, payload: { schema: "aurascan-settings/1" } });
-      },
-      setAiKey: (provider: string, secret: string) => {
-        calls.push(`key:${provider}:${secret}`);
-        return Promise.resolve({ ok: true, payload: { stored: true } });
-      }
+      refresh: () => record("refresh"),
+      openReport: () => record("openReport"),
+      readSettings: () => record("readSettings"),
+      setAiKey: (provider: string) => record(`setAiKey:${provider}`),
+      reviewInstructions: () => record("reviewInstructions"),
+      scanInstructions: () => record("scanInstructions"),
+      approveInstruction: (fileId: string, reportId: string, sha256: string) =>
+        record(`approve:${fileId}:${reportId}:${sha256}`),
+      disableInstruction: (fileId: string) => record(`disable:${fileId}`)
     });
 
     const bridge = desktopBridge();
     if (bridge === null) {
       throw new Error("bridge should be available");
     }
-    const refreshed = await bridge.refresh();
-    const opened = await bridge.openReport();
-    const settings = await bridge.readSettings();
-    const stored = await bridge.setAiKey("deepseek", "sk-test");
+    const sha = "a".repeat(64);
+    await bridge.refresh();
+    await bridge.openReport();
+    await bridge.readSettings();
+    await bridge.setAiKey("deepseek", "sk-test");
+    await bridge.reviewInstructions();
+    await bridge.scanInstructions();
+    await bridge.approveInstruction("file-1", "report-1", sha);
+    await bridge.disableInstruction("file-1", "report-1", sha);
 
-    expect(calls).toEqual(["refresh", "open", "settings", "key:deepseek:sk-test"]);
-    expect(refreshed).toEqual({ ok: true, payload: { contract: "aurascan-ui/1" } });
-    expect(opened).toEqual({ ok: false, canceled: true });
-    expect(settings).toEqual({ ok: true, payload: { schema: "aurascan-settings/1" } });
-    expect(stored).toEqual({ ok: true, payload: { stored: true } });
+    expect(calls).toEqual([
+      "refresh",
+      "openReport",
+      "readSettings",
+      "setAiKey:deepseek",
+      "reviewInstructions",
+      "scanInstructions",
+      `approve:file-1:report-1:${sha}`,
+      "disable:file-1"
+    ]);
   });
 });

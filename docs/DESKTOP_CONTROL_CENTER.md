@@ -85,14 +85,17 @@ These rules apply to every phase and are not negotiable per feature.
 ### Phase 2 — Instruction Guard triage
 
 - `instruction-audit --review --json` view with deterministic line ranges and
-  reasons.
-- Approve/disable/restore actions with report + SHA-256 binding. **CLI support is
-  implemented**: `--approve` and `--disable` accept `--expect-report-id` and
-  `--expect-sha256`, refuse the flags without an action, and refuse a malformed
-  digest, covered by `tests/test_instruction_cli_binding.py`. The renderer view
-  and shell operations remain open.
+  reasons. **Implemented**: the Agent files view, its strict
+  `instruction_guard_report/1.0` parser, and the review/scan/approve/disable
+  operations. The view shows only the relative path, the rule ID, severity,
+  one-based line ranges and the fixed reason — never source text.
+- Approve/disable/restore actions with report + SHA-256 binding. **Implemented
+  for approve and disable**: `--expect-report-id` and `--expect-sha256` are
+  forwarded by the shell, the confirmation panel echoes the report id, file id
+  and digest, and the CLI refuses a changed report or file. Restore is not yet
+  exposed.
 - Batch clean-baseline enrollment only after explicit confirmation, per the
-  existing Guard contract.
+  existing Guard contract. Not yet exposed.
 
 ### Phase 3 — Findings and diagnosis
 
@@ -141,4 +144,4 @@ Phase 1 is implemented end to end:
   `AURASCAN_DESKTOP_SELF_TEST_WRITE=1` is set against a throwaway `HOME` —
   stores and re-reads one sentinel credential.
 
-Phases 2–4 remain open.
+Phases 3–4 remain open.

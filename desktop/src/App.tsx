@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import sample from "./fixtures/snapshot.sample.json";
-import { countChecks, parseSettings, parseSettingsWrite, parseSnapshot } from "./contract";
-import type { SettingsPayload, Snapshot } from "./contract";
+import { countChecks, parseReview, parseSettings, parseSettingsWrite, parseSnapshot } from "./contract";
+import type { ReviewCandidate, ReviewReport, SettingsPayload, Snapshot } from "./contract";
 import { desktopBridge } from "./desktop";
 import type { ShellResult } from "./desktop";
 import { About } from "./views/About";
 import { Actions } from "./views/Actions";
 import { Checks } from "./views/Checks";
 import { Incidents } from "./views/Incidents";
+import { Instructions } from "./views/Instructions";
 import { Overview } from "./views/Overview";
 import { Report } from "./views/Report";
 import { Settings } from "./views/Settings";
@@ -19,6 +20,7 @@ const VIEWS = [
   { id: "overview", label: "Overview", hint: "state" },
   { id: "checks", label: "Checks", hint: "evidence" },
   { id: "incidents", label: "Incidents", hint: "attention" },
+  { id: "instructions", label: "Agent files", hint: "triage" },
   { id: "settings", label: "Settings", hint: "config" },
   { id: "about", label: "About", hint: "contract" }
 ] as const;
@@ -31,6 +33,7 @@ const DESCRIPTIONS: Record<ViewId, string> = {
   overview: "Machine state, detection-data identity, and pending attention.",
   checks: "Every collected check, grouped by subsystem.",
   incidents: "Crash markers that were collected for this user.",
+  instructions: "Agent control files reviewed as inert text, with hash-bound triage actions.",
   settings: "Your AuraScan configuration and AI provider state. Secrets are never displayed.",
   about: "What this view is allowed to claim."
 };
@@ -60,6 +63,8 @@ function availableViews(snapshot: Snapshot) {
         return Boolean(snapshot.doctor);
       case "incidents":
         return Boolean(snapshot.incidents);
+      case "instructions":
+        return true;
       case "settings":
         return true;
       default:
@@ -98,6 +103,18 @@ export function App() {
   const [settingsError, setSettingsError] = useState("");
   const [settingsNotice, setSettingsNotice] = useState("");
   const [settingsBusy, setSettingsBusy] = useState(false);
+  const [reviewRaw, setReviewRaw] = useState<unknown>(null);
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewError, setReviewError] = useState("");
+  const [reviewNotice, setReviewNotice] = useState("");
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const reviewParsed = useMemo(
+    () => (reviewRaw === null ? null : parseReview(reviewRaw)),
+    [reviewRaw]
+  );
+  const review: ReviewReport | null =
+    reviewParsed && reviewParsed.ok ? reviewParsed.report : null;
+  const reviewParseError = reviewParsed && !reviewParsed.ok ? reviewParsed.reason : "";
   const settingsParsed = useMemo(
     () => (settingsRaw === null ? null : parseSettings(settingsRaw)),
     [settingsRaw]
@@ -173,7 +190,11 @@ export function App() {
       ? reportMeta
       : active.id === "actions"
         ? actionsMeta
-        : active.id === "settings"
+        : active.id === "instructions"
+          ? review
+            ? `${plural(review.candidate_count, "candidate")} · ${review.highest_severity}`
+            : "no report"
+          : active.id === "settings"
           ? settings
             ? `${settings.ai.provider_label || settings.ai.provider} · ${settings.ai.ready ? "ready" : "not ready"}`
             : "unavailable"
@@ -214,6 +235,64 @@ export function App() {
     setShellError(result.error);
   };
 
+  const runReview = useCallback(
+    (operation: "review" | "scan") => {
+      if (!bridge) {
+        return;
+      }
+      setReviewLoading(true);
+      setReviewError("");
+      const call = operation === "review" ? bridge.reviewInstructions() : bridge.scanInstructions();
+      call
+        .then((result) => {
+          if (result.ok) {
+            setReviewRaw(result.payload);
+            setReviewNotice(operation === "scan" ? "Scan finished." : "");
+            return;
+          }
+          if (!result.canceled) {
+            setReviewError(result.error);
+          }
+        })
+        .catch(() => setReviewError("AuraScan could not be reached"))
+        .finally(() => setReviewLoading(false));
+    },
+    [bridge]
+  );
+
+  const runInstructionAction = async (
+    action: "approve" | "disable",
+    candidate: ReviewCandidate,
+    reportId: string
+  ) => {
+    if (!bridge) {
+      return;
+    }
+    setReviewBusy(true);
+    setReviewError("");
+    setReviewNotice("");
+    try {
+      const result =
+        action === "approve"
+          ? await bridge.approveInstruction(candidate.file_id, reportId, candidate.sha256)
+          : await bridge.disableInstruction(candidate.file_id, reportId, candidate.sha256);
+      if (!result.ok) {
+        setReviewError(result.error);
+        return;
+      }
+      setReviewNotice(
+        action === "approve"
+          ? `${candidate.relative_path} was approved for this exact content.`
+          : `${candidate.relative_path} was disabled with a restore receipt.`
+      );
+      runReview("review");
+    } catch {
+      setReviewError("AuraScan could not be reached");
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+
   const runShell = (operation: () => Promise<ShellResult>) => {
     operation()
       .then(applyShellResult)
@@ -245,8 +324,13 @@ export function App() {
     loadSettings();
   }, [loadSettings]);
 
-  const storeCredential = async (provider: string, secret: string) => {
-    if (!bridge) {
+  useEffect(() => {
+    if (view === "instructions" && reviewRaw === null && !reviewLoading) {
+      runReview("review");
+    }
+  }, [view, reviewRaw, reviewLoading, runReview]);
+
+  const storeCredential = async (provider: string, secret: string) => {    if (!bridge) {
       return;
     }
     setSettingsBusy(true);
@@ -352,6 +436,24 @@ export function App() {
         {view === "checks" && snapshot.doctor && <Checks checks={snapshot.doctor.checks} />}
         {view === "incidents" && snapshot.incidents && (
           <Incidents incidents={snapshot.incidents} />
+        )}
+        {view === "instructions" && (
+          <Instructions
+            report={review}
+            loading={reviewLoading}
+            error={reviewError || reviewParseError}
+            notice={reviewNotice}
+            busy={reviewBusy}
+            shellAvailable={Boolean(bridge)}
+            onReload={() => runReview("review")}
+            onScan={() => runReview("scan")}
+            onApprove={(candidate) =>
+              review ? runInstructionAction("approve", candidate, review.report_id) : Promise.resolve()
+            }
+            onDisable={(candidate) =>
+              review ? runInstructionAction("disable", candidate, review.report_id) : Promise.resolve()
+            }
+          />
         )}
         {view === "settings" && (
           <Settings

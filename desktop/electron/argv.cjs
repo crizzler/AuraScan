@@ -12,13 +12,18 @@ const path = require("node:path");
 
 const CONTRACT = "aurascan-ui/1";
 const SETTINGS_SCHEMA = "aurascan-settings/1";
+const REVIEW_SCHEMA = "instruction_guard_report/1.0";
 const PACKAGED_CLI = "/usr/bin/aurascan";
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_SECRET_CHARS = 4096;
 const MAX_PROVIDERS = 32;
 const MAX_FEATURES = 64;
+const MAX_CANDIDATES = 200;
 const SNAPSHOT_TIMEOUT_MS = 20000;
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
+const FILE_ID = /^[a-z0-9]{8,64}$/;
+const REPORT_ID = /^report-[a-z0-9]{8,64}$/;
+const SHA256 = /^[a-f0-9]{64}$/;
 
 // Mirrors the provider inventory in aurascan/core/ai_provider.py. A provider id
 // is never taken from the renderer without being checked against this list.
@@ -52,9 +57,15 @@ const FORWARDED_ENV = [
 const READ_ONLY_ACTIONS = Object.freeze([
   "refresh_snapshot",
   "project_report",
-  "read_settings"
+  "read_settings",
+  "instruction_review"
 ]);
-const MUTATING_ACTIONS = Object.freeze(["set_ai_key"]);
+const MUTATING_ACTIONS = Object.freeze([
+  "set_ai_key",
+  "instruction_scan",
+  "instruction_approve",
+  "instruction_disable"
+]);
 
 function resolveCli(isPackaged, env) {
   if (isPackaged) {
@@ -106,6 +117,42 @@ function actionArgv(actionId, values) {
   }
   if (actionId === "read_settings") {
     return ["settings", "--json"];
+  }
+  if (actionId === "instruction_review") {
+    return ["instruction-audit", "--review", "--json"];
+  }
+  if (actionId === "instruction_scan") {
+    return ["instruction-audit", "--json"];
+  }
+  if (actionId === "instruction_approve" || actionId === "instruction_disable") {
+    const fileId = values && values.file_id;
+    const reportId = values && values.report_id;
+    const digest = values && values.sha256;
+    if (typeof fileId !== "string" || !FILE_ID.test(fileId)) {
+      return null;
+    }
+    if (typeof reportId !== "string" || !REPORT_ID.test(reportId)) {
+      return null;
+    }
+    if (typeof digest !== "string" || !SHA256.test(digest)) {
+      return null;
+    }
+    const argv = [
+      "instruction-audit",
+      actionId === "instruction_approve" ? "--approve" : "--disable",
+      fileId,
+      "--expect-report-id",
+      reportId,
+      "--expect-sha256",
+      digest,
+      "--json"
+    ];
+    // The disable prompt is answered by the renderer's own confirmation, which
+    // echoes this exact report id, file id and digest. Nothing else adds --yes.
+    if (actionId === "instruction_disable") {
+      argv.push("--yes");
+    }
+    return argv;
   }
   if (actionId === "set_ai_key") {
     const provider = values && values.provider;
@@ -215,6 +262,36 @@ function parseSettingsWrite(stdout) {
   return parsed;
 }
 
+/** Structural gate for an Instruction Guard review report. */
+function parseReview(stdout) {
+  const parsed = parseJsonObject(stdout);
+  if (parsed.schema !== REVIEW_SCHEMA) {
+    throw new Error("review schema is not supported");
+  }
+  if (
+    typeof parsed.report_id !== "string" ||
+    !REPORT_ID.test(parsed.report_id) ||
+    typeof parsed.review_required !== "boolean" ||
+    !Array.isArray(parsed.candidates) ||
+    parsed.candidates.length > MAX_CANDIDATES
+  ) {
+    throw new Error("review payload is malformed");
+  }
+  return parsed;
+}
+
+/** Structural gate for an approve or disable result. */
+function parseInstructionAction(stdout) {
+  const parsed = parseJsonObject(stdout);
+  if (typeof parsed.status !== "string" || parsed.status.length === 0) {
+    throw new Error("instruction action was not confirmed");
+  }
+  if (typeof parsed.file_id !== "string" || !FILE_ID.test(parsed.file_id)) {
+    throw new Error("instruction action response is malformed");
+  }
+  return parsed;
+}
+
 module.exports = {
   CONTRACT,
   SETTINGS_SCHEMA,
@@ -234,5 +311,7 @@ module.exports = {
   validSecret,
   parseSnapshot,
   parseSettings,
-  parseSettingsWrite
+  parseSettingsWrite,
+  parseReview,
+  parseInstructionAction
 };

@@ -783,6 +783,240 @@ export function parseSettingsWrite(
   return { ok: true, ai };
 }
 
+export const REVIEW_SCHEMA = "instruction_guard_report/1.0";
+export const MAX_CANDIDATES = 200;
+export const MAX_REVIEW_FINDINGS = 50;
+
+export interface ReviewLineRange {
+  start_line: number;
+  end_line: number;
+}
+
+export interface ReviewFinding {
+  rule_id: string;
+  severity: Severity;
+  confidence: string;
+  source: string;
+  title: string;
+  reason: string;
+  ranges: ReviewLineRange[];
+}
+
+export interface ReviewCandidate {
+  file_id: string;
+  relative_path: string;
+  sha256: string;
+  surface: string;
+  integrity_state: string;
+  content_risk: Severity;
+  baseline: boolean;
+  disable_eligible: boolean;
+  review_required: boolean;
+  findings: ReviewFinding[];
+}
+
+export interface ReviewReport {
+  schema: string;
+  report_id: string;
+  created_at: string;
+  review_required: boolean;
+  candidate_count: number;
+  highest_severity: Severity;
+  truncated: boolean;
+  continuation_pending: boolean;
+  candidates: ReviewCandidate[];
+}
+
+export type ReviewParseResult =
+  | { ok: true; report: ReviewReport }
+  | { ok: false; reason: string };
+
+const FILE_ID = /^[a-z0-9]{8,64}$/;
+const REPORT_ID = /^report-[a-z0-9]{8,64}$/;
+const SHA256 = /^[a-f0-9]{64}$/;
+
+function reviewFail(reason: string): ReviewParseResult {
+  return { ok: false, reason };
+}
+
+function boundedString(value: unknown, limit: number): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > limit) {
+    return null;
+  }
+  return value;
+}
+
+function parseReviewRanges(raw: unknown): ReviewLineRange[] | null {
+  if (raw === undefined) {
+    return [];
+  }
+  if (!Array.isArray(raw) || raw.length > 20) {
+    return null;
+  }
+  const ranges: ReviewLineRange[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry)) {
+      return null;
+    }
+    const { start_line, end_line } = entry;
+    if (!Number.isInteger(start_line) || !Number.isInteger(end_line)) {
+      return null;
+    }
+    if ((start_line as number) < 1 || (end_line as number) < (start_line as number)) {
+      return null;
+    }
+    ranges.push({ start_line: start_line as number, end_line: end_line as number });
+  }
+  return ranges;
+}
+
+function parseReviewFindings(raw: unknown): ReviewFinding[] | null {
+  if (!Array.isArray(raw) || raw.length > MAX_REVIEW_FINDINGS) {
+    return null;
+  }
+  const findings: ReviewFinding[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry)) {
+      return null;
+    }
+    const ruleId = boundedString(entry.rule_id, 80);
+    const title = boundedString(entry.title, 300);
+    const reason = boundedString(entry.reason, 600);
+    const source = boundedString(entry.source, 40);
+    const confidence = boundedString(entry.confidence, 40);
+    if (!ruleId || !title || !reason || !source || !confidence) {
+      return null;
+    }
+    if (typeof entry.severity !== "string" || !SEVERITIES.includes(entry.severity as Severity)) {
+      return null;
+    }
+    const ranges = parseReviewRanges(entry.evidence_locations);
+    if (ranges === null) {
+      return null;
+    }
+    findings.push({
+      rule_id: ruleId,
+      severity: entry.severity as Severity,
+      confidence,
+      source,
+      title,
+      reason,
+      ranges
+    });
+  }
+  return findings;
+}
+
+function parseCandidates(raw: unknown): ReviewCandidate[] | null {
+  if (!Array.isArray(raw) || raw.length > MAX_CANDIDATES) {
+    return null;
+  }
+  const candidates: ReviewCandidate[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry)) {
+      return null;
+    }
+    const fileId = boundedString(entry.file_id, 64);
+    const relativePath = boundedString(entry.relative_path, 400);
+    const surface = boundedString(entry.surface, 60);
+    const integrityState = boundedString(entry.integrity_state, 60);
+    if (!fileId || !FILE_ID.test(fileId) || !relativePath || !surface || !integrityState) {
+      return null;
+    }
+    if (typeof entry.sha256 !== "string" || !SHA256.test(entry.sha256)) {
+      return null;
+    }
+    if (
+      typeof entry.content_risk !== "string" ||
+      !SEVERITIES.includes(entry.content_risk as Severity)
+    ) {
+      return null;
+    }
+    if (
+      typeof entry.baseline !== "boolean" ||
+      typeof entry.disable_eligible !== "boolean" ||
+      typeof entry.review_required !== "boolean"
+    ) {
+      return null;
+    }
+    const findings = parseReviewFindings(entry.findings);
+    if (findings === null) {
+      return null;
+    }
+    candidates.push({
+      file_id: fileId,
+      relative_path: relativePath,
+      sha256: entry.sha256,
+      surface,
+      integrity_state: integrityState,
+      content_risk: entry.content_risk as Severity,
+      baseline: entry.baseline,
+      disable_eligible: entry.disable_eligible,
+      review_required: entry.review_required,
+      findings
+    });
+  }
+  return candidates;
+}
+
+export function parseReview(raw: unknown): ReviewParseResult {
+  if (!isRecord(raw)) {
+    return reviewFail("review payload is not an object");
+  }
+  if (raw.schema !== REVIEW_SCHEMA) {
+    return reviewFail(`unsupported review schema: ${String(raw.schema)}`);
+  }
+  const reportId = boundedString(raw.report_id, 80);
+  if (!reportId || !REPORT_ID.test(reportId)) {
+    return reviewFail("review report identity is malformed");
+  }
+  const createdAt = boundedString(raw.created_at, 40);
+  if (!createdAt) {
+    return reviewFail("review timestamp is malformed");
+  }
+  if (
+    typeof raw.review_required !== "boolean" ||
+    typeof raw.truncated !== "boolean" ||
+    typeof raw.continuation_pending !== "boolean"
+  ) {
+    return reviewFail("review flags are malformed");
+  }
+  if (
+    !Number.isInteger(raw.candidate_count) ||
+    (raw.candidate_count as number) < 0 ||
+    (raw.candidate_count as number) > MAX_CANDIDATES
+  ) {
+    return reviewFail("review candidate count is out of range");
+  }
+  if (
+    typeof raw.highest_severity !== "string" ||
+    !SEVERITIES.includes(raw.highest_severity as Severity)
+  ) {
+    return reviewFail("review severity is malformed");
+  }
+  const candidates = parseCandidates(raw.candidates);
+  if (candidates === null) {
+    return reviewFail("review candidates are malformed");
+  }
+  if (candidates.length !== raw.candidate_count) {
+    return reviewFail("review candidate count does not match its entries");
+  }
+  return {
+    ok: true,
+    report: {
+      schema: REVIEW_SCHEMA,
+      report_id: reportId,
+      created_at: createdAt,
+      review_required: raw.review_required,
+      candidate_count: raw.candidate_count as number,
+      highest_severity: raw.highest_severity as Severity,
+      truncated: raw.truncated,
+      continuation_pending: raw.continuation_pending,
+      candidates
+    }
+  };
+}
+
 export function countChecks(checks: DoctorCheck[]): Record<CheckStatus, number> {
   const counts: Record<CheckStatus, number> = { ok: 0, warn: 0, error: 0 };
   for (const check of checks) {

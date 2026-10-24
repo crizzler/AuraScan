@@ -42,14 +42,30 @@ describe("desktop shell boundary", () => {
     }
   });
 
-  it("exposes only the four frozen bridge operations", () => {
+  it("exposes only the fixed bridge operations", () => {
     expect(preloadSource).toContain("Object.freeze");
-    expect(preloadSource).toContain("aurascan:refresh");
-    expect(preloadSource).toContain("aurascan:open-report");
-    expect(preloadSource).toContain("aurascan:settings");
-    expect(preloadSource).toContain("aurascan:set-ai-key");
+    for (const channel of [
+      "aurascan:refresh",
+      "aurascan:open-report",
+      "aurascan:settings",
+      "aurascan:set-ai-key",
+      "aurascan:instruction-review",
+      "aurascan:instruction-scan",
+      "aurascan:instruction-approve",
+      "aurascan:instruction-disable"
+    ]) {
+      expect(preloadSource).toContain(channel);
+    }
     expect(preloadSource).not.toContain("ipcRenderer.send");
     expect(preloadSource).not.toContain("child_process");
+  });
+
+  it("answers the disable prompt only from the renderer's own confirmation", () => {
+    const argvSource = readFileSync(join(here, "..", "electron", "argv.cjs"), "utf8");
+    expect(argvSource).toContain('argv.push("--yes")');
+    expect(argvSource).toContain("--expect-report-id");
+    expect(argvSource).toContain("--expect-sha256");
+    expect(mainSource).not.toContain('"--yes"');
   });
 
   it("never passes a credential through argv or the environment", () => {

@@ -18,6 +18,8 @@ const helpers = require("../electron/argv.cjs") as {
   parseSnapshot: (stdout: string) => { contract: string };
   parseSettings: (stdout: string) => { schema: string };
   parseSettingsWrite: (stdout: string) => { schema: string; stored: boolean };
+  parseReview: (stdout: string) => { schema: string; report_id: string };
+  parseInstructionAction: (stdout: string) => { status: string; file_id: string };
 };
 
 describe("shell CLI resolution", () => {
@@ -66,7 +68,8 @@ describe("shell action argv", () => {
     expect(helpers.READ_ONLY_ACTIONS).toEqual([
       "refresh_snapshot",
       "project_report",
-      "read_settings"
+      "read_settings",
+      "instruction_review"
     ]);
     expect(helpers.actionArgv("refresh_snapshot")).toEqual(["ui", "--json"]);
     expect(helpers.actionArgv("read_settings")).toEqual(["settings", "--json"]);
@@ -74,7 +77,12 @@ describe("shell action argv", () => {
       helpers.actionArgv("set_ai_key", { provider: "deepseek" })
     ).toEqual(["settings", "set-ai-key", "--provider", "deepseek", "--json"]);
     expect(helpers.actionArgv("set_ai_key", { provider: "nope" })).toBeNull();
-    expect(helpers.MUTATING_ACTIONS).toEqual(["set_ai_key"]);
+    expect(helpers.MUTATING_ACTIONS).toEqual([
+      "set_ai_key",
+      "instruction_scan",
+      "instruction_approve",
+      "instruction_disable"
+    ]);
     expect(helpers.validSecret("sk-1234567890")).toBe(true);
     expect(helpers.validSecret("sk-123\n456")).toBe(false);
     expect(helpers.validSecret("x".repeat(helpers.MAX_SECRET_CHARS + 1))).toBe(false);
@@ -89,6 +97,62 @@ describe("shell action argv", () => {
     expect(helpers.actionArgv("project_report", { report_path: "report.json" })).toBeNull();
     expect(helpers.actionArgv("project_report", { report_path: "-oops" })).toBeNull();
     expect(helpers.actionArgv("project_report", { report_path: "/tmp/a\u0000b" })).toBeNull();
+  });
+
+  it("builds the Instruction Guard operations with bound evidence", () => {
+    const fileId = "d0d36c7a141a6ceb7c30e1b1";
+    const reportId = "report-be8350d1b3a0e04b8bb85cca";
+    const sha = "a".repeat(64);
+
+    expect(helpers.actionArgv("instruction_review")).toEqual([
+      "instruction-audit",
+      "--review",
+      "--json"
+    ]);
+    expect(helpers.actionArgv("instruction_scan")).toEqual(["instruction-audit", "--json"]);
+    expect(
+      helpers.actionArgv("instruction_approve", { file_id: fileId, report_id: reportId, sha256: sha })
+    ).toEqual([
+      "instruction-audit",
+      "--approve",
+      fileId,
+      "--expect-report-id",
+      reportId,
+      "--expect-sha256",
+      sha,
+      "--json"
+    ]);
+    expect(
+      helpers.actionArgv("instruction_disable", { file_id: fileId, report_id: reportId, sha256: sha })
+    ).toEqual([
+      "instruction-audit",
+      "--disable",
+      fileId,
+      "--expect-report-id",
+      reportId,
+      "--expect-sha256",
+      sha,
+      "--json",
+      "--yes"
+    ]);
+  });
+
+  it("refuses an unbound or malformed instruction action", () => {
+    const sha = "a".repeat(64);
+    expect(helpers.actionArgv("instruction_approve", {})).toBeNull();
+    expect(
+      helpers.actionArgv("instruction_approve", { file_id: "../etc", report_id: "report-x", sha256: sha })
+    ).toBeNull();
+    expect(
+      helpers.actionArgv("instruction_approve", { file_id: "d0d36c7a141a6ceb7c30e1b1", report_id: "x", sha256: sha })
+    ).toBeNull();
+    expect(
+      helpers.actionArgv("instruction_disable", {
+        file_id: "d0d36c7a141a6ceb7c30e1b1",
+        report_id: "report-be8350d1b3a0e04b8bb85cca",
+        sha256: "A".repeat(64)
+      })
+    ).toBeNull();
   });
 });
 

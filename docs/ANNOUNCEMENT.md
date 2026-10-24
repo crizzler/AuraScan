@@ -9,7 +9,10 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
-The v0.10.19 release is a package-only reliability update. Verified official
+The v0.11.0 release is a package-only update that adds the read-only
+`aurascan ui` evidence contract for desktop interfaces, with an optional
+hardened Electron shell that consumes it; the shell is a separate artifact and
+is not published yet. Verified official
 repository archives use a fast deterministic pacman-hook scan: routine
 systemd service management is LOW/non-manual, auxiliary ClamAV/AI scans are
 skipped, and local or AUR archives keep the full scan and blocking behavior.
@@ -27,7 +30,7 @@ also detects a wait-then-read process deadlock, such as Goverlay 1.9.4 waiting
 forever for `lsmod`; `--fix-hung-apps` offers a cached older build. Confirmed
 signatures and deterministic CRITICAL findings still block. The v0.10.11
 recovery image remains the retained image; ISO and local-UKI gates were not
-rerun for v0.10.19.
+rerun for v0.11.0.
 
 The v0.10.11 release adds a guided AUR update flow to `aurascan upgrade`.
 After the repository-only continuation it can download a pending AUR update

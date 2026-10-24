@@ -96,7 +96,7 @@ a gate: `doctor.ok` carries the health conclusion, so a UI never has to treat
 {
   "contract": "aurascan-ui/1",
   "generated_at": 1792757134,
-  "app": { "version": "0.10.19", "python": "3.14.0", "platform": "linux" },
+  "app": { "version": "0.11.0", "python": "3.14.0", "platform": "linux" },
   "doctor": { "ok": true, "checks": [DoctorCheck, ...] },
   "intelligence": {
     "status": "bundled", "source": "bundled", "digest": "...",
@@ -142,7 +142,7 @@ the same envelope and skips live evidence collection entirely:
 {
   "contract": "aurascan-ui/1",
   "generated_at": 1792757134,
-  "app": { "version": "0.10.19", "python": "3.14.0", "platform": "linux" },
+  "app": { "version": "0.11.0", "python": "3.14.0", "platform": "linux" },
   "report": {
     "schema_version": "1.0",
     "scanner_version": "2.6.0",
@@ -191,7 +191,7 @@ run. IDs live in `aurascan/core/ui_actions.py`:
 {
   "contract": "aurascan-ui/1",
   "generated_at": 1792757134,
-  "app": { "version": "0.10.19", "python": "3.14.0", "platform": "linux" },
+  "app": { "version": "0.11.0", "python": "3.14.0", "platform": "linux" },
   "actions": [
     {
       "id": "scan_package",

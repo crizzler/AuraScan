@@ -11,10 +11,26 @@
 const path = require("node:path");
 
 const CONTRACT = "aurascan-ui/1";
+const SETTINGS_SCHEMA = "aurascan-settings/1";
 const PACKAGED_CLI = "/usr/bin/aurascan";
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+const MAX_SECRET_CHARS = 4096;
+const MAX_PROVIDERS = 32;
+const MAX_FEATURES = 64;
 const SNAPSHOT_TIMEOUT_MS = 20000;
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
+
+// Mirrors the provider inventory in aurascan/core/ai_provider.py. A provider id
+// is never taken from the renderer without being checked against this list.
+const AI_PROVIDERS = Object.freeze([
+  "openai",
+  "anthropic",
+  "deepseek",
+  "gemini",
+  "openrouter",
+  "lmstudio",
+  "llamacpp"
+]);
 
 // Only these variables reach the child process. In particular no AURASCAN_AI_*
 // or provider key variables are forwarded from the shell environment; the CLI
@@ -30,8 +46,15 @@ const FORWARDED_ENV = [
   "XDG_RUNTIME_DIR"
 ];
 
-// The only actions the shell may run. They are read-only and map to fixed argv.
-const READ_ONLY_ACTIONS = Object.freeze(["refresh_snapshot", "project_report"]);
+// The only actions the shell may run. Read-only actions never change local
+// state; the single mutating action stores one AI credential and is always
+// confirmed in the renderer first.
+const READ_ONLY_ACTIONS = Object.freeze([
+  "refresh_snapshot",
+  "project_report",
+  "read_settings"
+]);
+const MUTATING_ACTIONS = Object.freeze(["set_ai_key"]);
 
 function resolveCli(isPackaged, env) {
   if (isPackaged) {
@@ -81,7 +104,30 @@ function actionArgv(actionId, values) {
     }
     return ["ui", "--report", reportPath, "--json"];
   }
+  if (actionId === "read_settings") {
+    return ["settings", "--json"];
+  }
+  if (actionId === "set_ai_key") {
+    const provider = values && values.provider;
+    if (typeof provider !== "string" || !AI_PROVIDERS.includes(provider)) {
+      return null;
+    }
+    return ["settings", "set-ai-key", "--provider", provider, "--json"];
+  }
   return null;
+}
+
+/**
+ * Accept a credential only as a bounded single line. It travels over stdin and
+ * is never placed in argv, the environment, or a log line.
+ */
+function validSecret(value) {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.length <= MAX_SECRET_CHARS &&
+    !CONTROL_CHARS.test(value)
+  );
 }
 
 function parseSnapshot(stdout) {
@@ -106,15 +152,87 @@ function parseSnapshot(stdout) {
   return parsed;
 }
 
+function parseJsonObject(stdout) {
+  if (typeof stdout !== "string") {
+    throw new Error("payload is not text");
+  }
+  if (stdout.length > MAX_OUTPUT_BYTES) {
+    throw new Error("payload exceeds the shell bound");
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new Error("payload is not JSON");
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("payload is not an object");
+  }
+  return parsed;
+}
+
+/** Structural gate for `aurascan-settings/1`; the renderer validates fields. */
+function parseSettings(stdout) {
+  const parsed = parseJsonObject(stdout);
+  if (parsed.schema !== SETTINGS_SCHEMA) {
+    throw new Error("settings schema is not supported");
+  }
+  if (
+    parsed.config === null ||
+    typeof parsed.config !== "object" ||
+    Array.isArray(parsed.config) ||
+    parsed.ai === null ||
+    typeof parsed.ai !== "object" ||
+    Array.isArray(parsed.ai) ||
+    !Array.isArray(parsed.providers) ||
+    parsed.providers.length > MAX_PROVIDERS ||
+    !Array.isArray(parsed.features) ||
+    parsed.features.length > MAX_FEATURES
+  ) {
+    throw new Error("settings payload is malformed");
+  }
+  return parsed;
+}
+
+/**
+ * A write response carries only the confirmation and the resulting AI state.
+ * It must never be treated as a full settings payload: a successful write that
+ * failed to parse would otherwise be reported to the user as a failure.
+ */
+function parseSettingsWrite(stdout) {
+  const parsed = parseJsonObject(stdout);
+  if (parsed.schema !== SETTINGS_SCHEMA || parsed.stored !== true) {
+    throw new Error("settings write was not confirmed");
+  }
+  if (
+    parsed.ai === null ||
+    typeof parsed.ai !== "object" ||
+    Array.isArray(parsed.ai) ||
+    typeof parsed.ai.key_present !== "boolean"
+  ) {
+    throw new Error("settings write response is malformed");
+  }
+  return parsed;
+}
+
 module.exports = {
   CONTRACT,
+  SETTINGS_SCHEMA,
   PACKAGED_CLI,
   MAX_OUTPUT_BYTES,
+  MAX_SECRET_CHARS,
+  MAX_PROVIDERS,
+  MAX_FEATURES,
   SNAPSHOT_TIMEOUT_MS,
   FORWARDED_ENV,
+  AI_PROVIDERS,
   READ_ONLY_ACTIONS,
+  MUTATING_ACTIONS,
   resolveCli,
   buildEnv,
   actionArgv,
-  parseSnapshot
+  validSecret,
+  parseSnapshot,
+  parseSettings,
+  parseSettingsWrite
 };

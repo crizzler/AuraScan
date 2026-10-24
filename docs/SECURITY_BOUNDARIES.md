@@ -252,10 +252,38 @@ The optional Electron shell implements that boundary as follows: it spawns only
 `/usr/bin/aurascan` with fixed argument vectors, forwards an allowlisted
 environment with a fixed `PATH`, never stores or forwards stderr, bounds stdout
 and runtime, rejects any snapshot whose contract string differs, denies popups,
-navigation, webviews and permission requests, and exposes exactly two preload
-operations. A report path is chosen by a native dialog in the main process and
-never reaches the renderer. The renderer remains a pure view: a compromised one
-can misdisplay evidence, not change a deterministic result or install anything.
+navigation, webviews and permission requests, and exposes exactly four preload
+operations: refresh, open a report through a native dialog, read settings, and
+store one AI credential. A report path is chosen by the main process and never
+reaches the renderer. The renderer remains a pure view: a compromised one can
+misdisplay evidence, not change a deterministic result or install anything.
+
+### 12. Desktop settings and credentials
+
+| Aspect | Detail |
+| --- | --- |
+| Trusted side | `aurascan settings`, which reads and writes only the invoking user's own `.env` |
+| Untrusted side | A credential typed into any client; it is data, never a command |
+| Validation | Fixed provider allowlist mirrored in the shell; one bounded line on stdin; the value is revalidated, stripped of control characters and rejected when empty |
+| Allowed authority | Read the user's configuration and report secrets as presence booleans; store one provider credential |
+| Prohibited | Secrets in argv, the environment, logs, stdout, the renderer, or a settings payload; enabling AI as a side effect of storing a credential; any privileged write |
+| Evidence | Configuration path, file mode, per-provider presence booleans, feature declarations |
+
+`aurascan settings --json` emits `aurascan-settings/1`. Secret-bearing settings
+are reduced to booleans before the payload is built, so the serializer never
+sees a value. `aurascan settings set-ai-key` accepts the credential on stdin
+only, writes the file atomically at mode `0600` in a `0700` directory, echoes
+neither the value nor a digest of it, and writes an explicit
+`AURASCAN_AI_ENABLED=0` when the enable flag was unset, because the runtime
+otherwise treats a present key as enabled. Storing a credential is therefore
+never the same act as enabling AI.
+
+The shell validates the provider against its own frozen list, checks the
+credential shape, and passes it once on the child's stdin. It never places the
+value in the argument vector, and the environment it forwards contains no
+credential variables. A write confirmation is parsed with a dedicated parser:
+the response omits the provider and feature inventories, so treating it as a full
+settings payload would report a successful write as a failure.
 
 ## Prohibited capability combinations
 

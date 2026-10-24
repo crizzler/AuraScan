@@ -21,7 +21,10 @@ const SELF_TEST_ENV = "AURASCAN_DESKTOP_SELF_TEST";
 // Match the desktop entry's StartupWMClass so the window groups correctly.
 app.setName("aurascan-desktop");
 
-function runCli(args) {
+function runCli(args, options) {
+  const input = options && typeof options.input === "string" ? options.input : null;
+  const parse = (options && options.parse) || helpers.parseSnapshot;
+  const failure = (options && options.failure) || "AuraScan could not produce a snapshot";
   return new Promise((resolve) => {
     let settled = false;
     let stdout = "";
@@ -43,12 +46,17 @@ function runCli(args) {
     try {
       child = spawn(helpers.resolveCli(app.isPackaged, process.env), args, {
         env: helpers.buildEnv(process.env),
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe"],
         windowsHide: true
       });
     } catch {
       finish({ ok: false, error: "AuraScan could not be started" });
       return;
+    }
+
+    if (input !== null) {
+      child.stdin.on("error", () => {});
+      child.stdin.end(input);
     }
 
     timer = setTimeout(() => {
@@ -75,13 +83,13 @@ function runCli(args) {
         return;
       }
       if (code !== 0) {
-        finish({ ok: false, error: "AuraScan could not produce a snapshot" });
+        finish({ ok: false, error: failure });
         return;
       }
       try {
-        finish({ ok: true, snapshot: helpers.parseSnapshot(stdout) });
+        finish({ ok: true, payload: parse(stdout) });
       } catch {
-        finish({ ok: false, error: "AuraScan returned an unsupported snapshot" });
+        finish({ ok: false, error: failure });
       }
     });
   });
@@ -93,6 +101,38 @@ function requestSnapshot(actionId, values) {
     return Promise.resolve({ ok: false, error: "Unsupported desktop action" });
   }
   return runCli(args);
+}
+
+function requestSettings() {
+  const args = helpers.actionArgv("read_settings");
+  if (args === null) {
+    return Promise.resolve({ ok: false, error: "Unsupported desktop action" });
+  }
+  return runCli(args, {
+    parse: helpers.parseSettings,
+    failure: "AuraScan settings are unavailable"
+  });
+}
+
+function storeAiKey(provider, secret) {
+  if (!helpers.validSecret(secret)) {
+    return Promise.resolve({ ok: false, error: "That credential is not usable" });
+  }
+  const args = helpers.actionArgv("set_ai_key", { provider });
+  if (args === null) {
+    return Promise.resolve({ ok: false, error: "Unsupported desktop action" });
+  }
+  // The credential leaves the renderer once, on this process's stdin, and is
+  // never echoed, logged, or placed in argv.
+  return runCli(args, {
+    input: secret + "\n",
+    parse: helpers.parseSettingsWrite,
+    failure: "AuraScan could not store that credential"
+  }).then((result) =>
+    result.ok && result.payload && result.payload.stored === true
+      ? result
+      : { ok: false, error: "AuraScan refused that credential" }
+  );
 }
 
 function hardenContents(contents) {
@@ -147,6 +187,12 @@ function createWindow(showWindow = true) {
 function registerIpc() {
   ipcMain.handle("aurascan:refresh", () => requestSnapshot("refresh_snapshot"));
 
+  ipcMain.handle("aurascan:settings", () => requestSettings());
+
+  ipcMain.handle("aurascan:set-ai-key", (_event, provider, secret) =>
+    storeAiKey(provider, secret)
+  );
+
   ipcMain.handle("aurascan:open-report", async (event) => {
     const parent = BrowserWindow.fromWebContents(event.sender);
     const options = {
@@ -171,11 +217,18 @@ async function runSelfTest() {
     app.exit(1);
     return;
   }
-  const checks = Array.isArray(result.snapshot.doctor?.checks)
-    ? result.snapshot.doctor.checks.length
+  const checks = Array.isArray(result.payload.doctor?.checks)
+    ? result.payload.doctor.checks.length
     : 0;
   console.log(
-    `[aurascan-desktop] self-test ok contract=${result.snapshot.contract} checks=${checks}`
+    `[aurascan-desktop] self-test ok contract=${result.payload.contract} checks=${checks}`
+  );
+
+  const settings = await requestSettings();
+  console.log(
+    settings.ok
+      ? `[aurascan-desktop] self-test settings=${settings.payload.schema}`
+      : "[aurascan-desktop] self-test settings unavailable"
   );
 
   const window = createWindow(false);
@@ -209,11 +262,85 @@ async function runSelfTest() {
         })
       `);
       clearTimeout(timeout);
-      if (state && typeof state.view === "string" && state.view.length > 0) {
-        console.log(`[aurascan-desktop] self-test window ok view=${state.view}`);
-        app.exit(0);
+      if (!state || typeof state.view !== "string" || state.view.length === 0) {
+        console.log(
+          `[aurascan-desktop] self-test window did not render danger=${Boolean(
+            state && state.danger
+          )}`
+        );
+        app.exit(1);
         return;
       }
+      console.log(`[aurascan-desktop] self-test window ok view=${state.view}`);
+
+      if (settings.ok) {
+        const settingsView = await window.webContents.executeJavaScript(`
+          new Promise((resolve) => {
+            const deadline = Date.now() + 5000;
+            const step = () => {
+              const buttons = Array.from(document.querySelectorAll('nav button'));
+              const target = buttons.find((button) =>
+                (button.textContent || '').includes('Settings')
+              );
+              if (!target) {
+                if (Date.now() > deadline) {
+                  resolve({ ok: false, view: '', cells: 0 });
+                  return;
+                }
+                setTimeout(step, 50);
+                return;
+              }
+              target.click();
+              setTimeout(() => {
+                const heading = document.querySelector('main h1');
+                const cells = document.querySelectorAll('main dl.kv dd');
+                resolve({
+                  ok: Boolean(
+                    heading && heading.textContent === 'Settings' && cells.length > 0
+                  ),
+                  view: heading ? heading.textContent : '',
+                  cells: cells.length
+                });
+              }, 300);
+            };
+            step();
+          })
+        `);
+        if (!settingsView || settingsView.ok !== true) {
+          console.log(
+            `[aurascan-desktop] self-test settings view failed view=${String(
+              settingsView && settingsView.view
+            )} cells=${String(settingsView && settingsView.cells)}`
+          );
+          app.exit(1);
+          return;
+        }
+        console.log(
+          `[aurascan-desktop] self-test settings view ok cells=${settingsView.cells}`
+        );
+      }
+
+      if (process.env.AURASCAN_DESKTOP_SELF_TEST_WRITE === "1") {
+        // Opt-in: writes one sentinel credential through the stdin path. Only
+        // run this against a throwaway HOME.
+        const stored = await storeAiKey(
+          "deepseek",
+          "sk-selftest-not-a-real-credential"
+        );
+        const accepted = Boolean(
+          stored.ok && stored.payload && stored.payload.stored === true
+        );
+        console.log(
+          accepted
+            ? "[aurascan-desktop] self-test credential write ok"
+            : "[aurascan-desktop] self-test credential write failed"
+        );
+        app.exit(accepted ? 0 : 1);
+        return;
+      }
+
+      app.exit(0);
+      return;
       console.log(
         `[aurascan-desktop] self-test window did not render danger=${Boolean(
           state && state.danger

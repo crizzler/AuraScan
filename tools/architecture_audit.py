@@ -103,6 +103,7 @@ UI_ENTRY_SUFFIXES = (
     "core.recovery_cli",
     "core.incident_cli",
     "core.ui_cli",
+    "core.settings_cli",
 )
 
 # Generic lifecycle frameworks. They coordinate operations that the lifecycle

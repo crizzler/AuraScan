@@ -42,11 +42,20 @@ describe("desktop shell boundary", () => {
     }
   });
 
-  it("exposes only the two frozen bridge operations", () => {
+  it("exposes only the four frozen bridge operations", () => {
     expect(preloadSource).toContain("Object.freeze");
     expect(preloadSource).toContain("aurascan:refresh");
     expect(preloadSource).toContain("aurascan:open-report");
+    expect(preloadSource).toContain("aurascan:settings");
+    expect(preloadSource).toContain("aurascan:set-ai-key");
     expect(preloadSource).not.toContain("ipcRenderer.send");
     expect(preloadSource).not.toContain("child_process");
+  });
+
+  it("never passes a credential through argv or the environment", () => {
+    expect(mainSource).toContain("helpers.validSecret(secret)");
+    expect(mainSource).toContain('helpers.actionArgv("set_ai_key", { provider })');
+    expect(mainSource).toMatch(/input: secret \+ "\\n"/);
+    expect(mainSource).not.toContain("API_KEY");
   });
 });

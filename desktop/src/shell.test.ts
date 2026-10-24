@@ -6,11 +6,18 @@ const helpers = require("../electron/argv.cjs") as {
   CONTRACT: string;
   PACKAGED_CLI: string;
   MAX_OUTPUT_BYTES: number;
+  MAX_SECRET_CHARS: number;
+  MAX_PROVIDERS: number;
   READ_ONLY_ACTIONS: readonly string[];
+  MUTATING_ACTIONS: readonly string[];
+  AI_PROVIDERS: readonly string[];
   resolveCli: (isPackaged: boolean, env: Record<string, string | undefined>) => string;
   buildEnv: (env: Record<string, string | undefined>) => Record<string, string>;
   actionArgv: (id: string, values?: Record<string, unknown>) => string[] | null;
+  validSecret: (value: unknown) => boolean;
   parseSnapshot: (stdout: string) => { contract: string };
+  parseSettings: (stdout: string) => { schema: string };
+  parseSettingsWrite: (stdout: string) => { schema: string; stored: boolean };
 };
 
 describe("shell CLI resolution", () => {
@@ -55,9 +62,22 @@ describe("shell child environment", () => {
 });
 
 describe("shell action argv", () => {
-  it("builds only the two read-only actions", () => {
-    expect(helpers.READ_ONLY_ACTIONS).toEqual(["refresh_snapshot", "project_report"]);
+  it("builds only the fixed read-only actions", () => {
+    expect(helpers.READ_ONLY_ACTIONS).toEqual([
+      "refresh_snapshot",
+      "project_report",
+      "read_settings"
+    ]);
     expect(helpers.actionArgv("refresh_snapshot")).toEqual(["ui", "--json"]);
+    expect(helpers.actionArgv("read_settings")).toEqual(["settings", "--json"]);
+    expect(
+      helpers.actionArgv("set_ai_key", { provider: "deepseek" })
+    ).toEqual(["settings", "set-ai-key", "--provider", "deepseek", "--json"]);
+    expect(helpers.actionArgv("set_ai_key", { provider: "nope" })).toBeNull();
+    expect(helpers.MUTATING_ACTIONS).toEqual(["set_ai_key"]);
+    expect(helpers.validSecret("sk-1234567890")).toBe(true);
+    expect(helpers.validSecret("sk-123\n456")).toBe(false);
+    expect(helpers.validSecret("x".repeat(helpers.MAX_SECRET_CHARS + 1))).toBe(false);
     expect(
       helpers.actionArgv("project_report", { report_path: "/tmp/report.json" })
     ).toEqual(["ui", "--report", "/tmp/report.json", "--json"]);
@@ -81,5 +101,50 @@ describe("shell snapshot parsing", () => {
     expect(() => helpers.parseSnapshot("not json")).toThrow();
     expect(() => helpers.parseSnapshot("[]")).toThrow();
     expect(() => helpers.parseSnapshot("x".repeat(helpers.MAX_OUTPUT_BYTES + 1))).toThrow();
+  });
+});
+
+describe("shell settings parsing", () => {
+  const valid = JSON.stringify({
+    schema: "aurascan-settings/1",
+    config: { path: "~/.config/aurascan/.env", present: true, mode: "0600", mode_ok: true, readable: true },
+    ai: { enabled: false, provider: "deepseek", key_present: true },
+    providers: [{ id: "deepseek" }],
+    features: []
+  });
+
+  it("accepts the settings schema", () => {
+    expect(helpers.parseSettings(valid).schema).toBe("aurascan-settings/1");
+  });
+
+  it("rejects a different schema or a malformed envelope", () => {
+    expect(() => helpers.parseSettings(valid.replace("aurascan-settings/1", "aurascan-settings/2"))).toThrow();
+    expect(() => helpers.parseSettings(JSON.stringify({ schema: "aurascan-settings/1" }))).toThrow();
+    expect(() =>
+      helpers.parseSettings(
+        JSON.stringify({
+          ...JSON.parse(valid),
+          providers: new Array(helpers.MAX_PROVIDERS + 1).fill({ id: "x" })
+        })
+      )
+    ).toThrow();
+    expect(() => helpers.parseSettings("[]")).toThrow();
+    expect(() => helpers.parseSettings("not json")).toThrow();
+  });
+
+  it("accepts a write confirmation only when it is explicit", () => {
+    const confirmation = JSON.stringify({
+      schema: "aurascan-settings/1",
+      action: "set_ai_key",
+      stored: true,
+      provider: "deepseek",
+      ai: { provider: "deepseek", key_present: true }
+    });
+
+    expect(helpers.parseSettingsWrite(confirmation).stored).toBe(true);
+    expect(() => helpers.parseSettingsWrite(confirmation.replace('"stored":true', '"stored":false'))).toThrow();
+    expect(() => helpers.parseSettingsWrite(JSON.stringify({ schema: "aurascan-settings/1" }))).toThrow();
+    // A write response is not a full settings payload.
+    expect(() => helpers.parseSettings(confirmation)).toThrow();
   });
 });

@@ -2,12 +2,13 @@
  * Renderer-side handle for the desktop shell bridge.
  *
  * The browser prototype has no bridge. The Electron preload exposes exactly
- * two operations and never a command, a path, or an executable.
+ * four fixed operations. The renderer never receives a command, an executable,
+ * or a path, and a credential it sends leaves only through that bridge.
  */
 
-export interface ShellSnapshotResult {
+export interface ShellPayloadResult {
   ok: true;
-  snapshot: unknown;
+  payload: unknown;
 }
 
 export interface ShellErrorResult {
@@ -16,11 +17,13 @@ export interface ShellErrorResult {
   canceled?: boolean;
 }
 
-export type ShellResult = ShellSnapshotResult | ShellErrorResult;
+export type ShellResult = ShellPayloadResult | ShellErrorResult;
 
 export interface DesktopBridge {
   refresh(): Promise<ShellResult>;
   openReport(): Promise<ShellResult>;
+  readSettings(): Promise<ShellResult>;
+  setAiKey(provider: string, secret: string): Promise<ShellResult>;
 }
 
 export function desktopBridge(): DesktopBridge | null {
@@ -31,11 +34,25 @@ export function desktopBridge(): DesktopBridge | null {
   const bridge = candidate as Record<string, unknown>;
   const refresh = bridge.refresh;
   const openReport = bridge.openReport;
-  if (typeof refresh !== "function" || typeof openReport !== "function") {
+  const readSettings = bridge.readSettings;
+  const setAiKey = bridge.setAiKey;
+  if (
+    typeof refresh !== "function" ||
+    typeof openReport !== "function" ||
+    typeof readSettings !== "function" ||
+    typeof setAiKey !== "function"
+  ) {
     return null;
   }
   return {
     refresh: () => (refresh as () => Promise<ShellResult>).call(candidate),
-    openReport: () => (openReport as () => Promise<ShellResult>).call(candidate)
+    openReport: () => (openReport as () => Promise<ShellResult>).call(candidate),
+    readSettings: () => (readSettings as () => Promise<ShellResult>).call(candidate),
+    setAiKey: (provider: string, secret: string) =>
+      (setAiKey as (nextProvider: string, nextSecret: string) => Promise<ShellResult>).call(
+        candidate,
+        provider,
+        secret
+      )
   };
 }

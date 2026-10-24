@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import sample from "./fixtures/snapshot.sample.json";
-import { countChecks, parseSnapshot } from "./contract";
-import type { Snapshot } from "./contract";
+import { countChecks, parseSettings, parseSettingsWrite, parseSnapshot } from "./contract";
+import type { SettingsPayload, Snapshot } from "./contract";
 import { desktopBridge } from "./desktop";
 import type { ShellResult } from "./desktop";
 import { About } from "./views/About";
@@ -11,6 +11,7 @@ import { Checks } from "./views/Checks";
 import { Incidents } from "./views/Incidents";
 import { Overview } from "./views/Overview";
 import { Report } from "./views/Report";
+import { Settings } from "./views/Settings";
 
 const VIEWS = [
   { id: "report", label: "Report", hint: "scan" },
@@ -18,6 +19,7 @@ const VIEWS = [
   { id: "overview", label: "Overview", hint: "state" },
   { id: "checks", label: "Checks", hint: "evidence" },
   { id: "incidents", label: "Incidents", hint: "attention" },
+  { id: "settings", label: "Settings", hint: "config" },
   { id: "about", label: "About", hint: "contract" }
 ] as const;
 
@@ -29,6 +31,7 @@ const DESCRIPTIONS: Record<ViewId, string> = {
   overview: "Machine state, detection-data identity, and pending attention.",
   checks: "Every collected check, grouped by subsystem.",
   incidents: "Crash markers that were collected for this user.",
+  settings: "Your AuraScan configuration and AI provider state. Secrets are never displayed.",
   about: "What this view is allowed to claim."
 };
 
@@ -57,6 +60,8 @@ function availableViews(snapshot: Snapshot) {
         return Boolean(snapshot.doctor);
       case "incidents":
         return Boolean(snapshot.incidents);
+      case "settings":
+        return true;
       default:
         return true;
     }
@@ -88,6 +93,19 @@ export function App() {
   const [source, setSource] = useState<"fixture" | "shell">("fixture");
   const [shellError, setShellError] = useState("");
   const parsed = useMemo(() => parseSnapshot(raw), [raw]);
+  const [settingsRaw, setSettingsRaw] = useState<unknown>(null);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsError, setSettingsError] = useState("");
+  const [settingsNotice, setSettingsNotice] = useState("");
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const settingsParsed = useMemo(
+    () => (settingsRaw === null ? null : parseSettings(settingsRaw)),
+    [settingsRaw]
+  );
+  const settings: SettingsPayload | null =
+    settingsParsed && settingsParsed.ok ? settingsParsed.settings : null;
+  const settingsParseError =
+    settingsParsed && !settingsParsed.ok ? settingsParsed.reason : "";
   const [view, setView] = useState<ViewId>(
     parsed.ok && parsed.snapshot.report
       ? "report"
@@ -117,7 +135,7 @@ export function App() {
           return;
         }
         if (result.ok) {
-          setRaw(result.snapshot);
+          setRaw(result.payload);
           setSource("shell");
           setShellError("");
         } else if (!result.canceled) {
@@ -155,11 +173,15 @@ export function App() {
       ? reportMeta
       : active.id === "actions"
         ? actionsMeta
-        : counts
-          ? `${plural(counts.error, "error")} · ${plural(counts.warn, "warning")}`
-          : reportMeta || actionsMeta;
+        : active.id === "settings"
+          ? settings
+            ? `${settings.ai.provider_label || settings.ai.provider} · ${settings.ai.ready ? "ready" : "not ready"}`
+            : "unavailable"
+          : counts
+            ? `${plural(counts.error, "error")} · ${plural(counts.warn, "warning")}`
+            : reportMeta || actionsMeta;
   const hasError =
-    active.id === "actions"
+    active.id === "actions" || active.id === "settings"
       ? false
       : active.id === "report"
         ? blocking > 0
@@ -179,10 +201,10 @@ export function App() {
 
   const applyShellResult = (result: ShellResult) => {
     if (result.ok) {
-      setRaw(result.snapshot);
+      setRaw(result.payload);
       setSource("shell");
       setShellError("");
-      const value = result.snapshot as { report?: unknown } | null;
+      const value = result.payload as { report?: unknown } | null;
       setView(value && typeof value === "object" && "report" in value ? "report" : "overview");
       return;
     }
@@ -196,6 +218,62 @@ export function App() {
     operation()
       .then(applyShellResult)
       .catch(() => setShellError("AuraScan could not be reached"));
+  };
+
+  const loadSettings = useCallback(() => {
+    if (!bridge) {
+      return;
+    }
+    setSettingsLoading(true);
+    bridge
+      .readSettings()
+      .then((result) => {
+        if (result.ok) {
+          setSettingsRaw(result.payload);
+          setSettingsError("");
+          return;
+        }
+        if (!result.canceled) {
+          setSettingsError(result.error);
+        }
+      })
+      .catch(() => setSettingsError("AuraScan could not be reached"))
+      .finally(() => setSettingsLoading(false));
+  }, [bridge]);
+
+  useEffect(() => {
+    loadSettings();
+  }, [loadSettings]);
+
+  const storeCredential = async (provider: string, secret: string) => {
+    if (!bridge) {
+      return;
+    }
+    setSettingsBusy(true);
+    setSettingsNotice("");
+    setSettingsError("");
+    try {
+      const result = await bridge.setAiKey(provider, secret);
+      if (!result.ok) {
+        setSettingsError(result.error);
+        return;
+      }
+      const written = parseSettingsWrite(result.payload);
+      if (!written.ok) {
+        setSettingsError(written.reason);
+        return;
+      }
+      const label = written.ai.provider_label || written.ai.provider;
+      setSettingsNotice(
+        written.ai.enabled
+          ? `Credential stored for ${label}. AI is enabled with the existing configuration.`
+          : `Credential stored for ${label}. AI stays disabled until you enable it.`
+      );
+    } catch {
+      setSettingsError("AuraScan could not be reached");
+    } finally {
+      setSettingsBusy(false);
+    }
   };
 
   return (
@@ -274,6 +352,18 @@ export function App() {
         {view === "checks" && snapshot.doctor && <Checks checks={snapshot.doctor.checks} />}
         {view === "incidents" && snapshot.incidents && (
           <Incidents incidents={snapshot.incidents} />
+        )}
+        {view === "settings" && (
+          <Settings
+            settings={settings}
+            loading={settingsLoading}
+            error={settingsError || settingsParseError}
+            notice={settingsNotice}
+            busy={settingsBusy}
+            shellAvailable={Boolean(bridge)}
+            onReload={loadSettings}
+            onStoreCredential={storeCredential}
+          />
         )}
         {view === "about" && <About snapshot={snapshot} />}
       </main>

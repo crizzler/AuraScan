@@ -546,6 +546,243 @@ export function parseSnapshot(raw: unknown): ParseResult {
   return { ok: true, snapshot };
 }
 
+export const SETTINGS_SCHEMA = "aurascan-settings/1";
+export const MAX_PROVIDERS = 32;
+export const MAX_FEATURES = 64;
+
+export interface SettingsConfig {
+  path: string;
+  present: boolean;
+  mode: string | null;
+  mode_ok: boolean;
+  readable: boolean;
+}
+
+export interface SettingsAi {
+  enabled: boolean;
+  provider: string;
+  provider_label: string;
+  model: string;
+  base_url: string | null;
+  local: boolean;
+  requires_key: boolean;
+  key_env: string;
+  key_present: boolean;
+  supported: boolean;
+  authentication_ready: boolean;
+  error: string;
+  ready: boolean;
+}
+
+export interface SettingsProvider {
+  id: string;
+  label: string;
+  local: boolean;
+  requires_key: boolean;
+  key_env: string;
+  default_model: string;
+  key_present: boolean;
+  selected: boolean;
+}
+
+export interface SettingsFeature {
+  id: string;
+  label: string;
+  env: string;
+  enabled: boolean | null;
+  declared: boolean;
+}
+
+export interface SettingsPayload {
+  schema: string;
+  config: SettingsConfig;
+  ai: SettingsAi;
+  providers: SettingsProvider[];
+  features: SettingsFeature[];
+}
+
+export type SettingsParseResult =
+  | { ok: true; settings: SettingsPayload }
+  | { ok: false; reason: string };
+
+const FEATURE_ID = /^[a-z][a-z0-9_]{0,63}$/;
+const PROVIDER_ID = /^[a-z][a-z0-9_]{0,31}$/;
+
+function settingsFail(reason: string): SettingsParseResult {
+  return { ok: false, reason };
+}
+
+function parseConfigPayload(raw: unknown): SettingsConfig | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  const { path, present, mode, mode_ok, readable } = raw;
+  if (typeof path !== "string" || path.length === 0) {
+    return null;
+  }
+  if (typeof present !== "boolean" || typeof mode_ok !== "boolean" || typeof readable !== "boolean") {
+    return null;
+  }
+  if (mode !== null && typeof mode !== "string") {
+    return null;
+  }
+  return { path, present, mode, mode_ok, readable };
+}
+
+function parseAiPayload(raw: unknown): SettingsAi | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  const booleanKeys = [
+    "enabled",
+    "local",
+    "requires_key",
+    "key_present",
+    "supported",
+    "authentication_ready",
+    "ready"
+  ] as const;
+  for (const key of booleanKeys) {
+    if (typeof raw[key] !== "boolean") {
+      return null;
+    }
+  }
+  if (
+    typeof raw.provider !== "string" ||
+    typeof raw.provider_label !== "string" ||
+    typeof raw.model !== "string" ||
+    typeof raw.key_env !== "string" ||
+    typeof raw.error !== "string"
+  ) {
+    return null;
+  }
+  if (raw.base_url !== null && typeof raw.base_url !== "string") {
+    return null;
+  }
+  return {
+    enabled: raw.enabled as boolean,
+    provider: raw.provider,
+    provider_label: raw.provider_label,
+    model: raw.model,
+    base_url: raw.base_url as string | null,
+    local: raw.local as boolean,
+    requires_key: raw.requires_key as boolean,
+    key_env: raw.key_env,
+    key_present: raw.key_present as boolean,
+    supported: raw.supported as boolean,
+    authentication_ready: raw.authentication_ready as boolean,
+    error: raw.error,
+    ready: raw.ready as boolean
+  };
+}
+
+function parseProviderEntries(raw: unknown): SettingsProvider[] | null {
+  if (!Array.isArray(raw) || raw.length > MAX_PROVIDERS) {
+    return null;
+  }
+  const providers: SettingsProvider[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry)) {
+      return null;
+    }
+    const { id, label, local, requires_key, key_env, default_model, key_present, selected } = entry;
+    if (typeof id !== "string" || !PROVIDER_ID.test(id)) {
+      return null;
+    }
+    if (
+      typeof label !== "string" ||
+      typeof key_env !== "string" ||
+      typeof default_model !== "string" ||
+      typeof local !== "boolean" ||
+      typeof requires_key !== "boolean" ||
+      typeof key_present !== "boolean" ||
+      typeof selected !== "boolean"
+    ) {
+      return null;
+    }
+    providers.push({
+      id,
+      label,
+      local,
+      requires_key,
+      key_env,
+      default_model,
+      key_present,
+      selected
+    });
+  }
+  return providers;
+}
+
+function parseFeatureEntries(raw: unknown): SettingsFeature[] | null {
+  if (!Array.isArray(raw) || raw.length > MAX_FEATURES) {
+    return null;
+  }
+  const features: SettingsFeature[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry)) {
+      return null;
+    }
+    const { id, label, env, enabled, declared } = entry;
+    if (typeof id !== "string" || !FEATURE_ID.test(id)) {
+      return null;
+    }
+    if (
+      typeof label !== "string" ||
+      typeof env !== "string" ||
+      typeof declared !== "boolean" ||
+      !(enabled === null || typeof enabled === "boolean")
+    ) {
+      return null;
+    }
+    features.push({ id, label, env, enabled, declared });
+  }
+  return features;
+}
+
+export function parseSettings(raw: unknown): SettingsParseResult {
+  if (!isRecord(raw)) {
+    return settingsFail("settings payload is not an object");
+  }
+  if (raw.schema !== SETTINGS_SCHEMA) {
+    return settingsFail(`unsupported settings schema: ${String(raw.schema)}`);
+  }
+  const config = parseConfigPayload(raw.config);
+  if (config === null) {
+    return settingsFail("configuration state is malformed");
+  }
+  const ai = parseAiPayload(raw.ai);
+  if (ai === null) {
+    return settingsFail("AI settings are malformed");
+  }
+  const providers = parseProviderEntries(raw.providers);
+  if (providers === null) {
+    return settingsFail("provider inventory is malformed");
+  }
+  const features = parseFeatureEntries(raw.features);
+  if (features === null) {
+    return settingsFail("feature list is malformed");
+  }
+  return { ok: true, settings: { schema: SETTINGS_SCHEMA, config, ai, providers, features } };
+}
+
+/** A `settings set-ai-key` response: a confirmation plus the new effective state. */
+export function parseSettingsWrite(
+  raw: unknown
+): { ok: true; ai: SettingsAi } | { ok: false; reason: string } {
+  if (!isRecord(raw)) {
+    return { ok: false, reason: "response is not an object" };
+  }
+  if (raw.schema !== SETTINGS_SCHEMA || raw.stored !== true) {
+    return { ok: false, reason: "the credential was not stored" };
+  }
+  const ai = parseAiPayload(raw.ai);
+  if (ai === null) {
+    return { ok: false, reason: "AI settings are malformed" };
+  }
+  return { ok: true, ai };
+}
+
 export function countChecks(checks: DoctorCheck[]): Record<CheckStatus, number> {
   const counts: Record<CheckStatus, number> = { ok: 0, warn: 0, error: 0 };
   for (const check of checks) {

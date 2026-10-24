@@ -248,6 +248,15 @@ downgrade packages through sudo stay terminal-only. Any future renderer-
 requestable mutation must bind the exact report bytes the user saw and revalidate
 that binding in the core before acting.
 
+The optional Electron shell implements that boundary as follows: it spawns only
+`/usr/bin/aurascan` with fixed argument vectors, forwards an allowlisted
+environment with a fixed `PATH`, never stores or forwards stderr, bounds stdout
+and runtime, rejects any snapshot whose contract string differs, denies popups,
+navigation, webviews and permission requests, and exposes exactly two preload
+operations. A report path is chosen by a native dialog in the main process and
+never reaches the renderer. The renderer remains a pure view: a compromised one
+can misdisplay evidence, not change a deterministic result or install anything.
+
 ## Prohibited capability combinations
 
 The audit tool enforces the mechanically checkable subset (see

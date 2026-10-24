@@ -1473,6 +1473,11 @@ selects an action ID and declared arguments, never a command; actions that
 install or downgrade packages stay terminal-only and require a fresh
 confirmation.
 
+The optional desktop shell is a development prototype and is not packaged yet.
+To try it from a checkout: `cd desktop && npm install && npm run build &&
+npm run desktop`. It spawns only `/usr/bin/aurascan`, exposes two read-only
+operations, and never executes a package.
+
 `aurascan ui` never changes policy or local state, never calls a model, never
 runs a package manager, never executes package or fixture content, and opens no
 network listener. Fields are whitelisted and bounded; malformed or oversized

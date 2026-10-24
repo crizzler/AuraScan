@@ -1,10 +1,10 @@
 # AuraScan Desktop UI Design
 
-Status: design accepted. Phases 1 through 3 are implemented in the working tree
-and not released. Nothing in this document describes shipped behavior until the
-phase table marks a phase released. The renderer under `desktop/` is a
-development prototype; it is not packaged, not installed by `aurascan`, and not
-part of any release artifact.
+Status: design accepted. Phases 1 through 3 and the phase 4 shell are implemented
+in the working tree and not released. Packaging remains outstanding. Nothing in
+this document describes shipped behavior until the phase table marks a phase
+released. The renderer under `desktop/` is a development prototype; it is not
+packaged, not installed by `aurascan`, and not part of any release artifact.
 
 ## Why a desktop UI
 
@@ -277,6 +277,30 @@ Tauri with `webkit2gtk` is the documented alternative if binary size or the
 bundled-Chromium CVE stream outweighs ecosystem fit. The renderer is buildable
 for either shell because it only depends on the contract.
 
+### Implemented shell
+
+`desktop/electron/main.cjs`, `preload.cjs`, and `argv.cjs` implement the
+boundary above. What the shell can do today:
+
+- run exactly two operations: refresh the live snapshot, or project a report
+  the user picks in a native dialog. The chosen path never reaches the
+  renderer, and the renderer never supplies one;
+- spawn only the packaged `/usr/bin/aurascan` with a fixed argument vector. A
+  development override is accepted only when absolute, control-free, and not
+  flag-like, and is ignored entirely once packaged;
+- pass an allowlisted environment (home, locale, XDG paths) with a fixed
+  `PATH=/usr/bin:/bin`. AI and provider key variables are never forwarded;
+- drain stderr without storing or forwarding it, bound stdout to 8 MiB, and
+  kill the child after 20 seconds;
+- reject any output whose `contract` string is not `aurascan-ui/1` before the
+  renderer sees it;
+- deny popups, navigation, webviews, and every permission request.
+
+`AURASCAN_DESKTOP_SELF_TEST=1 electron .` runs a headless smoke test that
+spawns the CLI, checks the contract, loads the built renderer in a hidden
+window, and waits for the live snapshot to render. Packaging, signing, and an
+end-to-end window test remain outstanding.
+
 ## Threat model additions
 
 New attack surface: a Chromium/Node runtime in the user session, a renderer
@@ -346,7 +370,7 @@ are always paired with text (never color alone).
 | 1 | `aurascan ui --json` snapshot + contract tests | bounded, side-effect-free, pinned by tests | implemented, unreleased |
 | 2 | Read-only renderer over the real snapshot | overview, checks, incidents; fail-closed parser | prototype implemented, unreleased |
 | 3 | Scan report reading + action center | fixed action IDs, hash-bound consent, revalidation tests | implemented; action execution lands with the shell |
-| 4 | Electron shell + `aurascan-desktop` packaging | sandbox/CSP preflight, e2e on static build | not started |
+| 4 | Electron shell + `aurascan-desktop` packaging | sandbox/CSP preflight, e2e on static build | shell implemented; packaging not started |
 
 Phases 1 and 2 exist in the working tree but are not released and are not part
 of any package. Phases 3 and 4 do not exist in any form.

@@ -1,7 +1,20 @@
 import type { ActionSpec } from "../contract";
 import { StatusBadge } from "../components/StatusBadge";
 
-function ActionCard({ action }: { action: ActionSpec }) {
+const SHELL_ACTIONS = new Set(["refresh_snapshot", "project_report"]);
+
+function ActionCard({
+  action,
+  shellAvailable,
+  onRefresh,
+  onOpenReport
+}: {
+  action: ActionSpec;
+  shellAvailable: boolean;
+  onRefresh: () => void;
+  onOpenReport: () => void;
+}) {
+  const runnable = shellAvailable && SHELL_ACTIONS.has(action.id);
   return (
     <li className="action">
       <div className="action__head">
@@ -27,11 +40,30 @@ function ActionCard({ action }: { action: ActionSpec }) {
       ) : null}
       <pre className="argv">{action.argv_preview.join(" ")}</pre>
       <p className="action__notes">{action.notes}</p>
+      {runnable ? (
+        <button
+          type="button"
+          className="button"
+          onClick={action.id === "refresh_snapshot" ? onRefresh : onOpenReport}
+        >
+          {action.id === "refresh_snapshot" ? "Refresh now" : "Choose report…"}
+        </button>
+      ) : null}
     </li>
   );
 }
 
-export function Actions({ actions }: { actions: ActionSpec[] }) {
+export function Actions({
+  actions,
+  shellAvailable,
+  onRefresh,
+  onOpenReport
+}: {
+  actions: ActionSpec[];
+  shellAvailable: boolean;
+  onRefresh: () => void;
+  onOpenReport: () => void;
+}) {
   const requestable = actions.filter((action) => action.renderer_may_request);
   const terminalOnly = actions.filter((action) => !action.renderer_may_request);
 
@@ -43,7 +75,11 @@ export function Actions({ actions }: { actions: ActionSpec[] }) {
           <li>The renderer selects an action ID and its declared arguments, never a command.</li>
           <li>The desktop shell runs the fixed argument vector shown on each action.</li>
           <li>Mutating actions stay in the terminal and require a fresh confirmation.</li>
-          <li>This prototype cannot execute actions. It lists the catalog only.</li>
+          <li>
+            {shellAvailable
+              ? "The desktop shell runs the two read-only actions below through its fixed bridge."
+              : "This browser prototype cannot execute actions. It lists the catalog only."}
+          </li>
         </ul>
       </section>
 
@@ -55,7 +91,13 @@ export function Actions({ actions }: { actions: ActionSpec[] }) {
           </header>
           <ul className="action-list">
             {requestable.map((action) => (
-              <ActionCard action={action} key={action.id} />
+              <ActionCard
+                action={action}
+                key={action.id}
+                shellAvailable={shellAvailable}
+                onRefresh={onRefresh}
+                onOpenReport={onOpenReport}
+              />
             ))}
           </ul>
         </section>
@@ -69,7 +111,13 @@ export function Actions({ actions }: { actions: ActionSpec[] }) {
           </header>
           <ul className="action-list">
             {terminalOnly.map((action) => (
-              <ActionCard action={action} key={action.id} />
+              <ActionCard
+                action={action}
+                key={action.id}
+                shellAvailable={false}
+                onRefresh={onRefresh}
+                onOpenReport={onOpenReport}
+              />
             ))}
           </ul>
         </section>

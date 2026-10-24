@@ -11,6 +11,9 @@ Changes after v0.10.19:
 - Add `aurascan ui --actions`, the fixed desktop action catalog with validated
   argument substitution and a hash-binding helper for future renderer-
   requestable mutations; state-changing actions remain terminal-only.
+- Add the hardened Electron shell for the desktop console: two fixed read-only
+  operations, allowlisted child environment, bounded output, and a headless
+  self-test. It is not packaged yet.
 - Add the phase 2 desktop evidence console prototype under `desktop/` and the
   design and boundary notes in `docs/DESKTOP_UI_DESIGN.md`. The prototype is
   not packaged, has no action surface, and is not part of any release artifact.

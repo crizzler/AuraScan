@@ -1,7 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import sample from "./fixtures/snapshot.sample.json";
 import { countChecks, parseSnapshot } from "./contract";
+import type { Snapshot } from "./contract";
+import { desktopBridge } from "./desktop";
+import type { ShellResult } from "./desktop";
 import { About } from "./views/About";
 import { Actions } from "./views/Actions";
 import { Checks } from "./views/Checks";
@@ -42,6 +45,24 @@ function plural(count: number, singular: string): string {
   return `${count} ${singular}${count === 1 ? "" : "s"}`;
 }
 
+function availableViews(snapshot: Snapshot) {
+  return VIEWS.filter((entry) => {
+    switch (entry.id) {
+      case "report":
+        return Boolean(snapshot.report);
+      case "actions":
+        return Boolean(snapshot.actions);
+      case "overview":
+      case "checks":
+        return Boolean(snapshot.doctor);
+      case "incidents":
+        return Boolean(snapshot.incidents);
+      default:
+        return true;
+    }
+  });
+}
+
 function ParseFailure({ reason }: { reason: string }) {
   return (
     <main className="main">
@@ -62,7 +83,11 @@ function ParseFailure({ reason }: { reason: string }) {
 }
 
 export function App() {
-  const parsed = useMemo(() => parseSnapshot(sample), []);
+  const bridge = useMemo(() => desktopBridge(), []);
+  const [raw, setRaw] = useState<unknown>(sample);
+  const [source, setSource] = useState<"fixture" | "shell">("fixture");
+  const [shellError, setShellError] = useState("");
+  const parsed = useMemo(() => parseSnapshot(raw), [raw]);
   const [view, setView] = useState<ViewId>(
     parsed.ok && parsed.snapshot.report
       ? "report"
@@ -70,6 +95,44 @@ export function App() {
         ? "actions"
         : "overview"
   );
+
+  const available = parsed.ok ? availableViews(parsed.snapshot) : [];
+  const availableKey = available.map((entry) => entry.id).join(",");
+
+  useEffect(() => {
+    if (available.length > 0 && !available.some((entry) => entry.id === view)) {
+      setView(available[0].id);
+    }
+  }, [availableKey, view]);
+
+  useEffect(() => {
+    if (!bridge) {
+      return;
+    }
+    let active = true;
+    bridge
+      .refresh()
+      .then((result) => {
+        if (!active) {
+          return;
+        }
+        if (result.ok) {
+          setRaw(result.snapshot);
+          setSource("shell");
+          setShellError("");
+        } else if (!result.canceled) {
+          setShellError(result.error);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setShellError("AuraScan could not be reached");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [bridge]);
 
   if (!parsed.ok) {
     return (
@@ -81,21 +144,6 @@ export function App() {
 
   const snapshot = parsed.snapshot;
   const counts = snapshot.doctor ? countChecks(snapshot.doctor.checks) : null;
-  const available = VIEWS.filter((entry) => {
-    switch (entry.id) {
-      case "report":
-        return Boolean(snapshot.report);
-      case "actions":
-        return Boolean(snapshot.actions);
-      case "overview":
-      case "checks":
-        return Boolean(snapshot.doctor);
-      case "incidents":
-        return Boolean(snapshot.incidents);
-      default:
-        return true;
-    }
-  });
   const active = available.find((entry) => entry.id === view) ?? available[0];
   const blocking = snapshot.report?.counts.blocking ?? 0;
   const reportMeta = snapshot.report
@@ -129,6 +177,27 @@ export function App() {
     return VIEWS.find((entry) => entry.id === id)?.hint ?? "";
   };
 
+  const applyShellResult = (result: ShellResult) => {
+    if (result.ok) {
+      setRaw(result.snapshot);
+      setSource("shell");
+      setShellError("");
+      const value = result.snapshot as { report?: unknown } | null;
+      setView(value && typeof value === "object" && "report" in value ? "report" : "overview");
+      return;
+    }
+    if (result.canceled) {
+      return;
+    }
+    setShellError(result.error);
+  };
+
+  const runShell = (operation: () => Promise<ShellResult>) => {
+    operation()
+      .then(applyShellResult)
+      .catch(() => setShellError("AuraScan could not be reached"));
+  };
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -160,7 +229,7 @@ export function App() {
         </div>
       </aside>
 
-      <main className="main">
+      <main className="main" data-snapshot-source={source}>
         <header className="main__header">
           <div>
             <h1>{active.label}</h1>
@@ -172,8 +241,29 @@ export function App() {
           </div>
         </header>
 
+        {shellError ? (
+          <div className="banner banner--error" role="alert">
+            {shellError}
+          </div>
+        ) : null}
+
         {view === "report" && snapshot.report && <Report report={snapshot.report} />}
-        {view === "actions" && snapshot.actions && <Actions actions={snapshot.actions} />}
+        {view === "actions" && snapshot.actions && (
+          <Actions
+            actions={snapshot.actions}
+            shellAvailable={Boolean(bridge)}
+            onRefresh={() => {
+              if (bridge) {
+                runShell(() => bridge.refresh());
+              }
+            }}
+            onOpenReport={() => {
+              if (bridge) {
+                runShell(() => bridge.openReport());
+              }
+            }}
+          />
+        )}
         {view === "overview" && snapshot.doctor && (
           <Overview
             doctor={snapshot.doctor}

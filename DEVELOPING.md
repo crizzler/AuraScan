@@ -789,6 +789,16 @@ evidence contract can be reviewed separately from any renderer.
 - A renderer change that needs a new field must extend `project_scan_report`
   and `MAX_FINDINGS` handling together, and keep
   `tests/test_ui_report.py` plus the desktop fixture shape in sync.
+- The desktop shell lives in `desktop/electron/`. `argv.cjs` holds every fixed
+  argument vector and is the only place one may be defined; `main.cjs` only
+  spawns the packaged `/usr/bin/aurascan` with an allowlisted environment,
+  bounded output and a timeout, and never stores or forwards stderr. The
+  preload exposes exactly two operations (`refresh`, `openReport`); a report
+  path is chosen by a native dialog in the main process and never reaches the
+  renderer. `src/shell-boundary.test.ts` fails if a renderer loses
+  `contextIsolation`/`sandbox`, if navigation or popups stop being denied, or
+  if a shell/auto-updater import appears. `AURASCAN_DESKTOP_SELF_TEST=1
+  electron .` is the end-to-end smoke test.
 - Actions are defined only in `aurascan/core/ui_actions.py`. The renderer gets an
   ID and declared arguments, never a command. `read_only` actions may be
   requested; `terminal_only` actions (sudo package install or downgrade) may

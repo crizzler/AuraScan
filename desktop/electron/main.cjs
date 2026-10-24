@@ -18,6 +18,9 @@ const helpers = require("./argv.cjs");
 const DEV_SERVER_ENV = "AURASCAN_DESKTOP_DEV_SERVER";
 const SELF_TEST_ENV = "AURASCAN_DESKTOP_SELF_TEST";
 
+// Match the desktop entry's StartupWMClass so the window groups correctly.
+app.setName("aurascan-desktop");
+
 function runCli(args) {
   return new Promise((resolve) => {
     let settled = false;

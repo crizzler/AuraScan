@@ -799,6 +799,13 @@ evidence contract can be reviewed separately from any renderer.
   `contextIsolation`/`sandbox`, if navigation or popups stop being denied, or
   if a shell/auto-updater import appears. `AURASCAN_DESKTOP_SELF_TEST=1
   electron .` is the end-to-end smoke test.
+- Packaging for the desktop shell is a separate recipe in `packaging/desktop/`
+  (not published). It builds the renderer with the pinned lockfile, skips
+  Electron's own binary download, and installs a launcher plus the shell under
+  `/usr/lib/aurascan-desktop`. `tests/test_ci_contract.py` pins the desktop CI
+  job, which runs `npm ci`, typecheck, tests and the production build; the
+  Electron runtime smoke test stays local because it needs a display and the
+  real CLI.
 - Actions are defined only in `aurascan/core/ui_actions.py`. The renderer gets an
   ID and declared arguments, never a command. `read_only` actions may be
   requested; `terminal_only` actions (sudo package install or downgrade) may

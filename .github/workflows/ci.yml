@@ -58,3 +58,31 @@ jobs:
 
       - name: Audit architecture invariants
         run: python tools/architecture_audit.py --strict
+
+  desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install desktop dependencies
+        run: npm ci --prefix desktop
+
+      - name: Type-check the desktop renderer
+        run: npm --prefix desktop run typecheck
+
+      - name: Test the desktop renderer
+        run: npm --prefix desktop test
+
+      - name: Build the desktop renderer
+        run: npm --prefix desktop run build

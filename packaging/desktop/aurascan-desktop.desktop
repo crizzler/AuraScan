@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=AuraScan
+GenericName=Package Evidence Console
+Comment=Read-only AuraScan evidence console for packages, upgrades, and incidents
+Exec=aurascan-desktop
+Icon=aurascan-desktop
+Terminal=false
+Categories=System;Security;
+Keywords=security;package;aur;pacman;scan;
+StartupNotify=true
+StartupWMClass=aurascan-desktop

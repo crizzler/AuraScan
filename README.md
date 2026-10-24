@@ -1476,7 +1476,9 @@ confirmation.
 The optional desktop shell is a development prototype and is not packaged yet.
 To try it from a checkout: `cd desktop && npm install && npm run build &&
 npm run desktop`. It spawns only `/usr/bin/aurascan`, exposes two read-only
-operations, and never executes a package.
+operations, and never executes a package. The reference Arch recipe lives in
+`packaging/desktop/`; it is not published and requires an AuraScan release that
+ships `aurascan ui`.
 
 `aurascan ui` never changes policy or local state, never calls a model, never
 runs a package manager, never executes package or fixture content, and opens no

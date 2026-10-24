@@ -1,10 +1,9 @@
 # AuraScan Desktop UI Design
 
-Status: design accepted. Phases 1 through 3 and the phase 4 shell are implemented
-in the working tree and not released. Packaging remains outstanding. Nothing in
-this document describes shipped behavior until the phase table marks a phase
-released. The renderer under `desktop/` is a development prototype; it is not
-packaged, not installed by `aurascan`, and not part of any release artifact.
+Status: design accepted. Phases 1 through 4 are implemented in the working tree
+and not released. AUR publication of the desktop package remains outstanding;
+the recipe is a reference only. Nothing in this document describes shipped
+behavior until the phase table marks a phase released.
 
 ## Why a desktop UI
 
@@ -337,6 +336,14 @@ are always paired with text (never color alone).
 
 - The renderer and shell ship as a separate optional package
   (`aurascan-desktop`), architecture-specific, with its own release cadence.
+- The reference recipe lives in `packaging/desktop/`. It is not published,
+  installs `/usr/bin/aurascan-desktop` plus the shell under
+  `/usr/lib/aurascan-desktop`, and depends on `aurascan` and `electron`. The
+  build needs registry access for the pinned Vite/TypeScript toolchain and
+  skips Electron's own binary download.
+- **Publication gate:** do not push the desktop recipe until an AuraScan release
+  ships `aurascan ui`. The current published scanner has no `ui` command, so the
+  shell would have nothing to read.
 - `aurascan` stays `arch=('any')`, stdlib-only Python. The desktop app is never
   a runtime dependency of the scanner, and the scanner never imports it.
 - Adding the app alone does not change recovery runtime. The first shipped
@@ -370,7 +377,7 @@ are always paired with text (never color alone).
 | 1 | `aurascan ui --json` snapshot + contract tests | bounded, side-effect-free, pinned by tests | implemented, unreleased |
 | 2 | Read-only renderer over the real snapshot | overview, checks, incidents; fail-closed parser | prototype implemented, unreleased |
 | 3 | Scan report reading + action center | fixed action IDs, hash-bound consent, revalidation tests | implemented; action execution lands with the shell |
-| 4 | Electron shell + `aurascan-desktop` packaging | sandbox/CSP preflight, e2e on static build | shell implemented; packaging not started |
+| 4 | Electron shell + `aurascan-desktop` packaging | sandbox/CSP preflight, e2e on static build | shell, reference package, and CI checks implemented; publication pending |
 
 Phases 1 and 2 exist in the working tree but are not released and are not part
 of any package. Phases 3 and 4 do not exist in any form.

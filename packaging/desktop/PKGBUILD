@@ -1,0 +1,56 @@
+# Maintainer: AuraScan maintainers
+
+# Reference recipe for the optional desktop evidence console. It is not
+# published to the AUR yet, and it depends on an AuraScan release that ships
+# `aurascan ui` -- the snapshot contract the shell reads.
+pkgname=aurascan-desktop
+pkgver=0.10.19
+pkgrel=1
+pkgdesc="Read-only evidence console for AuraScan"
+arch=('x86_64' 'aarch64')
+url="https://github.com/crizzler/AuraScan"
+license=('MIT')
+depends=('aurascan' 'electron')
+makedepends=('nodejs' 'npm')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
+        "$pkgname.desktop"
+        "$pkgname.sh")
+sha256sums=('SKIP'
+            'SKIP'
+            'SKIP')
+
+build() {
+  cd "AuraScan-$pkgver/desktop"
+  # The build needs registry access for the Vite/TypeScript toolchain. The
+  # lockfile pins every package. Electron itself comes from the system package,
+  # so its binary download is skipped.
+  ELECTRON_SKIP_BINARY_DOWNLOAD=1 /usr/bin/npm ci --no-audit --no-fund
+  /usr/bin/npm run build
+}
+
+package() {
+  local appdir="$pkgdir/usr/lib/$pkgname"
+  install -d "$appdir" "$pkgdir/usr/bin" \
+    "$pkgdir/usr/share/applications" \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps"
+
+  cp -a "AuraScan-$pkgver/desktop/dist" "$appdir/dist"
+  cp -a "AuraScan-$pkgver/desktop/electron" "$appdir/electron"
+
+  # Runtime manifest only: no devDependencies, and Electron resolves the entry
+  # point from here.
+  printf '%s\n' \
+    '{' \
+    '  "name": "aurascan-desktop",' \
+    '  "productName": "AuraScan",' \
+    "  \"version\": \"$pkgver\"," \
+    '  "private": true,' \
+    '  "main": "electron/main.cjs"' \
+    '}' > "$appdir/package.json"
+
+  install -m755 "$srcdir/$pkgname.sh" "$pkgdir/usr/bin/$pkgname"
+  install -m644 "$srcdir/$pkgname.desktop" \
+    "$pkgdir/usr/share/applications/$pkgname.desktop"
+  install -m644 "AuraScan-$pkgver/aurascan/assets/aurascan-updater.svg" \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/$pkgname.svg"
+}

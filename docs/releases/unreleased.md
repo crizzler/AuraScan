@@ -14,6 +14,8 @@ Changes after v0.10.19:
 - Add the hardened Electron shell for the desktop console: two fixed read-only
   operations, allowlisted child environment, bounded output, and a headless
   self-test. It is not packaged yet.
+- Add CI coverage for the desktop renderer (typecheck, tests, production build)
+  and a reference `aurascan-desktop` packaging recipe that is not published yet.
 - Add the phase 2 desktop evidence console prototype under `desktop/` and the
   design and boundary notes in `docs/DESKTOP_UI_DESIGN.md`. The prototype is
   not packaged, has no action surface, and is not part of any release artifact.

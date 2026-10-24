@@ -71,3 +71,18 @@ def test_ci_workflow_never_configures_or_starts_live_ai():
     )
     for value in forbidden_live_ai_configuration:
         assert value not in text
+
+
+def test_ci_workflow_runs_the_desktop_checks():
+    text = workflow_text()
+    required_commands = (
+        "npm ci --prefix desktop",
+        "npm --prefix desktop run typecheck",
+        "npm --prefix desktop test",
+        "npm --prefix desktop run build",
+    )
+
+    for command in required_commands:
+        assert command in text
+    assert "cache-dependency-path: desktop/package-lock.json" in text
+    assert 'ELECTRON_SKIP_BINARY_DOWNLOAD: "1"' in text

@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -753,6 +754,17 @@ def build_instruction_audit_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--disable", metavar="FILE_ID", help="disable an eligible unchanged standalone instruction file")
     parser.add_argument("--restore", metavar="ACTION_ID", help="restore an unchanged file disabled by AuraScan")
+    binding = parser.add_argument_group("evidence binding")
+    binding.add_argument(
+        "--expect-report-id",
+        metavar="REPORT_ID",
+        help="with --approve or --disable, refuse unless the latest report has this id",
+    )
+    binding.add_argument(
+        "--expect-sha256",
+        metavar="DIGEST",
+        help="with --approve or --disable, refuse unless the reviewed content still has this SHA-256",
+    )
     parser.add_argument(
         "--yes",
         action="store_true",
@@ -1273,6 +1285,18 @@ def run_instruction_audit(
         print("Choose only one Instruction Guard action at a time.", file=stderr)
         return EXIT_ERROR
 
+    expected_report_id = args.expect_report_id
+    expected_sha256 = (args.expect_sha256 or "").strip().lower() or None
+    if (expected_report_id or expected_sha256) and not (args.approve or args.disable):
+        print(
+            "--expect-report-id and --expect-sha256 apply only to --approve or --disable.",
+            file=stderr,
+        )
+        return EXIT_ERROR
+    if expected_sha256 is not None and not re.fullmatch(r"[a-f0-9]{64}", expected_sha256):
+        print("An expected SHA-256 must be 64 lowercase hexadecimal characters.", file=stderr)
+        return EXIT_ERROR
+
     if args.enable_monitor or args.disable_monitor:
         ok, message = set_instruction_monitor_enabled(
             args.enable_monitor,
@@ -1375,7 +1399,13 @@ def run_instruction_audit(
 
     if args.approve:
         try:
-            result = guard.approve_candidate(args.approve, state_root=state_root, env=source_env)
+            result = guard.approve_candidate(
+                args.approve,
+                state_root=state_root,
+                env=source_env,
+                expected_report_id=expected_report_id,
+                expected_sha256=expected_sha256,
+            )
         except (OSError, ValueError) as exc:
             print(f"Approval failed: {exc}", file=stderr)
             return EXIT_ERROR
@@ -1390,7 +1420,13 @@ def run_instruction_audit(
             print("Disable cancelled.", file=stderr)
             return EXIT_ERROR
         try:
-            result = guard.disable_candidate(args.disable, state_root=state_root, env=source_env)
+            result = guard.disable_candidate(
+                args.disable,
+                state_root=state_root,
+                env=source_env,
+                expected_report_id=expected_report_id,
+                expected_sha256=expected_sha256,
+            )
         except (OSError, ValueError) as exc:
             print(f"Disable failed: {exc}", file=stderr)
             return EXIT_ERROR

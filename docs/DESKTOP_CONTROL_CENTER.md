@@ -86,8 +86,11 @@ These rules apply to every phase and are not negotiable per feature.
 
 - `instruction-audit --review --json` view with deterministic line ranges and
   reasons.
-- Approve/disable/restore actions with report + SHA-256 binding added to the CLI
-  (`--approve` currently accepts no expected hash, and triage refuses `--json`).
+- Approve/disable/restore actions with report + SHA-256 binding. **CLI support is
+  implemented**: `--approve` and `--disable` accept `--expect-report-id` and
+  `--expect-sha256`, refuse the flags without an action, and refuse a malformed
+  digest, covered by `tests/test_instruction_cli_binding.py`. The renderer view
+  and shell operations remain open.
 - Batch clean-baseline enrollment only after explicit confirmation, per the
   existing Guard contract.
 

@@ -42,7 +42,7 @@ AuraScan is a developer preview. It is ready for early testing and review, but
 its packaging, rule set, and integration story should still be treated as
 pre-1.0.
 
-The [v0.11.0 release](docs/releases/v0.11.0.md) is a package-only update that
+The [v0.11.1 release](docs/releases/v0.11.1.md) is a package-only update that
 adds the read-only `aurascan ui` evidence contract for desktop interfaces; it
 also carries the pacman-hook reliability and runtime-library repair work below.
 The hook binds a cached archive to the
@@ -63,7 +63,7 @@ with `aurascan doctor --fix-runtime-links`. `aurascan doctor` also detects a
 wait-then-read process deadlock, such as Goverlay 1.9.4 waiting forever for
 `lsmod`, and `--fix-hung-apps` offers a cached older package build when one is
 available. The v0.10.11 recovery image remains the retained, validated image;
-the v0.11.0 release note records that ISO and local-UKI gates were not rerun.
+the v0.11.1 release note records that ISO and local-UKI gates were not rerun.
 
 ## What You Can Try Now
 

@@ -4,7 +4,7 @@
 # published to the AUR yet, and it depends on an AuraScan release that ships
 # `aurascan ui` -- the snapshot contract the shell reads.
 pkgname=aurascan-desktop
-pkgver=0.11.0
+pkgver=0.11.1
 pkgrel=1
 pkgdesc="Read-only evidence console for AuraScan"
 arch=('x86_64' 'aarch64')

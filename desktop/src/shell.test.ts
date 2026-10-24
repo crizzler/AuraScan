@@ -7,7 +7,11 @@ const helpers = require("../electron/argv.cjs") as {
   PACKAGED_CLI: string;
   MAX_OUTPUT_BYTES: number;
   MAX_SECRET_CHARS: number;
+  MAX_CANDIDATES: number;
   MAX_PROVIDERS: number;
+  MAX_FINDINGS_SHELL: number;
+  INCIDENT_TIMEOUT_MS: number;
+  SNAPSHOT_TIMEOUT_MS: number;
   READ_ONLY_ACTIONS: readonly string[];
   MUTATING_ACTIONS: readonly string[];
   AI_PROVIDERS: readonly string[];
@@ -20,6 +24,7 @@ const helpers = require("../electron/argv.cjs") as {
   parseSettingsWrite: (stdout: string) => { schema: string; stored: boolean };
   parseReview: (stdout: string) => { schema: string; report_id: string };
   parseInstructionAction: (stdout: string) => { status: string; file_id: string };
+  parseIncidents: (stdout: string) => { schema: string; incident_id: string };
 };
 
 describe("shell CLI resolution", () => {
@@ -81,7 +86,9 @@ describe("shell action argv", () => {
       "set_ai_key",
       "instruction_scan",
       "instruction_approve",
-      "instruction_disable"
+      "instruction_disable",
+      "incident_scan",
+      "incident_resolve"
     ]);
     expect(helpers.validSecret("sk-1234567890")).toBe(true);
     expect(helpers.validSecret("sk-123\n456")).toBe(false);
@@ -135,6 +142,36 @@ describe("shell action argv", () => {
       "--json",
       "--yes"
     ]);
+  });
+
+  it("builds the incident operations", () => {
+    expect(helpers.actionArgv("incident_scan")).toEqual(["incidents", "--json"]);
+    expect(helpers.actionArgv("incident_resolve")).toEqual([
+      "incidents",
+      "--resolve",
+      "--json"
+    ]);
+    expect(helpers.INCIDENT_TIMEOUT_MS).toBeGreaterThan(helpers.SNAPSHOT_TIMEOUT_MS);
+  });
+
+  it("accepts a diagnosis payload and rejects anything else", () => {
+    const payload = JSON.stringify({
+      schema: "incident_report/1.3",
+      incident_id: "incident-20261024-222006-91fa5761fcd2-91376c6a",
+      findings: []
+    });
+    expect(helpers.parseIncidents(payload).schema).toBe("incident_report/1.3");
+    expect(() => helpers.parseIncidents(payload.replace("1.3", "1.2"))).toThrow();
+    expect(() => helpers.parseIncidents(JSON.stringify({ schema: "incident_report/1.3" }))).toThrow();
+    expect(() =>
+      helpers.parseIncidents(
+        JSON.stringify({
+          schema: "incident_report/1.3",
+          incident_id: "x",
+          findings: new Array(helpers.MAX_FINDINGS_SHELL + 1).fill({})
+        })
+      )
+    ).toThrow();
   });
 
   it("refuses an unbound or malformed instruction action", () => {

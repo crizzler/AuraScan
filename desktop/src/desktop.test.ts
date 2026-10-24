@@ -42,7 +42,9 @@ describe("desktopBridge", () => {
       scanInstructions: () => record("scanInstructions"),
       approveInstruction: (fileId: string, reportId: string, sha256: string) =>
         record(`approve:${fileId}:${reportId}:${sha256}`),
-      disableInstruction: (fileId: string) => record(`disable:${fileId}`)
+      disableInstruction: (fileId: string) => record(`disable:${fileId}`),
+      scanIncidents: () => record("scanIncidents"),
+      resolveIncidents: () => record("resolveIncidents")
     });
 
     const bridge = desktopBridge();
@@ -58,6 +60,8 @@ describe("desktopBridge", () => {
     await bridge.scanInstructions();
     await bridge.approveInstruction("file-1", "report-1", sha);
     await bridge.disableInstruction("file-1", "report-1", sha);
+    await bridge.scanIncidents();
+    await bridge.resolveIncidents();
 
     expect(calls).toEqual([
       "refresh",
@@ -67,7 +71,9 @@ describe("desktopBridge", () => {
       "reviewInstructions",
       "scanInstructions",
       `approve:file-1:report-1:${sha}`,
-      "disable:file-1"
+      "disable:file-1",
+      "scanIncidents",
+      "resolveIncidents"
     ]);
   });
 });

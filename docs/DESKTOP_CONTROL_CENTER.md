@@ -99,27 +99,23 @@ These rules apply to every phase and are not negotiable per feature.
 
 ### Phase 3 — Findings and diagnosis
 
-- Incident list and diagnosis through `incidents --json`.
-- "Resolve" for marker acknowledgement (unprivileged).
-- Repair *plans* displayed with action IDs; applying them stays terminal-only
-  until elevation is decided.
+- Incident list and diagnosis through `incidents --json`. **Implemented**: the
+  Incidents view runs a diagnosis, projects `incident_report/1.3` findings
+  (rule, severity, confidence, fixed texts) and can acknowledge markers.
+- "Resolve" for marker acknowledgement (unprivileged). **Implemented** as
+  `incidents --resolve --json`; acknowledgement never changes the evidence.
+- Repair *plans* stay terminal-only: the view lists the privileged commands but
+  cannot run them.
 
 ### Phase 4 — Privileged operations
 
-Blocked on the elevation decision:
-
-- **Option A (terminal handoff).** The app prepares the exact command, shows
-  every parameter and the plan hash, and copies it. The user runs it. No new
-  authority surface; the app cannot install anything.
-- **Option B (fixed polkit client).** One unprivileged helper per operation
-  (upgrade, maintenance, recovery, hook install) that revalidates its arguments
-  and relies on desktop administrator authorization, mirroring
-  `aurascan-intelligence-*` and the tray service clients. Larger, auditable, and
-  must stay fail-closed when the helper or polkit is absent.
-
-Upgrade and maintenance also need a plan identity in the CLI before either
-option is safe: today `upgrade --json` prints a report with no hash to echo back
-on apply.
+Decision: **Option A, terminal handoff.** The Incidents view lists the exact
+commands (`aurascan upgrade --json`, `aurascan upgrade`,
+`aurascan incidents --run-maintenance`, `aurascan recovery --install`) with the
+reason they stay in the terminal. No privileged helper, no root process, and no
+new authority surface were added. Option B remains available later, and either
+option still needs a plan identity in `upgrade --json` before it is safe to
+apply an upgrade from the app.
 
 ## Non-goals
 
@@ -144,4 +140,5 @@ Phase 1 is implemented end to end:
   `AURASCAN_DESKTOP_SELF_TEST_WRITE=1` is set against a throwaway `HOME` —
   stores and re-reads one sentinel credential.
 
-Phases 3–4 remain open.
+Phases 3 and 4 are implemented as described above, with privileged work kept in
+ the terminal. Restore, batch enrollment, and repair application remain open.

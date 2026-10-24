@@ -1017,6 +1017,99 @@ export function parseReview(raw: unknown): ReviewParseResult {
   };
 }
 
+export const INCIDENT_SCHEMA = "incident_report/1.3";
+export const MAX_INCIDENT_FINDINGS = 200;
+
+export interface IncidentFinding {
+  rule_id: string;
+  severity: Severity;
+  confidence: string;
+  category: string;
+  source: string;
+  title: string;
+  summary: string;
+  why_it_matters: string;
+  recommended_action: string;
+}
+
+export interface IncidentReport {
+  schema: string;
+  incident_id: string;
+  created_at: number;
+  findings: IncidentFinding[];
+}
+
+export type IncidentParseResult =
+  | { ok: true; report: IncidentReport }
+  | { ok: false; reason: string };
+
+const INCIDENT_ID = /^incident-[a-z0-9][a-z0-9-]{7,100}$/;
+
+function parseIncidentFindings(raw: unknown): IncidentFinding[] | null {
+  if (!Array.isArray(raw) || raw.length > MAX_INCIDENT_FINDINGS) {
+    return null;
+  }
+  const findings: IncidentFinding[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry)) {
+      return null;
+    }
+    const ruleId = boundedString(entry.rule_id, 80);
+    const title = boundedString(entry.title, 300);
+    const confidence = boundedString(entry.confidence, 40);
+    const category = boundedString(entry.category, 60);
+    const source = boundedString(entry.source, 60);
+    if (!ruleId || !title || !confidence || !category || !source) {
+      return null;
+    }
+    if (typeof entry.severity !== "string" || !SEVERITIES.includes(entry.severity as Severity)) {
+      return null;
+    }
+    findings.push({
+      rule_id: ruleId,
+      severity: entry.severity as Severity,
+      confidence,
+      category,
+      source,
+      title,
+      summary: typeof entry.summary === "string" ? entry.summary.slice(0, 800) : "",
+      why_it_matters: typeof entry.why_it_matters === "string" ? entry.why_it_matters.slice(0, 800) : "",
+      recommended_action:
+        typeof entry.recommended_action === "string" ? entry.recommended_action.slice(0, 800) : ""
+    });
+  }
+  return findings;
+}
+
+export function parseIncidentReport(raw: unknown): IncidentParseResult {
+  if (!isRecord(raw)) {
+    return { ok: false, reason: "incident payload is not an object" };
+  }
+  if (raw.schema !== INCIDENT_SCHEMA) {
+    return { ok: false, reason: `unsupported incident schema: ${String(raw.schema)}` };
+  }
+  const incidentId = boundedString(raw.incident_id, 120);
+  if (!incidentId || !INCIDENT_ID.test(incidentId)) {
+    return { ok: false, reason: "incident identity is malformed" };
+  }
+  if (!Number.isInteger(raw.created_at) || (raw.created_at as number) < 0) {
+    return { ok: false, reason: "incident timestamp is malformed" };
+  }
+  const findings = parseIncidentFindings(raw.findings);
+  if (findings === null) {
+    return { ok: false, reason: "incident findings are malformed" };
+  }
+  return {
+    ok: true,
+    report: {
+      schema: INCIDENT_SCHEMA,
+      incident_id: incidentId,
+      created_at: raw.created_at as number,
+      findings
+    }
+  };
+}
+
 export function countChecks(checks: DoctorCheck[]): Record<CheckStatus, number> {
   const counts: Record<CheckStatus, number> = { ok: 0, warn: 0, error: 0 };
   for (const check of checks) {

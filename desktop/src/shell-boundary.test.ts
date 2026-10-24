@@ -52,7 +52,9 @@ describe("desktop shell boundary", () => {
       "aurascan:instruction-review",
       "aurascan:instruction-scan",
       "aurascan:instruction-approve",
-      "aurascan:instruction-disable"
+      "aurascan:instruction-disable",
+      "aurascan:incident-scan",
+      "aurascan:incident-resolve"
     ]) {
       expect(preloadSource).toContain(channel);
     }

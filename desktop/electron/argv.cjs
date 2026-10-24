@@ -13,12 +13,15 @@ const path = require("node:path");
 const CONTRACT = "aurascan-ui/1";
 const SETTINGS_SCHEMA = "aurascan-settings/1";
 const REVIEW_SCHEMA = "instruction_guard_report/1.0";
+const INCIDENT_SCHEMA = "incident_report/1.3";
 const PACKAGED_CLI = "/usr/bin/aurascan";
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_SECRET_CHARS = 4096;
 const MAX_PROVIDERS = 32;
 const MAX_FEATURES = 64;
 const MAX_CANDIDATES = 200;
+const MAX_FINDINGS_SHELL = 200;
+const INCIDENT_TIMEOUT_MS = 90000;
 const SNAPSHOT_TIMEOUT_MS = 20000;
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
 const FILE_ID = /^[a-z0-9]{8,64}$/;
@@ -64,7 +67,9 @@ const MUTATING_ACTIONS = Object.freeze([
   "set_ai_key",
   "instruction_scan",
   "instruction_approve",
-  "instruction_disable"
+  "instruction_disable",
+  "incident_scan",
+  "incident_resolve"
 ]);
 
 function resolveCli(isPackaged, env) {
@@ -123,6 +128,12 @@ function actionArgv(actionId, values) {
   }
   if (actionId === "instruction_scan") {
     return ["instruction-audit", "--json"];
+  }
+  if (actionId === "incident_scan") {
+    return ["incidents", "--json"];
+  }
+  if (actionId === "incident_resolve") {
+    return ["incidents", "--resolve", "--json"];
   }
   if (actionId === "instruction_approve" || actionId === "instruction_disable") {
     const fileId = values && values.file_id;
@@ -292,6 +303,23 @@ function parseInstructionAction(stdout) {
   return parsed;
 }
 
+/** Structural gate for an incident diagnosis report. */
+function parseIncidents(stdout) {
+  const parsed = parseJsonObject(stdout);
+  if (parsed.schema !== INCIDENT_SCHEMA) {
+    throw new Error("incident schema is not supported");
+  }
+  if (
+    typeof parsed.incident_id !== "string" ||
+    parsed.incident_id.length === 0 ||
+    !Array.isArray(parsed.findings) ||
+    parsed.findings.length > MAX_FINDINGS_SHELL
+  ) {
+    throw new Error("incident payload is malformed");
+  }
+  return parsed;
+}
+
 module.exports = {
   CONTRACT,
   SETTINGS_SCHEMA,
@@ -300,6 +328,9 @@ module.exports = {
   MAX_SECRET_CHARS,
   MAX_PROVIDERS,
   MAX_FEATURES,
+  MAX_CANDIDATES,
+  MAX_FINDINGS_SHELL,
+  INCIDENT_TIMEOUT_MS,
   SNAPSHOT_TIMEOUT_MS,
   FORWARDED_ENV,
   AI_PROVIDERS,
@@ -313,5 +344,6 @@ module.exports = {
   parseSettings,
   parseSettingsWrite,
   parseReview,
-  parseInstructionAction
+  parseInstructionAction,
+  parseIncidents
 };

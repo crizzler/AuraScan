@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import sample from "./fixtures/snapshot.sample.json";
-import { countChecks, parseReview, parseSettings, parseSettingsWrite, parseSnapshot } from "./contract";
-import type { ReviewCandidate, ReviewReport, SettingsPayload, Snapshot } from "./contract";
+import { countChecks, parseIncidentReport, parseReview, parseSettings, parseSettingsWrite, parseSnapshot } from "./contract";
+import type { IncidentReport, ReviewCandidate, ReviewReport, SettingsPayload, Snapshot } from "./contract";
 import { desktopBridge } from "./desktop";
 import type { ShellResult } from "./desktop";
 import { About } from "./views/About";
@@ -115,6 +115,19 @@ export function App() {
   const review: ReviewReport | null =
     reviewParsed && reviewParsed.ok ? reviewParsed.report : null;
   const reviewParseError = reviewParsed && !reviewParsed.ok ? reviewParsed.reason : "";
+  const [diagnosisRaw, setDiagnosisRaw] = useState<unknown>(null);
+  const [diagnosisLoading, setDiagnosisLoading] = useState(false);
+  const [diagnosisError, setDiagnosisError] = useState("");
+  const [diagnosisNotice, setDiagnosisNotice] = useState("");
+  const [diagnosisBusy, setDiagnosisBusy] = useState(false);
+  const diagnosisParsed = useMemo(
+    () => (diagnosisRaw === null ? null : parseIncidentReport(diagnosisRaw)),
+    [diagnosisRaw]
+  );
+  const diagnosis: IncidentReport | null =
+    diagnosisParsed && diagnosisParsed.ok ? diagnosisParsed.report : null;
+  const diagnosisParseError =
+    diagnosisParsed && !diagnosisParsed.ok ? diagnosisParsed.reason : "";
   const settingsParsed = useMemo(
     () => (settingsRaw === null ? null : parseSettings(settingsRaw)),
     [settingsRaw]
@@ -293,8 +306,34 @@ export function App() {
     }
   };
 
-  const runShell = (operation: () => Promise<ShellResult>) => {
-    operation()
+  const runIncidentAction = (action: "scan" | "resolve") => {
+    if (!bridge) {
+      return;
+    }
+    setDiagnosisLoading(true);
+    setDiagnosisError("");
+    setDiagnosisNotice("");
+    const call = action === "scan" ? bridge.scanIncidents() : bridge.resolveIncidents();
+    call
+      .then((result) => {
+        if (result.ok) {
+          setDiagnosisRaw(result.payload);
+          setDiagnosisNotice(
+            action === "scan"
+              ? "Diagnosis complete. No repair was applied."
+              : "Markers acknowledged. The evidence itself is unchanged."
+          );
+          return;
+        }
+        if (!result.canceled) {
+          setDiagnosisError(result.error);
+        }
+      })
+      .catch(() => setDiagnosisError("AuraScan could not be reached"))
+      .finally(() => setDiagnosisLoading(false));
+  };
+
+  const runShell = (operation: () => Promise<ShellResult>) => {    operation()
       .then(applyShellResult)
       .catch(() => setShellError("AuraScan could not be reached"));
   };
@@ -435,7 +474,21 @@ export function App() {
         )}
         {view === "checks" && snapshot.doctor && <Checks checks={snapshot.doctor.checks} />}
         {view === "incidents" && snapshot.incidents && (
-          <Incidents incidents={snapshot.incidents} />
+          <Incidents
+            incidents={snapshot.incidents}
+            diagnosis={diagnosis}
+            loading={diagnosisLoading}
+            error={diagnosisError || diagnosisParseError}
+            notice={diagnosisNotice}
+            busy={diagnosisLoading || diagnosisBusy}
+            shellAvailable={Boolean(bridge)}
+            onDiagnose={() => runIncidentAction("scan")}
+            onResolve={() => {
+              setDiagnosisBusy(true);
+              runIncidentAction("resolve");
+              setDiagnosisBusy(false);
+            }}
+          />
         )}
         {view === "instructions" && (
           <Instructions

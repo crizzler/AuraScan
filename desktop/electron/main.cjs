@@ -26,6 +26,7 @@ function runCli(args, options) {
   const parse = (options && options.parse) || helpers.parseSnapshot;
   const failure = (options && options.failure) || "AuraScan could not produce a snapshot";
   const okExitCodes = (options && options.okExitCodes) || [0];
+  const timeoutMs = (options && options.timeoutMs) || helpers.SNAPSHOT_TIMEOUT_MS;
   return new Promise((resolve) => {
     let settled = false;
     let stdout = "";
@@ -63,7 +64,7 @@ function runCli(args, options) {
     timer = setTimeout(() => {
       killed = true;
       child.kill("SIGKILL");
-    }, helpers.SNAPSHOT_TIMEOUT_MS);
+    }, timeoutMs);
 
     child.stdout.on("data", (chunk) => {
       if (killed) {
@@ -176,6 +177,20 @@ function instructionAction(actionId, fileId, reportId, sha256) {
   });
 }
 
+function runIncidentAction(actionId) {
+  const args = helpers.actionArgv(actionId);
+  if (args === null) {
+    return Promise.resolve({ ok: false, error: "Unsupported desktop action" });
+  }
+  return runCli(args, {
+    parse: helpers.parseIncidents,
+    failure: "AuraScan could not complete the incident diagnosis",
+    // A diagnosis of a healthy system can still report attention.
+    okExitCodes: [0],
+    timeoutMs: helpers.INCIDENT_TIMEOUT_MS
+  });
+}
+
 function hardenContents(contents) {
   contents.setWindowOpenHandler(() => ({ action: "deny" }));
   contents.on("will-navigate", (event) => event.preventDefault());
@@ -245,6 +260,10 @@ function registerIpc() {
   ipcMain.handle("aurascan:instruction-disable", (_event, fileId, reportId, sha256) =>
     instructionAction("instruction_disable", fileId, reportId, sha256)
   );
+
+  ipcMain.handle("aurascan:incident-scan", () => runIncidentAction("incident_scan"));
+
+  ipcMain.handle("aurascan:incident-resolve", () => runIncidentAction("incident_resolve"));
 
   ipcMain.handle("aurascan:open-report", async (event) => {
     const parent = BrowserWindow.fromWebContents(event.sender);

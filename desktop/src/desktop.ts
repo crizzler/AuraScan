@@ -28,6 +28,8 @@ export interface DesktopBridge {
   scanInstructions(): Promise<ShellResult>;
   approveInstruction(fileId: string, reportId: string, sha256: string): Promise<ShellResult>;
   disableInstruction(fileId: string, reportId: string, sha256: string): Promise<ShellResult>;
+  scanIncidents(): Promise<ShellResult>;
+  resolveIncidents(): Promise<ShellResult>;
 }
 
 export function desktopBridge(): DesktopBridge | null {
@@ -44,7 +46,9 @@ export function desktopBridge(): DesktopBridge | null {
     "reviewInstructions",
     "scanInstructions",
     "approveInstruction",
-    "disableInstruction"
+    "disableInstruction",
+    "scanIncidents",
+    "resolveIncidents"
   ] as const;
   for (const name of names) {
     if (typeof bridge[name] !== "function") {
@@ -63,6 +67,8 @@ export function desktopBridge(): DesktopBridge | null {
     approveInstruction: (fileId: string, reportId: string, sha256: string) =>
       call("approveInstruction")(fileId, reportId, sha256),
     disableInstruction: (fileId: string, reportId: string, sha256: string) =>
-      call("disableInstruction")(fileId, reportId, sha256)
+      call("disableInstruction")(fileId, reportId, sha256),
+    scanIncidents: () => call("scanIncidents")(),
+    resolveIncidents: () => call("resolveIncidents")()
   };
 }

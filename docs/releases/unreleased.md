@@ -1,6 +1,10 @@
 # AuraScan Unreleased
 
-Changes after v0.11.1:
+Changes after v0.12.0:
+
+- No unreleased `aurascan` changes yet. The optional `aurascan-desktop` package
+  is prepared in `packaging/desktop/` but is not published; see its README for
+  the publication gate.
 
 - Add `aurascan settings`, a read-only `aurascan-settings/1` projection of the
   invoking user's configuration with AI credentials reduced to presence

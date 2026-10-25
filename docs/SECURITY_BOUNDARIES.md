@@ -66,6 +66,16 @@ recorded as LOW/non-manual and auxiliary ClamAV/AI skipped. This provenance
 check is not a proof of safety: it identifies the repository bytes, not their
 runtime behavior, and deterministic malicious-control findings still block.
 
+Coverage rules that report AuraScan's own bounded-inspection limits
+(`STATIC-REMOTE-STAGE-INSPECTION-INCOMPLETE-001`,
+`SUPPLYCHAIN-NPM-INSPECTION-INCOMPLETE-001`) are kept at HIGH severity as
+manual-review advisories on such an authenticated archive instead of aborting
+the package transaction. The limit is a property of the scan, not evidence
+about the package, and blocking every upgrade that contains one such archive
+turns a coverage gap into a denial of service. Local, AUR, stale, and
+mismatched archives keep the blocker, the advisory is still printed and
+recorded, and no code path describes the package as clean.
+
 ### 4. Agent-control and instruction files
 
 | Aspect | Detail |

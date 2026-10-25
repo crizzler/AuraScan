@@ -58,6 +58,32 @@ from aurascan.core.update_policy import (
     normalize_policy,
 )
 
+# Rules that report AuraScan's own bounded-inspection limits rather than
+# observed package behavior. For an archive already authenticated by the signed
+# sync database, the limit is kept as a review advisory instead of a blocker.
+OFFICIAL_COVERAGE_REVIEW_RULES = frozenset(
+    {
+        "STATIC-REMOTE-STAGE-INSPECTION-INCOMPLETE-001",
+        "SUPPLYCHAIN-NPM-INSPECTION-INCOMPLETE-001",
+    }
+)
+
+
+def review_official_coverage_findings(findings):
+    """Return findings with official-archive coverage blockers demoted to review."""
+
+    adjusted = []
+    for finding in findings:
+        if finding.rule_id in OFFICIAL_COVERAGE_REVIEW_RULES and finding.blocks_installation:
+            finding = replace(
+                finding,
+                blocks_installation=False,
+                requires_manual_review=True,
+            )
+        adjusted.append(finding)
+    return adjusted
+
+
 class AuraScanEngine:
     def __init__(self, json_output=False, deep_static=False, offline=False, auto_key_fetch=True, keyserver=None, trusted_key_dirs=None, verbose=False, update_scan_policy="full", scan_context="unknown", scan_context_source="unknown", allow_user_asserted_update_context=False, local_package_db_root=None, version_compare=None, intelligence_loader=None):
         self.json_output = json_output
@@ -129,6 +155,8 @@ class AuraScanEngine:
             if not result.is_safe:
                 is_safe = False
 
+        if official_repo:
+            all_findings = review_official_coverage_findings(all_findings)
         report = self._build_report(pkg_name, pkg_ver, all_findings, ["Scanned"], source_acquisition)
         out_dict = report.to_dict()
         self.last_report = out_dict

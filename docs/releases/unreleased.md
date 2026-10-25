@@ -1,6 +1,10 @@
 # AuraScan Unreleased
 
-Changes after v0.12.1:
+Changes after v0.12.2:
+
+- No unreleased `aurascan` changes yet. The optional `aurascan-desktop` package
+  is prepared in `packaging/desktop/` but is not published; see its README for
+  the publication gate.
 
 - No unreleased `aurascan` changes yet. The optional `aurascan-desktop` package
   is prepared in `packaging/desktop/` but is not published; see its README for

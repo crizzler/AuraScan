@@ -109,13 +109,16 @@ These rules apply to every phase and are not negotiable per feature.
 
 ### Phase 4 — Privileged operations
 
-Decision: **Option A, terminal handoff.** The Incidents view lists the exact
-commands (`aurascan upgrade --json`, `aurascan upgrade`,
-`aurascan incidents --run-maintenance`, `aurascan recovery --install`) with the
-reason they stay in the terminal. No privileged helper, no root process, and no
-new authority surface were added. Option B remains available later, and either
-option still needs a plan identity in `upgrade --json` before it is safe to
-apply an upgrade from the app.
+Decision: **Option A, terminal handoff.** The Actions view has a single
+"Open upgrade in terminal" button that starts `aurascan upgrade` in the user's
+terminal emulator from a fixed candidate list; the Incidents view lists the other
+privileged commands (`aurascan incidents --run-maintenance`,
+`aurascan recovery --install`). An upgrade needs root, and this process must
+never hold root or a password, so the wizard keeps the preflight, the risk
+review, and the sudo prompt in one place. No privileged helper, no root process,
+and no new authority surface were added. Option B remains available later, and
+either option still needs a plan identity in `upgrade --json` before it is safe
+to apply an upgrade without showing the plan.
 
 ## Launching it
 

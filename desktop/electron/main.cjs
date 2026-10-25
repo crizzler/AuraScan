@@ -9,6 +9,7 @@
  * command, an executable, or a free-form flag from the renderer.
  */
 
+const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { app, BrowserWindow, dialog, ipcMain, session } = require("electron");
@@ -89,7 +90,7 @@ function runCli(args, options) {
         return;
       }
       try {
-        finish({ ok: true, payload: parse(stdout) });
+        finish({ ok: true, payload: parse(stdout), exitCode: code });
       } catch {
         finish({ ok: false, error: failure });
       }
@@ -185,10 +186,56 @@ function runIncidentAction(actionId) {
   return runCli(args, {
     parse: helpers.parseIncidents,
     failure: "AuraScan could not complete the incident diagnosis",
-    // A diagnosis of a healthy system can still report attention.
-    okExitCodes: [0],
+    // 40 = some evidence is unavailable, 41 = a prepared repair was not
+    // applied. Both still print a complete report; 42 and 43 are failures.
+    okExitCodes: [0, 40, 41],
     timeoutMs: helpers.INCIDENT_TIMEOUT_MS
   });
+}
+
+function findExecutable(name) {
+  for (const dir of ["/usr/bin", "/usr/local/bin", "/bin"]) {
+    const candidate = path.join(dir, name);
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // Try the next fixed directory.
+    }
+  }
+  return "";
+}
+
+/**
+ * Open `aurascan upgrade` in a terminal.
+ *
+ * The upgrade needs root, and this process must never hold root or a password.
+ * The terminal wizard performs the preflight, shows the risks, and takes the
+ * sudo prompt, so the app stays unprivileged.
+ */
+function openUpgradeTerminal() {
+  for (const terminal of helpers.TERMINAL_CANDIDATES) {
+    const resolved = findExecutable(terminal.name);
+    if (!resolved) {
+      continue;
+    }
+    const args = helpers.upgradeTerminalArgv(resolved, terminal.name);
+    if (args === null) {
+      continue;
+    }
+    try {
+      const child = spawn(args[0], args.slice(1), {
+        detached: true,
+        stdio: "ignore",
+        env: helpers.buildEnv(process.env)
+      });
+      child.unref();
+      return { ok: true, payload: { terminal: terminal.name } };
+    } catch {
+      // Try the next terminal.
+    }
+  }
+  return { ok: false, error: "No terminal emulator was found for the upgrade wizard" };
 }
 
 function hardenContents(contents) {
@@ -272,6 +319,8 @@ function registerIpc() {
   ipcMain.handle("aurascan:incident-scan", () => runIncidentAction("incident_scan"));
 
   ipcMain.handle("aurascan:incident-resolve", () => runIncidentAction("incident_resolve"));
+
+  ipcMain.handle("aurascan:upgrade-terminal", () => openUpgradeTerminal());
 
   ipcMain.handle("aurascan:open-report", async (event) => {
     const parent = BrowserWindow.fromWebContents(event.sender);

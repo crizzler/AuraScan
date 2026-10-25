@@ -9,6 +9,7 @@
 export interface ShellPayloadResult {
   ok: true;
   payload: unknown;
+  exitCode?: number;
 }
 
 export interface ShellErrorResult {
@@ -30,6 +31,7 @@ export interface DesktopBridge {
   disableInstruction(fileId: string, reportId: string, sha256: string): Promise<ShellResult>;
   scanIncidents(): Promise<ShellResult>;
   resolveIncidents(): Promise<ShellResult>;
+  openUpgrade(): Promise<ShellResult>;
 }
 
 export function desktopBridge(): DesktopBridge | null {
@@ -48,7 +50,8 @@ export function desktopBridge(): DesktopBridge | null {
     "approveInstruction",
     "disableInstruction",
     "scanIncidents",
-    "resolveIncidents"
+    "resolveIncidents",
+    "openUpgrade"
   ] as const;
   for (const name of names) {
     if (typeof bridge[name] !== "function") {
@@ -69,6 +72,7 @@ export function desktopBridge(): DesktopBridge | null {
     disableInstruction: (fileId: string, reportId: string, sha256: string) =>
       call("disableInstruction")(fileId, reportId, sha256),
     scanIncidents: () => call("scanIncidents")(),
-    resolveIncidents: () => call("resolveIncidents")()
+    resolveIncidents: () => call("resolveIncidents")(),
+    openUpgrade: () => call("openUpgrade")()
   };
 }

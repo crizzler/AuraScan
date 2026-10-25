@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld(
     disableInstruction: (fileId, reportId, sha256) =>
       ipcRenderer.invoke("aurascan:instruction-disable", fileId, reportId, sha256),
     scanIncidents: () => ipcRenderer.invoke("aurascan:incident-scan"),
-    resolveIncidents: () => ipcRenderer.invoke("aurascan:incident-resolve")
+    resolveIncidents: () => ipcRenderer.invoke("aurascan:incident-resolve"),
+    openUpgrade: () => ipcRenderer.invoke("aurascan:upgrade-terminal")
   })
 );

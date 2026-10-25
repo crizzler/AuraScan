@@ -54,8 +54,34 @@ const DESKTOP_VIEWS = Object.freeze([
   "about"
 ]);
 
-function requestedView(argv) {
-  const args = Array.isArray(argv) ? argv : [];
+// Terminals the shell may use for the interactive upgrade wizard. Each entry
+// carries the flag that separates the emulator's own options from the command.
+const TERMINAL_CANDIDATES = Object.freeze([
+  { name: "xdg-terminal-exec", prefix: [] },
+  { name: "konsole", prefix: ["-e"] },
+  { name: "alacritty", prefix: ["-e"] },
+  { name: "kitty", prefix: [] },
+  { name: "gnome-terminal", prefix: ["--"] },
+  { name: "xterm", prefix: ["-e"] }
+]);
+
+/** Build the fixed argv for one terminal, or null when it is not usable. */
+function upgradeTerminalArgv(terminalPath, terminalName) {
+  if (
+    typeof terminalPath !== "string" ||
+    !path.isAbsolute(terminalPath) ||
+    CONTROL_CHARS.test(terminalPath)
+  ) {
+    return null;
+  }
+  const entry = TERMINAL_CANDIDATES.find((candidate) => candidate.name === terminalName);
+  if (!entry) {
+    return null;
+  }
+  return [terminalPath, ...entry.prefix, PACKAGED_CLI, "upgrade"];
+}
+
+function requestedView(argv) {  const args = Array.isArray(argv) ? argv : [];
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index];
     if (typeof value !== "string") {
@@ -370,6 +396,8 @@ module.exports = {
   FORWARDED_ENV,
   AI_PROVIDERS,
   DESKTOP_VIEWS,
+  TERMINAL_CANDIDATES,
+  upgradeTerminalArgv,
   requestedView,
   READ_ONLY_ACTIONS,
   MUTATING_ACTIONS,

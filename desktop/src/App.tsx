@@ -120,6 +120,7 @@ export function App() {
   const [diagnosisError, setDiagnosisError] = useState("");
   const [diagnosisNotice, setDiagnosisNotice] = useState("");
   const [diagnosisBusy, setDiagnosisBusy] = useState(false);
+  const [upgradeNotice, setUpgradeNotice] = useState("");
   const diagnosisParsed = useMemo(
     () => (diagnosisRaw === null ? null : parseIncidentReport(diagnosisRaw)),
     [diagnosisRaw]
@@ -326,10 +327,15 @@ export function App() {
       .then((result) => {
         if (result.ok) {
           setDiagnosisRaw(result.payload);
+          const code = typeof result.exitCode === "number" ? result.exitCode : 0;
           setDiagnosisNotice(
-            action === "scan"
-              ? "Diagnosis complete. No repair was applied."
-              : "Markers acknowledged. The evidence itself is unchanged."
+            code === 41
+              ? "A prepared repair is waiting. Applying it needs a terminal: aurascan incidents --yes"
+              : code === 40
+                ? "Some incident evidence is unavailable, so this report may be incomplete."
+                : action === "scan"
+                  ? "Diagnosis complete. No repair was applied."
+                  : "Markers acknowledged. The evidence itself is unchanged."
           );
           return;
         }
@@ -339,6 +345,26 @@ export function App() {
       })
       .catch(() => setDiagnosisError("AuraScan could not be reached"))
       .finally(() => setDiagnosisLoading(false));
+  };
+
+  const openUpgrade = () => {
+    if (!bridge) {
+      return;
+    }
+    setUpgradeNotice("");
+    bridge
+      .openUpgrade()
+      .then((result) => {
+        if (!result.ok) {
+          setUpgradeNotice(result.error);
+          return;
+        }
+        const payload = result.payload as { terminal?: unknown } | null;
+        const terminal =
+          payload && typeof payload.terminal === "string" ? payload.terminal : "a terminal";
+        setUpgradeNotice(`The upgrade wizard is open in ${terminal}.`);
+      })
+      .catch(() => setUpgradeNotice("AuraScan could not be reached"));
   };
 
   const runShell = (operation: () => Promise<ShellResult>) => {    operation()
@@ -461,6 +487,7 @@ export function App() {
           <Actions
             actions={snapshot.actions}
             shellAvailable={Boolean(bridge)}
+            notice={upgradeNotice}
             onRefresh={() => {
               if (bridge) {
                 runShell(() => bridge.refresh());
@@ -471,6 +498,7 @@ export function App() {
                 runShell(() => bridge.openReport());
               }
             }}
+            onOpenUpgrade={openUpgrade}
           />
         )}
         {view === "overview" && snapshot.doctor && (

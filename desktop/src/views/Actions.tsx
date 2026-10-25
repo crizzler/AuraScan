@@ -56,19 +56,45 @@ function ActionCard({
 export function Actions({
   actions,
   shellAvailable,
+  notice,
   onRefresh,
-  onOpenReport
+  onOpenReport,
+  onOpenUpgrade
 }: {
   actions: ActionSpec[];
   shellAvailable: boolean;
+  notice: string;
   onRefresh: () => void;
   onOpenReport: () => void;
+  onOpenUpgrade: () => void;
 }) {
   const requestable = actions.filter((action) => action.renderer_may_request);
   const terminalOnly = actions.filter((action) => !action.renderer_may_request);
 
   return (
     <div className="stack">
+      <section className="card">
+        <header className="card__header">
+          <h2>System upgrade</h2>
+          <StatusBadge tone="neutral" label="needs root" />
+        </header>
+        <p className="card__note">
+          An upgrade applies package transactions as root, so this console never runs it
+          directly and never holds a password. The button opens the AuraScan upgrade wizard
+          in a terminal: it runs the preflight, shows every risk it found, and takes your
+          sudo prompt. That is the same fraction of a second a helper spends asking for
+          elevation — the difference is that you see the plan first.
+        </p>
+        {shellAvailable ? (
+          <button type="button" className="button" onClick={onOpenUpgrade}>
+            Open upgrade in terminal
+          </button>
+        ) : (
+          <pre className="argv">aurascan upgrade</pre>
+        )}
+        {notice ? <p className="card__note">{notice}</p> : null}
+      </section>
+
       <section className="card card--muted">
         <h2>How actions work</h2>
         <ul className="rules">

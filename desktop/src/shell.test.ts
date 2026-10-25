@@ -25,6 +25,9 @@ const helpers = require("../electron/argv.cjs") as {
   parseReview: (stdout: string) => { schema: string; report_id: string };
   parseInstructionAction: (stdout: string) => { status: string; file_id: string };
   parseIncidents: (stdout: string) => { schema: string; incident_id: string };
+  TERMINAL_CANDIDATES: ReadonlyArray<{ name: string; prefix: string[] }>;
+  upgradeTerminalArgv: (terminalPath: string, terminalName: string) => string[] | null;
+  requestedView: (argv: string[]) => string | null;
 };
 
 describe("shell CLI resolution", () => {
@@ -154,8 +157,29 @@ describe("shell action argv", () => {
     expect(helpers.INCIDENT_TIMEOUT_MS).toBeGreaterThan(helpers.SNAPSHOT_TIMEOUT_MS);
   });
 
-  it("accepts a diagnosis payload and rejects anything else", () => {
-    const payload = JSON.stringify({
+  it("builds a fixed upgrade wizard argv for known terminals", () => {
+    expect(helpers.upgradeTerminalArgv("/usr/bin/konsole", "konsole")).toEqual([
+      "/usr/bin/konsole",
+      "-e",
+      "/usr/bin/aurascan",
+      "upgrade"
+    ]);
+    expect(helpers.upgradeTerminalArgv("/usr/bin/xdg-terminal-exec", "xdg-terminal-exec")).toEqual([
+      "/usr/bin/xdg-terminal-exec",
+      "/usr/bin/aurascan",
+      "upgrade"
+    ]);
+    expect(helpers.upgradeTerminalArgv("/usr/bin/gnome-terminal", "gnome-terminal")).toEqual([
+      "/usr/bin/gnome-terminal",
+      "--",
+      "/usr/bin/aurascan",
+      "upgrade"
+    ]);
+    expect(helpers.upgradeTerminalArgv("konsole", "konsole")).toBeNull();
+    expect(helpers.upgradeTerminalArgv("/usr/bin/konsole", "not-a-terminal")).toBeNull();
+  });
+
+  it("accepts a diagnosis payload and rejects anything else", () => {    const payload = JSON.stringify({
       schema: "incident_report/1.3",
       incident_id: "incident-20261024-222006-91fa5761fcd2-91376c6a",
       findings: []

@@ -9,12 +9,14 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
-The v0.12.0 release is a package-only update that adds the read-only
-`aurascan ui` evidence contract for desktop interfaces, a `aurascan settings`
-command that reports configuration with credentials reduced to presence
-booleans, a credential entry path that reads the value from stdin, and
-report-and-hash binding for Instruction Guard approve and disable. An optional
-hardened Electron console consumes them; the console is a separate artifact and
+The v0.12.1 release is a package-only update. The updater tray now opens the
+optional desktop console instead of the terminal wizard, the console accepts the
+documented incident attention codes, and it offers a one-button upgrade that
+runs the fixed `aurascan upgrade` wizard in your terminal. It also carries the
+v0.12.0 settings and Instruction Guard work: `aurascan settings` reports
+configuration with credentials reduced to presence booleans, a credential entry
+path reads the value from stdin, and Instruction Guard approve and disable are
+bound to the displayed report and SHA-256. The console is a separate artifact and
 is not published yet. Verified official
 repository archives use a fast deterministic pacman-hook scan: routine
 systemd service management is LOW/non-manual, auxiliary ClamAV/AI scans are
@@ -33,7 +35,7 @@ also detects a wait-then-read process deadlock, such as Goverlay 1.9.4 waiting
 forever for `lsmod`; `--fix-hung-apps` offers a cached older build. Confirmed
 signatures and deterministic CRITICAL findings still block. The v0.10.11
 recovery image remains the retained image; ISO and local-UKI gates were not
-rerun for v0.12.0.
+rerun for v0.12.1.
 
 The v0.10.11 release adds a guided AUR update flow to `aurascan upgrade`.
 After the repository-only continuation it can download a pending AUR update

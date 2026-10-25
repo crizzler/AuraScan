@@ -60,6 +60,12 @@ UPDATER_STATE_ICONS = {
     "critical": f"{UPDATER_ICON_NAME}-critical",
 }
 UPDATER_TERMINAL_ORDER = ["xdg-terminal-exec", "konsole", "alacritty", "kitty", "gnome-terminal", "xterm"]
+# Marks a menu entry that launches the optional desktop console instead of a
+# terminal command. Identity comparison is used, so these tuples never collide
+# with a real argv.
+DESKTOP_CONSOLE_ACTION = ("desktop-console",)
+DESKTOP_SETTINGS_ACTION = ("desktop-console", "settings")
+
 UPDATER_MENU_GROUPS = (
     (
         ("Run AuraScan Upgrade", ("aurascan", "upgrade")),
@@ -70,9 +76,42 @@ UPDATER_MENU_GROUPS = (
         ("Run System Maintenance Scan", ("aurascan", "incidents", "--run-maintenance")),
     ),
     (
-        ("AuraScan Settings", ("aurascan", "init")),
+        ("Open AuraScan Console", DESKTOP_CONSOLE_ACTION),
+        ("AuraScan Settings", DESKTOP_SETTINGS_ACTION),
     ),
 )
+
+# Packaged installs put the launcher here. A user-level launcher is accepted
+# only as the invoking user's own executable, and never run as root.
+DESKTOP_CONSOLE_SYSTEM_PATH = "/usr/bin/aurascan-desktop"
+
+
+def resolve_desktop_console(*, which: Callable, home: Optional[Path] = None) -> str:
+    """Return an absolute desktop-console launcher, or ``""`` when absent."""
+
+    user_path = (home or Path.home()) / ".local" / "bin" / "aurascan-desktop"
+    for candidate in (DESKTOP_CONSOLE_SYSTEM_PATH, str(user_path)):
+        if Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    found = which("aurascan-desktop")
+    if isinstance(found, str) and found.startswith("/"):
+        return found
+    return ""
+
+
+def launch_desktop_console(program: str, view: str, *, popen: Callable) -> bool:
+    """Start the console with a fixed argument vector and no shell."""
+
+    if not program.startswith("/") or any(ord(char) < 0x20 for char in program):
+        return False
+    argv = [program]
+    if view:
+        argv.extend(["--view", view])
+    try:
+        popen(argv, close_fds=True, start_new_session=True)
+    except OSError:
+        return False
+    return True
 ASSET_DIR = Path(__file__).resolve().parents[1] / "assets"
 
 
@@ -1229,8 +1268,36 @@ def start_tray_app(
 
     menu = QtWidgets.QMenu()
 
+    desktop_program = resolve_desktop_console(which=which)
+
     def add_action(label: str, command: Sequence[str]):
         action = menu.addAction(label)
+        if command is DESKTOP_SETTINGS_ACTION:
+            if desktop_program:
+                action.triggered.connect(
+                    lambda _checked=False: launch_desktop_console(
+                        desktop_program, "settings", popen=popen
+                    )
+                )
+            else:
+                # Without the optional console, the guided terminal wizard is
+                # still the supported way to change settings.
+                action.triggered.connect(
+                    lambda _checked=False: launch_terminal(
+                        ["aurascan", "init"],
+                        terminal=config.terminal,
+                        which=which,
+                        popen=popen,
+                    )
+                )
+            return action
+        if command is DESKTOP_CONSOLE_ACTION:
+            action.triggered.connect(
+                lambda _checked=False: launch_desktop_console(
+                    desktop_program, "", popen=popen
+                )
+            )
+            return action
         action.triggered.connect(lambda _checked=False, cmd=list(command): launch_terminal(cmd, terminal=config.terminal, which=which, popen=popen))
         return action
 
@@ -1256,6 +1323,8 @@ def start_tray_app(
             )
             menu.addSeparator()
         for label, command in group:
+            if command is DESKTOP_CONSOLE_ACTION and not desktop_program:
+                continue
             action = add_action(label, command)
             if label == INSTRUCTION_REVIEW_ACTION_LABEL:
                 instruction_review_action = action

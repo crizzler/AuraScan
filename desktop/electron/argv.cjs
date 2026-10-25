@@ -40,6 +40,41 @@ const AI_PROVIDERS = Object.freeze([
   "llamacpp"
 ]);
 
+// The tray may ask the shell to open a specific view. Only these names are
+// accepted; anything else is ignored, so an argument can never become data the
+// renderer acts on.
+const DESKTOP_VIEWS = Object.freeze([
+  "report",
+  "actions",
+  "overview",
+  "checks",
+  "incidents",
+  "instructions",
+  "settings",
+  "about"
+]);
+
+function requestedView(argv) {
+  const args = Array.isArray(argv) ? argv : [];
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (typeof value !== "string") {
+      continue;
+    }
+    let candidate = "";
+    if (value === "--view") {
+      const next = args[index + 1];
+      candidate = typeof next === "string" ? next : "";
+    } else if (value.startsWith("--view=")) {
+      candidate = value.slice("--view=".length);
+    } else {
+      continue;
+    }
+    return DESKTOP_VIEWS.includes(candidate) ? candidate : null;
+  }
+  return null;
+}
+
 // Only these variables reach the child process. In particular no AURASCAN_AI_*
 // or provider key variables are forwarded from the shell environment; the CLI
 // still reads the user's own configuration file.
@@ -334,6 +369,8 @@ module.exports = {
   SNAPSHOT_TIMEOUT_MS,
   FORWARDED_ENV,
   AI_PROVIDERS,
+  DESKTOP_VIEWS,
+  requestedView,
   READ_ONLY_ACTIONS,
   MUTATING_ACTIONS,
   resolveCli,

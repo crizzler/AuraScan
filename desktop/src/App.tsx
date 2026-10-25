@@ -136,13 +136,21 @@ export function App() {
     settingsParsed && settingsParsed.ok ? settingsParsed.settings : null;
   const settingsParseError =
     settingsParsed && !settingsParsed.ok ? settingsParsed.reason : "";
-  const [view, setView] = useState<ViewId>(
-    parsed.ok && parsed.snapshot.report
-      ? "report"
-      : parsed.ok && parsed.snapshot.actions
-        ? "actions"
-        : "overview"
-  );
+  const [view, setView] = useState<ViewId>(() => {
+    const search =
+      typeof globalThis.location?.search === "string" ? globalThis.location.search : "";
+    const requested = new URLSearchParams(search).get("view");
+    if (requested && VIEWS.some((entry) => entry.id === requested)) {
+      return requested as ViewId;
+    }
+    if (parsed.ok && parsed.snapshot.report) {
+      return "report";
+    }
+    if (parsed.ok && parsed.snapshot.actions) {
+      return "actions";
+    }
+    return "overview";
+  });
 
   const available = parsed.ok ? availableViews(parsed.snapshot) : [];
   const availableKey = available.map((entry) => entry.id).join(",");

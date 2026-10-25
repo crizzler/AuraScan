@@ -117,8 +117,22 @@ new authority surface were added. Option B remains available later, and either
 option still needs a plan identity in `upgrade --json` before it is safe to
 apply an upgrade from the app.
 
-## Non-goals
+## Launching it
 
+The tray menu opens the console when one is installed. The tray resolves a
+launcher from a fixed list — `/usr/bin/aurascan-desktop`, then
+`~/.local/bin/aurascan-desktop` when it is the invoking user's own executable,
+then a `aurascan-desktop` entry on `PATH` — and never runs it as root or through
+a shell. Without a launcher, "AuraScan Settings" keeps the guided terminal
+wizard, which is still the supported fallback.
+
+`--view <name>` opens one of the published views (`settings`, `instructions`,
+`incidents`, `report`, `actions`, `overview`, `checks`, `about`). Any other value
+is ignored, so the argument cannot become data the renderer acts on. The
+unpackaged shell can be started with `npm run desktop` or through the development
+launcher described in its README.
+
+## Non-goals
 - An embedded terminal or a "run any command" field.
 - Editing AuraScan source, rules, or policy from the app.
 - Managing other packages, services, or files outside AuraScan's own surfaces.

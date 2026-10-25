@@ -222,14 +222,22 @@ function createWindow(showWindow = true) {
   hardenContents(window.webContents);
 
   const devServer = process.env[DEV_SERVER_ENV];
+  const requestedView = helpers.requestedView(process.argv);
   if (
     !app.isPackaged &&
     typeof devServer === "string" &&
     devServer.startsWith("http://127.0.0.1:")
   ) {
-    window.loadURL(devServer);
+    const target = new URL(devServer);
+    if (requestedView !== null) {
+      target.searchParams.set("view", requestedView);
+    }
+    window.loadURL(target.toString());
   } else {
-    window.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+    window.loadFile(
+      path.join(__dirname, "..", "dist", "index.html"),
+      requestedView === null ? undefined : { query: { view: requestedView } }
+    );
   }
 
   window.once("ready-to-show", () => {

@@ -70,7 +70,7 @@
   "app": {
     "platform": "linux",
     "python": "3.14.0",
-    "version": "0.12.2"
+    "version": "0.13.0"
   },
   "contract": "aurascan-ui/1",
   "doctor": {

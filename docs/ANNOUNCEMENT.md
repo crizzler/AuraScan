@@ -9,12 +9,15 @@ it does not prove package safety.
 AuraScan is an early developer-preview safety layer for Arch Linux,
 EndeavourOS, Manjaro, CachyOS, and AUR workflows.
 
-The v0.12.2 release is a package-only update. It stops a verified official
-archive from aborting a whole package transaction when AuraScan's own bounded
-parser cannot finish inspecting its text: those two coverage rules stay HIGH
-advisories, local and AUR archives keep the blocker, and nothing is described as
-clean. It also carries the v0.12.1 tray and console work. The console is a
-separate artifact and is not published yet. Verified official
+The v0.13.0 release is a package-only update. It adds `aurascan npm-audit`, an
+offline pre-install review of a JavaScript project: it reads `package.json` and
+the files its lifecycle commands name as inert text, without running npm, node,
+a shell, or the project, and reports a blocking finding when one install-time
+file reads the environment, contacts the network, and evaluates dynamic code.
+The desktop console reaches the same command from its Actions view. It also
+carries the v0.12.2 official-archive advisory policy, the v0.12.1 tray and
+console work, and the v0.12.0 settings surface. The console is a separate
+artifact and is not published yet. Verified official
 repository archives use a fast deterministic pacman-hook scan: routine
 systemd service management is LOW/non-manual, auxiliary ClamAV/AI scans are
 skipped, and local or AUR archives keep the full scan and blocking behavior.
@@ -32,7 +35,7 @@ also detects a wait-then-read process deadlock, such as Goverlay 1.9.4 waiting
 forever for `lsmod`; `--fix-hung-apps` offers a cached older build. Confirmed
 signatures and deterministic CRITICAL findings still block. The v0.10.11
 recovery image remains the retained image; ISO and local-UKI gates were not
-rerun for v0.12.2.
+rerun for v0.13.0.
 
 The v0.10.11 release adds a guided AUR update flow to `aurascan upgrade`.
 After the repository-only continuation it can download a pending AUR update

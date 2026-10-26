@@ -164,7 +164,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  aurascan incidents  Diagnose crashes and prepare guarded system repairs.\n"
             "  aurascan recovery   Manage or enter the optional boot recovery environment.\n\n"
             "Security command:\n"
-            "  aurascan security-audit  Check known AUR campaigns and official package advisories.\n\n"
+            "  aurascan security-audit  Check known AUR campaigns and official package advisories.\n"
+            "  aurascan npm-audit  Inspect a project's install-time code before running npm install.\n\n"
             "  aurascan intelligence  Inspect or explicitly update signed intelligence.\n\n"
             "Agent file security command:\n"
             "  aurascan instruction-audit  Audit AI-agent control files without executing them.\n\n"
@@ -521,6 +522,9 @@ def main(argv=None):
     if raw_argv and raw_argv[0] == "settings":
         from aurascan.core.settings_cli import run_settings
         sys.exit(run_settings(raw_argv[1:]))
+    if raw_argv and raw_argv[0] == "npm-audit":
+        from aurascan.core.npm_audit_cli import run_npm_audit
+        sys.exit(run_npm_audit(raw_argv[1:]))
     load_command_environment(raw_argv)
     if raw_argv and raw_argv[0] == "init":
         sys.exit(run_init(raw_argv[1:]))

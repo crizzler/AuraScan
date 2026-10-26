@@ -1137,6 +1137,43 @@ The user settings are `AURASCAN_INSTRUCTION_MONITOR_ENABLED`,
 general AuraScan AI provider does not enable Instruction Guard AI or either
 Instruction Guard timer.
 
+## npm Pre-Install Audit
+
+`aurascan npm-audit [PATH]` reviews a JavaScript project before you install it.
+It is offline and non-executing: it reads `package.json` and the project files
+named by the `preinstall`, `install`, `postinstall`, and `prepare` commands as
+inert text, with bounded no-follow reads. It never runs npm, node, a shell, the
+project, or a lifecycle script, and it never contacts a registry.
+
+```bash
+aurascan npm-audit .          # review the project in the current directory
+aurascan npm-audit . --json   # aurascan-npm-audit/1 report
+```
+
+It reports `SUPPLYCHAIN-NPM-INSTALL-ENV-EXFIL-EVAL-001` (CRITICAL, blocking)
+when one install-time file reads environment variables, contacts a network
+destination, and evaluates dynamic code. That is the shape of a recruiter or
+"interview task" payload that runs on `npm install`, harvests the environment,
+and executes whatever the remote end returns. It reports
+`SUPPLYCHAIN-NPM-INSTALL-REMOTE-SCRIPT-001` (HIGH, blocking) when a lifecycle
+command pipes a download into a shell or interpreter. Comments, strings, and
+regular expressions are not treated as evidence, and a partial chain is not
+reported as a backdoor.
+
+Anything AuraScan cannot inspect — a malformed or oversized manifest, or a
+lifecycle entry that is missing, outside the project, or a symlink — becomes
+`SUPPLYCHAIN-NPM-INSPECTION-INCOMPLETE-001`, a manual-review coverage finding
+rather than a clean result. Exit codes are `0` for no findings, `1` for any
+finding, and `2` for a usage or path error.
+
+Dependency lifecycle scripts are reported as unknown: resolving them needs
+package metadata from a registry, which this audit deliberately does not
+fetch. A clean report means the reviewed project files did not show these
+patterns. It does not mean the project is safe to install. If you must install
+something you do not trust, use a disposable environment without credentials,
+or install with `npm install --ignore-scripts` and run only the scripts you
+reviewed.
+
 ## Upgrade Preflight
 
 `aurascan upgrade` is an optional first-class upgrade front door for

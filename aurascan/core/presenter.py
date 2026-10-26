@@ -145,6 +145,22 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
         'not_prove': 'This does not establish that a connection succeeded, data was transferred, or this host was compromised.',
         'action': 'Do not run this build. Review the control path and any independent execution evidence before deciding incident response.',
     },
+    'SUPPLYCHAIN-NPM-INSTALL-ENV-EXFIL-EVAL-001': {
+        'title': 'Install-time code reads the environment, sends it out, and evaluates dynamic code.',
+        'summary': 'A file that npm install would run reads environment variables, contacts a network destination, and evaluates dynamic code in the same file.',
+        'why': 'This is the shape of an npm install backdoor: credentials and tokens reach an outside endpoint, and the reply is executed.',
+        'checked': 'AuraScan read the lifecycle command and the named project file as inert text with bounded lexical parsing. It did not run npm, node, a shell, or the project, and it did not contact a registry or the destination.',
+        'not_prove': 'This static correlation does not prove the code ran, that data left the machine, or that an account was compromised.',
+        'action': 'Do not run npm install in this project on a machine that holds credentials. If it was already installed, rotate the environment and cloud credentials it could read.',
+    },
+    'SUPPLYCHAIN-NPM-INSTALL-REMOTE-SCRIPT-001': {
+        'title': 'An install-time command downloads and runs remote code.',
+        'summary': 'An npm lifecycle command pipes a network download into a shell or interpreter, so the project executes code that is not in the repository.',
+        'why': 'Nothing in the repository describes what that download does, and the audit cannot inspect it.',
+        'checked': 'AuraScan parsed the lifecycle command text with a bounded shell-like splitter and did not fetch or execute the download.',
+        'not_prove': 'The download may be benign, and this finding does not prove that anything was executed.',
+        'action': 'Do not run npm install here. Review the command, or install with --ignore-scripts in a disposable environment without credentials.',
+    },
     'SUPPLYCHAIN-NPM-INSPECTION-INCOMPLETE-001': {
         'title': 'npm supply-chain inspection did not complete.',
         'summary': 'A required parser, entry script, intelligence record, or configured resource bound prevented complete inspection.',

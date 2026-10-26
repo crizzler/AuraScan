@@ -104,6 +104,7 @@ UI_ENTRY_SUFFIXES = (
     "core.incident_cli",
     "core.ui_cli",
     "core.settings_cli",
+    "core.npm_audit_cli",
 )
 
 # Generic lifecycle frameworks. They coordinate operations that the lifecycle

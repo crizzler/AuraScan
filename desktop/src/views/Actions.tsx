@@ -1,4 +1,4 @@
-import type { ActionSpec } from "../contract";
+import type { ActionSpec, NpmAuditReport } from "../contract";
 import { StatusBadge } from "../components/StatusBadge";
 
 const SHELL_ACTIONS = new Set(["refresh_snapshot", "project_report"]);
@@ -53,10 +53,56 @@ function ActionCard({
   );
 }
 
+function AuditResult({ report }: { report: NpmAuditReport }) {
+  const blocking = report.findings.filter((finding) => finding.blocks_installation);
+  const review = report.findings.filter((finding) => !finding.blocks_installation);
+  return (
+    <div className="stack">
+      <p className="card__note mono">{report.path}</p>
+      <p className="card__note">
+        Install-time files read: {report.inspected_install_files.length}. Project install code:{" "}
+        {report.project_install_code}. Dependency lifecycle scripts: {report.dependency_lifecycle_scripts}.
+      </p>
+      {report.findings.length === 0 ? (
+        <p className="card__note">
+          Nothing in the project&apos;s own install-time code matched. That is not proof the
+          project is safe to install.
+        </p>
+      ) : null}
+      <ul className="rules">
+        {[...blocking, ...review].map((finding) => (
+          <li key={`${finding.rule_id}-${finding.file}-${finding.line}`}>
+            <StatusBadge
+              tone={finding.blocks_installation ? "error" : "warn"}
+              label={`${finding.blocks_installation ? "BLOCK" : "REVIEW"} ${finding.severity}`}
+            />{" "}
+            <span className="mono">{finding.rule_id}</span>
+            <div className="card__note mono">
+              {finding.file}
+              {finding.line > 0 ? `:${finding.line}` : ""}
+            </div>
+            <div className="card__note">{finding.explanation}</div>
+            <div className="card__note">{finding.recommendation}</div>
+          </li>
+        ))}
+      </ul>
+      <p className="card__note">
+        Static evidence does not prove the code ran. If you must install a project you do not
+        trust, use a disposable environment without credentials, or install with npm install
+        --ignore-scripts and run only the scripts you reviewed.
+      </p>
+    </div>
+  );
+}
+
 export function Actions({
   actions,
   shellAvailable,
   notice,
+  audit,
+  auditLoading,
+  auditError,
+  onAuditProject,
   onRefresh,
   onOpenReport,
   onOpenUpgrade
@@ -64,6 +110,10 @@ export function Actions({
   actions: ActionSpec[];
   shellAvailable: boolean;
   notice: string;
+  audit: NpmAuditReport | null;
+  auditLoading: boolean;
+  auditError: string;
+  onAuditProject: () => void;
   onRefresh: () => void;
   onOpenReport: () => void;
   onOpenUpgrade: () => void;
@@ -93,6 +143,28 @@ export function Actions({
           <pre className="argv">aurascan upgrade</pre>
         )}
         {notice ? <p className="card__note">{notice}</p> : null}
+      </section>
+
+      <section className="card">
+        <header className="card__header">
+          <h2>Review a project before npm install</h2>
+          <StatusBadge tone="neutral" label="offline" />
+        </header>
+        <p className="card__note">
+          A folder someone sent you can run code the moment you type npm install. This
+          reads package.json and the project files its preinstall, install, postinstall,
+          and prepare commands name, as inert text. It does not run npm, node, a shell, or
+          the project, and it does not contact a registry.
+        </p>
+        {shellAvailable ? (
+          <button type="button" className="button" onClick={onAuditProject} disabled={auditLoading}>
+            {auditLoading ? "Reviewing…" : "Choose project folder…"}
+          </button>
+        ) : (
+          <pre className="argv">aurascan npm-audit .</pre>
+        )}
+        {auditError ? <p className="card__note">{auditError}</p> : null}
+        {audit ? <AuditResult report={audit} /> : null}
       </section>
 
       <section className="card card--muted">

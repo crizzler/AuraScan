@@ -45,7 +45,8 @@ describe("desktopBridge", () => {
       disableInstruction: (fileId: string) => record(`disable:${fileId}`),
       scanIncidents: () => record("scanIncidents"),
       resolveIncidents: () => record("resolveIncidents"),
-      openUpgrade: () => record("openUpgrade")
+      openUpgrade: () => record("openUpgrade"),
+      npmAudit: () => record("npmAudit")
     });
 
     const bridge = desktopBridge();
@@ -64,6 +65,7 @@ describe("desktopBridge", () => {
     await bridge.scanIncidents();
     await bridge.resolveIncidents();
     await bridge.openUpgrade();
+    await bridge.npmAudit();
 
     expect(calls).toEqual([
       "refresh",
@@ -76,7 +78,8 @@ describe("desktopBridge", () => {
       "disable:file-1",
       "scanIncidents",
       "resolveIncidents",
-      "openUpgrade"
+      "openUpgrade",
+      "npmAudit"
     ]);
   });
 });

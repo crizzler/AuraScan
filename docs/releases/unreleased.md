@@ -10,8 +10,9 @@ Changes after v0.12.2:
   a network destination, and evaluates dynamic code, and one HIGH blocking
   finding when a lifecycle command pipes a download into a shell or
   interpreter. Files it cannot inspect stay a manual-review coverage finding,
-  and a clean result never means safe to install. Optional `aurascan-desktop`
-  wiring for this command is not included yet.
+  and a clean result never means safe to install. The desktop console reaches it
+  from the Actions view; the project folder is chosen in a native dialog in the
+  main process, and the fixed `npm-audit <path> --json` vector stays read-only.
 
 - The optional `aurascan-desktop` package is prepared in `packaging/desktop/`
   but is not published; see its README for the publication gate.

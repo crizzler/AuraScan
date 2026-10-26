@@ -14,6 +14,7 @@ const CONTRACT = "aurascan-ui/1";
 const SETTINGS_SCHEMA = "aurascan-settings/1";
 const REVIEW_SCHEMA = "instruction_guard_report/1.0";
 const INCIDENT_SCHEMA = "incident_report/1.3";
+const NPM_AUDIT_SCHEMA = "aurascan-npm-audit/1";
 const PACKAGED_CLI = "/usr/bin/aurascan";
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_SECRET_CHARS = 4096;
@@ -81,7 +82,8 @@ function upgradeTerminalArgv(terminalPath, terminalName) {
   return [terminalPath, ...entry.prefix, PACKAGED_CLI, "upgrade"];
 }
 
-function requestedView(argv) {  const args = Array.isArray(argv) ? argv : [];
+function requestedView(argv) {
+  const args = Array.isArray(argv) ? argv : [];
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index];
     if (typeof value !== "string") {
@@ -122,7 +124,8 @@ const READ_ONLY_ACTIONS = Object.freeze([
   "refresh_snapshot",
   "project_report",
   "read_settings",
-  "instruction_review"
+  "instruction_review",
+  "npm_audit"
 ]);
 const MUTATING_ACTIONS = Object.freeze([
   "set_ai_key",
@@ -192,6 +195,13 @@ function actionArgv(actionId, values) {
   }
   if (actionId === "incident_scan") {
     return ["incidents", "--json"];
+  }
+  if (actionId === "npm_audit") {
+    const projectPath = values && values.project_path;
+    if (!validPath(projectPath)) {
+      return null;
+    }
+    return ["npm-audit", projectPath, "--json"];
   }
   if (actionId === "incident_resolve") {
     return ["incidents", "--resolve", "--json"];
@@ -381,9 +391,51 @@ function parseIncidents(stdout) {
   return parsed;
 }
 
+/**
+ * Structural gate for the offline npm pre-install audit.
+ *
+ * The report says nothing may install on the strength of it, so the shell keeps
+ * only bounded text: rule ids, fixed severities, locations and prose. Anything
+ * unexpected makes the whole payload unusable.
+ */
+function parseNpmAudit(stdout) {
+  const parsed = parseJsonObject(stdout);
+  if (parsed.schema !== NPM_AUDIT_SCHEMA) {
+    throw new Error("npm audit schema is not supported");
+  }
+  if (
+    typeof parsed.ok !== "boolean" ||
+    typeof parsed.path !== "string" ||
+    parsed.counts === null ||
+    typeof parsed.counts !== "object" ||
+    Array.isArray(parsed.counts) ||
+    typeof parsed.counts.blocking !== "number" ||
+    !Array.isArray(parsed.inspected_install_files) ||
+    parsed.inspected_install_files.length > MAX_CANDIDATES ||
+    !Array.isArray(parsed.findings) ||
+    parsed.findings.length > MAX_FINDINGS_SHELL
+  ) {
+    throw new Error("npm audit payload is malformed");
+  }
+  for (const finding of parsed.findings) {
+    if (
+      finding === null ||
+      typeof finding !== "object" ||
+      Array.isArray(finding) ||
+      typeof finding.rule_id !== "string" ||
+      typeof finding.severity !== "string" ||
+      typeof finding.blocks_installation !== "boolean"
+    ) {
+      throw new Error("npm audit finding is malformed");
+    }
+  }
+  return parsed;
+}
+
 module.exports = {
   CONTRACT,
   SETTINGS_SCHEMA,
+  NPM_AUDIT_SCHEMA,
   PACKAGED_CLI,
   MAX_OUTPUT_BYTES,
   MAX_SECRET_CHARS,
@@ -410,5 +462,6 @@ module.exports = {
   parseSettingsWrite,
   parseReview,
   parseInstructionAction,
-  parseIncidents
+  parseIncidents,
+  parseNpmAudit
 };

@@ -32,6 +32,7 @@ export interface DesktopBridge {
   scanIncidents(): Promise<ShellResult>;
   resolveIncidents(): Promise<ShellResult>;
   openUpgrade(): Promise<ShellResult>;
+  npmAudit(): Promise<ShellResult>;
 }
 
 export function desktopBridge(): DesktopBridge | null {
@@ -51,7 +52,8 @@ export function desktopBridge(): DesktopBridge | null {
     "disableInstruction",
     "scanIncidents",
     "resolveIncidents",
-    "openUpgrade"
+    "openUpgrade",
+    "npmAudit"
   ] as const;
   for (const name of names) {
     if (typeof bridge[name] !== "function") {
@@ -73,6 +75,7 @@ export function desktopBridge(): DesktopBridge | null {
       call("disableInstruction")(fileId, reportId, sha256),
     scanIncidents: () => call("scanIncidents")(),
     resolveIncidents: () => call("resolveIncidents")(),
-    openUpgrade: () => call("openUpgrade")()
+    openUpgrade: () => call("openUpgrade")(),
+    npmAudit: () => call("npmAudit")()
   };
 }

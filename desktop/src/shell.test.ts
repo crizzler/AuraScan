@@ -77,7 +77,8 @@ describe("shell action argv", () => {
       "refresh_snapshot",
       "project_report",
       "read_settings",
-      "instruction_review"
+      "instruction_review",
+      "npm_audit"
     ]);
     expect(helpers.actionArgv("refresh_snapshot")).toEqual(["ui", "--json"]);
     expect(helpers.actionArgv("read_settings")).toEqual(["settings", "--json"]);

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import sample from "./fixtures/snapshot.sample.json";
-import { countChecks, parseIncidentReport, parseReview, parseSettings, parseSettingsWrite, parseSnapshot } from "./contract";
-import type { IncidentReport, ReviewCandidate, ReviewReport, SettingsPayload, Snapshot } from "./contract";
+import { countChecks, parseIncidentReport, parseNpmAuditReport, parseReview, parseSettings, parseSettingsWrite, parseSnapshot } from "./contract";
+import type { IncidentReport, NpmAuditReport, ReviewCandidate, ReviewReport, SettingsPayload, Snapshot } from "./contract";
 import { desktopBridge } from "./desktop";
 import type { ShellResult } from "./desktop";
 import { About } from "./views/About";
@@ -121,6 +121,16 @@ export function App() {
   const [diagnosisNotice, setDiagnosisNotice] = useState("");
   const [diagnosisBusy, setDiagnosisBusy] = useState(false);
   const [upgradeNotice, setUpgradeNotice] = useState("");
+  const [auditRaw, setAuditRaw] = useState<unknown>(null);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState("");
+  const auditParsed = useMemo(
+    () => (auditRaw === null ? null : parseNpmAuditReport(auditRaw)),
+    [auditRaw]
+  );
+  const audit: NpmAuditReport | null =
+    auditParsed && auditParsed.ok ? auditParsed.report : null;
+  const auditParseError = auditParsed && !auditParsed.ok ? auditParsed.reason : "";
   const diagnosisParsed = useMemo(
     () => (diagnosisRaw === null ? null : parseIncidentReport(diagnosisRaw)),
     [diagnosisRaw]
@@ -367,7 +377,29 @@ export function App() {
       .catch(() => setUpgradeNotice("AuraScan could not be reached"));
   };
 
-  const runShell = (operation: () => Promise<ShellResult>) => {    operation()
+  const auditProject = () => {
+    if (!bridge) {
+      return;
+    }
+    setAuditLoading(true);
+    setAuditError("");
+    bridge
+      .npmAudit()
+      .then((result) => {
+        if (!result.ok) {
+          if (!result.canceled) {
+            setAuditError(result.error);
+          }
+          return;
+        }
+        setAuditRaw(result.payload);
+      })
+      .catch(() => setAuditError("AuraScan could not be reached"))
+      .finally(() => setAuditLoading(false));
+  };
+
+  const runShell = (operation: () => Promise<ShellResult>) => {
+    operation()
       .then(applyShellResult)
       .catch(() => setShellError("AuraScan could not be reached"));
   };
@@ -488,6 +520,10 @@ export function App() {
             actions={snapshot.actions}
             shellAvailable={Boolean(bridge)}
             notice={upgradeNotice}
+            audit={audit}
+            auditLoading={auditLoading}
+            auditError={auditError || auditParseError}
+            onAuditProject={auditProject}
             onRefresh={() => {
               if (bridge) {
                 runShell(() => bridge.refresh());

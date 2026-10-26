@@ -193,6 +193,37 @@ function runIncidentAction(actionId) {
   });
 }
 
+/**
+ * Review a JavaScript project before the user runs npm install.
+ *
+ * The directory is chosen in a native dialog in this process, so the renderer
+ * never supplies a path, and the audit itself is offline and non-executing.
+ */
+async function auditProject(event) {
+  const parent = BrowserWindow.fromWebContents(event.sender);
+  const options = {
+    title: "Review a JavaScript project",
+    properties: ["openDirectory"],
+    message: "Choose the project directory that contains package.json"
+  };
+  const picked = parent
+    ? await dialog.showOpenDialog(parent, options)
+    : await dialog.showOpenDialog(options);
+  if (picked.canceled || picked.filePaths.length !== 1) {
+    return { ok: false, canceled: true };
+  }
+  const args = helpers.actionArgv("npm_audit", { project_path: picked.filePaths[0] });
+  if (args === null) {
+    return { ok: false, error: "Unsupported desktop action" };
+  }
+  return runCli(args, {
+    parse: helpers.parseNpmAudit,
+    failure: "AuraScan could not audit that project",
+    // 1 means the audit completed and found something to review.
+    okExitCodes: [0, 1]
+  });
+}
+
 function findExecutable(name) {
   for (const dir of ["/usr/bin", "/usr/local/bin", "/bin"]) {
     const candidate = path.join(dir, name);
@@ -321,6 +352,8 @@ function registerIpc() {
   ipcMain.handle("aurascan:incident-resolve", () => runIncidentAction("incident_resolve"));
 
   ipcMain.handle("aurascan:upgrade-terminal", () => openUpgradeTerminal());
+
+  ipcMain.handle("aurascan:npm-audit", (event) => auditProject(event));
 
   ipcMain.handle("aurascan:open-report", async (event) => {
     const parent = BrowserWindow.fromWebContents(event.sender);

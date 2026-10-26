@@ -1110,6 +1110,135 @@ export function parseIncidentReport(raw: unknown): IncidentParseResult {
   };
 }
 
+export const NPM_AUDIT_SCHEMA = "aurascan-npm-audit/1";
+export const MAX_NPM_AUDIT_FINDINGS = 200;
+
+export interface NpmAuditFinding {
+  rule_id: string;
+  severity: Severity;
+  confidence: string;
+  file: string;
+  line: number;
+  explanation: string;
+  recommendation: string;
+  blocks_installation: boolean;
+  requires_manual_review: boolean;
+  evidence: string;
+}
+
+export interface NpmAuditReport {
+  schema: string;
+  path: string;
+  inspected_install_files: string[];
+  findings: NpmAuditFinding[];
+  total: number;
+  blocking: number;
+  project_install_code: string;
+  dependency_lifecycle_scripts: string;
+}
+
+export type NpmAuditParseResult =
+  | { ok: true; report: NpmAuditReport }
+  | { ok: false; reason: string };
+
+function parseNpmAuditFindings(raw: unknown): NpmAuditFinding[] | null {
+  if (!Array.isArray(raw) || raw.length > MAX_NPM_AUDIT_FINDINGS) {
+    return null;
+  }
+  const findings: NpmAuditFinding[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry)) {
+      return null;
+    }
+    const ruleId = boundedString(entry.rule_id, 80);
+    const confidence = boundedString(entry.confidence, 40);
+    const file = boundedString(entry.file, 4096);
+    if (!ruleId || !confidence || !file) {
+      return null;
+    }
+    if (typeof entry.severity !== "string" || !SEVERITIES.includes(entry.severity as Severity)) {
+      return null;
+    }
+    if (typeof entry.blocks_installation !== "boolean") {
+      return null;
+    }
+    const line = Number.isInteger(entry.line) && (entry.line as number) > 0 ? (entry.line as number) : 0;
+    findings.push({
+      rule_id: ruleId,
+      severity: entry.severity as Severity,
+      confidence,
+      file,
+      line,
+      explanation: typeof entry.explanation === "string" ? entry.explanation.slice(0, 1200) : "",
+      recommendation:
+        typeof entry.recommendation === "string" ? entry.recommendation.slice(0, 1200) : "",
+      blocks_installation: entry.blocks_installation,
+      requires_manual_review: entry.requires_manual_review === true,
+      evidence: typeof entry.evidence === "string" ? entry.evidence.slice(0, 400) : ""
+    });
+  }
+  return findings;
+}
+
+/**
+ * Strict parser for the offline `aurascan npm-audit` report.
+ *
+ * A clean report is not a safety claim, so the parsed shape keeps the coverage
+ * strings the CLI produced instead of collapsing them into a boolean.
+ */
+export function parseNpmAuditReport(raw: unknown): NpmAuditParseResult {
+  if (!isRecord(raw)) {
+    return { ok: false, reason: "audit payload is not an object" };
+  }
+  if (raw.schema !== NPM_AUDIT_SCHEMA) {
+    return { ok: false, reason: `unsupported audit schema: ${String(raw.schema)}` };
+  }
+  const projectPath = boundedString(raw.path, 4096);
+  if (!projectPath) {
+    return { ok: false, reason: "audit project path is missing" };
+  }
+  if (!Array.isArray(raw.inspected_install_files) || raw.inspected_install_files.length > MAX_NPM_AUDIT_FINDINGS) {
+    return { ok: false, reason: "audit inspected-file list is malformed" };
+  }
+  const inspected: string[] = [];
+  for (const entry of raw.inspected_install_files) {
+    const name = boundedString(entry, 4096);
+    if (!name) {
+      return { ok: false, reason: "audit inspected-file list is malformed" };
+    }
+    inspected.push(name);
+  }
+  const findings = parseNpmAuditFindings(raw.findings);
+  if (findings === null) {
+    return { ok: false, reason: "audit findings are malformed" };
+  }
+  if (!isRecord(raw.counts) || !Number.isInteger(raw.counts.blocking) || !Number.isInteger(raw.counts.total)) {
+    return { ok: false, reason: "audit counts are malformed" };
+  }
+  if (!isRecord(raw.coverage)) {
+    return { ok: false, reason: "audit coverage is malformed" };
+  }
+  return {
+    ok: true,
+    report: {
+      schema: NPM_AUDIT_SCHEMA,
+      path: projectPath,
+      inspected_install_files: inspected,
+      findings,
+      total: raw.counts.total as number,
+      blocking: raw.counts.blocking as number,
+      project_install_code:
+        typeof raw.coverage.project_install_code === "string"
+          ? raw.coverage.project_install_code.slice(0, 200)
+          : "unknown",
+      dependency_lifecycle_scripts:
+        typeof raw.coverage.dependency_lifecycle_scripts === "string"
+          ? raw.coverage.dependency_lifecycle_scripts.slice(0, 200)
+          : "unknown"
+    }
+  };
+}
+
 export function countChecks(checks: DoctorCheck[]): Record<CheckStatus, number> {
   const counts: Record<CheckStatus, number> = { ok: 0, warn: 0, error: 0 };
   for (const check of checks) {

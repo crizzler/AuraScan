@@ -23,6 +23,7 @@ but several mutations are not yet bindable to what a user saw:
 | Settings (non-secret) | **added in this change** (`settings --json`) | no | no | none |
 | AI credential | **added in this change** (`settings set-ai-key`, stdin) | user config | no | none |
 | Instruction Guard review (`instruction-audit --review --json`) | yes | private state | no | none |
+| Project audit (`npm-audit --json`) | **added in this change** | no | no | none |
 | Instruction Guard approve/disable | yes | file rename, state | no | `--approve` accepts no expected hash; triage-only binding |
 | Incident diagnosis (`incidents --json`) | yes | private report | no | none |
 | Incident repair apply | yes (`--dry-run` + `--yes`) | packages/services | **yes** | elevation; plan IDs already exist |
@@ -36,8 +37,8 @@ but several mutations are not yet bindable to what a user saw:
 Two conclusions follow:
 
 1. **Unprivileged control is available now** and covers settings, credentials,
-   Instruction Guard review and triage, incident diagnosis, and every read-only
-   view.
+   Instruction Guard review and triage, incident diagnosis, offline project
+   audits, and every read-only view.
 2. **Privileged control needs a decision** (below) before any button exists for
    upgrade, maintenance, recovery, or hook installation.
 
@@ -159,3 +160,9 @@ Phase 1 is implemented end to end:
 
 Phases 3 and 4 are implemented as described above, with privileged work kept in
  the terminal. Restore, batch enrollment, and repair application remain open.
+The Actions view also hosts the offline npm pre-install audit. The directory is
+chosen in a native dialog in the main process, so the renderer never supplies a
+path, and the shell runs the fixed `npm-audit <path> --json` vector as a
+read-only action. The report is validated by `parseNpmAudit` in the shell and
+`parseNpmAuditReport` in the renderer, and it keeps the CLI's coverage strings
+so a clean result is displayed as "not proof the project is safe to install".

@@ -62,7 +62,7 @@ Two rules hold across every plane:
 Layers are assigned from repository structure by the audit tool. They describe
 dependency direction; they are not a package reorganisation.
 
-Current measurement: **92 modules, 72,340 physical lines.**
+Current measurement: **131 modules, 85,081 physical lines.**
 
 | Layer | Modules | Contents |
 | --- | ---: | --- |
@@ -73,6 +73,7 @@ Current measurement: **92 modules, 72,340 physical lines.**
 | `adapters` | 16 | Bounded platform boundaries: `core/trusted_tools.py`, `core/trusted_executable.py`, `core/archive.py`, `core/package_archive.py`, `core/source_acquisition.py`, `core/intelligence_transport.py`, `core/intelligence_crypto.py`, `core/cache.py`, `core/local_package_db.py`, `core/ai_provider.py`, `core/recovery_network.py`, `core/compatibility.py`, `core/state_file.py`, `core/bounded_process.py`, `core/repository_state.py`, `core/repository_repair.py` |
 | `application` | 27 | Orchestration and policy: `core/engine.py`, upgrade preflight, incidents, the follow-up framework and its lifecycle adapters (`core/incident_followup.py`, `core/upgrade_followup.py`), agent, config drift, security audit, recovery planners, instruction guard logic |
 | `recovery` | 3 | `core/recovery.py`, `core/recovery_boot.py`, `core/recovery_repairs.py` |
+| `mcp` | 13 | `mcp/` — read-only stdio JSON-RPC transport (`protocol`, `guards`, `results`, `registry`, `server`) and its four tools (`scan_content`, `scan_path`, `audit_agent_config`, `security_audit`) |
 | `presentation` | 16 | Entry points, trays and renderers: `cli.py`, `__main__.py`, `makepkg_wrapper.py`, `setup_wizard.py`, `core/updater_tray.py`, `core/intelligence_tray.py`, `core/instruction_cli.py`, `core/intelligence_cli.py`, `core/recovery_cli.py`, `core/incident_cli.py`, plus the six rendering modules `core/scan_report_presenter.py`, `core/config_drift_presenter.py`, `core/incident_presenter.py`, `core/recovery_presenter.py`, `core/security_audit_presenter.py`, `core/upgrade_preflight_presenter.py` |
 | `assets` | 1 | `assets/` bundled data |
 | `package` | 1 | `core/__init__.py` package metadata |
@@ -82,6 +83,7 @@ Dependency direction:
 ```
 domain   ←   risk     ←   application   ←   presentation
 domain   ←   catalog
+                        application   ←   mcp
 ```
 
 - `domain` is the leaf layer: it depends on the standard library and on itself,
@@ -98,6 +100,15 @@ domain   ←   catalog
   not import UI entry points (INV-007).
 - `adapters` own the dangerous capabilities: process execution, network access,
   archive extraction, privilege lookups, persistent state.
+- `mcp` is the one non-adapter layer allowed to execute a process: one injected
+  `subprocess.run` call site in `mcp/tools/security_audit.py`, argv-only, bounded,
+  and no second call site without an annotation review. It may import the
+  standard library, `analyzers/injection`, `core/models`,
+  `core/instruction_guard`, `core/security_audit` and `core/rule_metadata` (the
+  last as leaf data), and must not import a presenter, `cli` or any `core/*_cli`.
+  Its write surface is empty by design: every tool is annotated
+  `readOnlyHint: true`, which is honest only while `security_audit` stays pinned
+  to `offline=True, refresh=False`.
 - `application` assembles reports and decides outcomes: `core/engine.py` builds
   the `ScanReport` and asks `RiskEngine` for the summary.
 - `presentation` consumes application and domain APIs and does not decide which
@@ -182,7 +193,7 @@ document is updated.
 
 | Capability | Modules | Notes |
 | --- | ---: | --- |
-| Process execution | 4 | `core/agent.py`, `core/local_package_db.py`, `core/package_archive.py`, `core/trusted_tools.py`. The last is the shared bounded runner; `core/trusted_executable.py` supplies the identity check it revalidates, but performs no execution itself. See the note below on injected runners. |
+| Process execution | 5 | `core/agent.py`, `core/local_package_db.py`, `core/package_archive.py`, `core/trusted_tools.py`, `mcp/tools/security_audit.py`. `core/trusted_tools.py` is the shared bounded runner; `core/trusted_executable.py` supplies the identity check it revalidates, but performs no execution itself. See the note below on injected runners. |
 | Network access | 6 | `core/ai_provider.py`, `core/intelligence_transport.py`, `core/recovery_boot.py`, `core/security_audit.py`, `core/source_acquisition.py`, `core/upgrade_preflight.py` |
 | Privilege-sensitive calls | 2 | `core/config.py`, `core/intelligence_cli.py` (ownership/UID lookups only, no privilege change) |
 | Archive extraction | 1 | `core/archive.py` (`SafeArchiveExtractor`, bounded by bytes and entries) |
@@ -197,6 +208,10 @@ data flow. The incident, repair, diagnostics, automation and setup paths execute
 commands that way, so their execution authority is real and *under-reported* by
 the table above. Treat the process count as a map of direct call sites, and read
 `core/bounded_process.py` plus its callers for the bounded-execution boundary.
+
+`mcp/tools/security_audit.py` is deliberately *not* an injected-runner case: its
+wrapper body holds a direct `subprocess.run` call site precisely so the authority
+is recorded, and a second call site in that layer needs an annotation review.
 
 Notably, **no analyzer executes a process** (INV-001). Analyzers obtain native
 tool results through the trusted adapters, so the execution boundary stays in

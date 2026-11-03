@@ -1176,6 +1176,8 @@ def assign_layer(module_name: str, relative_path: str) -> str:
         return "analysis"
     if relative_path.startswith("assets/"):
         return "assets"
+    if relative_path.startswith("mcp/"):
+        return "mcp"
     if relative_path.startswith("core/"):
         stem = relative_path.split("/")[-1]
         name = stem[:-3] if stem.endswith(".py") else stem

@@ -4198,6 +4198,29 @@ def _cursor_config_analysis(text: str, surface: str) -> List[InstructionFinding]
     return findings
 
 
+# Surfaces that accept a caller-supplied document rather than a discovered file. Every entry here
+# must already be routed by ``_analyze_text``; this tuple is the allowlist, not a second router.
+AGENT_CONFIG_SURFACES = ("cursor-mcp-manifest", "cursor-permissions-configuration", "mcp-manifest")
+
+MAX_AGENT_CONFIG_CHARS = 262144
+
+
+def audit_agent_config_text(text, surface="cursor-mcp-manifest"):
+    """Audit one agent/MCP configuration document as untrusted data.
+
+    Pure: no file is opened, no process is run, no state is written. The document is analysed by the
+    same router discovery uses, so there is one source of truth for what a manifest finding is.
+    Raises ``TypeError`` for non-str, ``ValueError`` for an unknown surface or an over-limit document.
+    """
+    if not isinstance(text, str):
+        raise TypeError("config must be str")
+    if surface not in AGENT_CONFIG_SURFACES:
+        raise ValueError("unknown surface %r" % (surface,))
+    if len(text) > MAX_AGENT_CONFIG_CHARS:
+        raise ValueError("configuration exceeds the character limit")
+    return list(_analyze_text(text, surface))
+
+
 def _analyze_text(text: str, surface: str) -> List[InstructionFinding]:
     if surface in {"cursor-permissions-configuration", "cursor-mcp-manifest"}:
         return _cursor_config_analysis(text, surface)

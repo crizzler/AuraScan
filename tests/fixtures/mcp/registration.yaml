@@ -1,0 +1,24 @@
+# Registration block for the Hermes `config.yaml`, and the matching allowlist entries.
+# Applied by the operator (or the orchestrator) with `hermes config set`; the server name is
+# `aurascan` and the four names below must stay in step with `aurascan/mcp/registry.py`.
+mcp_servers:
+  aurascan:
+    command: "/home/arawn/.local/bin/aurascan-mcp"
+    args: ["--root", "/home/arawn/Documents/Other Projects/AuraScan"]
+    trust: untrusted
+    protocol: legacy
+    timeout: 120
+    connect_timeout: 30
+    supports_parallel_tool_calls: false
+    tools:
+      include: [scan_content, scan_path, audit_agent_config, security_audit]
+      resources: false
+      prompts: false
+    sampling:
+      enabled: false
+
+command_allowlist:
+  - mcp:aurascan/scan_content
+  - mcp:aurascan/scan_path
+  - mcp:aurascan/audit_agent_config
+  - mcp:aurascan/security_audit

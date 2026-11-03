@@ -2005,6 +2005,85 @@ run whose pacman install happens inside makepkg before the wrapper regains
 control; treat review acceptance and the pacman hook as the effective checks
 for those flows.
 
+## MCP Server
+
+`aurascan-mcp` exposes a small, strictly read-only slice of AuraScan to any MCP
+client over newline-delimited JSON-RPC 2.0 on stdin/stdout. It ships four tools
+and nothing else:
+
+| Tool | What it does |
+| --- | --- |
+| `scan_content` | Scan caller-supplied text for prompt-injection signals. |
+| `scan_path` | Scan one bounded UTF-8 file that must resolve inside an explicit `--root`. |
+| `audit_agent_config` | Audit one agent/MCP configuration document as untrusted data. |
+| `security_audit` | Check the local host offline: one bounded `pacman -Q`, reads only. |
+
+Every tool is annotated `readOnlyHint: true`, `destructiveHint: false`,
+`openWorldHint: false`, so all four run unprompted in headless sessions
+(`chat -q`, cron, unattended gateways) as well as approved in interactive ones.
+Nothing is written, nothing is blocked or quarantined, and a result never
+certifies a package or a host as safe.
+
+AuraScan's injection detector is a static, rule-based first signal — it reports
+text that looks like instructions aimed at an AI reader, nothing is executed, and
+the confidence value is a policy label, not a precision estimate.
+
+```bash
+aurascan-mcp --root "/home/arawn/Documents/Other Projects/AuraScan"
+```
+
+`--root` is repeatable and is the whole filesystem boundary for `scan_path`;
+`--budget <tool>=<seconds>` overrides a per-call timeout and `--max-line-bytes`
+bounds an inbound line. Progress and diagnostics go to stderr and never to
+stdout.
+
+Registration (Hermes `config.yaml`; apply with `hermes config set`, and pin
+`--root` because the server must not derive a boundary from the session's
+working directory):
+
+```yaml
+mcp_servers:
+  aurascan:
+    command: "/home/arawn/.local/bin/aurascan-mcp"
+    args: ["--root", "/home/arawn/Documents/Other Projects/AuraScan"]
+    trust: untrusted
+    protocol: legacy
+    timeout: 120
+    connect_timeout: 30
+    supports_parallel_tool_calls: false
+    tools:
+      include: [scan_content, scan_path, audit_agent_config, security_audit]
+      resources: false
+      prompts: false
+    sampling:
+      enabled: false
+```
+
+```yaml
+command_allowlist:
+  - mcp:aurascan/scan_content
+  - mcp:aurascan/scan_path
+  - mcp:aurascan/audit_agent_config
+  - mcp:aurascan/security_audit
+```
+
+`trust: untrusted` plus `readOnlyHint` keeps interactive consent visible;
+the allowlist is the second line of defence so a lost annotation cannot silently
+disable a tool headless. `tools.include` is an explicit four-name list: a fifth
+tool added to the server later stays invisible until someone opts in. Timeouts
+are 20 s per scan and 60 s for `security_audit`, under the client's `timeout:
+120`, so the server's own `timeout` error arrives instead of a client kill.
+
+`security_audit` is read-only only while it is pinned to `offline=True,
+refresh=False`; adding an `online` argument would need a fresh annotation
+review. Its description names the one process, every path it stats or reads, and
+that `include_evidence` discloses host-local paths, `hidden_*` BPF object names
+and Tailscale peer markers.
+
+`aurascan/mcp/results.py` resolves two agent-config coverage rule IDs from the
+catalog at import, so renaming either rule without updating the catalog stops
+the server at startup with a named `LookupError`. That is deliberate.
+
 ## Pacman Hook
 
 The release-safe pacman hook template is `packaging/arch/aurascan.hook`. The

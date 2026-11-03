@@ -3,6 +3,8 @@
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 import sys
 
 import pytest
@@ -16,7 +18,7 @@ import injection_corpus_export as exporter  # noqa: E402
 import injection_label_audit as audit  # noqa: E402
 import injection_parity as parity  # noqa: E402
 
-from aurascan.analyzers.injection import override  # noqa: E402
+from aurascan.analyzers.injection import encoded, override  # noqa: E402
 
 PROBE_DIR = os.path.join(TOOLS, "injection_probe")
 LABEL_LISTS = os.path.join(ROOT, "tests", "fixtures", "injection_corpus", "csharp_label_lists.txt")
@@ -152,6 +154,23 @@ def test_selftest_reports_the_pinned_deltas(loaded, capsys):
     assert "override.matches expected=45 actual=65 delta=+20" in out
     assert "benign.high_findings expected=0 actual=12 delta=+12" in out
     assert "override.tp expected=45 actual=41 delta=-4" in out
+    assert "encoded.tp expected=43 actual=37 delta=-6" in out
+    assert "encoded.tp expected=43 actual=45 delta=+2" in out
+
+
+def test_encoded_mutants_patch_the_production_tables(loaded, capsys):
+    injections, controls, golden = loaded
+    original = encoded.LEET_MAP
+    snapshot = dict(original)
+    with parity.mutant_leet_without_5():
+        assert "5" not in encoded.LEET_MAP
+        assert encoded.LEET_MAP is not original
+    assert encoded.LEET_MAP is original
+    assert encoded.LEET_MAP == snapshot
+
+    with parity.mutant_no_leet_count_guard():
+        assert encoded.LEET_MIN_HITS == 0
+    assert encoded.LEET_MIN_HITS == 2
 
 
 def test_baseline_reproduces_before_any_mutant_runs(loaded):
@@ -195,3 +214,73 @@ def test_mutants_patch_the_production_module_not_a_copy():
         assert override.LITERAL_PHRASES is not original
         assert len(override.LITERAL_PHRASES) == 17
     assert override.LITERAL_PHRASES is original
+
+
+# --- the gate's own failure paths ------------------------------------------------------------------
+
+def test_gate_exits_two_on_a_real_metric_delta(loaded):
+    injections, controls, golden = loaded
+    rows, differing = parity.measure(injections, controls, golden)
+    _lines, code = parity.compare_rows(rows, differing)
+    assert code == parity.EXIT_PASS
+
+    rows["encoded.tp"] = rows["encoded.tp"] + 1
+    _lines, code = parity.compare_rows(rows, differing)
+    assert code == parity.EXIT_METRIC
+
+
+def test_gate_exits_four_on_a_golden_mismatch(loaded):
+    injections, controls, golden = loaded
+    rows, differing = parity.measure(injections, controls, golden)
+    rows["golden.sample_mismatches"] = 3
+    _lines, code = parity.compare_rows(rows, differing)
+    assert code == parity.EXIT_GOLDEN
+
+
+def test_gate_exits_five_on_a_shape_mismatch(loaded):
+    injections, controls, golden = loaded
+    rows, differing = parity.measure(injections, controls, golden)
+    rows["corpus.samples_total"] = 549
+    _lines, code = parity.compare_rows(rows, differing)
+    assert code == parity.EXIT_SHAPE
+
+
+def test_reported_only_rows_never_fail_the_gate(loaded):
+    injections, controls, golden = loaded
+    rows, differing = parity.measure(injections, controls, golden)
+    rows["report.unknown.high_findings"] = 0
+    _lines, code = parity.compare_rows(rows, differing)
+    assert code == parity.EXIT_PASS
+
+
+def test_check_anchors_detects_a_one_byte_corpus_drift(tmp_path, monkeypatch):
+    raw = str(tmp_path / "raw")
+    shutil.copytree(exporter.RAW, raw)
+    target = os.path.join(raw, "Assets", "Corpus", "Injection", "override", "sample-0.cs")
+    with open(target, "ab") as handle:
+        handle.write(b"\n//drift\n")
+
+    monkeypatch.setattr(parity, "RAW", raw)
+    assert parity.check_anchors() == parity.EXIT_CORPUS
+
+
+def test_check_anchors_detects_a_dirty_anticopy_checkout(tmp_path, monkeypatch):
+    repo = str(tmp_path / "repo")
+    os.makedirs(repo)
+    subprocess.run(["git", "-C", repo, "init", "-q"], check=True)
+    with open(os.path.join(repo, "dirty.txt"), "w", encoding="utf-8") as handle:
+        handle.write("untracked\n")
+
+    monkeypatch.setattr(parity, "ANTICOPY", repo)
+    assert parity.check_anchors() == parity.EXIT_CORPUS
+
+
+def test_check_anchors_detects_a_golden_anchor_mismatch(tmp_path, monkeypatch):
+    with open(parity.GOLDEN, "r", encoding="utf-8") as handle:
+        golden = json.load(handle)
+    golden["anticopy_head"] = "0" * 40
+    drifted = tmp_path / "spans.json"
+    drifted.write_text(json.dumps(golden), encoding="utf-8")
+
+    monkeypatch.setattr(parity, "GOLDEN", str(drifted))
+    assert parity.check_anchors() == parity.EXIT_GOLDEN

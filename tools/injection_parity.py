@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Acceptance harness for the reverse-AntiCopy ``instruction-override`` spike (dev tool).
+"""Acceptance harness for the reverse-AntiCopy injection spike pair (dev tool).
 
-Three modes:
+Two gated classes (``instruction-override``, ``encoded-obfuscated``), one reported class
+(``data-exfiltration``) and one reported inner class (``persona-hijack``). Three modes:
 
 * ``--report``  run the metric pass, print the table, write the evidence JSON;
 * ``--gate``    re-derive the corpus hash from the retained raw tree, re-anchor the golden to the
@@ -40,11 +41,21 @@ if ROOT not in sys.path:
 from aurascan.analyzers.injection import catalog, injection_text, scanner  # noqa: E402
 from aurascan.analyzers.injection.engine import RuleBasedDetectionEngine  # noqa: E402
 from aurascan.analyzers.injection.model import InjectionSettings  # noqa: E402
-from aurascan.analyzers.injection import override  # noqa: E402
+from aurascan.analyzers.injection import encoded, override  # noqa: E402
 
 import injection_corpus_export as exporter  # noqa: E402
 
-ENABLED_CLASSES = (catalog.INSTRUCTION_OVERRIDE,)
+ENABLED_CLASSES = (
+    catalog.INSTRUCTION_OVERRIDE,
+    catalog.PERSONA_HIJACK,
+    catalog.DATA_EXFILTRATION,
+    catalog.ENCODED_OBFUSCATED,
+)
+
+CLASS_LABEL = {
+    catalog.INSTRUCTION_OVERRIDE: "override",
+    catalog.ENCODED_OBFUSCATED: "encoded",
+}
 
 EXIT_PASS = 0
 EXIT_METRIC = 2
@@ -58,7 +69,7 @@ CORPUS_DIR = os.path.join(FIXTURES, "injection_corpus")
 RAW = os.path.join(CORPUS_DIR, "raw")
 HARVEST = os.path.join(CORPUS_DIR, "harvest.json")
 GOLDEN = os.path.join(FIXTURES, "injection_golden", "spans.json")
-EVIDENCE = os.path.join(ROOT, "SPIKE-A-evidence.json")
+EVIDENCE = os.path.join(ROOT, "SPIKE-B-evidence.json")
 
 ANTICOPY = os.environ.get("ANTICOPY_ROOT", "/home/arawn/Unity Projects/AntiCopy")
 
@@ -74,17 +85,26 @@ EXPECTED = (
     ("corpus.class.multilingual", 40, True),
     ("corpus.class.tool-command", 10, True),
     ("corpus.class.delimiter-escape", 10, True),
-    ("enabled_classes", "instruction-override", True),
+    ("enabled_classes", "instruction-override,persona-hijack,data-exfiltration,encoded-obfuscated", True),
     ("override.tp", 45, True),
     ("override.fp_non_fixture", 12, True),
     ("override.matches", 45, True),
     ("override.recall", "0.900", True),
     ("override.precision", "0.789", True),
+    ("encoded.tp", 43, True),
+    ("encoded.fp_non_fixture", 0, True),
+    ("encoded.matches", 43, True),
+    ("encoded.recall", "0.860", True),
+    ("encoded.precision", "1.000", True),
     ("benign.medium_plus_files", 12, True),
     ("benign.high_findings", 0, True),
     ("golden.sample_mismatches", 0, True),
     ("report.override.samples", 50, False),
     ("report.benign.files", 310, False),
+    ("report.exfil.tp", 40, False),
+    ("report.exfil.fp", 0, False),
+    ("report.unknown.medium_plus_files", 42, False),
+    ("report.unknown.high_findings", 42, False),
 )
 
 ROW_ORDER = [name for name, _, _ in EXPECTED]
@@ -121,9 +141,9 @@ def git(*args):
 # --------------------------------------------------------------------------- metrics
 
 
-def _scan(content, path):
+def _scan(content, path, source_type=None):
     settings = InjectionSettings(enabled_classes=ENABLED_CLASSES)
-    return scanner.InjectionScanner(ENGINE, settings).scan_target(path, content)
+    return scanner.InjectionScanner(ENGINE, settings).scan_target(path, content, source_type=source_type)
 
 
 ENGINE = RuleBasedDetectionEngine()
@@ -143,8 +163,7 @@ def measure(injections, controls, golden):
 
     rows["enabled_classes"] = ",".join(ENABLED_CLASSES)
 
-    for class_id in ENABLED_CLASSES:
-        label = "override" if class_id == catalog.INSTRUCTION_OVERRIDE else class_id
+    for class_id, label in CLASS_LABEL.items():
         detected = 0
         matches = 0
         for sample in injections:
@@ -158,26 +177,54 @@ def measure(injections, controls, golden):
         rows[label + ".matches"] = matches
         rows[label + ".recall"] = "%.3f" % (float(detected) / class_counts.get(class_id, 1))
 
-    fp_non_fixture = 0
+    # Benign table 1: the corpus-path mapping (gated), then the pathless ``unknown`` table (reported).
+    corpus_fp = {}
     medium_plus_files = 0
     high_findings = 0
+    exfil_fp = 0
+    unknown_medium_plus = 0
+    unknown_high = 0
     for sample in controls:
         evidence = _scan(sample.content, sample.path)
-        if any(item.class_id == catalog.INSTRUCTION_OVERRIDE and not item.test_fixture_context for item in evidence):
-            fp_non_fixture += 1
+        for item in evidence:
+            if not item.test_fixture_context:
+                corpus_fp.setdefault(item.class_id, set()).add(sample.path)
         if any(item.confidence in ("MEDIUM", "HIGH") for item in evidence):
             medium_plus_files += 1
         high_findings += sum(1 for item in evidence if item.confidence == "HIGH")
+        if any(item.class_id == catalog.DATA_EXFILTRATION for item in evidence):
+            exfil_fp += 1
 
-    if catalog.INSTRUCTION_OVERRIDE in ENABLED_CLASSES:
-        detected = rows["override.tp"]
-        rows["override.fp_non_fixture"] = fp_non_fixture
-        rows["override.precision"] = "%.3f" % (float(detected) / (detected + fp_non_fixture)) if (detected + fp_non_fixture) else "1.000"
+        pathless = _scan(sample.content, "", source_type="unknown")
+        if any(item.confidence in ("MEDIUM", "HIGH") for item in pathless):
+            unknown_medium_plus += 1
+        unknown_high += sum(1 for item in pathless if item.confidence == "HIGH")
+
+    for class_id, label in CLASS_LABEL.items():
+        fp = len(corpus_fp.get(class_id, ()))
+        rows[label + ".fp_non_fixture"] = fp
+        rows[label + ".precision"] = (
+            "%.3f" % (float(rows[label + ".tp"]) / (rows[label + ".tp"] + fp))
+            if (rows[label + ".tp"] + fp)
+            else "1.000"
+        )
 
     rows["benign.medium_plus_files"] = medium_plus_files
     rows["benign.high_findings"] = high_findings
     rows["report.override.samples"] = class_counts.get(catalog.INSTRUCTION_OVERRIDE, 0)
     rows["report.benign.files"] = len(controls)
+    rows["report.exfil.tp"] = sum(
+        1
+        for sample in injections
+        if sample.class_id == catalog.DATA_EXFILTRATION
+        and any(
+            item.class_id == catalog.DATA_EXFILTRATION
+            for item in _scan(sample.content, sample.path)
+        )
+    )
+    rows["report.exfil.fp"] = exfil_fp
+    rows["report.unknown.medium_plus_files"] = unknown_medium_plus
+    rows["report.unknown.high_findings"] = unknown_high
 
     mismatches, paths = compare_golden(injections + controls, golden)
     rows["golden.sample_mismatches"] = mismatches
@@ -213,6 +260,7 @@ def compare_golden(samples, golden):
 
         fixture = injection_text.is_test_fixture_path(sample.path)
         documentation = injection_text.is_documentation_path(sample.path)
+
         actual_confidence = scanner._confidence_for(found[0], fixture, documentation) if found else None
         unknown_confidence = (
             scanner._confidence_for(found[0], False, False) if found else None
@@ -354,6 +402,21 @@ def mutant_drop_forget():
 
 
 @contextlib.contextmanager
+def mutant_leet_without_5():
+    """M5: leet map without ``5->s``; ``5end``/``1n5truct`` stop decoding to ``send``/``instruct``."""
+    table = dict((key, value) for key, value in encoded.LEET_MAP.items() if key != "5")
+    with _patch(encoded, "LEET_MAP", table):
+        yield
+
+
+@contextlib.contextmanager
+def mutant_no_leet_count_guard():
+    """M6: drop the ``leetCount < 2`` guard, so every 5+ character word forms a cluster."""
+    with _patch(encoded, "LEET_MIN_HITS", 0):
+        yield
+
+
+@contextlib.contextmanager
 def mutant_inert():
     """A mutant that changes nothing: the exit-6 path is exercised with it in the test suite."""
     with _patch(override, "LITERAL_PHRASES", tuple(override.LITERAL_PHRASES)):
@@ -366,7 +429,8 @@ MUTANTS = (
         "what": "drop LiteralPhrases[16]",
         "factory": mutant_drop_literal_16,
         "expected": {"override.tp": 43, "override.matches": 43},
-        "derived": {"override.recall", "override.precision", "golden.sample_mismatches"},
+        "derived": {"override.recall", "override.precision", "golden.sample_mismatches",
+                    "encoded.tp", "encoded.matches", "encoded.recall"},
     },
     {
         "name": "M2",
@@ -387,7 +451,22 @@ MUTANTS = (
         "what": "drop forget from StemFamily",
         "factory": mutant_drop_forget,
         "expected": {"override.tp": 41, "override.matches": 41},
-        "derived": {"override.recall", "override.precision", "golden.sample_mismatches"},
+        "derived": {"override.recall", "override.precision", "golden.sample_mismatches",
+                    "encoded.tp", "encoded.matches", "encoded.recall"},
+    },
+    {
+        "name": "M5",
+        "what": "leet map without 5->s",
+        "factory": mutant_leet_without_5,
+        "expected": {"encoded.tp": 37, "encoded.matches": 37},
+        "derived": {"encoded.recall", "encoded.precision", "golden.sample_mismatches"},
+    },
+    {
+        "name": "M6",
+        "what": "drop the leetCount < 2 guard",
+        "factory": mutant_no_leet_count_guard,
+        "expected": {"encoded.tp": 45, "encoded.matches": 45},
+        "derived": {"encoded.recall", "encoded.precision", "golden.sample_mismatches"},
     },
 )
 
@@ -548,11 +627,21 @@ def tables_sha256():
     """Hash over the detector tables and the confidence ladder — freeze before the first gate run."""
     import hashlib
 
+    from aurascan.analyzers.injection import exfiltration, persona
+
     digest = hashlib.sha256()
     for block in (
         override.LITERAL_IDS,
         override.LITERAL_PHRASES,
         (override.STEM_FAMILY_PATTERN,),
+        persona.LITERAL_IDS,
+        persona.LITERAL_PHRASES,
+        exfiltration.SENSITIVE_IDS,
+        exfiltration.SENSITIVE_PHRASES,
+        exfiltration.VERB_IDS,
+        exfiltration.VERB_PHRASES,
+        tuple("%s=%s" % item for item in sorted(encoded.LEET_MAP.items())),
+        (encoded.LEET_MIN_LENGTH, encoded.LEET_MIN_HITS),
         (injection_text.MAX_SNIPPET_LENGTH, injection_text.MAX_DECODED_LENGTH,
          injection_text.PAIR_WINDOW, injection_text.MAX_MATCHES_PER_DETECTOR),
     ):

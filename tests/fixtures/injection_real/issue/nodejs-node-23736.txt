@@ -1,0 +1,13 @@
+* **Version**: v10.12.0
+* **Platform**: Darwin geegaw.local 18.0.0 Darwin Kernel Version 18.0.0: Wed Aug 22 20:13:40 PDT 2018; root:xnu-4903.201.2~1/RELEASE_X86_64 x86_64
+* **Subsystem**: fs
+
+https://github.com/isaacs/chmodr/pull/20
+
+Node's fs.lchmod implementation opens the file in write-only mode.  (On Darwin, at least.)
+
+This is unnecessary, and fails for read-only files.
+
+Additionally, this approach (open and then use fchmod) fails for directories.  Is there a reason why native lchmod isn't being used?  Systems that have `O_SYMLINK` also have `lchmod(3)`, don't they?
+
+This is important because lchmod is the only way to avoid a (minor) security vulnerability when doing recursive mode setting on directories.  If we have to restrict the use of lchmod to only symlinks, then we're back in TOCTOU territory.

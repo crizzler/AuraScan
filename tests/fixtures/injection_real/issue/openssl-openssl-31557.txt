@@ -1,0 +1,11 @@
+The fix for CVE-2026-34182 (`7947e6a81e`) guarded the `auth==1` arm of `ossl_cms_EncryptedContent_init_bio` against non-AEAD content ciphers. The `auth==0` arm (plain EnvelopedData) currently accepts any cipher mode, including AES-OFB, AES-CFB, and AES-CTR.
+
+| Container | Content cipher | Current result |
+|---|---|---|
+| EnvelopedData | CBC | accepted ✓ |
+| EnvelopedData | stream-mode (OFB/CFB/CTR) | accepted ← gap |
+| EnvelopedData | AEAD | `CIPHER_AEAD_IN_ENVELOPED_DATA` ✓ |
+| AuthEnvelopedData | AEAD | verified ✓ |
+| AuthEnvelopedData | non-AEAD | `UNSUPPORTED_CONTENT_ENCRYPTION_ALGORITHM` ✓ |
+
+Extending the same restriction to the `auth==0` arm would make both arms consistent.

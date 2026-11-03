@@ -10,12 +10,19 @@ using AntiCopy.Provenance.Reporting;
 
 // Deterministic golden-span dumper. Input: corpus.json. Output: spans.json.
 //
-// The oracle is the production detector + production scanner confidence policy with the Card A
-// enabled set (instruction-override only). Everything below reads; nothing is written outside the
-// output path, and no detector logic is re-implemented here.
+// The oracle is the production detector + production scanner confidence policy with the Card B
+// enabled set (the four ported classes, i.e. the C# default set minus the three unported ones).
+// Everything below reads; nothing is written outside the output path, and no detector logic is
+// re-implemented here.
 internal static class Program
 {
-    private const string EnabledClass = "instruction-override";
+    private static readonly string[] EnabledClasses =
+    {
+        "instruction-override",
+        "persona-hijack",
+        "data-exfiltration",
+        "encoded-obfuscated"
+    };
 
     private sealed class Sample
     {
@@ -40,7 +47,7 @@ internal static class Program
         }
 
         var settings = new InjectionDetectionSettings();
-        settings.enabledClasses = new List<string> { EnabledClass };
+        settings.enabledClasses = new List<string>(EnabledClasses);
         var scanner = new InjectionScanner(new RuleBasedDetectionEngine(), settings);
         var engine = new RuleBasedDetectionEngine();
 
@@ -53,7 +60,13 @@ internal static class Program
             ? "CultureInvariant (RegexOptions.CultureInvariant|IgnoreCase)" : CultureInfo.InvariantCulture.Name)).Append(",\n");
         builder.Append("  \"unicode_culture\": ").Append(Json(CultureInfo.InvariantCulture.Name == string.Empty
             ? "invariant" : CultureInfo.InvariantCulture.Name)).Append(",\n");
-        builder.Append("  \"enabled_classes\": [").Append(Json(EnabledClass)).Append("],\n");
+        builder.Append("  \"enabled_classes\": [");
+        for (int e = 0; e < EnabledClasses.Length; e++)
+        {
+            if (e > 0) builder.Append(", ");
+            builder.Append(Json(EnabledClasses[e]));
+        }
+        builder.Append("],\n");
         builder.Append("  \"samples\": [\n");
 
         for (int i = 0; i < samples.Count; i++)
@@ -64,7 +77,7 @@ internal static class Program
             builder.Append(", \"class\": ").Append(sample.ClassId == null ? "null" : Json(sample.ClassId));
             builder.Append(", \"hits\": [");
 
-            IList<InjectionMatch> matches = engine.Scan(sample.Content, new List<string> { EnabledClass });
+            IList<InjectionMatch> matches = engine.Scan(sample.Content, new List<string>(EnabledClasses));
             IList<InjectionEvidence> evidence = scanner.ScanTarget(sample.Path, sample.Content);
             IList<InjectionEvidence> evidenceNoPath = scanner.ScanTarget(string.Empty, sample.Content);
 

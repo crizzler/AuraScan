@@ -39,8 +39,14 @@ C_SHARP_DEFAULT_ENABLED_CLASS_IDS = (
     MULTILINGUAL,
 )
 
-# Card A: the unported classes are not registered, so only this id is enabled.
-DEFAULT_ENABLED_CLASS_IDS = (INSTRUCTION_OVERRIDE,)
+# Card B: the four ported, enabled classes — the C# default set minus the three unported ones.
+# Asserted by the gate, so a class cannot be quietly disabled to move a number.
+DEFAULT_ENABLED_CLASS_IDS = (
+    INSTRUCTION_OVERRIDE,
+    PERSONA_HIJACK,
+    DATA_EXFILTRATION,
+    ENCODED_OBFUSCATED,
+)
 
 _SEVERITY = {
     INSTRUCTION_OVERRIDE: "HIGH",

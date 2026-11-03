@@ -1,0 +1,56 @@
+### What happened?
+
+Prow ci-kubernetes-snyk-master [job](https://prow.k8s.io/view/gs/kubernetes-ci-logs/logs/ci-kubernetes-snyk-master/2116143223394013184) failing due to new CVE-2026-78661 finding
+
+### What did you expect to happen?
+
+CVE scan should be clean
+
+### How can we reproduce it (as minimally and precisely as possible)?
+
+run 'snyk test' against latest k/k master
+
+### Anything else we need to know?
+
+_No response_
+
+### Kubernetes version
+
+<details>
+n/a
+</details>
+
+
+### Cloud provider
+
+<details>
+n/a
+</details>
+
+
+### OS version
+
+<details>
+n/a
+</details>
+
+
+### Install tools
+
+<details>
+
+</details>
+
+
+### Container runtime (CRI) and version (if applicable)
+
+<details>
+
+</details>
+
+
+### Related plugins (CNI, CSI, ...) and versions (if applicable)
+
+<details>
+
+</details>

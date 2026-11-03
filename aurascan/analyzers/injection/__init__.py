@@ -3,9 +3,10 @@
 Analysis-layer, stdlib-only, raise-only. Text is inspected as bytes-in-a-string: nothing is
 executed, fetched, or written while scanning.
 
-Spike scope (Card A): ``instruction-override`` only. The class set, the ported detector and the
-confidence ladder are deliberately narrow; ``encoded-obfuscated`` and its inner matchers follow in
-Card B, and ``source_type`` replaces the raw path policy there.
+Spike scope (Card B): ``instruction-override`` and ``encoded-obfuscated`` are the gated pair;
+``persona-hijack`` and ``data-exfiltration`` are ported as inner matchers for the encoded class and
+reported but never gated. ``source_type`` replaces the raw path policy. Three classes remain
+unported (multilingual, tool-command, delimiter-escape) and are never enabled.
 """
 
 from .catalog import (
@@ -23,8 +24,8 @@ from .catalog import (
 from .detectors import InjectionDetector, create_default_detectors
 from .engine import InjectionDetectionEngine, RuleBasedDetectionEngine
 from .findings import to_findings
-from .model import InjectionEvidence, InjectionMatch, InjectionSettings
-from .scanner import InjectionScanner, scan_content, scan_path
+from .model import SOURCE_TYPES, InjectionEvidence, InjectionMatch, InjectionSettings
+from .scanner import InjectionScanner, derive_source_type, scan_content, scan_path
 
 __all__ = [
     "CLASS_IDS",
@@ -33,6 +34,7 @@ __all__ = [
     "ENCODED_OBFUSCATED",
     "INSTRUCTION_OVERRIDE",
     "PERSONA_HIJACK",
+    "SOURCE_TYPES",
     "InjectionDetectionEngine",
     "InjectionDetector",
     "InjectionEvidence",
@@ -41,6 +43,7 @@ __all__ = [
     "InjectionSettings",
     "RuleBasedDetectionEngine",
     "create_default_detectors",
+    "derive_source_type",
     "display_name",
     "normalize",
     "rule_id_for",

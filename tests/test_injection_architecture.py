@@ -16,7 +16,18 @@ if AUDIT not in sys.path:
 
 import architecture_audit  # noqa: E402
 
-STDLIB_ALLOWED = {"re", "unicodedata", "abc", "dataclasses", "typing", "pathlib", "os", "sys", "json"}
+STDLIB_ALLOWED = {
+    "re",
+    "unicodedata",
+    "abc",
+    "dataclasses",
+    "typing",
+    "pathlib",
+    "os",
+    "sys",
+    "json",
+    "base64",
+}
 
 FORBIDDEN_MODULES = {
     "subprocess",

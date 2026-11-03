@@ -1,0 +1,253 @@
+{
+  "tool": "cve-mcp.ghsa",
+  "arguments": {
+    "id": "GHSA-7rjr-3q55-vv33"
+  },
+  "result": {
+    "ghsa_id": "GHSA-7rjr-3q55-vv33",
+    "cve_id": "CVE-2021-45046",
+    "url": "https://api.github.com/advisories/GHSA-7rjr-3q55-vv33",
+    "html_url": "https://github.com/advisories/GHSA-7rjr-3q55-vv33",
+    "summary": "Incomplete fix for Apache Log4j vulnerability",
+    "description": "# Impact\n\nThe fix to address [CVE-2021-44228](https://nvd.nist.gov/vuln/detail/CVE-2021-44228) in Apache Log4j 2.15.0 was incomplete in certain non-default configurations. This could allow attackers with control over Thread Context Map (MDC) input data when the logging configuration uses a non-default Pattern Layout with either a Context Lookup (for example, $${ctx:loginId}) or a Thread Context Map pattern (%X, %mdc, or %MDC) to craft malicious input data using a JNDI Lookup pattern resulting in a remote code execution (RCE) attack. \n\n## Affected packages\nOnly the `org.apache.logging.log4j:log4j-core` package is directly affected by this vulnerability. The `org.apache.logging.log4j:log4j-api` should be kept at the same version as the `org.apache.logging.log4j:log4j-core` package to ensure compatability if in use.\n\n# Mitigation\n\nLog4j 2.16.0 fixes this issue by removing support for message lookup patterns and disabling JNDI functionality by default. This issue can be mitigated in prior releases (< 2.16.0) by removing the JndiLookup class from the classpath (example: zip -q -d log4j-core-*.jar org/apache/logging/log4j/core/lookup/JndiLookup.class).\n\nLog4j 2.15.0 restricts JNDI LDAP lookups to localhost by default. Note that previous mitigations involving configuration such as to set the system property `log4j2.formatMsgNoLookups` to `true` do NOT mitigate this specific vulnerability.",
+    "type": "reviewed",
+    "severity": "critical",
+    "repository_advisory_url": null,
+    "source_code_location": "",
+    "identifiers": [
+      {
+        "value": "GHSA-7rjr-3q55-vv33",
+        "type": "GHSA"
+      },
+      {
+        "value": "CVE-2021-45046",
+        "type": "CVE"
+      }
+    ],
+    "references": [
+      "https://nvd.nist.gov/vuln/detail/CVE-2021-45046",
+      "https://logging.apache.org/log4j/2.x/security.html",
+      "https://www.openwall.com/lists/oss-security/2021/12/14/4",
+      "https://www.cve.org/CVERecord?id=CVE-2021-44228",
+      "https://www.intel.com/content/www/us/en/security-center/advisory/intel-sa-00646.html",
+      "https://cert-portal.siemens.com/productcert/pdf/ssa-661247.pdf",
+      "https://cert-portal.siemens.com/productcert/pdf/ssa-714170.pdf",
+      "https://www.kb.cert.org/vuls/id/930724",
+      "https://www.debian.org/security/2021/dsa-5022",
+      "https://psirt.global.sonicwall.com/vuln-detail/SNWLID-2021-0032",
+      "https://www.oracle.com/security-alerts/alert-cve-2021-44228.html",
+      "https://cert-portal.siemens.com/productcert/pdf/ssa-397453.pdf",
+      "https://cert-portal.siemens.com/productcert/pdf/ssa-479842.pdf",
+      "https://www.oracle.com/security-alerts/cpujan2022.html",
+      "https://www.oracle.com/security-alerts/cpuapr2022.html",
+      "https://www.oracle.com/security-alerts/cpujul2022.html",
+      "https://security.gentoo.org/glsa/202310-16",
+      "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/SIG7FZULMNK2XF6FZRU4VWYDQXNMUGAJ",
+      "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/EOKPQGV24RRBBI4TBZUDQMM4MEH7MXCY",
+      "https://sec.cloudapps.cisco.com/security/center/content/CiscoSecurityAdvisory/cisco-sa-apache-log4j-qRuKNEbd",
+      "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2021-45046",
+      "https://www.openwall.com/lists/oss-security/2021/12/18/1",
+      "https://www.openwall.com/lists/oss-security/2021/12/15/3",
+      "https://logging.apache.org/security.html#CVE-2021-45046",
+      "https://github.com/apache/logging-log4j2/compare/rel/2.3...rel/2.3.1",
+      "https://github.com/advisories/GHSA-7rjr-3q55-vv33"
+    ],
+    "published_at": "2021-12-14T18:01:28Z",
+    "updated_at": "2026-10-02T20:21:54Z",
+    "github_reviewed_at": "2021-12-14T17:55:00Z",
+    "nvd_published_at": "2021-12-14T19:15:00Z",
+    "withdrawn_at": null,
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "maven",
+          "name": "org.apache.logging.log4j:log4j-core"
+        },
+        "vulnerable_version_range": ">= 2.13.0, < 2.16.0",
+        "first_patched_version": "2.16.0",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "maven",
+          "name": "org.ops4j.pax.logging:pax-logging-log4j2"
+        },
+        "vulnerable_version_range": ">= 1.8.0, < 1.9.2",
+        "first_patched_version": "1.9.2",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "maven",
+          "name": "org.ops4j.pax.logging:pax-logging-log4j2"
+        },
+        "vulnerable_version_range": ">= 1.10.0, < 1.10.8",
+        "first_patched_version": "1.10.8",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "maven",
+          "name": "org.ops4j.pax.logging:pax-logging-log4j2"
+        },
+        "vulnerable_version_range": ">= 1.11.0, < 1.11.11",
+        "first_patched_version": "1.11.11",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "maven",
+          "name": "org.ops4j.pax.logging:pax-logging-log4j2"
+        },
+        "vulnerable_version_range": ">= 2.0.0, < 2.0.12",
+        "first_patched_version": "2.0.12",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "maven",
+          "name": "org.apache.logging.log4j:log4j-core"
+        },
+        "vulnerable_version_range": ">= 2.4.0, < 2.12.2",
+        "first_patched_version": "2.12.2",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "maven",
+          "name": "org.apache.logging.log4j:log4j-core"
+        },
+        "vulnerable_version_range": "< 2.3.1",
+        "first_patched_version": "2.3.1",
+        "vulnerable_functions": []
+      }
+    ],
+    "cvss_severities": {
+      "cvss_v3": {
+        "vector_string": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H",
+        "score": 9.0
+      },
+      "cvss_v4": {
+        "vector_string": null,
+        "score": 0.0
+      }
+    },
+    "cwes": [
+      {
+        "cwe_id": "CWE-502",
+        "name": "Deserialization of Untrusted Data"
+      },
+      {
+        "cwe_id": "CWE-917",
+        "name": "Improper Neutralization of Special Elements used in an Expression Language Statement ('Expression Language Injection')"
+      }
+    ],
+    "credits": [
+      {
+        "user": {
+          "login": "mrjonstrong",
+          "id": 42520909,
+          "node_id": "MDQ6VXNlcjQyNTIwOTA5",
+          "avatar_url": "https://avatars.githubusercontent.com/u/42520909?v=4",
+          "gravatar_id": "",
+          "url": "https://api.github.com/users/mrjonstrong",
+          "html_url": "https://github.com/mrjonstrong",
+          "followers_url": "https://api.github.com/users/mrjonstrong/followers",
+          "following_url": "https://api.github.com/users/mrjonstrong/following{/other_user}",
+          "gists_url": "https://api.github.com/users/mrjonstrong/gists{/gist_id}",
+          "starred_url": "https://api.github.com/users/mrjonstrong/starred{/owner}{/repo}",
+          "subscriptions_url": "https://api.github.com/users/mrjonstrong/subscriptions",
+          "organizations_url": "https://api.github.com/users/mrjonstrong/orgs",
+          "repos_url": "https://api.github.com/users/mrjonstrong/repos",
+          "events_url": "https://api.github.com/users/mrjonstrong/events{/privacy}",
+          "received_events_url": "https://api.github.com/users/mrjonstrong/received_events",
+          "type": "User",
+          "user_view_type": "public",
+          "site_admin": false
+        },
+        "type": "analyst"
+      },
+      {
+        "user": {
+          "login": "afdesk",
+          "id": 19297627,
+          "node_id": "MDQ6VXNlcjE5Mjk3NjI3",
+          "avatar_url": "https://avatars.githubusercontent.com/u/19297627?v=4",
+          "gravatar_id": "",
+          "url": "https://api.github.com/users/afdesk",
+          "html_url": "https://github.com/afdesk",
+          "followers_url": "https://api.github.com/users/afdesk/followers",
+          "following_url": "https://api.github.com/users/afdesk/following{/other_user}",
+          "gists_url": "https://api.github.com/users/afdesk/gists{/gist_id}",
+          "starred_url": "https://api.github.com/users/afdesk/starred{/owner}{/repo}",
+          "subscriptions_url": "https://api.github.com/users/afdesk/subscriptions",
+          "organizations_url": "https://api.github.com/users/afdesk/orgs",
+          "repos_url": "https://api.github.com/users/afdesk/repos",
+          "events_url": "https://api.github.com/users/afdesk/events{/privacy}",
+          "received_events_url": "https://api.github.com/users/afdesk/received_events",
+          "type": "User",
+          "user_view_type": "public",
+          "site_admin": false
+        },
+        "type": "analyst"
+      },
+      {
+        "user": {
+          "login": "ppkarwasz",
+          "id": 12533274,
+          "node_id": "MDQ6VXNlcjEyNTMzMjc0",
+          "avatar_url": "https://avatars.githubusercontent.com/u/12533274?v=4",
+          "gravatar_id": "",
+          "url": "https://api.github.com/users/ppkarwasz",
+          "html_url": "https://github.com/ppkarwasz",
+          "followers_url": "https://api.github.com/users/ppkarwasz/followers",
+          "following_url": "https://api.github.com/users/ppkarwasz/following{/other_user}",
+          "gists_url": "https://api.github.com/users/ppkarwasz/gists{/gist_id}",
+          "starred_url": "https://api.github.com/users/ppkarwasz/starred{/owner}{/repo}",
+          "subscriptions_url": "https://api.github.com/users/ppkarwasz/subscriptions",
+          "organizations_url": "https://api.github.com/users/ppkarwasz/orgs",
+          "repos_url": "https://api.github.com/users/ppkarwasz/repos",
+          "events_url": "https://api.github.com/users/ppkarwasz/events{/privacy}",
+          "received_events_url": "https://api.github.com/users/ppkarwasz/received_events",
+          "type": "User",
+          "user_view_type": "public",
+          "site_admin": false
+        },
+        "type": "analyst"
+      },
+      {
+        "user": {
+          "login": "noren95",
+          "id": 114586487,
+          "node_id": "U_kgDOBtRzdw",
+          "avatar_url": "https://avatars.githubusercontent.com/u/114586487?v=4",
+          "gravatar_id": "",
+          "url": "https://api.github.com/users/noren95",
+          "html_url": "https://github.com/noren95",
+          "followers_url": "https://api.github.com/users/noren95/followers",
+          "following_url": "https://api.github.com/users/noren95/following{/other_user}",
+          "gists_url": "https://api.github.com/users/noren95/gists{/gist_id}",
+          "starred_url": "https://api.github.com/users/noren95/starred{/owner}{/repo}",
+          "subscriptions_url": "https://api.github.com/users/noren95/subscriptions",
+          "organizations_url": "https://api.github.com/users/noren95/orgs",
+          "repos_url": "https://api.github.com/users/noren95/repos",
+          "events_url": "https://api.github.com/users/noren95/events{/privacy}",
+          "received_events_url": "https://api.github.com/users/noren95/received_events",
+          "type": "User",
+          "user_view_type": "public",
+          "site_admin": false
+        },
+        "type": "analyst"
+      }
+    ],
+    "comments": 0,
+    "cvss": {
+      "vector_string": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H",
+      "score": 9.0
+    },
+    "epss": {
+      "percentage": 0.99977,
+      "percentile": 0.9998
+    }
+  }
+}

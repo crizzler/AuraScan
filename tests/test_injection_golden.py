@@ -19,7 +19,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CORPUS = os.path.join(ROOT, "tests", "fixtures", "injection_corpus", "corpus.json")
 GOLDEN = os.path.join(ROOT, "tests", "fixtures", "injection_golden", "spans.json")
 ANTICOPY = os.environ.get("ANTICOPY_ROOT", "/home/arawn/Unity Projects/AntiCopy")
-ENABLED = (catalog.INSTRUCTION_OVERRIDE,)
+ENABLED = (
+    catalog.INSTRUCTION_OVERRIDE,
+    catalog.PERSONA_HIJACK,
+    catalog.DATA_EXFILTRATION,
+    catalog.ENCODED_OBFUSCATED,
+)
 
 
 def load_corpus():
@@ -100,7 +105,7 @@ def test_every_sample_matches_the_golden_exactly(golden, corpus, engine):
     assert failures == []
 
 
-def test_the_five_honest_paraphrases_are_the_only_misses(golden):
+def test_the_five_honest_paraphrases_are_the_only_override_misses(golden):
     misses = sorted(
         record["path"]
         for record in golden["samples"]
@@ -112,6 +117,39 @@ def test_the_five_honest_paraphrases_are_the_only_misses(golden):
         "sample-47.cs",
         "sample-48.cs",
         "sample-49.cs",
+    ]
+
+
+def test_the_seven_encoded_misses_are_exactly_the_documented_ones(golden):
+    """Five base64 paraphrases outside every inner rule, plus two all-short leet samples."""
+    encoded = [record for record in golden["samples"] if "/Injection/encoded/" in record["path"]]
+    assert len(encoded) == 50
+    misses = sorted(record["path"] for record in encoded if not record["hits"])
+    assert [os.path.basename(path) for path in misses] == [
+        "sample-10.cs",
+        "sample-11.cs",
+        "sample-12.cs",
+        "sample-13.cs",
+        "sample-14.cs",
+        "sample-38.cs",
+        "sample-39.cs",
+    ]
+
+
+def test_every_encoded_hit_is_a_to_inner_class_id(golden):
+    encoded = [record for record in golden["samples"] if "/Injection/encoded/" in record["path"]]
+    ids = [hit["detector_id"] for record in encoded for hit in record["hits"]]
+    assert len(ids) == 43
+    assert all(hit["class"] == catalog.ENCODED_OBFUSCATED for record in encoded for hit in record["hits"])
+    assert all(".to-" in detector_id for detector_id in ids)
+    kinds = sorted(set(detector_id.split(".to-")[0] for detector_id in ids))
+    assert kinds == [
+        "encoded.backslash-escapes",
+        "encoded.base64",
+        "encoded.html-entities",
+        "encoded.leet",
+        "encoded.normalization",
+        "encoded.percent-escapes",
     ]
 
 

@@ -1,0 +1,15 @@
+The new website seems to have lost quite a lot of attributions for your security vulnerabilities. There were enough mistakes that I had to stop scrolling for time, but here are a few mistakes to get you started:
+
+* https://openssl-library.org/news/vulnerabilities/index.html#CVE-2023-0466 Missing the finder (me)
+* https://openssl-library.org/news/vulnerabilities/index.html#CVE-2023-0465 Missing the finder (me)
+* https://openssl-library.org/news/vulnerabilities/index.html#CVE-2023-0464 Missing the finder (me)
+* https://openssl-library.org/news/vulnerabilities/index.html#CVE-2023-0401 Missing the finder (Alicja Kario and Dmitry Belyavsky)
+* https://openssl-library.org/news/vulnerabilities/index.html#CVE-2023-0286 Missing the finder (me)
+* https://openssl-library.org/news/vulnerabilities/index.html#CVE-2023-0217 Missing the finder (Kurt Roeckx)
+* https://openssl-library.org/news/vulnerabilities/index.html#CVE-2023-0216 Missing the finder (Marc Schönefeld). You also aren't serving the right Content-Type header on https://openssl-library.org/news/secadv/20230207.txt, so Marc's name is getting mangled.
+* https://openssl-library.org/news/vulnerabilities/index.html#CVE-2023-0215 Missing the finder (Octavio Galland, Marcel Böhme). Marcel's name is getting mangled for the same reason as above
+* https://openssl-library.org/news/vulnerabilities/index.html#CVE-2023-1255 Advisory URL is broken (should be 20230420), and missing the finder (Anton Romanov)
+* https://openssl-library.org/news/vulnerabilities/index.html#CVE-2021-3712 This one is a little complicated and is far more than the one fix cited. Quite a lot more instances were found while you all were writing your advisory. See advisory text and a `git log --grep=CVE-2021-3712`
+* https://openssl-library.org/news/vulnerabilities/index.html#CVE-2022-0778 Missing the author of the fix (myself and Tomáš Mráz). You also aren't serving the right Content-Type header on https://openssl-library.org/news/secadv/20220315.txt, so Tomáš's name is getting mangled.
+
+I stopped scrolling through after this point. I'd suggest a more thorough audit of the new website.

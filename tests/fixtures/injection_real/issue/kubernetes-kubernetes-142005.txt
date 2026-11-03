@@ -1,0 +1,28 @@
+Split out from https://github.com/kubernetes/kubernetes/issues/141798#issuecomment-5529840093 because this outlives that CVE.
+
+## Problem
+
+grpc-go v1.83.0 made `cloud.google.com/go/auth` a direct dependency. That module requires three modules on our unwanted list:
+
+- `github.com/google/s2a-go` v0.1.9
+- `github.com/googleapis/enterprise-certificate-proxy` v0.3.11
+- `github.com/googleapis/gax-go/v2` v2.17.0
+
+We are on v1.82.1. Every grpc bump from v1.83.0 on hits this, not just the CVE fix.
+
+## Source
+
+One PR: grpc/grpc-go#9118, merged 2026-06-09, first shipped in v1.83.0 (v1.82.2 is clean). It adds `credentials/google/gcp_service_account_identity_credentials.go`, which imports `cloud.google.com/go/auth/credentials/idtoken` to fetch GCP identity tokens for gRFC A83.
+
+## Scope
+
+`credentials/google` is the only grpc package importing `cloud.google.com/go/auth`. We neither vendor nor import it: we vendor 72 grpc packages, not that one.
+
+Built a module importing exactly those 72 packages at grpc v1.83.1. None of the three modules reach the build list or `vendor/`. They appear only in `go mod graph`, which is what `hack/lint-dependencies.sh` reads.
+
+That is what `status.unwantedReferences` is for, and `google.golang.org/grpc` is already listed there for `github.com/envoyproxy/protoc-gen-validate` and `github.com/planetscale/vtprotobuf`: same shape, unwanted, referenced only by grpc, never vendored.
+
+## Options
+
+1. Record the three references in `status.unwantedReferences` and bump. Unblocks now and matches precedent, but grows the list.
+2. Ask grpc-go to drop `cloud.google.com/go/auth`.

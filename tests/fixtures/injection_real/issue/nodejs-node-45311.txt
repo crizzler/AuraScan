@@ -1,0 +1,13 @@
+### Affected URL(s)
+
+https://nodejs.org/api/url.html#url_url_parse_urlstring_parsequerystring_slashesdenotehost
+
+### Description of the problem
+
+I know there is a bit of history regarding deprecating, undeprecating, legacy, doc deprecating, etc., which I'm not looking to rehash.  My question is specific to a small tweak or clarification on the last paragraph that mentions security.  The current docs have the following warning:
+
+> It is prone to security issues such as [host name spoofing](https://hackerone.com/reports/678487) and incorrect handling of usernames and passwords. Do not use with untrusted input. CVEs are not issued for `url.parse()` vulnerabilities. Use the [WHATWG URL](https://nodejs.org/api/url.html#the-whatwg-url-api) API instead.
+
+Is it possible to clarify there are no **active** security vulnerabilities with it.  Perhaps it's just me, but every time I read that paragraph (even though I know the specific vulnerability called out has indeed been fixed in https://github.com/nodejs/node/pull/38631), I always do a double take because it looks like the docs are saying there are active vulnerabilities that **won't** be fixed.
+
+`new URL()` is still about 50% slower than `url.parse` in v19, and `url.parse` is still heavily used in the wild, so I think it'd be a value add in terms of clarity, but let me know your thoughts.  I'm not sure exactly what the wording should be, but just making it clearer that it's not an active security risk unless the current wording is intended to scare people away 😆

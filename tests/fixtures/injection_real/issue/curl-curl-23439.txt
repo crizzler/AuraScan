@@ -1,0 +1,161 @@
+### Specify which documentation you found a problem with
+
+docs/SECURITY.md, docs/CODE_REVIEW.md, README.md (top-level)
+
+### The problem
+
+Audit of three curl process docs (docs/SECURITY.md, docs/CODE_REVIEW.md, README.md).
+
+Findings:
+
+1. SECURITY.md -- disclosure policy is declarative, not operational (critical)
+2. CODE_REVIEW.md -- no mandatory security review for sensitive PRs (critical)
+3. README.md -- missing examples and security-contact pointer (important)
+
+Details below.
+
+---
+
+## Finding 1: SECURITY.md -- disclosure policy is declarative, not operational (critical)
+
+### What the doc says
+
+SECURITY.md is short. It links to VULN-DISCLOSURE-POLICY.md, points to
+a web form at curl.se/dev/vuln-disclosure.html, and mentions OpenSSF
+Gold status. It is a declarative document.
+
+### What's missing
+
+1. No SLA. A researcher does not know when to expect acknowledgment,
+   triage, or fix. Industry standard: ack in 48h, triage in 7 days.
+2. No severity classification. CVSS is not mentioned. Without it,
+   triage priority is unclear -- a critical RCE and a minor info leak
+   may be processed the same way.
+3. No fallback channel. The only reporting path is the web form. If
+   the form is down, blocked by a corporate firewall, or unavailable
+   to a researcher in a restricted network, there is no way to report.
+   Most projects offer security@... + PGP key.
+4. No embargo policy. No defined window between report and public
+   disclosure. Common source of friction: researchers may
+   full-disclose out of frustration.
+5. No safe harbor. A good-faith researcher may worry about legal
+   consequences.
+
+### Real-world precedent
+
+- OpenSSL publishes a security policy with SLA and channels.
+- Linux kernel has Documentation/process/security-bugs.rst with a
+  clear process, embargo, and multiple channels.
+- XZ Utils post-mortem shows that single-channel processes can fail
+  at critical moments.
+
+### Proposed fix (Option A, 2-3 days)
+
+Add to SECURITY.md:
+
+1. SLA table:
+   - Acknowledgment: <= 48h
+   - Triage: <= 7 days
+   - Fix: by severity (critical: <= 30 days; high: <= 90; etc.)
+2. Fallback channel: security@curl.se + public PGP fingerprint.
+3. Severity classification: reference CVSS v4.0.
+4. Embargo window: 90 days (industry standard).
+5. Safe harbor statement for good-faith researchers.
+
+Documentation-only, no code changes.
+
+---
+
+## Finding 2: CODE_REVIEW.md -- no mandatory security review (critical)
+
+### What the doc covers
+
+CODE_REVIEW.md covers style, formatting, naming, memory management,
+thread-safety, portability, types, overflow handling, test and
+documentation requirements, and interpersonal aspects ("be nice",
+language barriers, first-timers). This is a strong technical guide,
+with one line mentioning "sensitive data".
+
+### What's missing
+
+1. No mandatory security review. A PR touching TLS, authentication,
+   protocol parsing, or credentials can be merged by a reviewer
+   without security expertise, as long as style and tests look good.
+2. No ABI-diff in CI. Breaking changes to libcurl's ABI can be merged
+   without automated detection. Downstream users discover the break
+   only at integration time.
+3. No SLA / metrics. Review can stall indefinitely. No published
+   metric of time-to-first-review or time-to-merge.
+4. No rollback process. Once merged, code goes into next release
+   without a defined rollback procedure.
+
+### Why this is critical for curl specifically
+
+- libcurl is a shared library; ABI breaks are breaking changes for
+  all downstream.
+- curl handles TLS and auth; a subtle security bug is not always
+  caught by tests.
+- OpenSSL and Rust RFC process have formal checklists for this;
+  curl's doc stops short.
+
+### Proposed fix (Option A, 2-3 days)
+
+Add to CODE_REVIEW.md:
+
+1. Mandatory security checklist for PRs labeled "security":
+   - TLS: verify verification is on, no --insecure-like defaults.
+   - Auth: no credentials in logs, no weak defaults.
+   - Parsing: fuzz-relevant changes require fuzz tests.
+   - Credentials: no new logging of secrets.
+2. Assign a security contact for security PRs.
+3. abidiff / abipkgdiff in CI. Merge is blocked if ABI changes are
+   not declared in the PR description.
+4. TSAN run for PRs touching shared state.
+
+---
+
+## Finding 3: README.md -- missing examples and security-contact pointer (important)
+
+### What the doc says
+
+README.md is around 60 lines. It contains project identity, protocol
+list, install pointers, libcurl pointer, community/support links,
+security section, funding.
+
+### What's missing
+
+1. No command examples. A first-time user cannot see how to use curl
+   at a glance. Competing tools (wget, httpie) show examples in
+   README.
+2. Security contact is not prominent. The security section links to
+   SECURITY.md, but there is no security@ email or PGP fingerprint in
+   README itself.
+3. No warning for -k / --insecure. Users can easily learn the "just
+   add -k" workaround without seeing a warning.
+4. No warning for -o / -O overwrite. Users can overwrite files by
+   accident.
+
+### Proposed fix
+
+1. Add 3-5 command examples (GET, POST, download, upload).
+2. Move security-contact pointer up + include email/PGP.
+3. Add warning near first example: "do not use -k in production".
+4. Add warning for -o / -O: "silently overwrites files".
+
+---
+
+## Summary of severity
+
+| Finding | Severity | Fix cost | Impact |
+|---|---|---|---|
+| SECURITY.md -- no SLA/channels/embargo | critical | 2-3 days | single channel; lost reports |
+| CODE_REVIEW.md -- no security review | critical | 2-3 days | missed CVEs, ABI breaks |
+| README.md -- no examples/contact | important | 1 day | onboarding friction; -k misuse |
+
+---
+
+## How this audit was produced
+
+The three docs were analyzed by Vishap (LLM-based analyzer) on
+2026-10-16. Vishap's pipeline detected 11 risk nodes and 8 threats
+across these files.

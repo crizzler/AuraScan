@@ -1,0 +1,28 @@
+### I did this
+
+In the wolfSSL backend, `CURLOPT_SSL_VERIFYHOST` has no effect when `CURLOPT_SSL_VERIFYPEER` is 0. A certificate whose CN/SAN does not match the hostname is accepted with the default `verifyhost=2`.
+
+The backend calls `wolfSSL_check_domain_name()` in `wssl_connect_step1()`, gated only on `conn_config->verifyhost`. But with `verifypeer=0` the context is set to `WOLFSSL_VERIFY_NONE`, and in that mode wolfSSL does not enforce the domain name check during the handshake. The result is that the option silently does nothing for this configuration.
+
+Verified on current master `5d4eaac8f` (2026-10-18, wolfSSL 5.9.4):
+
+- `verifypeer=0, verifyhost=2`, server presents self-signed cert with CN=evil.attacker.com against https://victim.local: accepted, transfer succeeds.
+- Default verification (`verifypeer=1`): the same cert is correctly rejected (exit 77).
+
+The mbedTLS backend had the same gap and it was fixed in 26fdb92 by performing the hostname check independently of the verification mode. The wolfSSL backend appears to have been missed.
+
+On impact: with `verifypeer=0` an attacker can present a self-signed cert with a matching CN anyway, so this is not a strong security boundary in that configuration. The issue is that the option is documented to work and silently does not, and that the backends behave differently. Either the check should be enforced post-handshake independent of the verify mode (as the mbedTLS fix does), or the documentation should state that `verifyhost` requires `verifypeer`.
+
+### I expected the following
+
+_No response_
+
+### curl/libcurl version
+
+git master 8.23.1-DEV (commit 5d4eaac8f, 2026-10-17)
+
+### operating system
+
+Ubuntu 22.04.5 LTS (x86_64)
+gcc 11.4.0
+OpenSSL 3.0.2

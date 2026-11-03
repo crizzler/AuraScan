@@ -1,0 +1,97 @@
+### I did this
+
+With WebSocket automatic PONG handling enabled (the default), I sent a valid PING frame carrying 100 bytes, but split its payload across two network writes. The first write contained the WebSocket header and 50 payload bytes; the second contained the remaining 50 bytes followed by an ordinary binary frame (`X`). This is **one WebSocket PING frame**, not a fragmented control frame.
+
+On current master, libcurl:
+
+- passes the first 50 PING bytes through as application data (also visible in the `curl` tool's output); and
+- sends a masked PONG containing only the final 50 bytes instead of the complete 100-byte payload.
+
+I reproduced this in the unmodified source tree. A split at other offsets produced the same pattern (e.g. 15 bytes delivered to the application and only 85 bytes echoed). The same issue reproduced over certificate-verified `wss://` when the PING crossed two TLS records.
+
+#### Steps to reproduce
+
+1. Save the following as `split_ping.py`:
+
+```python
+import base64
+import hashlib
+import socket
+import time
+
+guid = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+payload = b"A" * 50 + b"B" * 50
+
+def read_exact(sock, n):
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise EOFError("client disconnected")
+        data += chunk
+    return data
+
+with socket.socket() as listener:
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 8765))
+    listener.listen(1)
+    print("listening on 127.0.0.1:8765", flush=True)
+    with listener.accept()[0] as conn:
+        conn.settimeout(5)
+        request = b""
+        while b"\r\n\r\n" not in request:
+            request += conn.recv(4096)
+        key = next(line.split(b":", 1)[1].strip()
+                   for line in request.split(b"\r\n")
+                   if line.lower().startswith(b"sec-websocket-key:"))
+        accept = base64.b64encode(hashlib.sha1(key + guid).digest())
+        conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\n"
+                     b"Connection: Upgrade\r\nUpgrade: websocket\r\n"
+                     b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n")
+
+        conn.sendall(b"\x89\x64" + payload[:50])
+        time.sleep(0.2)
+        conn.sendall(payload[50:] + b"\x82\x01X")
+
+        head = read_exact(conn, 2)
+        assert head[0] == 0x8A and head[1] & 0x80
+        mask = read_exact(conn, 4)
+        wire = read_exact(conn, head[1] & 127)
+        pong = bytes(b ^ mask[i % 4] for i, b in enumerate(wire))
+        print("PONG length:", len(pong), "payload:", pong, flush=True)
+        conn.sendall(b"\x88\x00")
+        time.sleep(0.1)
+```
+
+2. Run `python3 split_ping.py` in one terminal.
+3. In another terminal, run:
+
+```sh
+curl --noproxy '*' --max-time 5 -sS ws://127.0.0.1:8765/
+```
+
+**Observed:** `curl` prints 50 `A` characters plus `X`, exits with status 0, and the test server prints `PONG length: 50` with `b'B' * 50` as the PONG payload.
+
+**Control:** When the entire PING payload is sent in one network write, the server receives a correct 100-byte PONG and the 50 `A` bytes do not appear in the client output.
+
+### I expected the following
+
+With automatic PONG handling enabled, the complete 100-byte PING payload should be echoed in the PONG, and no PING payload bytes should be delivered as application data. RFC 6455 section 5.5.3 requires the PONG to carry the same application data as the PING. The [libcurl WebSocket documentation](https://curl.se/libcurl/c/libcurl-ws.html) also promises that behavior.
+
+### Suspected cause
+
+In [`ws_cw_dec_next()`](https://github.com/curl/curl/blob/a395bd86c5a9395d261cd067eefb6f7239b63549/lib/ws.c#L666-L713) and `ws_client_collect()`, auto-PONG is built from `buf, buflen` only on the last chunk (`!remain`). Earlier chunks are forwarded to the next writer or returned to the caller. The code comment says auto-PONG currently works only for single-chunk payloads.
+
+Related but distinct: #16706 discusses partial **sending** of auto-PONG; this report is about a PING whose **incoming payload** arrives across multiple reads.
+
+### curl/libcurl version
+
+`curl 8.23.1-DEV` / `libcurl 8.23.1-DEV`, commit [`a395bd86`](https://github.com/curl/curl/commit/a395bd86c5a9395d261cd067eefb6f7239b63549), OpenSSL 3.0.13, debug build with ASan/UBSan. No sanitizer errors were observed.
+
+### operating system
+
+Linux x86_64.
+
+### Impact
+
+Protocol interoperability and unexpected application-output data; a server validating PONG payloads may reject the heartbeat. I have **not** established memory corruption, information disclosure, or a separate security vulnerability.

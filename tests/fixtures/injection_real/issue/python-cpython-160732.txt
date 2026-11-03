@@ -1,0 +1,44 @@
+### Bug report
+
+### Context
+This was first reported privately to PSRT and triaged as **outside Python's security threat model** (it depends on launch conditions — `--prompt` or the environment directory name). I'm opening it here as a **robustness / least-surprise improvement**, as suggested on the advisory — not as a security report, and not to re-litigate that decision.
+
+### What happens
+`python -m venv` writes the environment prompt (from `--prompt`, or by default the env directory's basename) into the generated `bin/activate`:
+
+```sh
+PS1="("__VENV_PROMPT__") ${PS1:-}"
+```
+
+`replace_variables()` quotes `__VENV_PROMPT__` with `shlex.quote`, which is correct for the **assignment**. But bash (and zsh with `PROMPT_SUBST`) re-expand `PS1` on **every prompt draw** (`promptvars`, on by default), and `shlex.quote` does not neutralize that second pass. So a prompt containing `$(...)` or backticks executes when the prompt is rendered:
+
+```console
+$ python3 -m venv --prompt '$(id)' venv
+$ grep 'PS1=' venv/bin/activate
+    PS1="("'$(id)'") ${PS1:-}"
+$ bash -c 'source venv/bin/activate; : "${PS1@P}"'   # ${PS1@P} = bash's prompt render
+uid=1000(...) gid=1000(...) ...                       # runs
+```
+
+In an interactive shell this runs on the first prompt after `source`. The same `activate` template + `shlex.quote`-only handling are present on `main`, so it's unfixed there too.
+
+### Why it's worth hardening (not a security claim)
+- Surprising: a documented, seemingly-cosmetic option (`--prompt`) and the default prompt (the directory name) can execute shell code on activation.
+- **Consistency:** `virtualenv` treats this as in-scope and already escapes the prompt for the display pass (CVE-2026-113725 / -113726 / -113732); `venv` diverges.
+- It's the display-pass complement to the assignment-pass quoting that gh-124651 (CVE-2024-9287) added.
+
+### Suggested change
+Escape the prompt for the shell's prompt-display expansion in addition to the assignment: for bash/zsh, neutralize `` ` ``, `$`, and backslash before substitution — since bash expands `PS1` in two passes, the escaping must survive both (double-escaping), mirroring virtualenv's fix. Apply the equivalent to `activate.csh` (history `!`) and verify `Activate.ps1`.
+
+### CPython versions tested on:
+
+3.16, CPython main branch, 3.15, 3.14, 3.13, 3.12, 3.11
+
+### Operating systems tested on:
+
+Linux
+
+<!-- gh-linked-prs -->
+### Linked PRs
+* gh-160734
+<!-- /gh-linked-prs -->

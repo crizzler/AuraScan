@@ -163,6 +163,25 @@ def bound(text, max_length):
     return "".join(out[:end])
 
 
+def is_mostly_printable(text):
+    """True when a decoded buffer looks like text rather than binary noise.
+
+    Mirrors ``DetectionText.IsMostlyPrintable``: CR/LF/TAB, ``0x20``-``0x7E`` and everything from
+    ``0xA0`` up count as printable, and 85 % is enough. A per-character ratio, not a code-point test,
+    so a short binary blob with a few letters does not pass.
+    """
+    if not text:
+        return False
+
+    printable = 0
+    for ch in text:
+        code = ord(ch)
+        if code == 0x0D or code == 0x0A or code == 0x09 or (0x20 <= code <= 0x7E) or code >= 0xA0:
+            printable += 1
+
+    return printable * 100 >= len(text) * 85
+
+
 def _is_test_directory_name(segment):
     if segment.lower() == "test" or segment.lower() == "tests":
         return True

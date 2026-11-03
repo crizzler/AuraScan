@@ -1,17 +1,28 @@
 """Scanner: enabled classes, confidence policy, caps and evidence construction.
 
-Mirrors ``InjectionScanner.cs``. This is the only module that knows a path. Card A keeps the
-path-based confidence model only; ``source_type`` (and the pathless ``unknown`` table) belongs to
-Card B.
+Mirrors ``InjectionScanner.cs``. This is the only module that knows a path or a source type.
 
-Confidence ladder, in this order (the ordering is load-bearing — step 1 precedes the documentation
+``source_type`` (Card B) is the policy input; ``path_hint`` only *derives* it when the caller left it
+``unknown`` and still echoes into the evidence ``path`` field. An explicit non-``unknown`` value always
+wins over the hint:
+
+===========================  ==========================================================
+``fixture``                  LOW, ``test_fixture_context`` True (short-circuits everything)
+``documentation``            the HIGH->MEDIUM cap applies, not a fixture
+``source`` / ``unknown``     no cap, not a fixture
+===========================  ==========================================================
+
+``unknown`` behaves like ``source`` on purpose: that is what the original does for a pathless scan
+(``01b`` §6.2), and the pathless table is the honest reverse-deployment number.
+
+Confidence ladder, in this order (the ordering is load-bearing — step 2 precedes the documentation
 downgrade, and the downgrade only ever lowers HIGH):
 
 1. test fixture -> LOW (short-circuits everything else);
 2. ``encoded-obfuscated`` -> LOW;
 3. ``instruction-override`` + ``override.literal.`` prefix -> HIGH, otherwise MEDIUM;
 4. other classes -> MEDIUM;
-5. documentation path + HIGH -> MEDIUM.
+5. documentation source type + HIGH -> MEDIUM.
 
 ``_confidence_for`` is module-level on purpose: ``tools/injection_parity.py --selftest`` mutates it
 in place for M3.
@@ -22,9 +33,20 @@ from typing import List, Optional, Sequence
 
 from . import catalog, injection_text
 from .engine import InjectionDetectionEngine, RuleBasedDetectionEngine
-from .model import InjectionEvidence, InjectionSettings
+from .model import SOURCE_TYPES, InjectionEvidence, InjectionSettings
 
 LOCKED_MAX_FINDINGS_PER_FILE = 32
+
+
+def derive_source_type(path):
+    """Classify a path into a source type. The empty path is ``unknown``."""
+    if injection_text.is_test_fixture_path(path):
+        return "fixture"
+    if injection_text.is_documentation_path(path):
+        return "documentation"
+    if path:
+        return "source"
+    return "unknown"
 
 
 class InjectionScanner(object):
@@ -32,7 +54,7 @@ class InjectionScanner(object):
         self._engine = engine
         self._settings = settings if settings is not None else InjectionSettings()
 
-    def scan_target(self, project_relative_path, content):
+    def scan_target(self, project_relative_path, content, source_type=None):
         results = []
         if not content:
             return results
@@ -42,6 +64,13 @@ class InjectionScanner(object):
         path = project_relative_path or ""
         if injection_text.is_suppressed(path, self._settings.suppressed_paths):
             return results
+
+        if source_type is None:
+            source_type = derive_source_type(path)
+        else:
+            source_type = _check_source_type(source_type)
+        fixture = source_type == "fixture"
+        documentation = source_type == "documentation"
 
         enabled = self._settings.enabled_classes
         if not enabled:
@@ -53,8 +82,6 @@ class InjectionScanner(object):
 
         ordered = sorted(matches, key=compare_by_position)
 
-        fixture = injection_text.is_test_fixture_path(path)
-        documentation = injection_text.is_documentation_path(path)
         cap = self._settings.max_findings_per_file
         if cap <= 0 or cap > LOCKED_MAX_FINDINGS_PER_FILE:
             cap = LOCKED_MAX_FINDINGS_PER_FILE
@@ -101,6 +128,14 @@ def severity_for(match):
 
 def _severity_rank(value):
     return {"LOW": 1, "MEDIUM": 2, "HIGH": 3}.get(value, 0)
+
+
+def _check_source_type(value):
+    if value not in SOURCE_TYPES:
+        raise ValueError(
+            "unknown source_type %r; expected one of %s" % (value, ", ".join(SOURCE_TYPES))
+        )
+    return value
 
 
 def _confidence_for(match, fixture, documentation):
@@ -173,10 +208,28 @@ def _default_engine():
     return _DEFAULT_ENGINE
 
 
-def scan_content(content, path_hint="", enabled_classes=None, max_findings=None, engine=None):
-    """Scan text. ``path_hint`` is echoed as the evidence path and drives the path policy."""
+def scan_content(
+    content,
+    source_type="unknown",
+    path_hint="",
+    enabled_classes=None,
+    max_findings=None,
+    engine=None,
+):
+    """Scan text.
+
+    ``source_type`` is the policy input and must be one of :data:`model.SOURCE_TYPES`; it defaults to
+    ``unknown``, which behaves like ``source``. When it is left ``unknown`` and ``path_hint`` is
+    non-empty, the type is derived from the hint. An explicit non-``unknown`` value always wins.
+    ``path_hint`` stays echoed in the evidence ``path`` field either way.
+    """
     if not isinstance(content, str):
         raise TypeError("content must be str")
+
+    resolved = _check_source_type(source_type)
+    if resolved == "unknown" and path_hint:
+        resolved = derive_source_type(path_hint)
+
     settings = InjectionSettings()
     if enabled_classes is not None:
         settings = InjectionSettings(enabled_classes=tuple(enabled_classes))
@@ -185,11 +238,11 @@ def scan_content(content, path_hint="", enabled_classes=None, max_findings=None,
             enabled_classes=settings.enabled_classes, max_findings_per_file=max_findings
         )
     instance = InjectionScanner(engine if engine is not None else _default_engine(), settings)
-    return instance.scan_target(path_hint, content)
+    return instance.scan_target(path_hint, content, source_type=resolved)
 
 
 def scan_path(path, enabled_classes=None):
-    """Scan a UTF-8 file from disk. The ``str`` of ``path`` is the policy input."""
+    """Scan a UTF-8 file from disk. The path derives the source type."""
     target = Path(path)
     text = target.read_text(encoding="utf-8", errors="replace")
     return scan_content(text, path_hint=str(path), enabled_classes=enabled_classes)

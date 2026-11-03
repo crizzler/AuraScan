@@ -1,0 +1,476 @@
+{
+  "counts": {
+    "cve": 25,
+    "issue": 22,
+    "tool-result": 10
+  },
+  "documents": [
+    {
+      "bytes": 469,
+      "fetched_at_utc": "2026-11-03T16:28:59Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2017-0144.txt",
+      "sha256": "80372bc73542f928202dc40a3afbfe44948c693faf6940b7158cb41ee2aec912",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2017-0144"
+    },
+    {
+      "bytes": 286,
+      "fetched_at_utc": "2026-11-03T16:28:57Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2019-0708.txt",
+      "sha256": "97865120990331369dfc4c7f95b2e90d9a7e9fde1d3709daa3e3a016a711d5f3",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2019-0708"
+    },
+    {
+      "bytes": 1292,
+      "fetched_at_utc": "2026-11-03T16:28:56Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2020-1472.txt",
+      "sha256": "419effb57ba7d2d5a7e89351feeaa478b77739d243099c7fff8d8dad549cf00b",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2020-1472"
+    },
+    {
+      "bytes": 231,
+      "fetched_at_utc": "2026-11-03T16:28:49Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2021-3156.txt",
+      "sha256": "a373a9e53fd24ca71402656ba77b53296642f313eb46938466ac8933f5be3465",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2021-3156"
+    },
+    {
+      "bytes": 643,
+      "fetched_at_utc": "2026-11-03T16:28:35Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2021-4034.txt",
+      "sha256": "fe6b9d5c5ba32cf84cdb63bdc7d63b362e838aa03d707ca75abad29e203b16ab",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2021-4034"
+    },
+    {
+      "bytes": 714,
+      "fetched_at_utc": "2026-11-03T16:28:26Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2021-44228.txt",
+      "sha256": "a479f667782c3e115fb2141b22e2318a0724c14b24b4245068f97699f7a245dc",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2021-44228"
+    },
+    {
+      "bytes": 496,
+      "fetched_at_utc": "2026-11-03T16:28:30Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2022-0185.txt",
+      "sha256": "19a563eba81f84aecccde36dfd13369f15e1280d9bfc250d0f67fe6b71887aee",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2022-0185"
+    },
+    {
+      "bytes": 383,
+      "fetched_at_utc": "2026-11-03T16:28:36Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2022-0847.txt",
+      "sha256": "28e8f874e82a943890d9315dd5929ea2d708171dadd3109a1db58c9df47c7213",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2022-0847"
+    },
+    {
+      "bytes": 432,
+      "fetched_at_utc": "2026-11-03T16:28:28Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2022-22965.txt",
+      "sha256": "2c5ed512c1e9bfd5020cdb2c922b6562af5508a66aa0a5f83dc6e6e3732ed21c",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2022-22965"
+    },
+    {
+      "bytes": 178,
+      "fetched_at_utc": "2026-11-03T16:28:40Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2022-2588.txt",
+      "sha256": "31649ea0d6ddb7c8b0e5f3f4640139852f694907e655069c8530a66b16085c7b",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2022-2588"
+    },
+    {
+      "bytes": 1314,
+      "fetched_at_utc": "2026-11-03T16:28:53Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2022-3602.txt",
+      "sha256": "0cc8a203f93f00f7d7495a640dc10f38a934d453307098162983316824da5857",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2022-3602"
+    },
+    {
+      "bytes": 321,
+      "fetched_at_utc": "2026-11-03T16:28:47Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2022-47929.txt",
+      "sha256": "37325c55be103e57e153724ad96e7ed6f753816799f5ac191e21d77106511085",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2022-47929"
+    },
+    {
+      "bytes": 1094,
+      "fetched_at_utc": "2026-11-03T16:28:54Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2023-0286.txt",
+      "sha256": "867fb6765e5ca509eef3962cccc01e4478477a5606084847c493d13935047666",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2023-0286"
+    },
+    {
+      "bytes": 508,
+      "fetched_at_utc": "2026-11-03T16:28:37Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2023-22809.txt",
+      "sha256": "439dd133a4dce060330815711609fc74e92c90a4cda483e594b504c34ad9c278",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2023-22809"
+    },
+    {
+      "bytes": 289,
+      "fetched_at_utc": "2026-11-03T16:28:43Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2023-32233.txt",
+      "sha256": "5c2b036235bc89b621632f5baa1459cf26af11f5df6baf05f276d78669959c09",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2023-32233"
+    },
+    {
+      "bytes": 340,
+      "fetched_at_utc": "2026-11-03T16:28:50Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2023-38408.txt",
+      "sha256": "e4289370d0d883b0ecfeb467f0a1188f44085243b245ebf429eb5e32a18a7a02",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2023-38408"
+    },
+    {
+      "bytes": 809,
+      "fetched_at_utc": "2026-11-03T16:28:29Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2023-38545.txt",
+      "sha256": "12060ee3897e00a78c5ad19a95e45c307873f22c34faa0fafdbafee780a9b93c",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2023-38545"
+    },
+    {
+      "bytes": 195,
+      "fetched_at_utc": "2026-11-03T16:28:32Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2023-44487.txt",
+      "sha256": "21036cab2d1b691c8012e198957025e6b4d754b80a85bfb7b6be3ad430441483",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2023-44487"
+    },
+    {
+      "bytes": 222,
+      "fetched_at_utc": "2026-11-03T16:28:23Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2023-4863.txt",
+      "sha256": "107c225d0ae95246f2133e90a029853ab3664f994574824ff6be3086ba6904f5",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2023-4863"
+    },
+    {
+      "bytes": 326,
+      "fetched_at_utc": "2026-11-03T16:28:46Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2023-4911.txt",
+      "sha256": "c1eae5912b1f3457c23ef90e7586616e4f2a057d83354e4ed3d6bae92541a07c",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2023-4911"
+    },
+    {
+      "bytes": 461,
+      "fetched_at_utc": "2026-11-03T16:28:39Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2024-1086.txt",
+      "sha256": "406c2e033fc4f6a642e9ac61744ce7c12c4a3495fe56f0e5ace3ae1eda18ecb9",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2024-1086"
+    },
+    {
+      "bytes": 347,
+      "fetched_at_utc": "2026-11-03T16:28:45Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2024-28085.txt",
+      "sha256": "88d728f259489707c9f0f57d82eb8919135a96464b76fbcc885c227798a6f7e6",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2024-28085"
+    },
+    {
+      "bytes": 269,
+      "fetched_at_utc": "2026-11-03T16:28:51Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2024-2961.txt",
+      "sha256": "2e88106b5cdeeffcad8a1ad2a3627308a73f599997fc7e8d9c08b3e13150af78",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2024-2961"
+    },
+    {
+      "bytes": 490,
+      "fetched_at_utc": "2026-11-03T16:28:25Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2024-3094.txt",
+      "sha256": "bae1ec9fad1d2c00fe45084b1203f746f1aad0b69ea3232ea8c9f302e0c38c9d",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2024-3094"
+    },
+    {
+      "bytes": 286,
+      "fetched_at_utc": "2026-11-03T16:28:33Z",
+      "kind": "cve",
+      "path": "tests/fixtures/injection_real/cve/CVE-2024-6387.txt",
+      "sha256": "cd8eaa3b8052aba5e50f60d97fc21824edf3a3ff675a0c5016b424826b88f45d",
+      "source_url": "https://cveawg.mitre.org/api/cve/CVE-2024-6387"
+    },
+    {
+      "bytes": 2659,
+      "fetched_at_utc": "2026-11-03T16:29:00Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/curl-curl-22832.txt",
+      "sha256": "50fa30f63d348785c306a1055cd9ab20b03c9c7c7280b354e55ff55a141fb4fe",
+      "source_url": "https://github.com/curl/curl/issues/22832"
+    },
+    {
+      "bytes": 5823,
+      "fetched_at_utc": "2026-11-03T16:29:00Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/curl-curl-23439.txt",
+      "sha256": "94427a3eb182c71f4cf13fde29d6f2c2faddc685cdfdd0cfec8d701ece105f59",
+      "source_url": "https://github.com/curl/curl/issues/23439"
+    },
+    {
+      "bytes": 1726,
+      "fetched_at_utc": "2026-11-03T16:29:00Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/curl-curl-23475.txt",
+      "sha256": "df4be44ff1ed62a6175325a625fe9b0abaa3dcb842d81cf77bec2edfdd357dfe",
+      "source_url": "https://github.com/curl/curl/issues/23475"
+    },
+    {
+      "bytes": 4632,
+      "fetched_at_utc": "2026-11-03T16:29:00Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/curl-curl-23671.txt",
+      "sha256": "3d40e1859c13f790077875efa7d90b3aef1574beb8806eaac0048f2e2e6ead97",
+      "source_url": "https://github.com/curl/curl/issues/23671"
+    },
+    {
+      "bytes": 695,
+      "fetched_at_utc": "2026-11-03T16:29:15Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/golang-go-82460.txt",
+      "sha256": "7b04eea4f386e865899d334383a5d4675acffac3f6b87aed1274fc730dd18f6e",
+      "source_url": "https://github.com/golang/go/issues/82460"
+    },
+    {
+      "bytes": 900,
+      "fetched_at_utc": "2026-11-03T16:29:15Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/golang-go-82813.txt",
+      "sha256": "cc5cf34ba20597c2a0cf08d3b046739283fa92513c24fbd058e40d829a77aa16",
+      "source_url": "https://github.com/golang/go/issues/82813"
+    },
+    {
+      "bytes": 1606,
+      "fetched_at_utc": "2026-11-03T16:29:18Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/kubernetes-kubernetes-142005.txt",
+      "sha256": "f78d6e25f8e9a1735d52f50bf66600f468ccfe8adccfa43916c875f5f2213978",
+      "source_url": "https://github.com/kubernetes/kubernetes/issues/142005"
+    },
+    {
+      "bytes": 779,
+      "fetched_at_utc": "2026-11-03T16:29:18Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/kubernetes-kubernetes-143608.txt",
+      "sha256": "7048af6ed19f720b35f5dded8193a6c305be9e2c3f813a5de1d11796dbae94c1",
+      "source_url": "https://github.com/kubernetes/kubernetes/issues/143608"
+    },
+    {
+      "bytes": 778,
+      "fetched_at_utc": "2026-11-03T16:29:18Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/kubernetes-kubernetes-143609.txt",
+      "sha256": "d39886ebce9d88311a9f675c6bf2f2266502e7478bec6882ee5154d44861c990",
+      "source_url": "https://github.com/kubernetes/kubernetes/issues/143609"
+    },
+    {
+      "bytes": 781,
+      "fetched_at_utc": "2026-11-03T16:29:18Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/kubernetes-kubernetes-143610.txt",
+      "sha256": "993ea1aaf5b948c054acddc4f184da4c64807472862f26ea9b95ec8936799cfc",
+      "source_url": "https://github.com/kubernetes/kubernetes/issues/143610"
+    },
+    {
+      "bytes": 828,
+      "fetched_at_utc": "2026-11-03T16:29:07Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/nodejs-node-23736.txt",
+      "sha256": "01ba450d22b82cc022f1c57d0e558cebe460d5474639f96bd1f1a94250c053f8",
+      "source_url": "https://github.com/nodejs/node/issues/23736"
+    },
+    {
+      "bytes": 1544,
+      "fetched_at_utc": "2026-11-03T16:29:07Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/nodejs-node-45311.txt",
+      "sha256": "414ed513c4f892d59029222c69973e40a8c45afb753d8206e076c32d7b5b7094",
+      "source_url": "https://github.com/nodejs/node/issues/45311"
+    },
+    {
+      "bytes": 670,
+      "fetched_at_utc": "2026-11-03T16:29:07Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/nodejs-node-63810.txt",
+      "sha256": "fccc693dfe953c40b28ebdadfd797f6be415627740127d7a8250da3514530cef",
+      "source_url": "https://github.com/nodejs/node/issues/63810"
+    },
+    {
+      "bytes": 6001,
+      "fetched_at_utc": "2026-11-03T16:29:07Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/nodejs-node-66972.txt",
+      "sha256": "ab6fda64bda42cd931400cbedacc299bb5ac82aa2906dbf4414ad2f4c7a43b60",
+      "source_url": "https://github.com/nodejs/node/issues/66972"
+    },
+    {
+      "bytes": 2132,
+      "fetched_at_utc": "2026-11-03T16:29:04Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/openssl-openssl-27577.txt",
+      "sha256": "1a992b7b7732ac51fecc54ed35906c06b1607db89934d8bcd634b1d7a2d90b61",
+      "source_url": "https://github.com/openssl/openssl/issues/27577"
+    },
+    {
+      "bytes": 606,
+      "fetched_at_utc": "2026-11-03T16:29:04Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/openssl-openssl-29834.txt",
+      "sha256": "48351b65b997597a0e9a9677e5b5911958f3d6eca23b7bd57de1f6d1f78fedeb",
+      "source_url": "https://github.com/openssl/openssl/issues/29834"
+    },
+    {
+      "bytes": 1032,
+      "fetched_at_utc": "2026-11-03T16:29:04Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/openssl-openssl-29936.txt",
+      "sha256": "558bcda23271ef02569b5f8d9fbf0dbb2c68fa340caecc09b41f354228817967",
+      "source_url": "https://github.com/openssl/openssl/issues/29936"
+    },
+    {
+      "bytes": 699,
+      "fetched_at_utc": "2026-11-03T16:29:04Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/openssl-openssl-31557.txt",
+      "sha256": "f503377974c5b1c8857558d22008cbe5ccd202ff47697616bd1ebcb69222d700",
+      "source_url": "https://github.com/openssl/openssl/issues/31557"
+    },
+    {
+      "bytes": 1133,
+      "fetched_at_utc": "2026-11-03T16:29:10Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/python-cpython-159475.txt",
+      "sha256": "12326efe70bce16d720b4f42c3aa5fa65af0f57fb11a24c931fea6dde2106da5",
+      "source_url": "https://github.com/python/cpython/issues/159475"
+    },
+    {
+      "bytes": 2455,
+      "fetched_at_utc": "2026-11-03T16:29:10Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/python-cpython-160732.txt",
+      "sha256": "5d4ae9ae507efd9ff7956416cac36696668c7b2e005bbd33e5eacba01d80d482",
+      "source_url": "https://github.com/python/cpython/issues/160732"
+    },
+    {
+      "bytes": 4070,
+      "fetched_at_utc": "2026-11-03T16:29:10Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/python-cpython-160782.txt",
+      "sha256": "49f0702f800a21c2b8fb1fffff11af786289539191e14d0c34b775810798db11",
+      "source_url": "https://github.com/python/cpython/issues/160782"
+    },
+    {
+      "bytes": 539,
+      "fetched_at_utc": "2026-11-03T16:29:10Z",
+      "kind": "issue",
+      "path": "tests/fixtures/injection_real/issue/python-cpython-161192.txt",
+      "sha256": "335f0e954945b49229a4ae5cd14efb0a846399abf036688b6f9f28d083bd3911",
+      "source_url": "https://github.com/python/cpython/issues/161192"
+    },
+    {
+      "bytes": 403,
+      "fetched_at_utc": "2026-11-03T16:29:23Z",
+      "kind": "tool-result",
+      "path": "tests/fixtures/injection_real/tool-result/epss-cve-2023-4863.json",
+      "sha256": "bf8b810644661e34080e4c9c3ded0a6d445651eba4dfdeebde74141552d2d445",
+      "source_url": "https://api.first.org/data/v1/epss?cve=CVE-2023-4863"
+    },
+    {
+      "bytes": 403,
+      "fetched_at_utc": "2026-11-03T16:29:23Z",
+      "kind": "tool-result",
+      "path": "tests/fixtures/injection_real/tool-result/epss-cve-2024-3094.json",
+      "sha256": "5c69f6ed962c1f49fed21d26c2487d921f0e01b1099babe90074a2e55452eab4",
+      "source_url": "https://api.first.org/data/v1/epss?cve=CVE-2024-3094"
+    },
+    {
+      "bytes": 11932,
+      "fetched_at_utc": "2026-11-03T16:29:44Z",
+      "kind": "tool-result",
+      "path": "tests/fixtures/injection_real/tool-result/ghsa-ghsa-7rjr-3q55-vv33.json",
+      "sha256": "4c6451bf22c86555690bccfe8ed886ef096c940221a204c633e5bc8ba921ea57",
+      "source_url": "https://api.github.com/advisories/GHSA-7rjr-3q55-vv33"
+    },
+    {
+      "bytes": 15081,
+      "fetched_at_utc": "2026-11-03T16:29:42Z",
+      "kind": "tool-result",
+      "path": "tests/fixtures/injection_real/tool-result/ghsa-ghsa-jfh8-c2jp-5v3q.json",
+      "sha256": "6418437d61416f562f0d1afdcad032a8e721ca21e262374d0c911af621e6916b",
+      "source_url": "https://api.github.com/advisories/GHSA-jfh8-c2jp-5v3q"
+    },
+    {
+      "bytes": 1870,
+      "fetched_at_utc": "2026-11-03T16:29:24Z",
+      "kind": "tool-result",
+      "path": "tests/fixtures/injection_real/tool-result/kev-cve-2026-111357.json",
+      "sha256": "ae0b14a384052e7168b2a9598a578ad89271e5a33612f953e60c346840384dfc",
+      "source_url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+    },
+    {
+      "bytes": 1764,
+      "fetched_at_utc": "2026-11-03T16:29:24Z",
+      "kind": "tool-result",
+      "path": "tests/fixtures/injection_real/tool-result/kev-cve-2026-118527.json",
+      "sha256": "8dd24d57faf99394280d864d58f928abe0ece379716620e666a7e4d9406cb785",
+      "source_url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+    },
+    {
+      "bytes": 37889,
+      "fetched_at_utc": "2026-11-03T16:29:25Z",
+      "kind": "tool-result",
+      "path": "tests/fixtures/injection_real/tool-result/nvd-cve-2023-4863.json",
+      "sha256": "a89ee3f55a308a091249e406711ab9fc83333baeeaef56df123f71d4dc28d13d",
+      "source_url": "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=CVE-2023-4863"
+    },
+    {
+      "bytes": 22424,
+      "fetched_at_utc": "2026-11-03T16:29:33Z",
+      "kind": "tool-result",
+      "path": "tests/fixtures/injection_real/tool-result/nvd-cve-2024-3094.json",
+      "sha256": "df476999ad399713d6391547b4f6e673e3150f022beb203ed35266a7808fbae6",
+      "source_url": "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=CVE-2024-3094"
+    },
+    {
+      "bytes": 11918,
+      "fetched_at_utc": "2026-11-03T16:29:41Z",
+      "kind": "tool-result",
+      "path": "tests/fixtures/injection_real/tool-result/osv-ghsa-7rjr-3q55-vv33.json",
+      "sha256": "3fd33a43cb2deadfd8bb3e17b427d1e2893e2427294e31ff15c144b114124aa3",
+      "source_url": "https://api.osv.dev/v1/vulns/GHSA-7rjr-3q55-vv33"
+    },
+    {
+      "bytes": 30991,
+      "fetched_at_utc": "2026-11-03T16:29:40Z",
+      "kind": "tool-result",
+      "path": "tests/fixtures/injection_real/tool-result/osv-ghsa-jfh8-c2jp-5v3q.json",
+      "sha256": "e9f3a342c848bf19da8dc3353fe015e0ac0199a927a5f7652e6c63be86375f50",
+      "source_url": "https://api.osv.dev/v1/vulns/GHSA-jfh8-c2jp-5v3q"
+    }
+  ],
+  "generated_at_utc": "2026-11-03T16:29:45Z",
+  "harvest_invocation": "python tools/injection_real_harvest.py",
+  "max_document_chars": 6000,
+  "public_data_only": true,
+  "source_type_mapping": {
+    "cve": "documentation",
+    "issue": "source",
+    "tool-result": "source"
+  },
+  "total": 57,
+  "version": 1
+}

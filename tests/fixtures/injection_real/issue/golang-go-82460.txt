@@ -1,0 +1,5 @@
+When processing a 101 Switching Protocols response, the HTTP/1 client returns a response with a writable `Response.Body` which the caller may use to read and write from the newly-created tunnel.
+
+It does this even when the request did not ask for a protocol switch by sending an `Upgrade` header. A malicious server returning a unsolicited 101 Switching Protocols response could cause a client to hang reading indefinitely from the response body. (Timeouts reading from the body are disabled after a protocol switch, since the timeout only applies to the HTTP round trip, which has concluded.)
+
+This was reported to us as a potential security issue. We are categorizing it as a non-security bug.

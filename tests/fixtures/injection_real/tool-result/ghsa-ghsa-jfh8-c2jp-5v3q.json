@@ -1,0 +1,265 @@
+{
+  "tool": "cve-mcp.ghsa",
+  "arguments": {
+    "id": "GHSA-jfh8-c2jp-5v3q"
+  },
+  "result": {
+    "ghsa_id": "GHSA-jfh8-c2jp-5v3q",
+    "cve_id": "CVE-2021-44228",
+    "url": "https://api.github.com/advisories/GHSA-jfh8-c2jp-5v3q",
+    "html_url": "https://github.com/advisories/GHSA-jfh8-c2jp-5v3q",
+    "summary": "Remote code injection in Log4j",
+    "description": "# Summary\n\nLog4j versions prior to 2.16.0 are subject to a remote code execution vulnerability via the ldap JNDI parser.\nAs per [Apache's Log4j security guide](https://logging.apache.org/log4j/2.x/security.html): Apache Log4j2 <=2.14.1 JNDI features used in configuration, log messages, and parameters do not protect against attacker controlled LDAP and other JNDI related endpoints. An attacker who can control log messages or log message parameters can execute arbitrary code loaded from LDAP servers when message lookup substitution is enabled. From log4j 2.16.0, this behavior has been disabled by default.\n\nLog4j version 2.15.0 contained an earlier fix for the vulnerability, but that patch did not disable attacker-controlled JNDI lookups in all situations. For more information, see the `Updated advice for version 2.16.0` section of this advisory.\n\n# Impact\n\nLogging untrusted or user controlled data with a vulnerable version of Log4J may result in Remote Code Execution (RCE) against your application. This includes untrusted data included in logged errors such as exception traces, authentication failures, and other unexpected vectors of user controlled input. \n\n# Affected versions\n\nAny Log4J version prior to v2.15.0 is affected to this specific issue.\n\nThe v1 branch of Log4J which is considered End Of Life (EOL) is vulnerable to other RCE vectors so the recommendation is to still update to 2.16.0 where possible.\n\n## Security releases\nAdditional backports of this fix have been made available in versions 2.3.1, 2.12.2, and 2.12.3\n\n## Affected packages\nOnly the `org.apache.logging.log4j:log4j-core` package is directly affected by this vulnerability. The `org.apache.logging.log4j:log4j-api` should be kept at the same version as the `org.apache.logging.log4j:log4j-core` package to ensure compatability if in use.\n\n# Remediation Advice\n\n## Updated advice for version 2.16.0\n\nThe Apache Logging Services team provided updated mitigation advice upon the release of version 2.16.0, which [disables JNDI by default and completely removes support for message lookups](https://logging.apache.org/log4j/2.x/changes-report.html#a2.16.0).\nEven in version 2.15.0, lookups used in layouts to provide specific pieces of context information will still recursively resolve, possibly triggering JNDI lookups. This problem is being tracked as [CVE-2021-45046](https://nvd.nist.gov/vuln/detail/CVE-2021-45046). More information is available on the [GitHub Security Advisory for CVE-2021-45046](https://github.com/advisories/GHSA-7rjr-3q55-vv33).\n\nUsers who want to avoid attacker-controlled JNDI lookups but cannot upgrade to 2.16.0 must [ensure that no such lookups resolve to attacker-provided data and ensure that the the JndiLookup class is not loaded](https://issues.apache.org/jira/browse/LOG4J2-3221).\n\nPlease note that Log4J v1 is End Of Life (EOL) and will not receive patches for this issue. Log4J v1 is also vulnerable to other RCE vectors and we recommend you migrate to Log4J 2.16.0 where possible.",
+    "type": "reviewed",
+    "severity": "critical",
+    "repository_advisory_url": null,
+    "source_code_location": "https://github.com/apache/logging-log4j2",
+    "identifiers": [
+      {
+        "value": "GHSA-jfh8-c2jp-5v3q",
+        "type": "GHSA"
+      },
+      {
+        "value": "CVE-2021-44228",
+        "type": "CVE"
+      }
+    ],
+    "references": [
+      "https://nvd.nist.gov/vuln/detail/CVE-2021-44228",
+      "https://github.com/apache/logging-log4j2/pull/608",
+      "https://github.com/tangxiaofeng7/apache-log4j-poc",
+      "https://logging.apache.org/log4j/2.x/changes-report.html#a2.15.0",
+      "https://logging.apache.org/log4j/2.x/manual/lookups.html#JndiLookup",
+      "https://issues.apache.org/jira/browse/LOG4J2-3198",
+      "https://issues.apache.org/jira/browse/LOG4J2-3201",
+      "https://logging.apache.org/log4j/2.x/manual/migration.html",
+      "https://logging.apache.org/log4j/2.x/security.html",
+      "http://packetstormsecurity.com/files/165225/Apache-Log4j2-2.14.1-Remote-Code-Execution.html",
+      "http://www.openwall.com/lists/oss-security/2021/12/10/1",
+      "http://www.openwall.com/lists/oss-security/2021/12/10/2",
+      "http://www.openwall.com/lists/oss-security/2021/12/10/3",
+      "https://psirt.global.sonicwall.com/vuln-detail/SNWLID-2021-0032",
+      "https://issues.apache.org/jira/browse/LOG4J2-3214",
+      "https://www.oracle.com/security-alerts/alert-cve-2021-44228.html",
+      "http://www.openwall.com/lists/oss-security/2021/12/13/1",
+      "http://www.openwall.com/lists/oss-security/2021/12/13/2",
+      "https://issues.apache.org/jira/browse/LOG4J2-3221",
+      "https://github.com/advisories/GHSA-7rjr-3q55-vv33",
+      "https://cert-portal.siemens.com/productcert/pdf/ssa-661247.pdf",
+      "https://lists.debian.org/debian-lts-announce/2021/12/msg00007.html",
+      "https://twitter.com/kurtseifried/status/1469345530182455296",
+      "https://www.debian.org/security/2021/dsa-5020",
+      "http://packetstormsecurity.com/files/165260/VMware-Security-Advisory-2021-0028.html",
+      "http://packetstormsecurity.com/files/165261/Apache-Log4j2-2.14.1-Information-Disclosure.html",
+      "http://packetstormsecurity.com/files/165270/Apache-Log4j2-2.14.1-Remote-Code-Execution.html",
+      "http://www.openwall.com/lists/oss-security/2021/12/14/4",
+      "https://www.intel.com/content/www/us/en/security-center/advisory/intel-sa-00646.html",
+      "https://www.kb.cert.org/vuls/id/930724",
+      "http://packetstormsecurity.com/files/165281/Log4j2-Log4Shell-Regexes.html",
+      "http://packetstormsecurity.com/files/165282/Log4j-Payload-Generator.html",
+      "http://packetstormsecurity.com/files/165306/L4sh-Log4j-Remote-Code-Execution.html",
+      "http://packetstormsecurity.com/files/165307/Log4j-Remote-Code-Execution-Word-Bypassing.html",
+      "http://packetstormsecurity.com/files/165311/log4j-scan-Extensive-Scanner.html",
+      "http://www.openwall.com/lists/oss-security/2021/12/15/3",
+      "https://cert-portal.siemens.com/productcert/pdf/ssa-714170.pdf",
+      "https://cert-portal.siemens.com/productcert/pdf/ssa-397453.pdf",
+      "https://cert-portal.siemens.com/productcert/pdf/ssa-479842.pdf",
+      "http://packetstormsecurity.com/files/165371/VMware-Security-Advisory-2021-0028.4.html",
+      "http://packetstormsecurity.com/files/165532/Log4Shell-HTTP-Header-Injection.html",
+      "https://github.com/cisagov/log4j-affected-db/blob/develop/SOFTWARE-LIST.md",
+      "http://packetstormsecurity.com/files/165642/VMware-vCenter-Server-Unauthenticated-Log4Shell-JNDI-Injection-Remote-Code-Execution.html",
+      "http://packetstormsecurity.com/files/165673/UniFi-Network-Application-Unauthenticated-Log4Shell-Remote-Code-Execution.html",
+      "https://www.oracle.com/security-alerts/cpujan2022.html",
+      "https://github.com/cisagov/log4j-affected-db",
+      "https://support.apple.com/kb/HT213189",
+      "https://www.bentley.com/en/common-vulnerability-exposure/be-2022-0001",
+      "https://www.oracle.com/security-alerts/cpuapr2022.html",
+      "https://github.com/nu11secur1ty/CVE-mitre/tree/main/CVE-2021-44228",
+      "https://www.nu11secur1ty.com/2021/12/cve-2021-44228.html",
+      "http://packetstormsecurity.com/files/167794/Open-Xchange-App-Suite-7.10.x-Cross-Site-Scripting-Command-Injection.html",
+      "http://packetstormsecurity.com/files/167917/MobileIron-Log4Shell-Remote-Command-Execution.html",
+      "http://packetstormsecurity.com/files/171626/AD-Manager-Plus-7122-Remote-Code-Execution.html",
+      "https://msrc-blog.microsoft.com/2021/12/11/microsofts-response-to-cve-2021-44228-apache-log4j2",
+      "https://security.netapp.com/advisory/ntap-20211210-0007",
+      "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/M5CSVUNV4HWZZXGOKNSK6L7RPM7BOKIB",
+      "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/VU57UJDCFIASIO35GC55JMKSRXJMCDFM",
+      "https://github.com/github/advisory-database/pull/5501",
+      "https://packetstormsecurity.com/files/165673/UniFi-Network-Application-Unauthenticated-Log4Shell-Remote-Code-Execution.html",
+      "https://packetstormsecurity.com/files/167794/Open-Xchange-App-Suite-7.10.x-Cross-Site-Scripting-Command-Injection.html",
+      "https://packetstormsecurity.com/files/167917/MobileIron-Log4Shell-Remote-Command-Execution.html",
+      "https://packetstormsecurity.com/files/171626/AD-Manager-Plus-7122-Remote-Code-Execution.html",
+      "https://sec.cloudapps.cisco.com/security/center/content/CiscoSecurityAdvisory/cisco-sa-apache-log4j-qRuKNEbd",
+      "https://seclists.org/fulldisclosure/2022/Dec/2",
+      "https://seclists.org/fulldisclosure/2022/Jul/11",
+      "https://seclists.org/fulldisclosure/2022/Mar/23",
+      "https://tools.cisco.com/security/center/content/CiscoSecurityAdvisory/cisco-sa-apache-log4j-qRuKNEbd",
+      "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2021-44228",
+      "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/M5CSVUNV4HWZZXGOKNSK6L7RPM7BOKIB",
+      "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/VU57UJDCFIASIO35GC55JMKSRXJMCDFM",
+      "http://seclists.org/fulldisclosure/2022/Dec/2",
+      "http://seclists.org/fulldisclosure/2022/Jul/11",
+      "http://seclists.org/fulldisclosure/2022/Mar/23",
+      "https://github.com/advisories/GHSA-jfh8-c2jp-5v3q"
+    ],
+    "published_at": "2021-12-10T00:40:56Z",
+    "updated_at": "2025-10-22T19:13:26Z",
+    "github_reviewed_at": "2021-12-10T00:40:41Z",
+    "nvd_published_at": "2021-12-10T10:15:00Z",
+    "withdrawn_at": null,
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "maven",
+          "name": "org.apache.logging.log4j:log4j-core"
+        },
+        "vulnerable_version_range": ">= 2.13.0, < 2.15.0",
+        "first_patched_version": "2.15.0",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "maven",
+          "name": "org.apache.logging.log4j:log4j-core"
+        },
+        "vulnerable_version_range": ">= 2.4, < 2.12.2",
+        "first_patched_version": "2.12.2",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "maven",
+          "name": "com.guicedee.services:log4j-core"
+        },
+        "vulnerable_version_range": "<= 1.2.1.2-jre17",
+        "first_patched_version": null,
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "maven",
+          "name": "org.xbib.elasticsearch:log4j"
+        },
+        "vulnerable_version_range": "= 6.3.2.1",
+        "first_patched_version": null,
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "maven",
+          "name": "uk.co.nichesolutions.logging.log4j:log4j-core"
+        },
+        "vulnerable_version_range": "= 2.6.3-CUSTOM",
+        "first_patched_version": null,
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "maven",
+          "name": "org.apache.logging.log4j:log4j-core"
+        },
+        "vulnerable_version_range": ">= 2.0-beta9, < 2.3.1",
+        "first_patched_version": "2.3.1",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "maven",
+          "name": "org.ops4j.pax.logging:pax-logging-log4j2"
+        },
+        "vulnerable_version_range": ">= 1.8.0, < 1.9.2",
+        "first_patched_version": "1.9.2",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "maven",
+          "name": "org.ops4j.pax.logging:pax-logging-log4j2"
+        },
+        "vulnerable_version_range": ">= 1.10.0, < 1.10.8",
+        "first_patched_version": "1.10.8",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "maven",
+          "name": "org.ops4j.pax.logging:pax-logging-log4j2"
+        },
+        "vulnerable_version_range": ">= 1.11.0, < 1.11.10",
+        "first_patched_version": "1.11.10",
+        "vulnerable_functions": []
+      },
+      {
+        "package": {
+          "ecosystem": "maven",
+          "name": "org.ops4j.pax.logging:pax-logging-log4j2"
+        },
+        "vulnerable_version_range": ">= 2.0.0, < 2.0.11",
+        "first_patched_version": "2.0.11",
+        "vulnerable_functions": []
+      }
+    ],
+    "cvss_severities": {
+      "cvss_v3": {
+        "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H/E:H",
+        "score": 10.0
+      },
+      "cvss_v4": {
+        "vector_string": null,
+        "score": 0.0
+      }
+    },
+    "cwes": [
+      {
+        "cwe_id": "CWE-20",
+        "name": "Improper Input Validation"
+      },
+      {
+        "cwe_id": "CWE-400",
+        "name": "Uncontrolled Resource Consumption"
+      },
+      {
+        "cwe_id": "CWE-502",
+        "name": "Deserialization of Untrusted Data"
+      },
+      {
+        "cwe_id": "CWE-917",
+        "name": "Improper Neutralization of Special Elements used in an Expression Language Statement ('Expression Language Injection')"
+      }
+    ],
+    "credits": [
+      {
+        "user": {
+          "login": "ppkarwasz",
+          "id": 12533274,
+          "node_id": "MDQ6VXNlcjEyNTMzMjc0",
+          "avatar_url": "https://avatars.githubusercontent.com/u/12533274?v=4",
+          "gravatar_id": "",
+          "url": "https://api.github.com/users/ppkarwasz",
+          "html_url": "https://github.com/ppkarwasz",
+          "followers_url": "https://api.github.com/users/ppkarwasz/followers",
+          "following_url": "https://api.github.com/users/ppkarwasz/following{/other_user}",
+          "gists_url": "https://api.github.com/users/ppkarwasz/gists{/gist_id}",
+          "starred_url": "https://api.github.com/users/ppkarwasz/starred{/owner}{/repo}",
+          "subscriptions_url": "https://api.github.com/users/ppkarwasz/subscriptions",
+          "organizations_url": "https://api.github.com/users/ppkarwasz/orgs",
+          "repos_url": "https://api.github.com/users/ppkarwasz/repos",
+          "events_url": "https://api.github.com/users/ppkarwasz/events{/privacy}",
+          "received_events_url": "https://api.github.com/users/ppkarwasz/received_events",
+          "type": "User",
+          "user_view_type": "public",
+          "site_admin": false
+        },
+        "type": "analyst"
+      }
+    ],
+    "comments": 0,
+    "cvss": {
+      "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H/E:H",
+      "score": 10.0
+    },
+    "epss": {
+      "percentage": 0.99999,
+      "percentile": 1.0
+    }
+  }
+}

@@ -1,0 +1,23 @@
+Please see blog post https://blog.hartwork.org/posts/expat-2-10-0-released/ for an overview and the change log at https://github.com/libexpat/libexpat/blob/R_2_10_0/expat/Changes for details. Affects all alive branches of Python. Thank you! 🙏 
+
+Related: #158876 (predecessor for Expat 2.9.0)
+
+CC @StanFromIreland @picnixz @gpshead
+
+---
+
+- CVE-2026-113351
+- CVE-2026-115506
+- CVE-2026-117610
+- CVE-2026-118370
+
+---
+
+<!-- gh-linked-prs -->
+### Linked PRs
+* gh-161202
+* gh-161215
+* gh-161216
+* gh-161217
+* gh-161218
+<!-- /gh-linked-prs -->

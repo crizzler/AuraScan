@@ -1,0 +1,189 @@
+### Version
+
+v26.12.1
+
+### Platform
+
+```text
+win32 x64 v26.12.1
+```
+
+### Subsystem
+
+vfs
+
+### What steps will reproduce the bug?
+
+1. Create a ZIP archive containing two directories with conflicting filenames.
+
+Save the following as zip-rename-repro.mjs:
+
+import {
+  ZipEntry, ZipBuffer, createZipArchive
+} from 'node:zlib';
+import { ZipProvider, create } from 'node:vfs';
+
+const entries = await Promise.all([
+  ZipEntry.create('src/file.txt', Buffer.from('Original A')),
+  ZipEntry.create('dst/file.txt', Buffer.from('Original B')),
+  ZipEntry.create('dst/keep.txt', Buffer.from('Keep this file'))
+]);
+
+const archive = Buffer.concat(
+  await Array.fromAsync(createZipArchive(entries))
+);
+
+const zip = new ZipBuffer(archive);
+const fs = create(new ZipProvider(zip));
+
+console.log('Before:', fs.readFileSync('/dst/file.txt', 'utf8'));
+
+try {
+  fs.renameSync('/src', '/dst');
+  console.log('Rename succeeded despite nonempty destination');
+} catch (error) {
+  console.log('Rename failed:', error.code);
+}
+
+console.log('After:', fs.readFileSync('/dst/file.txt', 'utf8'));
+
+2. Run it using:
+
+node --experimental-vfs .\zip-rename-repro.mjs
+
+3. Observe that the existing destination file is silently overwritten.
+
+4. Additional reproduction: persistent data loss after failure
+
+The attached zip-extended-poc.mjs includes further tests using a writable, disk-backed ZipFile.
+
+In one test, the source directory contains two entries. The second entry has a deliberately corrupted payload, causing a CRC verification failure during the rename.
+
+The first entry has the same filename as an existing destination file.
+
+The operation throws ERR_ZIP_ENTRY_CORRUPT, but the destination file has already been overwritten. Closing and reopening the ZIP archive confirms that the modification persists.
+
+### How often does it reproduce? Is there a required condition?
+
+Reproduces consistently on Node.js v26.12.1.
+
+Conditions:
+
+Node.js must run with --experimental-vfs.
+
+The filesystem uses ZipProvider backed by a writable ZipBuffer or ZipFile.
+
+A directory is renamed onto an existing nonempty destination directory.
+
+For the persistent partial-modification scenario, a later source entry must fail during processing (for example, because of a corrupted ZIP payload).
+
+Both asynchronous and synchronous rename implementations appear to share the same underlying logic. The supplied results directly confirm the tested cases.
+
+### What is the expected behavior? Why is that the expected behavior?
+
+Renaming a directory onto an existing nonempty directory should fail with ENOTEMPTY without modifying the source or destination.
+
+This matches the behaviour explicitly tested elsewhere in Node.js's VFS test suite:
+
+test/parallel/test-vfs-rename.js
+
+A directory should also not be renamed onto an existing regular file in a way that creates a contradictory filesystem hierarchy.
+
+If a multi-entry rename fails, previously existing destination data should not remain unexpectedly overwritten.
+
+These expectations are consistent with normal filesystem rename semantics and with the existing Node.js VFS regression tests.
+
+### What do you see instead?
+
+1. Silent overwrite of existing destination content
+
+Actual output:
+
+Before: Original B
+After: Original A
+Rename succeeded despite nonempty destination
+
+The existing file is overwritten rather than the rename being rejected.
+
+2. Inconsistent file/directory hierarchy
+
+A separate test renames a directory onto an existing regular file:
+
+Rename: SUCCESS
+/target FILE
+Content: ORIGINAL FILE
+/target/child.txt FILE
+Content: CHILD CONTENT
+Directory listing rejected: ENOTDIR
+
+The ZIP contains a file and a child entry beneath that same file path.
+
+3. Partial modification despite failure
+
+A deliberately corrupted second ZIP member produces:
+
+Rename failed: ERR_ZIP_ENTRY_CORRUPT
+Source remains: true
+Destination created: true
+
+4. Persistent overwrite after a failed rename
+
+The strongest reproduction uses a writable ZipFile and then closes and reopens the physical archive:
+
+Rename failed: ERR_ZIP_ENTRY_CORRUPT
+Destination after reopening: REPLACEMENT DATA
+Original destination preserved: false
+Source still exists: true
+Final entries: [
+  'dst/01-good.txt',
+  'src/01-good.txt',
+  'src/02-bad.txt'
+]
+
+This demonstrates that an operation which reports failure can permanently overwrite previously existing archive contents.
+
+### Additional information
+
+Suspected root cause
+
+The issue appears to originate in:
+
+lib/internal/vfs/providers/ziparchive.js
+
+Specifically, the directory rename logic in ZipProvider.rename() and ZipProvider.renameSync().
+
+The implementation collects source entries, writes them under their destination names, and then deletes the source entries.
+
+It appears to lack:
+
+Validation that an existing destination directory is empty.
+
+Complete validation of file/directory collisions.
+
+Operation-level rollback when a later archive entry fails during processing.
+
+Impact
+
+The observed consequences are unintended data replacement, inconsistent archive structure, and persistent partial modifications after a failed operation.
+
+A separate test also confirmed that replaced JavaScript can subsequently be loaded through the VFS module loader. However, no unauthorised code execution, privilege escalation, or security-boundary bypass has been demonstrated.
+
+The findings are reported as filesystem correctness and data-integrity defects, not as a confirmed security vulnerability.
+
+Related files
+
+lib/internal/vfs/providers/ziparchive.js
+
+test/parallel/test-vfs-rename.js
+
+test/parallel/test-vfs-zip-provider.js
+
+Suggested remediation
+
+Validate source and destination entries before making changes, reject invalid replacements using appropriate filesystem errors, and prevent partial persistent modifications when a multi-entry rename fails.
+
+Reproduction scripts and terminal output are available as attachments.
+
+[node-vfs-reproduction.zip](https://github.com/user-attachments/files/33897186/node-vfs-reproduction.zip)
+
+[reproduction-output.txt](https:/

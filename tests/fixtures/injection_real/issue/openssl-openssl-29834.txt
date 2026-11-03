@@ -1,0 +1,13 @@
+There should fuzzers that can find the CVE (where it makes sense).
+I think at least the following CVE should be covered by a fuzzer, which might need to extend an existing fuzzer. They all seem to be memory corruption or NULL pointer deference, which the fuzzer should be able to report.
+- CVE-2026-22796: PKCS#7
+- CVE-2026-22795: PKCS#12
+- CVE-2025-69421: PKCS#12
+- CVE-2025-69420: TS_RESP_verify_response
+- CVE-2025-69419: PKCS#12
+- CVE-2025-68160: BIO filter
+- CVE-2025-15468: SSL_CIPHER_find() using QUIC
+- CVE-2025-15467: CMS
+- CVE-2025-11187: PKCS#12
+- CVE-2025-9232: HTTP client
+- CVE-2025-9230: CMS

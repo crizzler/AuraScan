@@ -8,9 +8,15 @@ importing it back. That keeps ``analyzers.injection`` free of an import cycle.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Literal, Optional, Tuple
 
 from . import catalog
+
+# Where the scanned text came from (Card B). ``unknown`` deliberately behaves like ``source``: that is
+# what the original does for a pathless scan, and making it safer would break fidelity.
+SourceType = Literal["documentation", "fixture", "source", "unknown"]
+
+SOURCE_TYPES = ("documentation", "fixture", "source", "unknown")
 
 
 @dataclass(frozen=True)

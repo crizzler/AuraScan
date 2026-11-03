@@ -1,0 +1,28 @@
+`email.utils.parseaddr()` and `getaddresses()`, even in `strict=True` mode (the default since the CVE-2023-27043 fix), silently drop a comment that is embedded inside a dot-atom and splice the surrounding atoms together:
+
+```python
+>>> from email.utils import parseaddr
+>>> parseaddr('u(comment)ser@d.com', strict=True)
+('comment comment', 'user@d.com')
+```
+
+The strict parser rejects the same input:
+
+```python
+>>> from email.headerregistry import Address
+>>> Address(addr_spec='u(comment)ser@d.com')
+InvalidHeaderDefect: local-part is not dot-atom, quoted-string, or obs-local-part
+```
+
+So a caller that validates or authorizes with `parseaddr` and then hands the original string to a strict component gets a subject mismatch — the same class as CVE-2019-11340 and the motivation for CVE-2023-27043.
+
+Proposal: in strict mode, fail closed (return `('', '')`) when a comment is embedded inside a dot-atom instead of splicing. `strict=False` would keep the historical lenient behavior. I'm happy to prepare a PR.
+
+Reproduced on CPython 3.14.6.
+
+
+<!-- gh-linked-prs -->
+### Linked PRs
+* gh-159477
+* gh-159618
+<!-- /gh-linked-prs -->

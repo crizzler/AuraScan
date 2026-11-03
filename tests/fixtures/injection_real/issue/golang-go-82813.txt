@@ -1,0 +1,9 @@
+The following is an LLM-generated summary. It is accurate to the best of my ability to determine.
+
+This was reported to us as a potential security issue. Since there is no way to accidentally trigger this behavior--it requires a buggy server handler--we consider it to be a non-security bug.
+
+----
+
+When an HTTP/1 server handler sends a 101 Switching Protocols response and returns without hijacking the connection, the server continues to read and serve subsequent HTTP requests from the connection.
+
+Because a 101 Switching Protocols response switches the connection away from HTTP/1 (RFC 9110, Section 15.2.2), the server should not treat the connection as continuing to contain HTTP requests if the handler did not take ownership of the connection via Hijack. As with CONNECT requests (#81744), the server should mark the connection to close (closeAfterReply = true) after writing a 101 response.

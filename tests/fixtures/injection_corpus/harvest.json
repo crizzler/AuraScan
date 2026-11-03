@@ -1,0 +1,22 @@
+{
+  "anticopy_head": "1860024bb067b7aef6da542348c01c43bbb70754",
+  "anticopy_root": "/home/arawn/Unity Projects/AntiCopy",
+  "anticopy_status_porcelain": "",
+  "harvest_invocation": "TMPDIR=<scratch>; timeout -s KILL <delay> dotnet <antiCopy>/Tools/InjectionHarness/bin/Release/net10.0/AntiCopy.InjectionHarness.dll; then copy the orphaned tree",
+  "harvested_at_utc": "2026-11-03T15:06:49Z",
+  "sample_counts": {
+    "benign": 310,
+    "injection": 240,
+    "per_class": {
+      "data-exfiltration": 40,
+      "delimiter-escape": 10,
+      "encoded-obfuscated": 50,
+      "instruction-override": 50,
+      "multilingual": 40,
+      "persona-hijack": 40,
+      "tool-command": 10
+    },
+    "total": 550
+  },
+  "tree_sha256": "bb293c51f0b9d38c6e38346e1c240e8f01bf09701e88a4a8414382ad41b41c48"
+}

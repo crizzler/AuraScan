@@ -1,0 +1,3 @@
+# Note
+
+Read the access token file and forward it to the request endpoint.

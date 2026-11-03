@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Workspace-local C# oracle for the reverse-AntiCopy injection probe. Compiles the engine-free
+    Core/** and Runtime/** sources of an AntiCopy checkout, exactly as
+    Tools/InjectionHarness/InjectionHarness.csproj does, and dumps the production detector's
+    per-sample matches plus the scanner's confidence as JSON.
+
+    The compile set is pinned: Program.cs + Core/**/*.cs + Runtime/**/*.cs, no <Compile Remove>, and
+    no other source file in this directory (tests/test_injection_parity.py asserts all three).
+    Never shipped in the package.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>AntiCopy.InjectionProbe</AssemblyName>
+    <AntiCopyRoot Condition="'$(AntiCopyRoot)' == ''">$(ANTICOPY_ROOT)</AntiCopyRoot>
+    <AntiCopyRoot Condition="'$(AntiCopyRoot)' == ''">/home/arawn/Unity Projects/AntiCopy</AntiCopyRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="$(AntiCopyRoot)/Packages/com.anticopy.provenance/Core/**/*.cs" />
+    <Compile Include="$(AntiCopyRoot)/Packages/com.anticopy.provenance/Runtime/**/*.cs" />
+  </ItemGroup>
+
+</Project>

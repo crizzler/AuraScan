@@ -1,0 +1,114 @@
+# Verbatim C# label lists. Extracted once at harvest, never retyped.
+#
+# Regenerate:
+#   sed -n '20,56p'  <AntiCopy>/Packages/com.anticopy.provenance/Core/Injection/InstructionOverrideDetector.cs
+#   sed -n '14,77p'  <AntiCopy>/Packages/com.anticopy.provenance/Core/Injection/DataExfiltrationDetector.cs
+#
+# The override range is 20-56 rather than the design's 39-56 so that the literal *ids* are captured
+# next to the phrases; 39-56 alone is the phrase array only.
+# AntiCopy HEAD: 1860024bb067b7aef6da542348c01c43bbb70754
+#
+# ==== InstructionOverrideDetector.cs:20-56 ====
+            "override.literal.ignore-prior",
+            "override.literal.ignore-all-prior",
+            "override.literal.disregard-previous",
+            "override.literal.disregard-all-previous",
+            "override.literal.disregard-prior",
+            "override.literal.ignore-previous-commands",
+            "override.literal.ignore-all-previous-commands",
+            "override.literal.forget-previous",
+            "override.literal.forget-all-previous",
+            "override.literal.ignore-your-instructions",
+            "override.literal.ignore-the-above",
+            "override.literal.override-your-instructions",
+            "override.literal.ignore-preceding",
+            "override.literal.ignore-everything-above",
+            "override.literal.disregard-everything-above"
+        };
+
+        private static readonly string[] LiteralPhrases =
+        {
+            "ignore previous instructions",
+            "ignore all previous instructions",
+            "ignore the previous instructions",
+            "ignore prior instructions",
+            "ignore all prior instructions",
+            "disregard previous instructions",
+            "disregard all previous instructions",
+            "disregard prior instructions",
+            "ignore previous commands",
+            "ignore all previous commands",
+            "forget previous instructions",
+            "forget all previous instructions",
+            "ignore your instructions",
+            "ignore the above instructions",
+            "override your instructions",
+            "ignore preceding instructions",
+            "ignore everything above",
+            "disregard everything above"
+
+# ==== DataExfiltrationDetector.cs:14-77 ====
+        private static readonly string[] SensitiveIds =
+        {
+            "system-prompt",
+            "your-instructions",
+            "env-file",
+            "api-key",
+            "api-key-compact",
+            "api-key-hyphen",
+            "environment-variables",
+            "credentials",
+            "secret-key",
+            "ssh-private-key",
+            "access-token",
+            "password-file"
+        };
+
+        private static readonly string[] SensitivePhrases =
+        {
+            "system prompt",
+            "your instructions",
+            ".env",
+            "api key",
+            "apikey",
+            "api-key",
+            "environment variables",
+            "credentials",
+            "secret key",
+            "id_rsa",
+            "access token",
+            "password file"
+        };
+
+        private static readonly string[] VerbIds =
+        {
+            "send",
+            "post",
+            "email",
+            "upload",
+            "exfiltrate",
+            "reveal",
+            "leak",
+            "forward",
+            "transmit",
+            "print-to-chat",
+            "output-in-full",
+            "include-in-response",
+            "paste"
+        };
+
+        private static readonly string[] VerbPhrases =
+        {
+            "send",
+            "post",
+            "email",
+            "upload",
+            "exfiltrate",
+            "reveal",
+            "leak",
+            "forward",
+            "transmit",
+            "print to the chat",
+            "output in full",
+            "include in your response",
+            "paste"

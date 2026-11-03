@@ -1,0 +1,3 @@
+# Note 0
+
+The .env file and the system prompt are described in the developer guide.

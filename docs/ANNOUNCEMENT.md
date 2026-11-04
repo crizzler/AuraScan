@@ -10,7 +10,9 @@ The v0.14.0 release is a package-only update. It adds `aurascan-mcp`, a
 read-only stdio MCP server that exposes the reverse-AntiCopy injection
 detector, an agent/MCP configuration audit, and the offline host audit as four
 default tools: `scan_content`, `scan_path`, `audit_agent_config`, and
-`security_audit`. It also ships an opt-in `verify_evidence` bundle checker.
+`security_audit`. It also ships an opt-in `verify_evidence` bundle checker and
+an opt-in `security_audit_online` host audit that refreshes campaign intel in
+memory, writes nothing, and is the only tool that may reach the network.
 The detector is a static first signal, not containment; the server does not
 execute, fetch, write, block, or quarantine anything. The two scan tools redact
 credential-shaped spans in optional snippets, best effort and never a

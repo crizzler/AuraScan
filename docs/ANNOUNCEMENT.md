@@ -11,9 +11,10 @@ read-only stdio MCP server that exposes the reverse-AntiCopy injection
 detector, an agent/MCP configuration audit, and the offline host audit as four
 tools: `scan_content`, `scan_path`, `audit_agent_config`, and
 `security_audit`. The detector is a static first signal, not containment; the
-server does not execute, fetch, write, block, or quarantine anything. The
-v0.10.11 recovery image remains the retained image, and the ISO and local-UKI
-gates were not rerun for v0.14.0.
+server does not execute, fetch, write, block, or quarantine anything. The two
+scan tools redact credential-shaped spans in optional snippets, best effort and
+never a secret-free guarantee. The v0.10.11 recovery image remains the retained
+image, and the ISO and local-UKI gates were not rerun for v0.14.0.
 
 ## Short Post
 

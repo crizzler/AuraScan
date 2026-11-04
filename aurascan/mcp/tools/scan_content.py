@@ -3,11 +3,15 @@
 The text is never executed and nothing is fetched or written. The package owns policy: the server
 passes ``source_type`` by keyword, defaults it to ``unknown`` (which the package treats like
 ``source``) and re-ranks nothing.
+
+``run`` is the whole production path and returns the bare payload; ``handle`` only validates the
+arguments and wraps that payload. ``verify_evidence`` calls ``run`` so a re-derivation cannot drift
+from a scan.
 """
 
 from aurascan.analyzers.injection import scanner
 
-from .. import results
+from .. import bundle, results
 from ..errors import ToolError
 from ..guards import text_argument
 
@@ -28,14 +32,16 @@ def _arguments(arguments):
     return content
 
 
-def handle(ctx, arguments):
-    content = _arguments(arguments)
-    path_hint = text_argument(arguments, "path_hint", MAX_PATH_HINT_CHARS)
-    source_type = arguments.get("source_type", "unknown")
-    max_findings = arguments.get("max_findings", DEFAULT_MAX_FINDINGS)
-    include_snippet = bool(arguments.get("include_snippet", False))
-    include_raw = bool(arguments.get("include_raw_snippet", False))
-
+def run(
+    content,
+    source_type="unknown",
+    path_hint="",
+    max_findings=DEFAULT_MAX_FINDINGS,
+    include_snippet=False,
+    include_raw=False,
+    emit_bundle=False,
+):
+    """Scan ``content`` and return the payload, carrying an evidence bundle when asked."""
     # One match is over-fetched so ``truncated`` is decidable below the scanner's own cap. At the
     # cap the package limit applies and the flag is always false.
     fetch = max_findings + 1 if max_findings < MAX_FINDINGS_LIMIT else MAX_FINDINGS_LIMIT
@@ -56,4 +62,32 @@ def handle(ctx, arguments):
     payload = results.scan_payload(
         evidence, resolved_type, path_hint, max_findings, include_snippet, include_raw
     )
-    return results.text_result(payload)
+    if emit_bundle:
+        # The resolved type is what a re-derivation must be given back, so the bundle stores it
+        # rather than the caller's ``unknown`` plus a hint that would have to be re-derived again.
+        payload["evidence_bundle"] = bundle.build(
+            "scan_content",
+            {"source_type": resolved_type, "path_hint": path_hint},
+            max_findings,
+            include_snippet,
+            include_raw,
+            payload,
+            content,
+        )
+    return payload
+
+
+def handle(ctx, arguments):
+    content = _arguments(arguments)
+    path_hint = text_argument(arguments, "path_hint", MAX_PATH_HINT_CHARS)
+    return results.text_result(
+        run(
+            content,
+            arguments.get("source_type", "unknown"),
+            path_hint,
+            arguments.get("max_findings", DEFAULT_MAX_FINDINGS),
+            bool(arguments.get("include_snippet", False)),
+            bool(arguments.get("include_raw_snippet", False)),
+            bool(arguments.get("emit_bundle", False)),
+        )
+    )

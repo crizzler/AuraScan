@@ -2009,7 +2009,7 @@ for those flows.
 
 `aurascan-mcp` exposes a small, strictly read-only slice of AuraScan to any MCP
 client over newline-delimited JSON-RPC 2.0 on stdin/stdout. It ships four tools
-and nothing else:
+and nothing else, plus one opt-in fifth (`verify_evidence`, below):
 
 | Tool | What it does |
 | --- | --- |
@@ -2073,6 +2073,16 @@ disable a tool headless. `tools.include` is an explicit four-name list: a fifth
 tool added to the server later stays invisible until someone opts in. Timeouts
 are 20 s per scan and 60 s for `security_audit`, under the client's `timeout:
 120`, so the server's own `timeout` error arrives instead of a client kill.
+
+`verify_evidence` is that opt-in fifth tool and it is deliberately absent from
+both lists above. Pass `emit_bundle: true` to either scan tool and the payload
+gains an `evidence_bundle` object: the exact payload returned to you, a SHA-256
+digest of it, and a digest of the scan input. `verify_evidence` recomputes the
+bundle digest, re-hashes the bundled payload, and re-runs the same scan against
+the source you supply (`path`, or `content`), so a payload edited and re-hashed
+still fails `rederivation_mismatch`. `consistent` means the internal checks
+agree; it is not a signature and not the word "verified". To use it, add
+`verify_evidence` to `tools.include` and to `command_allowlist` yourself.
 
 Snippets (`include_snippet`) are redacted best effort before they leave the
 server: credential-shaped substrings become `<redacted:class>` markers and an

@@ -48,6 +48,7 @@ PINNED_ANNOTATIONS = {
     "scan_path": (True, False, False),
     "audit_agent_config": (True, False, False),
     "security_audit": (True, False, False),
+    "verify_evidence": (True, False, False),
 }
 
 
@@ -84,17 +85,25 @@ def test_03_tools_list_is_the_pinned_surface(tmp_path):
     assert honour_line() not in by_name["security_audit"]
     assert "read-only process" in by_name["security_audit"]
 
-    # The registration block a human applies must name the same four tools, slice for slice.
+    # The registration block a human applies names the shipped four tools, slice for slice. The
+    # fifth tool is documented in the README as opt-in and stays out of the include list and the
+    # allowlist until an operator adds it.
     names = sorted(by_name)
-    for source in (
-        Path(__file__).resolve().parents[1] / "README.md",
-        Path(__file__).resolve().parent / "fixtures" / "mcp" / "registration.yaml",
-    ):
-        text = source.read_text(encoding="utf-8")
-        assert "verify_evidence" not in text
+    readme = Path(__file__).resolve().parents[1] / "README.md"
+    registration = Path(__file__).resolve().parent / "fixtures" / "mcp" / "registration.yaml"
+    readme_text = readme.read_text(encoding="utf-8")
+    registration_text = registration.read_text(encoding="utf-8")
+    for source, text in ((readme, readme_text), (registration, registration_text)):
         assert "tools.include" in text or "include:" in text
-        for name in names:
-            assert name in text, (source, name)
+    for name in names:
+        assert name in readme_text, (readme, name)
+    for name in ("audit_agent_config", "scan_content", "scan_path", "security_audit"):
+        assert name in registration_text, (registration, name)
+    include_line = [
+        line for line in registration_text.splitlines() if line.strip().startswith("include:")
+    ]
+    assert len(include_line) == 1
+    assert "verify_evidence" not in include_line[0]
 
 
 def test_04_shutdown_then_exit_is_status_zero(tmp_path):

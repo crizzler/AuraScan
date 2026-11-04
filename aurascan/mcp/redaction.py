@@ -54,7 +54,8 @@ CLASSES = (
 SNIPPET_POLICY = (
     "Snippets are best effort: text that matches no pattern is returned as-is and may still carry a "
     "secret. `redaction_applied: false` means no pattern matched in this snippet, not that the "
-    "snippet is secret-free."
+    "snippet is secret-free. `redaction_incomplete: true` also fires on token shape alone (a run that "
+    "looks cut off at the span edge) even when nothing was actually removed."
 )
 
 _MARKER = "<redacted:%s>"

@@ -21,6 +21,8 @@ TOOL_ERROR_CODES = (
     "path_too_large",
     "path_unreadable",
     "content_too_large",
+    "bundle_unsupported",
+    "bundle_too_large",
     "timeout",
     "cancelled",
     "internal",

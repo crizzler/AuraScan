@@ -10,7 +10,7 @@ advertised so a client can see them but are enforced by the handlers, which retu
 ``enum``, ``minimum`` and ``maximum`` are decided here.
 """
 
-from .tools import audit_agent_config, scan_content, scan_path, security_audit
+from .tools import audit_agent_config, scan_content, scan_path, security_audit, verify_evidence
 
 HONESTY_LINE = (
     "AuraScan's injection detector is a static, rule-based first signal \u2014 it reports text that "
@@ -35,6 +35,7 @@ _SCAN_CONTENT_SCHEMA = {
         "max_findings": {"type": "integer", "minimum": 1, "maximum": 32, "default": 32},
         "include_snippet": {"type": "boolean", "default": False},
         "include_raw_snippet": {"type": "boolean", "default": False},
+        "emit_bundle": {"type": "boolean", "default": False},
     },
 }
 
@@ -47,6 +48,7 @@ _SCAN_PATH_SCHEMA = {
         "max_findings": {"type": "integer", "minimum": 1, "maximum": 32, "default": 32},
         "include_snippet": {"type": "boolean", "default": False},
         "include_raw_snippet": {"type": "boolean", "default": False},
+        "emit_bundle": {"type": "boolean", "default": False},
     },
 }
 
@@ -75,6 +77,18 @@ _SECURITY_AUDIT_SCHEMA = {
     "properties": {
         "max_findings": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100},
         "include_evidence": {"type": "boolean", "default": False},
+    },
+}
+
+
+_VERIFY_EVIDENCE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["bundle"],
+    "properties": {
+        "bundle": {"type": "object"},
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "content": {"type": "string", "maxLength": 262144},
     },
 }
 
@@ -108,7 +122,10 @@ SCAN_CONTENT_DESCRIPTION = (
     "`documentation` when you know. `path_hint` only derives the type while `source_type` is "
     "`unknown`. Findings carry no raw text unless `include_snippet` is true; a returned snippet has "
     "credential-shaped substrings replaced by `<redacted:class>` markers, best effort and never a "
-    "secret-free guarantee. `include_raw_snippet` adds the unredacted copy alongside. `truncated` is "
+    "secret-free guarantee. `include_raw_snippet` adds the unredacted copy alongside. `emit_bundle` "
+    "(default false) adds an `evidence_bundle` object holding the exact returned payload plus digests "
+    "of that payload and of the scan input, so `verify_evidence` can re-derive it later; the digest is "
+    "not a signature and proves neither correctness nor that a scan ran. `truncated` is "
     "only reported when `max_findings` is below 32; at 32 the scanner's own per-file cap applies and "
     "the flag is always false. Cancellation cannot be observed before the call returns. " + HONESTY_LINE
 )
@@ -119,7 +136,11 @@ SCAN_PATH_DESCRIPTION = (
     "only while they stay inside a root; non-regular files are refused. Findings carry no raw text "
     "unless `include_snippet` is true; a returned snippet has credential-shaped substrings replaced "
     "by `<redacted:class>` markers, best effort and never a secret-free guarantee. "
-    "`include_raw_snippet` adds the unredacted copy alongside. `truncated` follows the same rule as "
+    "`include_raw_snippet` adds the unredacted copy alongside. `emit_bundle` (default false) adds an "
+    "`evidence_bundle` object holding the exact returned payload plus digests of that payload and of "
+    "the decoded scan input, so `verify_evidence` can re-derive it later; the digest is not a "
+    "signature and proves neither correctness nor that a scan ran, and it covers decoded text rather "
+    "than raw bytes. `truncated` follows the same rule as "
     "`scan_content`. " + HONESTY_LINE
 )
 
@@ -151,6 +172,24 @@ SECURITY_AUDIT_DESCRIPTION = (
     "Tailscale peer markers, so a result pasted into a chat discloses this host's layout. "
     "`arch_audit.findings[].evidence` is not returned at all - the arch audit does not run offline "
     "today, so its evidence is unreachable and must not be assumed."
+)
+
+VERIFY_EVIDENCE_DESCRIPTION = (
+    "Checks that an AuraScan bundle is internally consistent and, when you supply the source, that it "
+    "still re-derives. Three separable questions: the bundle's own digest is recomputed, the bundled "
+    "payload is re-hashed against `payload_sha256`, and the same tool is re-run and its payload hashed "
+    "against the bundled one. Supply at most one source - `path` (resolved inside a configured root, "
+    "the same guards and errors as `scan_path`) or `content` - or neither, which leaves `consistency` "
+    "at `unchecked` and `notes` at `source_absent`. `consistent` needs every internal check to agree; "
+    "it never means the bundle is true. Read-only: one bounded file read at most, nothing written. "
+    "It does not verify: (1) `origin` - anyone can recompute the digest, there is no key and no "
+    "signature, so it says nothing about who produced the bundle or when; (2) `truth` - reproduction "
+    "proves the same rules still fire on the same bytes, not that the rules are right or complete; "
+    "(3) `no_tamper` - an editor who changes a finding and recomputes `bundle_sha256` passes every "
+    "check here; (4) `execution` - nothing is executed, a scan is static text analysis; "
+    "(5) `file_identity_beyond_bytes` - only bytes are compared, so the same bytes at a different "
+    "path are indistinguishable; (6) `rule_catalog` - only the version strings are compared, catalog "
+    "contents are not hashed."
 )
 
 TOOLS = (
@@ -185,6 +224,14 @@ TOOLS = (
         _SECURITY_AUDIT_SCHEMA,
         security_audit.handle,
         60,
+    ),
+    Tool(
+        "verify_evidence",
+        "Check an evidence bundle against its own source",
+        VERIFY_EVIDENCE_DESCRIPTION,
+        _VERIFY_EVIDENCE_SCHEMA,
+        verify_evidence.handle,
+        20,
     ),
 )
 

@@ -1,7 +1,7 @@
 [
   {
     "name": "scan_content",
-    "description": "Scan untrusted text for prompt-injection signals. Static and rule-based: the text is never executed and nothing is fetched or written. `source_type` selects the policy - `unknown` (the default) behaves like `source` and is the honest reverse-deployment number; pass `fixture` or `documentation` when you know. `path_hint` only derives the type while `source_type` is `unknown`. Findings carry no raw text unless `include_snippet` is true; a returned snippet has credential-shaped substrings replaced by `<redacted:class>` markers, best effort and never a secret-free guarantee. `include_raw_snippet` adds the unredacted copy alongside. `truncated` is only reported when `max_findings` is below 32; at 32 the scanner's own per-file cap applies and the flag is always false. Cancellation cannot be observed before the call returns. AuraScan's injection detector is a static, rule-based first signal \u2014 it reports text that looks like instructions aimed at an AI reader, nothing is executed, and the confidence value is a policy label, not a precision estimate.",
+    "description": "Scan untrusted text for prompt-injection signals. Static and rule-based: the text is never executed and nothing is fetched or written. `source_type` selects the policy - `unknown` (the default) behaves like `source` and is the honest reverse-deployment number; pass `fixture` or `documentation` when you know. `path_hint` only derives the type while `source_type` is `unknown`. Findings carry no raw text unless `include_snippet` is true; a returned snippet has credential-shaped substrings replaced by `<redacted:class>` markers, best effort and never a secret-free guarantee. `include_raw_snippet` adds the unredacted copy alongside. `emit_bundle` (default false) adds an `evidence_bundle` object holding the exact returned payload plus digests of that payload and of the scan input, so `verify_evidence` can re-derive it later; the digest is not a signature and proves neither correctness nor that a scan ran. `truncated` is only reported when `max_findings` is below 32; at 32 the scanner's own per-file cap applies and the flag is always false. Cancellation cannot be observed before the call returns. AuraScan's injection detector is a static, rule-based first signal \u2014 it reports text that looks like instructions aimed at an AI reader, nothing is executed, and the confidence value is a policy label, not a precision estimate.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
@@ -42,6 +42,10 @@
         "include_raw_snippet": {
           "type": "boolean",
           "default": false
+        },
+        "emit_bundle": {
+          "type": "boolean",
+          "default": false
         }
       }
     },
@@ -54,7 +58,7 @@
   },
   {
     "name": "scan_path",
-    "description": "Scan one bounded UTF-8 file from disk. The path derives `source_type` and must resolve inside a configured root. Read-only: the file is read once, nothing is written. Symlinks are followed only while they stay inside a root; non-regular files are refused. Findings carry no raw text unless `include_snippet` is true; a returned snippet has credential-shaped substrings replaced by `<redacted:class>` markers, best effort and never a secret-free guarantee. `include_raw_snippet` adds the unredacted copy alongside. `truncated` follows the same rule as `scan_content`. AuraScan's injection detector is a static, rule-based first signal \u2014 it reports text that looks like instructions aimed at an AI reader, nothing is executed, and the confidence value is a policy label, not a precision estimate.",
+    "description": "Scan one bounded UTF-8 file from disk. The path derives `source_type` and must resolve inside a configured root. Read-only: the file is read once, nothing is written. Symlinks are followed only while they stay inside a root; non-regular files are refused. Findings carry no raw text unless `include_snippet` is true; a returned snippet has credential-shaped substrings replaced by `<redacted:class>` markers, best effort and never a secret-free guarantee. `include_raw_snippet` adds the unredacted copy alongside. `emit_bundle` (default false) adds an `evidence_bundle` object holding the exact returned payload plus digests of that payload and of the decoded scan input, so `verify_evidence` can re-derive it later; the digest is not a signature and proves neither correctness nor that a scan ran, and it covers decoded text rather than raw bytes. `truncated` follows the same rule as `scan_content`. AuraScan's injection detector is a static, rule-based first signal \u2014 it reports text that looks like instructions aimed at an AI reader, nothing is executed, and the confidence value is a policy label, not a precision estimate.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
@@ -78,6 +82,10 @@
           "default": false
         },
         "include_raw_snippet": {
+          "type": "boolean",
+          "default": false
+        },
+        "emit_bundle": {
           "type": "boolean",
           "default": false
         }
@@ -152,6 +160,37 @@
       "destructiveHint": false,
       "openWorldHint": false,
       "title": "Audit the local host offline"
+    }
+  },
+  {
+    "name": "verify_evidence",
+    "description": "Checks that an AuraScan bundle is internally consistent and, when you supply the source, that it still re-derives. Three separable questions: the bundle's own digest is recomputed, the bundled payload is re-hashed against `payload_sha256`, and the same tool is re-run and its payload hashed against the bundled one. Supply at most one source - `path` (resolved inside a configured root, the same guards and errors as `scan_path`) or `content` - or neither, which leaves `consistency` at `unchecked` and `notes` at `source_absent`. `consistent` needs every internal check to agree; it never means the bundle is true. Read-only: one bounded file read at most, nothing written. It does not verify: (1) `origin` - anyone can recompute the digest, there is no key and no signature, so it says nothing about who produced the bundle or when; (2) `truth` - reproduction proves the same rules still fire on the same bytes, not that the rules are right or complete; (3) `no_tamper` - an editor who changes a finding and recomputes `bundle_sha256` passes every check here; (4) `execution` - nothing is executed, a scan is static text analysis; (5) `file_identity_beyond_bytes` - only bytes are compared, so the same bytes at a different path are indistinguishable; (6) `rule_catalog` - only the version strings are compared, catalog contents are not hashed.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundle"
+      ],
+      "properties": {
+        "bundle": {
+          "type": "object"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 262144
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "title": "Check an evidence bundle against its own source"
     }
   }
 ]

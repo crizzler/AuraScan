@@ -733,6 +733,17 @@ def test_recovery_bearing_v01011_release_contract():
         ):
             assert outcome in release
 
+def test_arch_release_checksum_pin_is_fail_closed():
+    script_path = ROOT / "packaging/arch/pin-release-checksum.sh"
+    script = read_text("packaging/arch/pin-release-checksum.sh")
+
+    assert os.access(script_path, os.X_OK)
+    assert "ls-remote" in script
+    assert "sha256sums=('SKIP')" in script
+    assert "makepkg --config /etc/makepkg.conf --printsrcinfo" in script
+    assert "refusing: public tag" in script
+
+
 def test_current_package_only_release_contract():
     def normalized(relative: str) -> str:
         return " ".join(read_text(relative).lower().split())

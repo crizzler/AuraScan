@@ -45,8 +45,8 @@ optdepends=(
   'xfsprogs: read-only XFS recovery diagnostics'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-# The v0.14.0 tag and its source archive do not exist yet; pin this checksum
-# before publishing the AUR package.
+# Run ./pin-release-checksum.sh after the public v0.14.0 tag. The final
+# release gate rejects SKIP; do not publish this recipe while it remains.
 sha256sums=('SKIP')
 
 build() {

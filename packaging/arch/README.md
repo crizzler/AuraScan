@@ -5,7 +5,17 @@ package-manager-owned install path for public release builds, not a claim that
 the package is accepted into the official repositories.
 
 Before publishing to the AUR, verify the checksum against the public GitHub
-release/tag source archive, then regenerate `.SRCINFO` from the final PKGBUILD:
+release/tag source archive, then regenerate `.SRCINFO` from the final PKGBUILD.
+The pinning helper refuses to run until the tag is public and HEAD is that tag
+commit; it downloads the exact archive, replaces `SKIP`, regenerates
+`.SRCINFO`, and fails if any `SKIP` remains:
+
+```bash
+./packaging/arch/pin-release-checksum.sh
+```
+
+The final release gate (`AURASCAN_RELEASE_FINAL=1`) also rejects a `SKIP`
+checksum, so the package cannot be published with the placeholder.
 
 ```bash
 AURASCAN_PACKAGE_BUILD_HOME=/private/empty/aurascan-package-build-home

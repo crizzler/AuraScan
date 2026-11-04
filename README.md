@@ -2074,6 +2074,15 @@ tool added to the server later stays invisible until someone opts in. Timeouts
 are 20 s per scan and 60 s for `security_audit`, under the client's `timeout:
 120`, so the server's own `timeout` error arrives instead of a client kill.
 
+Snippets (`include_snippet`) are redacted best effort before they leave the
+server: credential-shaped substrings become `<redacted:class>` markers and an
+encoded span is replaced whole by `<redacted:encoded>`, with every count on the
+payload under `snippet_redaction` and the honest caveat under `snippet_policy`.
+Redaction is lossy and the payload never claims to be secret-free, so
+`redaction_applied: false` only means no pattern matched in that snippet.
+`include_raw_snippet` adds the untouched text next to the redacted one when the
+caller wants to see the bytes as they were.
+
 `security_audit` is read-only only while it is pinned to `offline=True,
 refresh=False`; adding an `online` argument would need a fresh annotation
 review. Its description names the one process, every path it stats or reads, and

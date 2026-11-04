@@ -19,6 +19,7 @@ ALLOWED_AURASCAN = frozenset((
     "aurascan.core.instruction_guard",
     "aurascan.core.security_audit",
     "aurascan.core.rule_metadata",
+    "aurascan.core.redaction",
 ))
 
 _spec = importlib.util.spec_from_file_location("architecture_audit", TOOL_PATH)
@@ -67,7 +68,7 @@ def test_42_no_mcp_module_is_unclassified():
     assert all(info.layer == "mcp" for info in mcp_modules)
 
 
-def test_43_import_allowlist_is_stdlib_plus_five_named_modules():
+def test_43_import_allowlist_is_stdlib_plus_six_named_modules():
     for path in _sources():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):

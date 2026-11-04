@@ -34,6 +34,7 @@ _SCAN_CONTENT_SCHEMA = {
         "path_hint": {"type": "string", "maxLength": 1024, "default": ""},
         "max_findings": {"type": "integer", "minimum": 1, "maximum": 32, "default": 32},
         "include_snippet": {"type": "boolean", "default": False},
+        "include_raw_snippet": {"type": "boolean", "default": False},
     },
 }
 
@@ -45,6 +46,7 @@ _SCAN_PATH_SCHEMA = {
         "path": {"type": "string", "minLength": 1, "maxLength": 4096},
         "max_findings": {"type": "integer", "minimum": 1, "maximum": 32, "default": 32},
         "include_snippet": {"type": "boolean", "default": False},
+        "include_raw_snippet": {"type": "boolean", "default": False},
     },
 }
 
@@ -104,17 +106,21 @@ SCAN_CONTENT_DESCRIPTION = (
     "executed and nothing is fetched or written. `source_type` selects the policy - `unknown` (the "
     "default) behaves like `source` and is the honest reverse-deployment number; pass `fixture` or "
     "`documentation` when you know. `path_hint` only derives the type while `source_type` is "
-    "`unknown`. Findings carry no raw text unless `include_snippet` is true. `truncated` is only "
-    "reported when `max_findings` is below 32; at 32 the scanner's own per-file cap applies and the "
-    "flag is always false. Cancellation cannot be observed before the call returns. " + HONESTY_LINE
+    "`unknown`. Findings carry no raw text unless `include_snippet` is true; a returned snippet has "
+    "credential-shaped substrings replaced by `<redacted:class>` markers, best effort and never a "
+    "secret-free guarantee. `include_raw_snippet` adds the unredacted copy alongside. `truncated` is "
+    "only reported when `max_findings` is below 32; at 32 the scanner's own per-file cap applies and "
+    "the flag is always false. Cancellation cannot be observed before the call returns. " + HONESTY_LINE
 )
 
 SCAN_PATH_DESCRIPTION = (
     "Scan one bounded UTF-8 file from disk. The path derives `source_type` and must resolve inside a "
     "configured root. Read-only: the file is read once, nothing is written. Symlinks are followed "
     "only while they stay inside a root; non-regular files are refused. Findings carry no raw text "
-    "unless `include_snippet` is true. `truncated` follows the same rule as `scan_content`. " +
-    HONESTY_LINE
+    "unless `include_snippet` is true; a returned snippet has credential-shaped substrings replaced "
+    "by `<redacted:class>` markers, best effort and never a secret-free guarantee. "
+    "`include_raw_snippet` adds the unredacted copy alongside. `truncated` follows the same rule as "
+    "`scan_content`. " + HONESTY_LINE
 )
 
 AUDIT_AGENT_CONFIG_DESCRIPTION = (

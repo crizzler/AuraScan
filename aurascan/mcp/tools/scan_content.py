@@ -34,6 +34,7 @@ def handle(ctx, arguments):
     source_type = arguments.get("source_type", "unknown")
     max_findings = arguments.get("max_findings", DEFAULT_MAX_FINDINGS)
     include_snippet = bool(arguments.get("include_snippet", False))
+    include_raw = bool(arguments.get("include_raw_snippet", False))
 
     # One match is over-fetched so ``truncated`` is decidable below the scanner's own cap. At the
     # cap the package limit applies and the flag is always false.
@@ -53,6 +54,6 @@ def handle(ctx, arguments):
         resolved_type = scanner.derive_source_type(path_hint)
 
     payload = results.scan_payload(
-        evidence, resolved_type, path_hint, max_findings, include_snippet
+        evidence, resolved_type, path_hint, max_findings, include_snippet, include_raw
     )
     return results.text_result(payload)

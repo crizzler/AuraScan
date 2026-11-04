@@ -39,22 +39,43 @@ def test_02_initialized_notification_writes_nothing(tmp_path):
         assert client.read()["id"] == 2
 
 
-def test_03_tools_list_is_exactly_four_with_annotations(tmp_path):
+SURFACE = Path(__file__).resolve().parent / "fixtures" / "mcp" / "tool_surface.json"
+
+# Append-only rule: a tool added later must be pinned here before it can ship, and none of these
+# triples may flip without an annotation review.
+PINNED_ANNOTATIONS = {
+    "scan_content": (True, False, False),
+    "scan_path": (True, False, False),
+    "audit_agent_config": (True, False, False),
+    "security_audit": (True, False, False),
+}
+
+
+def _triple(tool):
+    annotations = tool["annotations"]
+    return (
+        annotations["readOnlyHint"],
+        annotations["destructiveHint"],
+        annotations["openWorldHint"],
+    )
+
+
+def test_03_tools_list_is_the_pinned_surface(tmp_path):
     with spawn(_root(tmp_path)) as client:
         client.send({"jsonrpc": "2.0", "method": "tools/list", "id": 1})
         tools = client.read()["result"]["tools"]
 
-    assert [tool["name"] for tool in tools] == [
-        "scan_content",
-        "scan_path",
-        "audit_agent_config",
-        "security_audit",
+    surface = json.loads(SURFACE.read_text(encoding="utf-8"))
+    assert [tool["name"] for tool in tools][: len(surface)] == [
+        entry["name"] for entry in surface
     ]
+    # Every pinned field, in order: name, description, inputSchema and annotations.
+    for tool, expected in zip(tools, surface):
+        assert tool == expected
+
     for tool in tools:
         assert tool["inputSchema"]["type"] == "object"
-        assert tool["annotations"]["readOnlyHint"] is True
-        assert tool["annotations"]["destructiveHint"] is False
-        assert tool["annotations"]["openWorldHint"] is False
+        assert _triple(tool) == PINNED_ANNOTATIONS[tool["name"]], tool["name"]
         assert tool["annotations"]["title"]
 
     by_name = {tool["name"]: tool["description"] for tool in tools}

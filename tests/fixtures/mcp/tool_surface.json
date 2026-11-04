@@ -1,0 +1,157 @@
+[
+  {
+    "name": "scan_content",
+    "description": "Scan untrusted text for prompt-injection signals. Static and rule-based: the text is never executed and nothing is fetched or written. `source_type` selects the policy - `unknown` (the default) behaves like `source` and is the honest reverse-deployment number; pass `fixture` or `documentation` when you know. `path_hint` only derives the type while `source_type` is `unknown`. Findings carry no raw text unless `include_snippet` is true; a returned snippet has credential-shaped substrings replaced by `<redacted:class>` markers, best effort and never a secret-free guarantee. `include_raw_snippet` adds the unredacted copy alongside. `truncated` is only reported when `max_findings` is below 32; at 32 the scanner's own per-file cap applies and the flag is always false. Cancellation cannot be observed before the call returns. AuraScan's injection detector is a static, rule-based first signal \u2014 it reports text that looks like instructions aimed at an AI reader, nothing is executed, and the confidence value is a policy label, not a precision estimate.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content"
+      ],
+      "properties": {
+        "content": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 262144
+        },
+        "source_type": {
+          "type": "string",
+          "enum": [
+            "documentation",
+            "fixture",
+            "source",
+            "unknown"
+          ],
+          "default": "unknown"
+        },
+        "path_hint": {
+          "type": "string",
+          "maxLength": 1024,
+          "default": ""
+        },
+        "max_findings": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32,
+          "default": 32
+        },
+        "include_snippet": {
+          "type": "boolean",
+          "default": false
+        },
+        "include_raw_snippet": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "title": "Scan text for prompt-injection signals"
+    }
+  },
+  {
+    "name": "scan_path",
+    "description": "Scan one bounded UTF-8 file from disk. The path derives `source_type` and must resolve inside a configured root. Read-only: the file is read once, nothing is written. Symlinks are followed only while they stay inside a root; non-regular files are refused. Findings carry no raw text unless `include_snippet` is true; a returned snippet has credential-shaped substrings replaced by `<redacted:class>` markers, best effort and never a secret-free guarantee. `include_raw_snippet` adds the unredacted copy alongside. `truncated` follows the same rule as `scan_content`. AuraScan's injection detector is a static, rule-based first signal \u2014 it reports text that looks like instructions aimed at an AI reader, nothing is executed, and the confidence value is a policy label, not a precision estimate.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "max_findings": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32,
+          "default": 32
+        },
+        "include_snippet": {
+          "type": "boolean",
+          "default": false
+        },
+        "include_raw_snippet": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "title": "Scan one file for prompt-injection signals"
+    }
+  },
+  {
+    "name": "audit_agent_config",
+    "description": "Audit one agent/MCP configuration document as untrusted data. Static: no file is opened, no command is run, no permission is evaluated. Reports broad tool grants, dangerous hook correlations, command behaviour correlations and JSON shape problems, with line numbers. It establishes static configuration only - not that a server starts, a grant is effective, or a command executes. `mcp-manifest` checks JSON shape and grants only and does not correlate commands; `cursor-mcp-manifest` (the default) adds command-behaviour correlations and is the surface to use for any document with `mcpServers` command/args fields. Duplicate keys are rejected, not last-wins: a document with two `mcpServers` keys reports an invalid-shape finding and `coverage_complete: false`. AuraScan's injection detector is a static, rule-based first signal \u2014 it reports text that looks like instructions aimed at an AI reader, nothing is executed, and the confidence value is a policy label, not a precision estimate.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "config"
+      ],
+      "properties": {
+        "config": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 262144
+        },
+        "surface": {
+          "type": "string",
+          "enum": [
+            "cursor-mcp-manifest",
+            "cursor-permissions-configuration",
+            "mcp-manifest"
+          ],
+          "default": "cursor-mcp-manifest"
+        },
+        "path_hint": {
+          "type": "string",
+          "maxLength": 1024,
+          "default": ""
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "title": "Audit an agent or MCP configuration document"
+    }
+  },
+  {
+    "name": "security_audit",
+    "description": "Check the local host against bounded AUR campaign intelligence, bundled vendor advisories and host indicators. Runs in offline mode by design: no network at all, and no state is written - the campaign feed comes from the packaged assets or a previously refreshed cache, and `arch-audit` is skipped. It runs one read-only process (`pacman -Q`, bounded to 30 s) and stats or reads the reported artifact paths under `/etc`, `/usr/lib`, `/usr/bin` and `/usr/local/bin` (including `/etc/ufw/user.rules` and `/etc/ufw/user6.rules`), `/root/pamkeys`, `/var/log/pacman.log{,.1}`, `/sys/fs/bpf` and the AUR helper cache. Findings are exposure evidence: a package-name match is not proof a malicious commit executed, and no match is not proof of integrity. AuraScan never removes or quarantines anything. The honesty line in `instructions` applies to the injection detector; this tool additionally runs one read-only process. `include_evidence` (default false) adds each finding's `evidence` array. That array is host-local: it carries absolute paths of matched artifacts, `hidden_*` BPF object names and Tailscale peer markers, so a result pasted into a chat discloses this host's layout. `arch_audit.findings[].evidence` is not returned at all - the arch audit does not run offline today, so its evidence is unreachable and must not be assumed.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_findings": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 100
+        },
+        "include_evidence": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "title": "Audit the local host offline"
+    }
+  }
+]

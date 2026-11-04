@@ -73,7 +73,7 @@ Current measurement: **131 modules, 85,081 physical lines.**
 | `adapters` | 16 | Bounded platform boundaries: `core/trusted_tools.py`, `core/trusted_executable.py`, `core/archive.py`, `core/package_archive.py`, `core/source_acquisition.py`, `core/intelligence_transport.py`, `core/intelligence_crypto.py`, `core/cache.py`, `core/local_package_db.py`, `core/ai_provider.py`, `core/recovery_network.py`, `core/compatibility.py`, `core/state_file.py`, `core/bounded_process.py`, `core/repository_state.py`, `core/repository_repair.py` |
 | `application` | 27 | Orchestration and policy: `core/engine.py`, upgrade preflight, incidents, the follow-up framework and its lifecycle adapters (`core/incident_followup.py`, `core/upgrade_followup.py`), agent, config drift, security audit, recovery planners, instruction guard logic |
 | `recovery` | 3 | `core/recovery.py`, `core/recovery_boot.py`, `core/recovery_repairs.py` |
-| `mcp` | 13 | `mcp/` — read-only stdio JSON-RPC transport (`protocol`, `guards`, `results`, `registry`, `server`) and its four tools (`scan_content`, `scan_path`, `audit_agent_config`, `security_audit`) |
+| `mcp` | 14 | `mcp/` — read-only stdio JSON-RPC transport (`protocol`, `guards`, `results`, `registry`, `server`), snippet redaction (`redaction`) and its four tools (`scan_content`, `scan_path`, `audit_agent_config`, `security_audit`) |
 | `presentation` | 16 | Entry points, trays and renderers: `cli.py`, `__main__.py`, `makepkg_wrapper.py`, `setup_wizard.py`, `core/updater_tray.py`, `core/intelligence_tray.py`, `core/instruction_cli.py`, `core/intelligence_cli.py`, `core/recovery_cli.py`, `core/incident_cli.py`, plus the six rendering modules `core/scan_report_presenter.py`, `core/config_drift_presenter.py`, `core/incident_presenter.py`, `core/recovery_presenter.py`, `core/security_audit_presenter.py`, `core/upgrade_preflight_presenter.py` |
 | `assets` | 1 | `assets/` bundled data |
 | `package` | 1 | `core/__init__.py` package metadata |
@@ -212,6 +212,12 @@ the table above. Treat the process count as a map of direct call sites, and read
 `mcp/tools/security_audit.py` is deliberately *not* an injected-runner case: its
 wrapper body holds a direct `subprocess.run` call site precisely so the authority
 is recorded, and a second call site in that layer needs an annotation review.
+
+### Known limitations of the read-only mcp guards
+
+| # | Limitation | Disposition |
+| --- | --- | --- |
+| L1 | `mcp/guards.read_capped` re-decides regular-file type and size on the opened descriptor but never re-decides root containment there, and it opens without `O_NOFOLLOW`. A symlink swapped in between `resolve_regular_file` and that open is read from outside the root, which contradicts the containment the module docstring promises. `read_path`'s contract is one check short today. | its own card; any path-based tool inherits it |
 
 Notably, **no analyzer executes a process** (INV-001). Analyzers obtain native
 tool results through the trusted adapters, so the execution boundary stays in

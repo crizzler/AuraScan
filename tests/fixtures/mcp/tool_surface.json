@@ -192,5 +192,39 @@
       "openWorldHint": false,
       "title": "Check an evidence bundle against its own source"
     }
+  },
+  {
+    "name": "security_audit_online",
+    "description": "Same bounded host audit as `security_audit`, plus one HTTPS GET of the packaged campaign manifest source and the `arch-audit --json` pass the offline tool skips. `refresh` defaults true; `refresh: false` suppresses only AuraScan's own fetch - `arch-audit` may still reach its own feed and is the only other egress, so `refresh: false` is not the same thing as no network. The refresh is validated (2 MiB cap, UTF-8, name syntax, digest) and held in memory: nothing is written by AuraScan, the offline cache under `$XDG_STATE_HOME/aurascan/security-intel` is read if present and never written, and `security_audit`'s own result is left untouched. Only that cache's own contents are trusted exactly as much as the offline tool trusts it. 3xx responses are rejected *before* the redirect target is contacted, so there is no silent cross-host beacon, and proxy environment variables are not inherited (`no_proxy`-style escapes and a mandatory corporate proxy are both unsupported here). `verified: shape-only` - size, UTF-8, name syntax and digest, computed by this same process and not signed - is the whole claim, so DNS rebinding and a TLS-terminating MITM remain. It runs one filtered-environment `pacman -Q` (bounded to 30 s) and, unless `include_arch_audit` is false, one `arch-audit` (45 s); the children get only an allowlisted environment, though their own captured stderr still reaches `notes` and `arch_audit.error` unfiltered, and `which(\"arch-audit\")` resolves on the server's `PATH` rather than the filtered one. A failed refresh is not an error: `isError` stays false, `status` drops to `partial` on an otherwise clean run, and the caller branches on `status` plus `refresh.status`/`refresh.error` (`redirect_rejected`, `http_error`, `network_error`, `invalid_feed`, `campaign_unavailable`, `unknown`) while validated bundled or cached data is retained. `include_evidence` (default false) carries the same host-local evidence disclosure as `security_audit`, and here `arch_audit.findings[].evidence` really is reachable, so it follows the flag too. Budget is 110 s under the client's 120; cancellation is advisory and only observed at phase boundaries, so the budget is the hard bound. The honesty line in `instructions` applies to the injection detector; this tool does not certify a package or a host either.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "refresh": {
+          "type": "boolean",
+          "default": true
+        },
+        "include_arch_audit": {
+          "type": "boolean",
+          "default": true
+        },
+        "max_findings": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 100
+        },
+        "include_evidence": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": true,
+      "title": "Audit the local host with one campaign refresh"
+    }
   }
 ]

@@ -1,8 +1,10 @@
 """The tool table: name, schema, annotations, handler and budget.
 
-Order is fixed and visible in ``tools/list``. Every entry earns ``readOnlyHint: true`` on facts —
-nothing here writes, and the one process is bounded and disclosed — because Hermes gates MCP tools by
-annotation and a headless session declines anything that is not annotated read-only.
+Order is fixed and visible in ``tools/list``. The five default entries earn ``readOnlyHint: true`` on
+facts — nothing they do writes, and the one process is bounded and disclosed — because Hermes gates MCP
+tools by annotation and a headless session declines anything that is not annotated read-only. The opt-in
+``security_audit_online`` flips ``readOnlyHint`` and ``openWorldHint`` instead: it leaves the host, runs
+two children and can differ between two calls, so it prompts even after opt-in.
 
 The validator below is deliberately narrower than JSON Schema. String ``maxLength`` bounds are
 advertised so a client can see them but are enforced by the handlers, which return the stable
@@ -10,7 +12,9 @@ advertised so a client can see them but are enforced by the handlers, which retu
 ``enum``, ``minimum`` and ``maximum`` are decided here.
 """
 
-from .tools import audit_agent_config, scan_content, scan_path, security_audit, verify_evidence
+from .tools import (
+    audit_agent_config, scan_content, scan_path, security_audit, security_audit_online, verify_evidence,
+)
 
 HONESTY_LINE = (
     "AuraScan's injection detector is a static, rule-based first signal \u2014 it reports text that "
@@ -19,6 +23,8 @@ HONESTY_LINE = (
 )
 
 _ANNOTATIONS = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
+
+_ONLINE_ANNOTATIONS = {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True}
 
 _SCAN_CONTENT_SCHEMA = {
     "type": "object",
@@ -81,6 +87,18 @@ _SECURITY_AUDIT_SCHEMA = {
 }
 
 
+_SECURITY_AUDIT_ONLINE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "refresh": {"type": "boolean", "default": True},
+        "include_arch_audit": {"type": "boolean", "default": True},
+        "max_findings": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100},
+        "include_evidence": {"type": "boolean", "default": False},
+    },
+}
+
+
 _VERIFY_EVIDENCE_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -94,18 +112,19 @@ _VERIFY_EVIDENCE_SCHEMA = {
 
 
 class Tool(object):
-    __slots__ = ("name", "title", "description", "schema", "handler", "budget")
+    __slots__ = ("name", "title", "description", "schema", "handler", "budget", "annotations")
 
-    def __init__(self, name, title, description, schema, handler, budget):
+    def __init__(self, name, title, description, schema, handler, budget, annotations=None):
         self.name = name
         self.title = title
         self.description = description
         self.schema = schema
         self.handler = handler
         self.budget = budget
+        self.annotations = _ANNOTATIONS if annotations is None else annotations
 
     def listing(self):
-        annotations = dict(_ANNOTATIONS)
+        annotations = dict(self.annotations)
         annotations["title"] = self.title
         return {
             "name": self.name,
@@ -174,6 +193,34 @@ SECURITY_AUDIT_DESCRIPTION = (
     "today, so its evidence is unreachable and must not be assumed."
 )
 
+SECURITY_AUDIT_ONLINE_DESCRIPTION = (
+    "Same bounded host audit as `security_audit`, plus one HTTPS GET of the packaged campaign "
+    "manifest source and the `arch-audit --json` pass the offline tool skips. `refresh` defaults "
+    "true; `refresh: false` suppresses only AuraScan's own fetch - `arch-audit` may still reach its "
+    "own feed and is the only other egress, so `refresh: false` is not the same thing as no network. "
+    "The refresh is validated (2 MiB cap, UTF-8, name syntax, digest) and held in memory: nothing is "
+    "written by AuraScan, the offline cache under `$XDG_STATE_HOME/aurascan/security-intel` is read if "
+    "present and never written, and `security_audit`'s own result is left untouched. Only that cache's "
+    "own contents are trusted exactly as much as the offline tool trusts it. 3xx responses are rejected "
+    "*before* the redirect target is contacted, so there is no silent cross-host beacon, and proxy "
+    "environment variables are not inherited (`no_proxy`-style escapes and a mandatory corporate proxy "
+    "are both unsupported here). `verified: shape-only` - size, UTF-8, name syntax and digest, computed "
+    "by this same process and not signed - is the whole claim, so DNS rebinding and a TLS-terminating "
+    "MITM remain. It runs one filtered-environment `pacman -Q` (bounded to 30 s) and, unless "
+    "`include_arch_audit` is false, one `arch-audit` (45 s); the children get only an allowlisted "
+    "environment, though their own captured stderr still reaches `notes` and `arch_audit.error` "
+    "unfiltered, and `which(\"arch-audit\")` resolves on the server's `PATH` rather than the filtered "
+    "one. A failed refresh is not an error: `isError` stays false, `status` drops to `partial` on an "
+    "otherwise clean run, and the caller branches on `status` plus `refresh.status`/`refresh.error` "
+    "(`redirect_rejected`, `http_error`, `network_error`, `invalid_feed`, `campaign_unavailable`, "
+    "`unknown`) while validated bundled or cached data is retained. `include_evidence` (default false) "
+    "carries the same host-local evidence disclosure as `security_audit`, and here "
+    "`arch_audit.findings[].evidence` really is reachable, so it follows the flag too. Budget is 110 s "
+    "under the client's 120; cancellation is advisory and only observed at phase boundaries, so the "
+    "budget is the hard bound. The honesty line in `instructions` applies to the injection detector; "
+    "this tool does not certify a package or a host either."
+)
+
 VERIFY_EVIDENCE_DESCRIPTION = (
     "Checks that an AuraScan bundle is internally consistent and, when you supply the source, that it "
     "still re-derives. Three separable questions: the bundle's own digest is recomputed, the bundled "
@@ -233,6 +280,15 @@ TOOLS = (
         _VERIFY_EVIDENCE_SCHEMA,
         verify_evidence.handle,
         20,
+    ),
+    Tool(
+        "security_audit_online",
+        "Audit the local host with one campaign refresh",
+        SECURITY_AUDIT_ONLINE_DESCRIPTION,
+        _SECURITY_AUDIT_ONLINE_SCHEMA,
+        security_audit_online.handle,
+        110,
+        _ONLINE_ANNOTATIONS,
     ),
 )
 

@@ -30,14 +30,16 @@ def build_instructions(roots):
     root_list = "\n".join("  - %s" % (root,) for root in roots)
     return "\n".join((
         "AuraScan is a safety layer for Arch-family package and maintenance workflows. This server "
-        "exposes its static injection detector, its agent/MCP configuration audit and its offline "
-        "host audit as read-only tools.",
+        "exposes its static injection detector, its agent/MCP configuration audit and its host audit "
+        "(offline by default, one opt-in online variant) as tools.",
         "",
         registry.HONESTY_LINE,
         "",
-        "Every tool is read-only: nothing is written, nothing is blocked or quarantined, and no "
-        "result certifies a package or a host as safe. Findings are evidence, and an empty result is "
-        "not proof of integrity.",
+        "Nothing is written, nothing is blocked or quarantined, and no result certifies a package or "
+        "a host as safe. Findings are evidence, and an empty result is not proof of integrity. The "
+        "offline tools never leave the host; `security_audit_online` fetches the campaign feed once "
+        "and executes `pacman`/`arch-audit` under a filtered environment, writing no AuraScan state "
+        "while `arch-audit` may keep its own cache.",
         "",
         "scan_path resolves only inside these roots:",
         root_list,

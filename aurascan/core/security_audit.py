@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen as urllib_urlopen
+from urllib.request import (
+    Request, build_opener, HTTPRedirectHandler, ProxyHandler, urlopen as urllib_urlopen,
+)
 
 from aurascan.core.intelligence import (
     IntelligenceSnapshot, VENDOR_COMPARATOR_FLOORS, bundled_snapshot, load_intelligence_snapshot,
@@ -473,7 +475,15 @@ def refresh_campaign_intel(
     state_root: Optional[Path] = None,
     urlopen: Callable = urllib_urlopen,
     timeout: int = DEFAULT_FEED_TIMEOUT,
+    persist_refresh: bool = True,
 ) -> CampaignIntel:
+    """Fetch the campaign feed once and validate it before anything is trusted.
+
+    ``persist_refresh=False`` writes no cache file at all and reports
+    ``data_origin="refreshed"``: the refreshed names live only in the returned
+    object, so a caller that never wants to disturb the offline cache can still
+    use one authenticated fetch.
+    """
     request = Request(
         campaign.source_url,
         headers={
@@ -497,19 +507,22 @@ def refresh_campaign_intel(
     names = parse_campaign_package_names(text)
     digest = hashlib.sha256(payload).hexdigest()
     retrieved_at = datetime.now(timezone.utc).isoformat()
-    root = Path(state_root or default_security_state_root())
-    _ensure_private_dir(root)
-    list_path = root / CAMPAIGN_PACKAGES_ASSET
-    meta_path = root / (CAMPAIGN_PACKAGES_ASSET + ".meta.json")
-    _atomic_private_write(list_path, payload)
-    metadata = {
-        "schema_version": "1.0",
-        "source_url": campaign.source_url,
-        "sha256": digest,
-        "retrieved_at": retrieved_at,
-        "package_count": len(names),
-    }
-    _atomic_private_write(meta_path, (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+    if persist_refresh:
+        root = Path(state_root or default_security_state_root())
+        _ensure_private_dir(root)
+        list_path = root / CAMPAIGN_PACKAGES_ASSET
+        meta_path = root / (CAMPAIGN_PACKAGES_ASSET + ".meta.json")
+        _atomic_private_write(list_path, payload)
+        metadata = {
+            "schema_version": "1.0",
+            "source_url": campaign.source_url,
+            "sha256": digest,
+            "retrieved_at": retrieved_at,
+            "package_count": len(names),
+        }
+        _atomic_private_write(
+            meta_path, (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        )
     return CampaignIntel(
         campaign_id=campaign.campaign_id,
         title=campaign.title,
@@ -522,8 +535,29 @@ def refresh_campaign_intel(
         payload_indicators=list(campaign.payload_indicators),
         sha256=digest,
         retrieved_at=retrieved_at,
-        data_origin="refreshed-cache",
+        data_origin="refreshed-cache" if persist_refresh else "refreshed",
     )
+
+
+class RedirectRejected(ValueError):
+    """A 3xx was returned and the redirect target was deliberately not contacted."""
+
+    label = "redirect_rejected"
+
+    def __init__(self, label: str = "redirect_rejected") -> None:
+        ValueError.__init__(self, label)
+
+
+class _RejectRedirects(HTTPRedirectHandler):
+    def http_error_302(self, req, fp, code, msg, headers):
+        raise RedirectRejected()
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
+def strict_urlopen(request, timeout=DEFAULT_FEED_TIMEOUT):
+    """One-shot HTTPS fetch: no redirect following, no proxy inheritance."""
+    return build_opener(ProxyHandler({}), _RejectRedirects()).open(request, timeout=timeout)
 
 
 def _ensure_private_dir(path: Path) -> None:
@@ -1426,7 +1460,16 @@ def build_security_audit(
     include_host_indicators: bool = True,
     urlopen: Callable = urllib_urlopen,
     intelligence_snapshot: Optional[IntelligenceSnapshot] = None,
+    persist_refresh: bool = True,
+    poll: Optional[Callable[[], None]] = None,
 ) -> SecurityAuditReport:
+    """Run one bounded host audit.
+
+    ``persist_refresh`` is forwarded to the refresh and decides whether the
+    campaign cache is written. ``poll`` is a phase-boundary cancellation hook:
+    it is called once after the campaign phase and once before the arch-audit
+    phase, and an exception from it propagates out of this function.
+    """
     snapshot = intelligence_snapshot if intelligence_snapshot is not None else load_intelligence_snapshot()
     notes: List[str] = []
     if snapshot.status == "stale":
@@ -1446,9 +1489,15 @@ def build_security_audit(
         notes.append("Campaign refresh was skipped because offline mode is enabled.")
     elif refresh and campaign is not None:
         try:
-            campaign = refresh_campaign_intel(campaign, state_root=state_root, urlopen=urlopen)
+            campaign = refresh_campaign_intel(
+                campaign, state_root=state_root, urlopen=urlopen,
+                persist_refresh=persist_refresh,
+            )
         except (OSError, UnicodeError, ValueError, HTTPError, URLError) as exc:
             notes.append(f"Campaign refresh failed; retained validated {campaign.data_origin} data: {exc}")
+
+    if poll is not None:
+        poll()
 
     package_error = ""
     if installed_packages is None:
@@ -1484,6 +1533,8 @@ def build_security_audit(
     if include_host_indicators:
         campaign_findings.extend(detect_host_campaign_indicators(root))
 
+    if poll is not None:
+        poll()
     if include_arch_audit:
         arch_result = run_arch_audit(runner=runner, which=which, root=root, offline=offline)
     else:

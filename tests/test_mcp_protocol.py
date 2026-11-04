@@ -49,6 +49,7 @@ PINNED_ANNOTATIONS = {
     "audit_agent_config": (True, False, False),
     "security_audit": (True, False, False),
     "verify_evidence": (True, False, False),
+    "security_audit_online": (False, False, True),
 }
 
 
@@ -104,6 +105,12 @@ def test_03_tools_list_is_the_pinned_surface(tmp_path):
     ]
     assert len(include_line) == 1
     assert "verify_evidence" not in include_line[0]
+    assert "security_audit_online" not in include_line[0]
+    allowlist_lines = [
+        line for line in registration_text.splitlines() if line.strip().startswith("- mcp:")
+    ]
+    assert not any("security_audit_online" in line for line in allowlist_lines)
+    assert not any("verify_evidence" in line for line in allowlist_lines)
 
 
 def test_04_shutdown_then_exit_is_status_zero(tmp_path):

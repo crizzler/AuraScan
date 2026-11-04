@@ -128,4 +128,10 @@ def test_60_security_audit_is_the_recorded_process_owner():
 
     from test_architecture_audit import PROCESS_MODULES
 
-    assert PROCESS_MODULES[-1] == "aurascan/mcp/tools/security_audit.py"
+    assert PROCESS_MODULES[-2:] == [
+        "aurascan/mcp/tools/security_audit.py",
+        "aurascan/mcp/tools/security_audit_online.py",
+    ]
+    online = records["aurascan/mcp/tools/security_audit_online.py"]
+    assert "process" in online.capabilities
+    assert "network" not in online.capabilities

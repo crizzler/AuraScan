@@ -1,8 +1,8 @@
 # Registration block for the Hermes `config.yaml`, and the matching allowlist entries.
 # Applied by the operator (or the orchestrator) with `hermes config set`; the server name is
 # `aurascan` and the four names below must stay in step with `aurascan/mcp/registry.py`.
-# The server also ships a fifth, opt-in tool `verify_evidence`; it is deliberately left out of
-# both blocks below until an operator adds it (see the README).
+# The server also ships two opt-in tools, `verify_evidence` and `security_audit_online`; both are
+# deliberately left out of both blocks below until an operator adds them (see the README).
 mcp_servers:
   aurascan:
     command: "/home/arawn/.local/bin/aurascan-mcp"

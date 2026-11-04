@@ -170,6 +170,7 @@ PROCESS_MODULES = [
     "aurascan/core/package_archive.py",
     "aurascan/core/trusted_tools.py",
     "aurascan/mcp/tools/security_audit.py",
+    "aurascan/mcp/tools/security_audit_online.py",
 ]
 
 NETWORK_MODULES = [

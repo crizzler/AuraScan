@@ -2009,7 +2009,8 @@ for those flows.
 
 `aurascan-mcp` exposes a small, strictly read-only slice of AuraScan to any MCP
 client over newline-delimited JSON-RPC 2.0 on stdin/stdout. It ships four tools
-and nothing else, plus one opt-in fifth (`verify_evidence`, below):
+and nothing else, plus two opt-in tools (`verify_evidence` and
+`security_audit_online`, below):
 
 | Tool | What it does |
 | --- | --- |
@@ -2017,10 +2018,13 @@ and nothing else, plus one opt-in fifth (`verify_evidence`, below):
 | `scan_path` | Scan one bounded UTF-8 file that must resolve inside an explicit `--root`. |
 | `audit_agent_config` | Audit one agent/MCP configuration document as untrusted data. |
 | `security_audit` | Check the local host offline: one bounded `pacman -Q`, reads only. |
+| `security_audit_online` | Opt-in: the same host audit plus one HTTPS campaign refresh and `arch-audit`. |
 
-Every tool is annotated `readOnlyHint: true`, `destructiveHint: false`,
-`openWorldHint: false`, so all four run unprompted in headless sessions
-(`chat -q`, cron, unattended gateways) as well as approved in interactive ones.
+The four default tools and `verify_evidence` are annotated `readOnlyHint: true`,
+`destructiveHint: false`, `openWorldHint: false`, so they run unprompted in
+headless sessions (`chat -q`, cron, unattended gateways) as well as approved in
+interactive ones. `security_audit_online` differs: it is `readOnlyHint: false`,
+`openWorldHint: true`, so it prompts on every call even after opt-in.
 Nothing is written, nothing is blocked or quarantined, and a result never
 certifies a package or a host as safe.
 
@@ -2071,8 +2075,9 @@ command_allowlist:
 the allowlist is the second line of defence so a lost annotation cannot silently
 disable a tool headless. `tools.include` is an explicit four-name list: a fifth
 tool added to the server later stays invisible until someone opts in. Timeouts
-are 20 s per scan and 60 s for `security_audit`, under the client's `timeout:
-120`, so the server's own `timeout` error arrives instead of a client kill.
+are 20 s per scan, 60 s for `security_audit` and 110 s for
+`security_audit_online`, still under the client's `timeout: 120`, so the
+server's own `timeout` error arrives instead of a client kill.
 
 `verify_evidence` is that opt-in fifth tool and it is deliberately absent from
 both lists above. Pass `emit_bundle: true` to either scan tool and the payload
@@ -2083,6 +2088,33 @@ the source you supply (`path`, or `content`), so a payload edited and re-hashed
 still fails `rederivation_mismatch`. `consistent` means the internal checks
 agree; it is not a signature and not the word "verified". To use it, add
 `verify_evidence` to `tools.include` and to `command_allowlist` yourself.
+
+`security_audit_online` is the second opt-in tool and the only one that leaves
+the host. It runs the same bounded host audit as `security_audit`, plus one
+HTTPS GET of the packaged campaign source and the `arch-audit --json` pass the
+offline tool skips, and it is annotated `readOnlyHint: false` /
+`openWorldHint: true`, so it prompts every call even after opt-in. The refresh
+is validated (2 MiB cap, UTF-8, package-name syntax, digest) and held in
+memory: AuraScan writes nothing, the cache under
+`$XDG_STATE_HOME/aurascan/security-intel` is read if present and never written,
+and `security_audit`'s result is unaffected. `refresh` defaults true;
+`refresh: false` suppresses only AuraScan's own fetch — `arch-audit` may still
+reach its own feed, so it is not the same thing as "no network". 3xx responses
+are rejected before the redirect target is contacted and proxy environment
+variables are not inherited (a mandatory corporate proxy therefore breaks the
+refresh, though the audit itself still runs). `verified: shape-only` is the
+whole claim: size, UTF-8, name syntax and digest, computed by this same process
+and not signed, so DNS rebinding and a TLS-terminating MITM remain. A failed
+refresh is not an error — `isError` stays false and the caller branches on
+`status` plus `refresh.status`/`refresh.error`. `arch-audit` findings do carry
+`evidence` here when `include_evidence` is true. To use it, opt in the same way:
+
+```yaml
+      # online audit is opt-in: add the name below, then restart the server; it prompts every call
+      # include: [scan_content, scan_path, audit_agent_config, security_audit, security_audit_online]
+```
+
+and add `mcp:aurascan/security_audit_online` to `command_allowlist`.
 
 Snippets (`include_snippet`) are redacted best effort before they leave the
 server: credential-shaped substrings become `<redacted:class>` markers and an

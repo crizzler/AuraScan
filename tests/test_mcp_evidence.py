@@ -287,7 +287,7 @@ def test_102_emit_bundle_is_absent_by_default(tmp_path):
         assert client.read_result()["evidence_bundle"]["bundle_version"] == 1
 
 
-def test_103_five_server_tools_but_four_profile_names(tmp_path):
+def test_103_six_server_tools_but_four_profile_names(tmp_path):
     root = _root(tmp_path)
     with spawn(root) as client:
         client.send({"jsonrpc": "2.0", "method": "tools/list", "id": 1})
@@ -299,14 +299,17 @@ def test_103_five_server_tools_but_four_profile_names(tmp_path):
         "audit_agent_config",
         "security_audit",
         "verify_evidence",
+        "security_audit_online",
     ]
     registration = (Path(__file__).resolve().parent / "fixtures" / "mcp" / "registration.yaml")
     text = registration.read_text(encoding="utf-8")
     include = [line for line in text.splitlines() if line.strip().startswith("include:")][0]
     assert "verify_evidence" not in include
+    assert "security_audit_online" not in include
     allowlist = [line for line in text.splitlines() if line.strip().startswith("- mcp:")]
     assert len(allowlist) == 4
     assert not any("verify_evidence" in line for line in allowlist)
+    assert not any("security_audit_online" in line for line in allowlist)
 
 
 def test_104_count_and_unknown_rule_are_invariant_mismatches(tmp_path):

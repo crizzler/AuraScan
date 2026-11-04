@@ -101,14 +101,16 @@ domain   ←   catalog
 - `adapters` own the dangerous capabilities: process execution, network access,
   archive extraction, privilege lookups, persistent state.
 - `mcp` is the one non-adapter layer allowed to execute a process: one injected
-  `subprocess.run` call site in `mcp/tools/security_audit.py`, argv-only, bounded,
-  and no second call site without an annotation review. It may import the
-  standard library, `analyzers/injection`, `core/models`,
-  `core/instruction_guard`, `core/security_audit` and `core/rule_metadata` (the
-  last as leaf data), and must not import a presenter, `cli` or any `core/*_cli`.
-  Its write surface is empty by design: every tool is annotated
-  `readOnlyHint: true`, which is honest only while `security_audit` stays pinned
-  to `offline=True, refresh=False`.
+  `subprocess.run` call site in each of `mcp/tools/security_audit.py` and
+  `mcp/tools/security_audit_online.py`, argv-only, bounded, and no third call
+  site without an annotation review. It may import the standard library,
+  `analyzers/injection`, `core/models`, `core/instruction_guard`,
+  `core/security_audit` and `core/rule_metadata` (the last as leaf data), and
+  must not import a presenter, `cli` or any `core/*_cli`.
+  Its write surface is empty by design: five tools are annotated
+  `readOnlyHint: true`, and the opt-in online audit is `false` /
+  `openWorldHint: true`, which is honest only while it keeps passing
+  `persist_refresh=False` and `state_root=None` so no AuraScan file is written.
 - `application` assembles reports and decides outcomes: `core/engine.py` builds
   the `ScanReport` and asks `RiskEngine` for the summary.
 - `presentation` consumes application and domain APIs and does not decide which

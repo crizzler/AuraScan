@@ -143,6 +143,8 @@ def validate(bundle):
 
     if bundle["bundle_version"] != BUNDLE_VERSION:
         raise _unsupported("bundle_version must be %d" % (BUNDLE_VERSION,))
+    if not 1 <= bundle["max_findings"] <= 32:
+        raise _unsupported("max_findings must be between 1 and 32")
     if bundle["tool"] not in SCAN_TOOLS:
         raise _unsupported("tool must be one of %s" % (", ".join(SCAN_TOOLS),))
     for key in ("source_sha256", "payload_sha256", "bundle_sha256"):

@@ -12,8 +12,10 @@ and still fails (3) with ``rederivation_mismatch``. Re-derivation is the only re
 imports the scan tools instead of re-implementing them.
 
 ``consistent`` therefore requires all four of ``digest_matches``, ``payload_self_matches``,
-``payload_matches`` and — in path mode — ``file_unchanged``. Without a supplied source it degrades to
-``unchecked`` (``source_absent``) and never to a pass, and content mode always carries
+``payload_matches`` and — in path mode — ``file_unchanged``. The verdict is built from those booleans,
+never from an empty mismatch list, so a re-derivation that did not run can never pass: a source with no
+``payload_matches`` (cancelled, failed, or absent) is ``unchecked``. Without a supplied source it
+degrades to ``unchecked`` (``source_absent``) and never to a pass, and content mode always carries
 ``content_mode_circular`` because the caller handed over both the bytes and the hash.
 """
 
@@ -41,9 +43,9 @@ VERDICT_LINE = "Internally consistent. Not signed, not proof of correctness, not
 
 NOTE_SOURCE_ABSENT = "source_absent"
 NOTE_PATH_UNAVAILABLE = "path_unavailable"
-NOTE_SOURCE_UNAVAILABLE = "source_unavailable"
 NOTE_CONTENT_CIRCULAR = "content_mode_circular"
 NOTE_REDERIVATION_FAILED = "rederivation_failed"
+NOTE_REDERIVATION_CANCELLED = "rederivation_cancelled"
 
 
 def _matches(left, right):
@@ -87,13 +89,17 @@ def _rederive(ctx, bundle, mode, source_text):
     """Re-run the production scan the bundle names; ``(payload, note)``.
 
     ``note`` is the reason a payload could not be produced, or None on success. A scan that is only
-    possible because a source was supplied must not report a source note.
+    possible because a source was supplied must not report a source note, and a cancellation gets its
+    own note: the source was read, so ``path_unavailable`` would be a lie.
     """
+    if ctx.cancelled():
+        return None, NOTE_REDERIVATION_CANCELLED
     tool = bundle["tool"]
     arguments = bundle["arguments"]
     if tool == "scan_content":
         if source_text is None:
-            return None, NOTE_SOURCE_UNAVAILABLE
+            # No source at all: ``source_absent`` is the note, not a second, redundant one.
+            return None, None
         try:
             return scan_content.run(
                 source_text,
@@ -103,8 +109,8 @@ def _rederive(ctx, bundle, mode, source_text):
                 bundle["include_snippet"],
                 bundle["include_raw_snippet"],
             ), None
-        except ToolError:
-            return None, NOTE_REDERIVATION_FAILED
+        except ToolError as exc:
+            return None, _failure_note(exc)
     try:
         return scan_path.run(
             ctx,
@@ -113,8 +119,14 @@ def _rederive(ctx, bundle, mode, source_text):
             bundle["include_snippet"],
             bundle["include_raw_snippet"],
         ), None
-    except ToolError:
+    except ToolError as exc:
+        if exc.code == "cancelled":
+            return None, NOTE_REDERIVATION_CANCELLED
         return None, NOTE_PATH_UNAVAILABLE
+
+
+def _failure_note(error):
+    return NOTE_REDERIVATION_CANCELLED if error.code == "cancelled" else NOTE_REDERIVATION_FAILED
 
 
 def _checked(bundle, mismatches):
@@ -183,14 +195,23 @@ def run(ctx, bundle, path=None, content=None):
 
     mismatches = sorted(set(mismatches))
     notes = sorted(set(notes))
+    # The verdict is the conjunction of the booleans, never "no mismatch strings": a re-derivation
+    # that did not run leaves ``payload_matches`` None and appends nothing, so an empty mismatch list
+    # alone must not pass.
     if mismatches:
         consistency = "inconsistent"
-    elif source_matches is None:
+    elif (
+        source_matches is not None
+        and digest_matches
+        and payload_self_matches
+        and payload_matches is True
+        and (mode != "path" or file_unchanged is True)
+    ):
+        consistency = "consistent"
+    else:
         consistency = "unchecked"
         if mode is None:
             notes = sorted(set(notes) | set((NOTE_SOURCE_ABSENT,)))
-    else:
-        consistency = "consistent"
 
     return {
         "advisory": True,

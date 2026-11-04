@@ -384,11 +384,12 @@ def test_120_successful_refresh_reports_shape_only_provenance(tmp_path, monkeypa
 
 
 class _RedirectHandler(BaseHTTPRequestHandler):
+    code = 302
     hits = {"target": 0}
 
     def do_GET(self):
         if self.path == "/redir":
-            self.send_response(302)
+            self.send_response(type(self).code)
             self.send_header("Location", "/target")
             self.end_headers()
             return
@@ -415,17 +416,30 @@ def _serve(handler=_RedirectHandler):
     raise AssertionError("no loopback port")
 
 
-def test_121_a_redirect_is_rejected_before_the_target_is_contacted(tmp_path, monkeypatch):
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_121_a_redirect_is_rejected_before_the_target_is_contacted(code):
+    # One case per 3xx alias: if any alias is dropped from the opener, urllib's base
+    # ``http_error_30x`` follows that code and the target is hit instead.
+    handler = type("H%d" % code, (_RedirectHandler,), {"code": code, "hits": {"target": 0}})
+    server = _serve(handler)
+    port = server.server_address[1]
+    try:
+        request = Request("https://127.0.0.1:%d/redir" % port)
+        request.full_url = request.full_url.replace("https://", "http://", 1)
+        with pytest.raises(RedirectRejected):
+            strict_urlopen(request, timeout=5)
+        assert handler.hits["target"] == 0
+    finally:
+        server.shutdown()
+
+
+def test_121b_a_rejected_redirect_becomes_a_partial_report(tmp_path, monkeypatch):
+    # The through-tool half stays on one code; the codes themselves are pinned above.
     _RedirectHandler.hits["target"] = 0
     server = _serve()
     port = server.server_address[1]
     try:
         url = "https://127.0.0.1:%d/redir" % port
-        request = Request(url)
-        request.full_url = request.full_url.replace("https://", "http://", 1)
-        with pytest.raises(RedirectRejected):
-            strict_urlopen(request, timeout=5)
-        assert _RedirectHandler.hits["target"] == 0
 
         _state(tmp_path, monkeypatch)
         _root_patch(tmp_path, monkeypatch)
@@ -562,6 +576,43 @@ def test_125_child_environment_is_an_allowlist(tmp_path, monkeypatch):
             assert env["XDG_CACHE_HOME"] == os.environ["XDG_CACHE_HOME"]
         else:
             assert "XDG_CACHE_HOME" not in env
+
+
+def _arch_disabled_body(tmp_path, monkeypatch):
+    """Enable an ``arch-audit`` shim that records it ran, then call with the audit disabled."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "arch-audit-ran"
+    _shim(bin_dir / "arch-audit", "#!/bin/sh\ntouch %s\necho '[]'\n" % marker)
+    monkeypatch.setenv("PATH", "%s:%s" % (bin_dir, os.environ.get("PATH", "")))
+    _state(tmp_path, monkeypatch)
+    _root_patch(tmp_path, monkeypatch)
+    _point_assets(tmp_path, monkeypatch)
+    _install_fetch(monkeypatch, b"remote-package\nsecond-package\n")
+
+    body, is_error = _call(ONLINE, {"refresh": True, "include_arch_audit": False})
+    assert is_error is False
+    return body, marker
+
+
+def test_125b_include_arch_audit_false_disables_the_helper(tmp_path, monkeypatch):
+    body, marker = _arch_disabled_body(tmp_path, monkeypatch)
+
+    assert body["arch_audit"]["status"] == "disabled"
+    assert body["arch_audit"]["command"] == []
+    assert body["arch_audit"]["findings"] == []
+    assert not marker.exists()
+
+    # Control: the same shim is reachable when the flag is left on.
+    _call(ONLINE, {"refresh": True, "include_arch_audit": True})
+    assert marker.exists()
+
+
+def test_125c_the_disabled_arch_arm_still_reports_the_bound_and_no_persist(tmp_path, monkeypatch):
+    body, _marker = _arch_disabled_body(tmp_path, monkeypatch)
+
+    assert body["cancellation"]["hard_bound_seconds"] == 110
+    assert body["refresh"]["persisted"] is False
 
 
 def test_126_argv_is_explicit_and_env_is_always_passed(tmp_path, monkeypatch):

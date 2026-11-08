@@ -1,6 +1,8 @@
 # AuraScan reference
 
-> This is the long-form reference. For the project overview, start at [README](../README.md).
+> This is the long-form reference. For the current release status and the short
+> project overview, start at [README](../README.md). Detailed behavior text is
+> preserved here; some historical version references remain in context.
 
 [![AUR package](https://img.shields.io/aur/version/aurascan?label=AUR&logo=archlinux)](https://aur.archlinux.org/packages/aurascan)
 

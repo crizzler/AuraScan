@@ -45,8 +45,9 @@ optdepends=(
   'xfsprogs: read-only XFS recovery diagnostics'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-# Source archive for the public v0.15.0 tag.
-sha256sums=('08cc71fecb66fa4a69a2271048c7e8fd565953708165a787448d43d0807f3707')
+# Run ./pin-release-checksum.sh after the public v0.15.0 tag; the final
+# release gate rejects SKIP.
+sha256sums=('SKIP')
 
 build() {
   cd "AuraScan-$pkgver"

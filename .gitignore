@@ -80,3 +80,6 @@ Thumbs.db
 .vscode/
 !tests/fixtures/curated_packages/editor_task_autorun_carrier/.vscode/
 !tests/fixtures/curated_packages/editor_task_benign/.vscode/
+
+# Local agent spike/evidence files are not release payload.
+/SPIKE-*

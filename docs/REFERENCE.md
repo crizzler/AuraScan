@@ -1,0 +1,2423 @@
+# AuraScan reference
+
+> This is the long-form reference. For the project overview, start at [README](../README.md).
+
+[![AUR package](https://img.shields.io/aur/version/aurascan?label=AUR&logo=archlinux)](https://aur.archlinux.org/packages/aurascan)
+
+AI-assisted package safety for Arch-family Linux systems, pacman, AUR,
+PKGBUILD, makepkg, and upgrade workflows.
+
+AuraScan is a security-focused package scanner, upgrade preflight assistant,
+and guarded incident recovery tool
+for Arch Linux, EndeavourOS, Manjaro, CachyOS, and AUR workflows. It is
+designed to catch obvious and moderately sophisticated malicious package
+behavior, explain risky package metadata clearly, and reduce breakage risk
+before routine upgrades. It can also inspect bounded crash evidence and prepare
+verified guarded repair recipes without treating AI prose as shell commands.
+Optional Assisted Background Recovery keeps networked AI analysis unprivileged
+and separate from the offline deterministic repair service.
+Foreground upgrade, incident, maintenance, and config-drift results can also
+open a bounded contextual AI follow-up without granting AI command authority.
+The optional foreground Policy-Gated Repair Agent can separately propose only
+allowlisted local diagnostics and constrained repository package repairs after
+explicit configuration, strict response/command validation, and fresh
+live-terminal consent for each exact command. Remote acquisition, arbitrary
+executables, AUR/build tooling, interpreters, and dynamic code are refused.
+The optional AuraScan Recovery boot environment extends those guarded workflows
+to an installed OS that cannot boot normally, with deterministic offline
+diagnostics and separately consented provider AI.
+The opt-in Agent Instruction Guard adds a bounded, unprivileged review layer
+for AI-agent control files in a user's home directory without executing their
+contents.
+
+AuraScan does not prove that a package is safe. A clean report, a clean ClamAV
+result, or a valid source signature is not a guarantee. The goal is to find risk
+signals early, explain them clearly, and stop dangerous flows before package
+code runs.
+
+A clean ClamAV result is not proof of safety. A valid source signature is not a
+guarantee that the package behavior is safe.
+
+## Status
+
+AuraScan is a developer preview. It is ready for early testing and review, but
+its packaging, rule set, and integration story should still be treated as
+pre-1.0.
+
+The [v0.12.0 release](releases/v0.12.0.md) is a package-only update that
+adds `aurascan settings`, stdin credential entry, and report-and-hash binding
+for Instruction Guard actions, on top of the read-only `aurascan ui` evidence
+contract for desktop interfaces. It also carries the pacman-hook reliability and
+runtime-library repair work below.
+The hook binds a cached archive to the
+root-owned pacman sync databases by filename and SHA-256, accepts a matching
+checksum from any configured repository rebuild, and uses a fast deterministic
+install-hook scan for those archives. Routine systemd service management is
+LOW/non-manual, and auxiliary ClamAV/AI scans are skipped. A ClamAV timeout or
+incomplete scan is reported as a non-blocking review advisory, while confirmed
+signatures and deterministic CRITICAL findings still block. A cache archive
+older than the installed package is skipped with a clear warning instead of
+being reported as the transaction package; local `-U` files can be scanned
+explicitly with `aurascan --pkg <file>`. During a long transaction the hook
+prints a flushed start line, the current archive, and an ASCII progress bar at
+most every two seconds. Changed repository packages are checked statically for
+missing ELF `DT_NEEDED` libraries after an upgrade; a unique official provider
+can be installed through the trusted sudo/pacman handoff, or checked directly
+with `aurascan doctor --fix-runtime-links`. `aurascan doctor` also detects a
+wait-then-read process deadlock, such as Goverlay 1.9.4 waiting forever for
+`lsmod`, and `--fix-hung-apps` offers a cached older package build when one is
+available. The v0.10.11 recovery image remains the retained, validated image;
+the v0.13.0 release note records that ISO and local-UKI gates were not rerun.
+
+## What You Can Try Now
+
+AuraScan currently provides ten practical entry points:
+
+- `aurascan --pkgbuild ./PKGBUILD` reviews package build metadata before trust.
+- `aurascan-makepkg` scans before handing control to `makepkg`.
+- `aurascan upgrade --dry-run` previews an Arch-family upgrade and reports
+  pacman, AUR helper, known campaign, kernel/module, config drift, and AI-raised
+  risks.
+- `aurascan security-audit` checks installed packages and pacman history against
+  validated AUR campaign intelligence, reviewed emergency vendor advisories,
+  and optional official Arch advisories.
+- `aurascan instruction-audit` reviews recognized Claude Code, `AGENTS.md`, and
+  Agent Skill control files for suspicious content and unexpected changes.
+- `aurascan config-drift --dry-run` explains `.pacnew` and `.pacsave` files and
+  prepares safe fixes with backups.
+- `aurascan incidents --dry-run` diagnoses system and application crashes from
+  bounded local logs without applying repairs.
+- `aurascan recovery --status` manages an optional local recovery boot image;
+  plain `aurascan recovery` inside that image starts the guided recovery UI.
+- `aurascan ask --latest` reopens the newest private AuraScan result for
+  bounded explanatory questions and locally verified follow-up actions.
+- `aurascan agent --latest` opens the optional foreground Policy-Gated Repair
+  Agent. Its default `guarded` mode uses only AuraScan-owned probes/actions;
+  command-enabled profiles remain a fail-closed local allowlist.
+
+## Feature areas
+
+AuraScan is one defense-in-depth system made of five areas. Every area inspects
+untrusted input before it gains authority, and every area keeps deterministic
+policy authoritative over optional AI.
+
+| Area | What it covers |
+| --- | --- |
+| Core protection | Package and install-hook review, bounded repository provenance, upgrade preflight, `makepkg` wrapper handoff |
+| Intelligence | Independently signed detection data, reviewed advisories, one captured snapshot per operation |
+| Endpoint monitoring | Configuration-drift review, security audit of installed state and package history, hardware and module health signals |
+| Response and recovery | Incident diagnosis, guarded repair planning, optional recovery boot environment |
+| Interface | CLI, tray, desktop snapshot, setup wizard and doctor, guided triage, contextual follow-up |
+
+The trust model is static-first: AuraScan reads untrusted package, source, and
+agent-control content without executing it, reports what it could and could not
+inspect, and never turns a clean result into a safety guarantee. AI is a
+separate opt-in advisory layer that can raise a deterministic finding's severity
+but never lower, clear, or replace one.
+
+Where trust boundaries and side effects live is documented in
+[`docs/ARCHITECTURE.md`](ARCHITECTURE.md) and
+[`docs/SECURITY_BOUNDARIES.md`](SECURITY_BOUNDARIES.md).
+
+## Independent security intelligence
+
+AuraScan can consume independently signed updates for its existing npm
+package/version, payload-hash, malicious-domain, and emergency vendor-advisory
+checks. New formats and behavior rules still require an application update.
+Normal scans remain local and use one captured intelligence version throughout
+their analysis. A signature authenticates the publisher; it does not prove
+that an indicator is correct or that package code executed.
+
+**The production feed and signing keys are not yet configured in v0.10.11.**
+Bundled detections continue to work. Refresh, import, and timer enablement
+deliberately refuse activation until a separately reviewed application release
+provisions that trust. Installing this version does not start downloads or
+enable automatic updates.
+
+After production provisioning, the interface is:
+
+```bash
+aurascan intelligence status --json
+sudo aurascan intelligence update
+sudo aurascan intelligence import /absolute/path/to/offline-bundle
+sudo aurascan intelligence auto-update enable
+sudo aurascan intelligence auto-update disable
+```
+
+The Updater tray's right-click menu also provides **Update detection data**,
+**Automatic detection updates**, and **Detection data status**. Updates and
+schedule changes request administrator authorization through the desktop's
+polkit agent. No password is collected by AuraScan. A desktop without an
+authentication agent can use the `sudo` commands above instead.
+
+Status shows the data sequence, content identity, review date, last successful
+activation, expiry, and observed timer/service state. Opening the menu or status
+does not download anything or enable automatic updates. The checkbox changes
+only after the local timer state confirms the request. Unconfigured feeds,
+expired data, and unavailable or inconsistent service state are explained;
+the update/enable actions remain unavailable until the feed is configured.
+An already enabled timer can still be disabled if feed configuration is missing.
+These entries manage AuraScan's signed indicators; ClamAV signatures and
+application upgrades remain separate. They become available in the tray after
+this application change is installed.
+
+Status is offline and unprivileged. Administrative actions manage one protected
+system-wide intelligence installation used by all users and package hooks.
+GnuPG is required to activate signed updates; bundled scanning does not require
+it. Automatic updates are disabled by default; opting in enables a daily timer
+with randomized delay. Package installation neither enables it nor downloads
+intelligence. No project configuration, AI credentials, scan results, or user
+files are sent to the feed.
+
+For local service details from a terminal, use
+`aurascan intelligence status --json --include-services`. Activation time is
+retained when the identical bundle is reimported; it is not a timestamp for
+every successful refresh check. Reported service state is not a durable history
+of update attempts.
+
+Failed refreshes retain previously verified intelligence. Expired intelligence
+continues detecting with a visible stale status and conservative scanning;
+expiry alone does not force manual installation approval. Corrupt active
+storage is an explicit coverage failure. Reports record the exact intelligence
+identity, and a changed generation invalidates cached shortcuts and earlier
+package review acceptance. Ordinary offline scans cannot establish whether a
+newer public bundle exists.
+
+The [publisher template](../tools/intelligence_repository/README.md) documents
+rights review, signed corrections, and future GitHub distribution. It remains
+separate from research-data quarantine and is not installed as runtime tooling.
+
+## Quickstart
+
+AuraScan is published as [`aurascan`](https://aur.archlinux.org/packages/aurascan)
+on the Arch User Repository. Review the `PKGBUILD`, then install it with an AUR
+helper:
+
+```bash
+paru -S aurascan
+# or
+yay -S aurascan
+```
+
+To build directly from the AUR Git repository:
+
+```bash
+git clone https://aur.archlinux.org/aurascan.git
+cd aurascan
+makepkg -si
+```
+
+After installation, launch the setup wizard and verify the system integration:
+
+```bash
+aurascan init
+aurascan doctor
+```
+
+For a development checkout:
+
+```bash
+git clone https://github.com/crizzler/AuraScan.git
+cd AuraScan
+python -m pip install -e ".[test]"
+python -m aurascan init
+python -m aurascan doctor
+```
+
+Release notes and any recovery-image artifacts are available from the
+[GitHub releases page](https://github.com/crizzler/AuraScan/releases). Starting
+with v0.10.3, every new release explicitly says whether it is
+**recovery-bearing** or **package-only**.
+A recovery-bearing release publishes the ISO, its SHA-256 sidecar, and its
+sorted package manifest as one set. A package-only release names the older
+recovery image it continues to use and states that ISO/UKI validation was not
+rerun for that release. AuraScan records the image date and Doctor warns when a
+retained image exceeds 90 days; a new package-only release may not carry an
+image beyond that window.
+
+Installation does not auto-run the wizard, collect API keys, write user config,
+enable monitoring or repair services, install tray autostart, or add a recovery
+boot entry as a side effect. Setup starts only when you run `aurascan init` or
+`python -m aurascan init`.
+
+## Why AuraScan Is Useful For Arch Users
+
+AUR packages can run build scripts. Maintainer/package takeovers, source URL
+changes, dependency tricks, weakened checksums, install hooks, and background
+persistence patterns are real risks. Reading every PKGBUILD manually is easy to
+forget, especially during routine updates.
+
+AuraScan adds a fast automated safety layer before build or install steps. It
+is not a replacement for judgment, but it reduces blind spots and gives risky
+package behavior a clear review path.
+
+For routine system maintenance, `aurascan upgrade` is meant to feel like a
+native upgrade front door: it previews the pending transaction, checks common
+Arch-family pitfalls, optionally asks AI to raise correlated risks, and then
+hands off to pacman, paru, yay, or Shelly.
+
+## Installation
+
+AuraScan is available from the AUR as
+[`aurascan`](https://aur.archlinux.org/packages/aurascan). It is not currently
+part of Arch Linux's official binary repositories. The AUR recipe builds the
+versioned GitHub source release, verifies fixed source checksums, and applies
+any explicitly listed packaging patches before running the test suite.
+
+Install with an AUR helper:
+
+```bash
+paru -S aurascan
+# or
+yay -S aurascan
+```
+
+The public package recipe and history can be reviewed independently:
+
+```text
+https://aur.archlinux.org/cgit/aur.git/tree/PKGBUILD?h=aurascan
+```
+
+For development:
+
+```bash
+python -m pip install -e ".[test]"
+```
+
+This installs the `aurascan` and `aurascan-makepkg` console scripts into the
+active environment. It does not install pacman hooks and does not run the
+wizard.
+
+The Arch/AUR packaging recipe installs `/usr/bin/aurascan`,
+`/usr/bin/aurascan-makepkg`, the pacman hook template, the optional updater
+desktop/icon assets, disabled-by-default incident and Agent Instruction Guard
+monitors and user assistants, Safe Autopilot services, recovery image profiles,
+and a disabled recovery refresh hook. It does not build a UKI, alter an ESP, or
+add a boot entry during package installation. It also installs a
+non-interactive post-install message that points users to `aurascan init` and
+`aurascan doctor`.
+
+The source-tree reference recipe remains under `packaging/arch/`. The AUR Git
+repository is the canonical public package history used by AUR clients.
+
+## Compatibility
+
+AuraScan targets Arch-family systems where pacman is the system package
+manager. Core package scanning, `aurascan doctor`, `aurascan config-drift`,
+`aurascan incidents`, and `aurascan upgrade --dry-run` are CLI-first and work
+independently of the desktop environment.
+
+| Distribution | Support tier | Notes |
+| --- | --- | --- |
+| Arch Linux | Supported | Generic pacman behavior with optional `paru` or `yay` AUR context. |
+| EndeavourOS | Supported | Arch-compatible flow; `yay` is commonly available but not required. |
+| CachyOS | Supported | Includes Shelly handoff support and CachyOS kernel/module checks when CachyOS packages are present. |
+| Manjaro | Supported with caveats | Manjaro's delayed repositories can make AUR and mirror timing differ from Arch. Avoid partial upgrades and follow Manjaro's normal branch/update guidance. |
+| Unknown Arch-like | Best effort | AuraScan uses conservative pacman behavior and Doctor reports what it can prove locally. |
+
+Desktop support is intentionally layered:
+
+- KDE Plasma on Wayland or X11 is the best-supported target for the optional
+  AuraScan Updater tray icon.
+- XFCE, Cinnamon, MATE, LXQt, and Budgie are expected to work when their normal
+  tray/status-notifier support is enabled.
+- GNOME is fully supported for CLI workflows, but the tray icon may require an
+  AppIndicator/status-notifier extension.
+- Tiling window managers can use AuraScan normally from the terminal; the tray
+  applet needs a tray host such as the one provided by your panel/bar setup.
+
+## What It Checks
+
+The default scan is conservative and fast. It inspects package metadata,
+PKGBUILD text, declared local install hooks when available, local history, and
+available package archives. It can use deterministic rules, ClamAV when
+available, source metadata checks, local history diffing, and structured risk
+summaries. The separate security audit also checks a validated historical AUR
+campaign snapshot, the reported August 2026 `hyprland-fixes` incident, bounded
+pacman history, correlated host artifacts, and optional `arch-audit` advisories.
+
+Default static analysis also blocks an AUR-maintainer-worm technique reported
+in the August 2026
+[`xsnow`/`xsnow-bin` incident](https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/thread/FPT525XVV2DL2P437KPHTADV3KJINORN/):
+`SUPPLYCHAIN-AUR-REPO-PROPAGATION-001` applies only to deterministic PKGBUILD
+or declared install-hook control text that correlates an `aur.archlinux.org`
+Git target, repository mutation or staging, and a non-dry-run push bound to the
+AUR endpoint or configured remote. An AUR URL, ordinary clone/fetch behavior,
+`git push` to another host, a dot-prefixed filename, or quoted documentation is
+not enough. The CRITICAL finding means the inspected text contains a static
+chain that could attempt to propagate changes using a maintainer's AUR
+credentials; it does not prove that the hook ran, credentials were available,
+a push succeeded, or an account was compromised.
+
+Following the [31 August 2026 aur-general report about packages shipping
+precompiled binaries](https://lists.archlinux.org/archives/list/aur-general%40lists.archlinux.org/thread/HI6AJSU7LMGWOELAI2JUABEMNVHPGBAG/),
+every PKGBUILD scan also performs an always-on, bounded provenance check of
+regular files present alongside the PKGBUILD before source acquisition or an
+allow decision. This is a filesystem observation: AuraScan does not invoke Git
+and does not claim that a file was committed to, downloaded from, or published
+through the AUR. The report explicitly did not allege that the named packages
+were malicious, and AuraScan does not treat their names as indicators. The
+normal traversal does not follow links and prunes VCS
+internals, named cache/dependency directories, and generated root `src/` and
+`pkg/` trees. If supported static package logic explicitly references a path
+inside an otherwise pruned tree, AuraScan captures that required path with the
+same no-follow bounds instead of treating pruning as trust. Ambiguous or unsafe
+required-path inspection blocks as incomplete. Supported ELF, PE, Mach-O, and
+opaque archive formats are recognized from bounded file magic rather than
+filenames. Exact checkout files represented by a supported literal
+`source=()` form are excluded from repository-embedded-artifact classification
+and remain subject to the normal source-provenance workflow. Statically proven
+VCS checkout directory roots are treated as source-owned subtrees during the
+normal walk so an already-populated upstream cache cannot consume the local
+artifact bounds; an exact package-control reference beneath that root overrides
+the exclusion and is captured normally. A declared checkout directory that
+already exists beside the PKGBUILD is reported as
+`AUR-REPO-PREEXISTING-VCS-CHECKOUT-001`, because makepkg reuses that
+directory; the finding asks the reviewer to remove it or verify it resolves to
+the declared remote revision before building.
+
+Repository artifact findings deliberately form an evidence ladder:
+
+- `AUR-REPO-OPAQUE-ARTIFACT-001` is a non-hard-blocking, acceptance-eligible
+  MEDIUM manual-review finding when a supported executable or opaque archive
+  is present but AuraScan finds no supported exact install or execution
+  correlation. The makepkg wrapper pauses for an explicit review decision.
+- `AUR-REPO-PREEXISTING-VCS-CHECKOUT-001` is a non-hard-blocking,
+  acceptance-eligible MEDIUM manual-review notice when a declared VCS
+  checkout directory already exists beside the PKGBUILD. makepkg reuses such
+  a directory after comparing only its configured origin URL, and the
+  bounded walk does not inspect its content.
+- `AUR-REPO-OPAQUE-BINARY-001` is a HIGH manual-review finding when package
+  control text requests copying, moving, or installing the exact undeclared
+  artifact, or an exact recursively transferred directory containing it, into
+  `$pkgdir`. If destination directory semantics are not statically provable,
+  this tier does not claim an exact installed child path.
+- `AUR-REPO-OPAQUE-BINARY-EXEC-001` is a CRITICAL blocker when package control
+  text or a declared install hook can invoke or code-load the exact artifact
+  (or its exact installed destination), or requests SUID or SGID privilege
+  bits.
+- `AUR-REPO-INSPECTION-INCOMPLETE-001` is a HIGH fail-closed blocker when the
+  bounded traversal or stable file capture cannot finish safely. When the
+  failing entry is known, the finding names it and its target (for example
+  `First unsupported entry: linked-payload -> /media/usb/payload (a symbolic
+  link).`) so the reason and the location are visible without re-running the
+  capture.
+
+Symbolic links beside the PKGBUILD are read but never followed. A one-hop
+link to a stable regular file that stays inside the checkout - for example a
+REUSE-style `LICENSES/0BSD.txt -> ../LICENSE` alias - is recorded with its
+target bytes bound into the checkout identity, so it no longer stops the scan.
+Links that are absolute, escape the checkout, dangle, or point at directories,
+special files, pruned trees, or other links still produce the HIGH
+incomplete-coverage result above.
+
+A clean result is not a sandbox. AuraScan's default scan never executes
+package code, so an allowed build still runs on this machine through makepkg.
+The optional upgrade sandbox (`AURASCAN_AUR_SANDBOX=devtools`,
+`--aur-sandbox devtools`, or the interactive sandbox choice) executes a
+reviewed build inside a fresh devtools chroot and scans the produced archives,
+but a chroot shares the host kernel and one run cannot prove that a package is
+safe. When a reviewed package still needs hands-on testing, treat it as
+hostile: build and run it in a disposable local virtual machine (for example
+an Arch install ISO in QEMU with a snapshot or overlay disk, no shared
+folders, no host keys or credentials, and no network or an isolated one),
+never on the daily system. A single sandboxed run cannot prove that a package
+is safe; it only shows what that run did in that environment.
+
+This local check performs no network request, runs no native inspection tool,
+and never executes or extracts an artifact. A finding does not prove that the
+file is malicious, Git-tracked, installed, executed successfully, or capable
+of compromising the machine. Legitimate vendored executables, firmware,
+archives, and test fixtures can therefore require review; an ordinary binary
+package that declares a checksummed upstream artifact in `source=()` is not
+flagged merely because that acquired artifact contains binary data.
+
+Use verbose terminal output for the review locator. For a correlated finding,
+AuraScan shows the sanitized PKGBUILD or install-hook path and deterministic
+one-based line together with a 12-character artifact SHA-256 prefix; a presence
+finding identifies the observed local path and the same short hash. It does not
+print the artifact bytes or the matched command text. These local technical
+fields identify what to inspect, not what ran.
+
+`SUPPLYCHAIN-REMOTE-STAGE-EXEC-001` separately blocks package control text that
+correlates a command-position network download or Git clone with later
+execution of the same local artifact. The correlation follows simple constant
+paths and bounded decode/copy steps, so a downloaded image- or text-named
+carrier that becomes an executed script is covered without AuraScan rendering
+the carrier. Fetching, installing, or documenting a file without executing the
+matched artifact is not enough. Evidence is fixed and secret-free, and the
+finding does not claim that a connection, download, or execution succeeded.
+
+`SUPPLYCHAIN-OPAQUE-CARRIER-EXEC-001` covers the related local-only pattern:
+active package logic decodes content into a separate artifact and then executes
+that exact artifact, or directly invokes a media-, document-, data-, or
+font-named path as code. A picture, archive, font, text file, asset declaration,
+or decode step alone is not a finding. Both correlations use a bounded command
+parser; if that parser cannot finish, AuraScan blocks with
+`STATIC-REMOTE-STAGE-INSPECTION-INCOMPLETE-001` and describes incomplete
+inspection rather than asserting malware or execution.
+
+Local package scans and explicit deep-static scans also inspect captured
+`.vscode/tasks.json` files structurally. `EDITOR-TASK-AUTORUN-CARRIER-001`
+blocks a supported `folderOpen` task, or its reachable task dependency, that
+configures an interpreter to execute a literal font, media, document or data
+path. A task file, a normal automatic build, or a font alone does not establish
+this correlation. Actual task execution depends on VS Code workspace trust and
+automatic-task permissions; AuraScan does not execute tasks or establish that
+their targets exist or are malicious. Malformed or unsupported active task
+configuration produces a blocking coverage finding. This bounded Linux task
+check belongs to package/source scanning; standalone Instruction Guard does not
+discover VS Code task files.
+
+Git source identity is separate from a repository URL. Changing a source
+selector requires normal scanning; a branch name or short identifier cannot be
+presented as a full commit pin. Explicit deep-static acquisition resolves the
+selected Git namespace to a commit, checks out that commit and verifies the
+resulting HEAD, recording `resolved_revision`. It reacquires sources on every
+scan. When the acquired object itself carries a signature, deep-static reports
+whether one is present, its format, a verified signer fingerprint (only from
+machine-readable verifier status) and whether that fingerprint matches a
+declared `validpgpkeys` entry; an unsupported format, missing key or unavailable
+verifier stays unresolved coverage rather than "unsigned". A valid signature is
+not proof of authorization, origin or safety. Default local scans cannot observe
+remote branch/tag movement or prove that upstream history was not rewritten.
+Commit identity is not authenticity, and neither old timestamps nor a familiar
+hosting provider establish trust.
+
+A literal local `install=` target is mandatory scan evidence, including a
+dot-prefixed hook. AuraScan will not call the package clear when that declared
+hook is absent, unreadable, unsafe, ambiguous, or any component of its declared
+relative path under the package directory is a symlink. It fails closed
+instead. The hook identity participates in scan and review fingerprints: an
+unresolved hook cannot reuse or create an allow decision, although AuraScan may
+cache the matching blocker report under its failure-state identity.
+
+Built package archives receive the same deterministic treatment for their
+`.INSTALL` member. AuraScan reads `.PKGINFO` identity and `.INSTALL` control
+text through a bounded no-follow archive reader. It executes only an
+already-opened, root-owned, non-writable `/usr/bin/bsdtar` identity and checks
+that identity again after use; linked, replaced, oversized, binary, or invalid
+inputs are not accepted as captured metadata. An uninspectable install hook
+fails closed before installation. Built-package reports are not cached until
+every analyzer can share one immutable archive snapshot, avoiding clear-report
+reuse across a mutable package path. Package images and other binary members
+are never rendered for AI. ClamAV may inspect their bytes when available, while
+deterministic rules focus on code paths that decode or execute a carrier.
+
+Default scans do not download declared sources, clone upstream repositories,
+fetch PGP keys, run GPG, run makepkg, install packages, or execute package code.
+The default scan context is `unknown`, which keeps update fast paths disabled.
+
+The separate Agent Instruction Guard performs bounded, static content and
+integrity checks on recognized AI-agent control files. It never imports,
+renders, sources, or executes a discovered file. It is disabled until the user
+opts in.
+
+Package control text that invokes pnpm dependency resolution receives a local
+build-tool check. AuraScan reads bounded pacman database evidence and compares
+the installed upstream version using trusted `/usr/bin/vercmp`; it never runs
+pnpm. Versions below 10.34.5 and 11.x versions below 11.11.0 block the build
+because of [CVE-2026-82392](https://github.com/pnpm/pnpm/security/advisories/GHSA-c59q-g84q-2gj5)
+and [CVE-2026-82393](https://github.com/pnpm/pnpm/security/advisories/GHSA-vq4v-j7r6-jq4m).
+`--ignore-scripts` does not waive the manifest-name file-write risk. Missing or
+ambiguous tool/version evidence blocks as incomplete coverage. Relevant scans
+are uncached, and the wrapper rechecks the local evidence before handoff.
+Installed package evidence does not prove what a later PATH, Corepack, project
+pin, or dependency update selects, nor does it establish exploitation.
+
+Deep-static inspection additionally checks decoded `package.json` names and
+pnpm lockfile package-name fields for traversal and absolute paths. Scoped
+names such as `@scope/package` remain valid. The standard-library reader
+supports bounded literal YAML mappings/sequences for lockfile versions 5.3,
+5.4, 6.0, and 9.0; unsupported syntax, dependency identity forms, malformed
+metadata, or duplicate fields produce a coverage blocker. These checks apply
+to acquired source and extracted dependency archives, even without lifecycle
+scripts. They do not inspect dependencies that were never acquired.
+
+AuraScan also carries offline intelligence for the four npm releases in the
+[September 7 Shai-Hulud report](https://www.aikido.dev/blog/shai-hulud-npm-resurfaces),
+with their GHSA/OSV references. Exact observed package/version selections in
+supported npm/Bun/Yarn/pnpm install commands are CRITICAL blockers. An unpinned
+selector or different version of those advisory packages needs HIGH provenance
+review: the broader malware advisories list no patched release. Package names,
+versions, and file hashes remain distinct evidence.
+
+Explicit deep-static scans also inspect acquired `package.json`, npm lockfiles,
+and shrinkwrap records, and compare bounded regular source files against the
+verified payload SHA-256, including renamed non-code assets. Unsupported reads
+and exhausted bounds block as incomplete inspection. Dependencies that are not
+in the acquired source are outside this coverage; AuraScan never installs them
+to discover their contents. Exact active shell network targets are checked
+against the confirmed C2 hostname without contacting it.
+
+A lifecycle hook that launches the same captured package's root `index.js` via
+Bun or Node receives additional bounded JavaScript analysis. Known C2 use, or
+correlated credential access, persistence writes and network/publication
+behavior, can block the build. Credential access and correlated writes to
+`.vscode/tasks.json` or `.claude/settings.json` receive separate review findings.
+An ordinary entry point, token name, editor configuration, comment, or quoted
+example alone does not establish the correlation. Dynamic JavaScript and
+unfollowed helpers remain coverage limits.
+
+Registry downloadability, publish-time malware scanning, favorable history,
+source checksums, signatures, and AI responses cannot clear deterministic
+blockers. These static matches do not establish execution or host compromise,
+and this intelligence update does not establish a direct AUR campaign or this
+machine's exposure. If installation or execution is independently confirmed,
+the [malware advisory](https://github.com/advisories/GHSA-q5c6-p5q5-g3px)
+calls for investigation and secret rotation from a separate clean machine;
+package removal alone cannot establish recovery.
+
+Repository and acquired-source inspection also select `.pyc`, `.pyo`, `.pyd`,
+and `__pycache__` contents regardless of executable permissions. Presence
+requests manual review without a hard block. Recognized unchecked-hash
+[PEP 552](https://peps.python.org/pep-0552/) headers receive HIGH review;
+nearby source does not authenticate their bodies. Exact repository execution
+or code-loading correlations remain CRITICAL blockers. Acquired shell-script
+references require an exact captured path and proven working directory;
+matching references with unresolved working directories block as incomplete
+coverage. AuraScan never imports, unmarshals, disassembles, or executes the
+carrier. Native `.pyd` candidates are distinct from CPython bytecode, and
+ordinary installed Python caches are not blanket-flagged by these source checks.
+
+Deep static source inspection is opt-in: --deep-static is explicit. It safely acquires and inspects declared source
+archives without executing package code. In this mode AuraScan may verify
+detached signatures in an isolated temporary GPG home. Automatic key lookup is
+limited to explicit source acquisition/deep-static flows and can be disabled
+with `--no-auto-key-fetch` or `--offline`. Offline mode makes zero source or key
+network requests and blocks when a declared remote source therefore cannot be
+inspected. Deep-static parses the exact captured PKGBUILD rather than a
+neighboring `.SRCINFO`, copies local sources through bounded no-follow reads,
+isolates every acquired source path, and blocks on any declared source it
+cannot inspect. Deep-static also binds its verdict to the bytes the build will
+use. A declared remote source whose checkout name is already present as a
+different file in the package directory blocks, because makepkg reuses that
+local file instead of the inspected download. An HTTP/HTTPS archive declared
+with `sha256sums=SKIP` blocks as well, because no declared digest ties the
+inspected download to the bytes a later makepkg fetch would use; a detached
+signature that verifies against a declared `validpgpkeys` entry still covers
+that sanctioned SKIP-plus-signature pattern. Because makepkg later downloads a
+declared source with its own client, only a real declared checksum ties the
+inspected bytes to the bytes the build fetches; for a SKIP entry covered only
+by a detached signature, AuraScan verifies the inspected download but cannot
+prove the builder's separate download returns identical bytes. Deep-static reports are
+deliberately not reused from cache until acquired-source identities can be
+bound to an immutable cache key.
+Source parsing handles bounded literal assignments and appends, but fails
+closed with `SOURCE-PARSER-AMBIGUOUS` when Bash syntax, malformed arrays,
+indirect mutation, `eval`/sourcing, or a nameref could change what `source`
+means without evaluation.
+
+Network Git acquisition and signature verification use captured and
+revalidated `/usr/bin/git` and `/usr/bin/gpg` identities rather than a later
+bare `PATH` lookup. Both run with isolated configuration plus bounded time and
+combined captured output. The PGP cache directory must be private and user-owned;
+cached or configured public-key files are read as bounded, stable, non-link
+snapshots. A fetched key is published as a private no-replace cache file, then
+the exact captured bytes are copied into the private temporary GPG home before
+import. These checks reduce path and replacement attacks; they do not make Git,
+GPG, their parsers, or a fetched key intrinsically trustworthy.
+
+Initial and redirected source URLs reject embedded credentials, localhost, and
+non-public IP literals; persisted acquisition metadata omits URL userinfo,
+queries, and fragments. This lexical defense does not eliminate DNS rebinding,
+so explicit network acquisition should still run in an isolated environment
+when the PKGBUILD is untrusted.
+
+## What It Does Not Protect Against
+
+AuraScan is not a sandbox, VM, or general process-behavior monitor. It does not
+make makepkg safe after it starts running package functions. The Agent
+Instruction Guard is a periodic control-file scanner, not synchronous
+interception: it cannot stop a process that reads or changes a file between
+scans. It does not preflight pasted commands or download links, use privileged
+fanotify interception, or automatically quarantine files. AuraScan does not
+guarantee malware detection, and it cannot see behavior hidden in files it did
+not fetch or inspect.
+
+AuraScan does not attempt to prove that arbitrary pictures, fonts, media,
+firmware, or opaque binaries are benign, and it does not use a multimodal model
+to interpret them. Static correlation can catch supported code that
+materializes and executes a carrier, but unknown decoders, steganography,
+parser vulnerabilities, dormant payloads, and behavior reached only after
+makepkg starts remain residual risk. Use a disposable build environment for
+untrusted AUR packages even after a clear scan. Deep-static currently blocks
+rather than silently skipping a nested archive; it does not recursively expand
+that archive in the same run.
+
+The repository provenance check sees a bounded local directory snapshot, not
+the AUR server's Git history. It cannot establish whether an observed artifact
+was committed, generated locally, or left behind by an earlier build, and
+the normal walk prunes VCS, named cache/dependency directories, and generated
+root `src`/`pkg` trees. Statically resolvable package-control references can
+override that pruning for an exact required path, but dynamically constructed
+or otherwise unsupported paths are not equivalent to complete traversal of a
+pruned tree. Root package/source archives and artifacts reached under generated
+trees do not get a presence-only notice, although an exact active correlation
+can still elevate them. Magic and shell recognition are intentionally finite;
+unsupported loaders or decoders, encrypted or nested archive contents,
+polyglots, steganography, malformed/disguised formats, and runtime-only control
+flow may remain opaque. Presence-only findings remain non-blocking to limit
+false positives, while detected incomplete traversal or correlation blocks as
+missing coverage, not as evidence of malware.
+
+AuraScan retains each captured path identity and revalidates it after the
+bounded traversal, which catches a one-time replacement or mutation after an
+early subtree was read. This is still not an atomic filesystem snapshot: a
+same-UID process can race after validation, and root can defeat the boundary.
+
+Bounds, no-follow reads, fixed tool paths, and identity checks limit known
+confused-deputy and replacement paths; they are not a parser sandbox. A defect
+in AuraScan, Python, Git, GPG, libarchive/bsdtar, ClamAV, or another invoked
+native parser may still be exploitable by hostile input. Same-UID malware can
+attack user-owned configuration, caches, and state, while root malware can
+replace AuraScan or its trusted system tools and defeat these checks. Explicit
+deep-static acquisition also creates network and disk exposure before the
+acquired tree can be fully analyzed, so use a disposable, resource-limited
+environment for adversarial packages.
+
+The AUR propagation rule is deliberately scoped to deterministic PKGBUILD and
+declared install-hook control text. It does not claim to parse or prove the
+exact runtime call path. AuraScan does not apply the rule as a blanket check to
+every file acquired by `--deep-static`, because ordinary upstream release
+tooling may legitimately modify and publish its own repositories.
+
+ClamAV integration is useful when available, but a clean ClamAV scan is not
+proof of safety. PGP signatures help confirm source integrity and signer
+identity, but a valid signature does not prove that upstream code is safe or
+that packaging behavior is harmless.
+
+## Basic Usage
+
+First-run setup:
+
+```bash
+aurascan init
+aurascan doctor
+aurascan doctor --check-ai
+python -m aurascan init
+python -m aurascan doctor
+```
+
+`aurascan init` can configure a cloud or local AI provider in
+`~/.config/aurascan/.env`. Required cloud API keys are prompted with hidden
+input; optional local-server tokens can be added as
+`AURASCAN_LOCAL_AI_API_KEY`. The user config file is written with restrictive
+permissions. The wizard recognizes the release-safe hook installed by the Arch
+package and does not ask for a redundant local override. Source or development
+installs can still repair a local hook at
+`/etc/pacman.d/hooks/aurascan.hook` when needed.
+
+LM Studio and `llama-server` expose compatible local APIs, so they can be
+selected without installing another Python client:
+
+```bash
+aurascan init --provider lmstudio --model MODEL --enable-ai
+aurascan init --provider llamacpp --model aurascan-local --enable-ai
+aurascan init --provider llamacpp --model MODEL --base-url http://127.0.0.1:9000/v1 --enable-ai
+aurascan doctor
+aurascan doctor --check-ai
+```
+
+The presets use `http://127.0.0.1:1234/v1` for LM Studio and
+`http://127.0.0.1:8080/v1` for llama.cpp. Start and load a model in the selected
+server first; AuraScan does not start, download, or manage local models. The
+wizard prompts for the model ID when `--model` is omitted. For llama.cpp,
+`llama-server --alias aurascan-local ...` provides a stable ID instead of
+exposing the model-file path as the default ID. See the official
+[LM Studio OpenAI-compatible API documentation](https://lmstudio.ai/docs/developer/openai-compat)
+and [llama-server documentation](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
+
+Local providers require explicit `AURASCAN_AI_ENABLED=1`, but do not require a
+placeholder API key when their server has authentication disabled. Set
+`AURASCAN_LOCAL_AI_API_KEY` when the local server requires a Bearer token, and
+use `AURASCAN_AI_BASE_URL` to override a preset with another loopback HTTP(S)
+endpoint. Local-provider URLs are restricted to loopback; AuraScan bypasses
+environment proxies, refuses redirects, and never falls back to a cloud
+provider. `aurascan doctor` remains offline unless `--check-ai` is supplied.
+
+Package AI is advisory and raise-only. AuraScan sends a bounded head/tail set
+of numbered text lines as a JSON data object, gives the model no tools, and
+accepts only a strict verdict, allowlisted behavior families, and references to
+lines that were actually supplied. Provider prose, commands, URLs, snippets,
+and extra fields are rejected and never retained. A
+`no_additional_concern` response is not a clean bill of health and cannot
+lower or suppress deterministic findings. All default provider transports
+refuse redirects; Gemini credentials are sent in a header rather than a URL.
+Plain-HTTP `localhost` local endpoints are normalized to `127.0.0.1` so a
+mutable host lookup cannot redirect local model traffic.
+
+The same output boundary applies to config-drift, incident, and recovery AI.
+Responses have exact bounded JSON schemas, duplicate keys are rejected, and
+only known evidence, probe, or verified action IDs survive validation. Advisory
+model prose remains untrusted interpretation. Before display or persistence,
+AuraScan normalizes it and rejects recognized URL/domain destinations, direct
+or indirect action requests, sentence-leading imperative verbs, named or
+generic package-manager/install-helper advice, nominalized operation or
+invocation advice, credential transfer wording, questions, terminal controls,
+AuraScan status impersonation, and unsupported claims that a machine is safe or
+compromised. Invalid output and provider errors become fixed, secret-free
+explanations; the rejected raw response is not persisted or rendered.
+
+This language filter reduces common prompt-injection and social-engineering
+paths; it is not proof that arbitrary natural language is harmless. Accepted
+interpretation has no tool, URL, command, policy, or execution authority. Only
+validated known IDs can affect the separately guarded workflow, and
+deterministic evidence remains authoritative.
+
+`aurascan init` can also configure upgrade preflight defaults. Upgrade
+preflight is enabled by default even without an explicit setting, but the
+wizard can record your preferred default helper, AI-review behavior, and config
+drift assistant policy:
+
+```bash
+aurascan init --enable-upgrade-preflight --upgrade-aur-helper auto --enable-upgrade-ai
+aurascan init --enable-config-drift --config-drift-ai-diffs ask
+aurascan init --enable-updater-tray --install-updater-autostart
+aurascan init --enable-incident-monitor --enable-incident-ai --incident-ai-evidence redacted
+aurascan init --enable-incident-background-ai --incident-auto-repair safe
+aurascan init --enable-instruction-monitor --disable-instruction-ai --instruction-scan-mode agent-surfaces
+aurascan init --install-recovery --enable-recovery-ai --enable-recovery-auto-refresh --recovery-wifi-profiles ask
+aurascan init --disable-upgrade-preflight
+```
+
+AI analysis is explicit in wizard-created configs. If you leave AI disabled,
+AuraScan writes `AURASCAN_AI_ENABLED=0` and keeps normal scans deterministic and
+local. `aurascan doctor` checks the selected provider, required credential
+state, optional tools, hook status, and config permissions. It does not contact
+the provider unless `--check-ai` is supplied. Selecting LM Studio or llama.cpp
+keeps the request on the configured loopback server; it does not implicitly
+authorize cloud AI.
+
+When AuraScan is launched by a root pacman hook through `sudo`, it also checks
+the invoking user's `~/.config/aurascan/.env` when `SUDO_USER` is available.
+For root shells, unattended system updates, or hook contexts without an
+invoking user, put system-wide AI settings in `/etc/aurascan/.env`.
+
+Scan a PKGBUILD:
+
+```bash
+aurascan --pkgbuild ./PKGBUILD
+```
+
+Scan a built package archive:
+
+```bash
+aurascan --pkg /var/cache/pacman/pkg/example-1.0-1-x86_64.pkg.tar.zst
+```
+
+Emit JSON:
+
+```bash
+aurascan --json --pkgbuild ./PKGBUILD
+```
+
+Run explicit source acquisition and deep static inspection:
+
+```bash
+aurascan --deep-static --pkgbuild ./PKGBUILD
+aurascan --deep-static --offline --no-auto-key-fetch --pkgbuild ./PKGBUILD
+```
+
+## Security Audit
+
+`aurascan security-audit` correlates installed package names and bounded pacman
+history with packaged AUR campaign intelligence. AuraScan ships a validated
+snapshot of the community-maintained June 2026 incident list and labels its
+provenance clearly. It parses package names as data and never executes the
+upstream shell script. It also includes bounded intelligence for the 28 August
+2026 [`hyprland-fixes` report](https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/message/TAASU6LTO76UCKYLMG25OJPUY7ZONASN/).
+
+```bash
+aurascan security-audit
+aurascan security-audit --verbose
+aurascan security-audit --json
+aurascan security-audit --refresh
+aurascan security-audit --offline
+```
+
+`--refresh` downloads only the bounded HTTPS plain-text list, validates every
+package name, hashes it, and stores it in private user state. A failed refresh
+keeps the last validated packaged or cached list. Do not substitute a
+`curl | bash` workflow.
+
+When the optional `arch-audit` command is installed, AuraScan also imports its
+strict JSON output. Those findings are shown separately because `arch-audit`
+uses official Arch Security Team advisories for repository packages; it is not
+an AUR-malware list. During `aurascan upgrade`, known campaign checks run by
+default and official HIGH/CRITICAL advisories are raised only when the pending
+repository transaction does not already include a verifiably fixed version of
+the affected package.
+
+Captured emergency vendor security floors also run offline and with
+`--no-arch-audit`. Each curated entry maps one exact Arch package name to a
+verified vendor fixed version, and the check compares the captured installed
+version against it. Below-floor versions raise HIGH with source/category
+`vendor_emergency_advisory`, separate from `arch-audit` and AUR incidents.
+`SEC-KNOWN-EXPLOITED-VERSION-LAG` is used when the cited authority records
+exploitation; `SEC-VENDOR-SECURITY-FLOOR-LAG` is used when it does not, so a
+critical vulnerability exposure is never presented as a known-exploited one.
+Unknown/custom versions produce incomplete-coverage review. Epoch and package
+revision bumps do not establish an upstream fix, and an out-of-date flag alone
+never raises this finding.
+
+The curated entries are: `chromium` below Linux upstream fix `153.0.8010.36` for
+[CVE-2026-87491](https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_0808145027.html),
+whose exploitation is confirmed by Google and
+[CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2026-87491);
+`chromium` below `153.0.8010.47` for
+[CVE-2026-91749](https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_0541751186.html);
+`firefox` below `156.0` for
+[MFSA 2026-90](https://www.mozilla.org/security/advisories/mfsa2026-90/); and
+`thunderbird` below `156.0` for
+[MFSA 2026-94](https://www.mozilla.org/security/advisories/mfsa2026-94/). The
+three later entries were reviewed on 2026-09-16 and record no exploitation
+evidence. A build between two Chromium floors is clean for the known-exploited
+entry and still below the later one.
+
+The bundled baseline was reviewed on 2026-09-16; a verified intelligence update
+can independently replace it. Security-audit `--refresh` remains the separate
+legacy AUR campaign refresh and does not update this mapping. Captured names
+and versions cannot authenticate package
+origin or rule out downstream backports. A match does not establish exploitation
+on this host, Linux targeting, sandbox escape, or compromise. Floors map to
+exact Arch package names, so browser forks such as LibreWolf, Zen Browser and
+Floorp are never matched by version similarity — they can backport fixes while
+displaying a Firefox-like version. User-local installs and unlisted
+vulnerabilities remain outside this check; no match is not a safety guarantee.
+The check does not query current repository availability or recommend an
+automatic package replacement.
+
+AuraScan records the review decisions you make at the makepkg handoff in a
+private local log, so a finding you judged benign stays distinguishable from one
+you accepted without any judgment. That log is never exported automatically:
+`aurascan evidence status` shows what was captured, `aurascan evidence consent
+--purpose <purpose> --confirm <purpose>` records consent for one named purpose,
+and `aurascan evidence export` then writes quarantine candidates for separate
+review. Exports carry hashes and review metadata only - never package bytes,
+host paths or your notes - and no export can admit data, grant rights or train
+anything.
+
+A package-name-only match is MEDIUM because cleaned packages can later be
+legitimate. A matching pacman transaction inside the campaign window,
+including a later removal, is CRITICAL exposure evidence, but still not proof
+that the exact malicious commit executed. AuraScan does not automatically
+remove packages or claim to clean a potentially compromised host.
+
+For `hyprland-fixes`, an installed or pending name is HIGH, a helper-cache-only
+match is LOW, and any matching install/update event in bounded pacman history
+is CRITICAL; a removal event is also exposure evidence because uninstalling
+does not undo host changes. The malicious repository history predates the
+public report. The host audit also checks bounded, non-executing evidence at the
+reported paths: disguised root-`sshd` configuration under
+`/etc/pacman.d`, related systemd units and hourly persistence, the narrow
+sudoers grant, duplicate SSH-key placement, payload copies, and the reported
+firewall peer. One exact path is HIGH; multiple artifacts or validated behavior
+markers are CRITICAL. Evidence labels omit auth-key and SSH-key material.
+
+AuraScan intentionally does not alert on `tailscaled`, a Tailscale interface,
+or a `100.64.0.0/10` address alone. Those are common legitimate conditions and
+do not identify an attacker-controlled tailnet. Static source detection instead
+correlates authenticated Tailscale SSH enrollment or hidden root-SSH behavior
+with independent persistence, privilege, or anti-forensics signals. A match
+proves suspicious code or artifacts were found, not that enrollment or remote
+access succeeded.
+
+Installed-version `security-audit` checks also cover the nine verified CodeWhale
+trust-boundary advisories, using captured package metadata without running an
+installed agent or fetching advisories. CodeWhale versions `>=0.8.41,<0.8.64`
+match the recorded affected range; legacy DeepSeek TUI lower bounds differ by
+advisory. Legacy versions at or above the rename boundary and unsupported
+version spellings are reported as unresolved coverage, not declared fixed.
+Package provenance and unverified backports remain limitations. These findings
+do not establish exploitation or the versions currently available from AUR.
+See the [maintainer advisories](https://github.com/Hmbown/CodeWhale/security/advisories).
+
+## Agent Instruction Guard
+
+AI-agent control files can influence an assistant every time a project or
+skill is loaded. A poisoned file restored onto a rebuilt machine can therefore
+reintroduce dangerous instructions while still looking like ordinary project
+documentation. `aurascan instruction-audit` provides an opt-in, unprivileged
+review workflow for this risk:
+
+```bash
+aurascan instruction-audit
+aurascan instruction-audit --all-markdown --no-ai
+aurascan instruction-audit --ai --json
+aurascan instruction-audit --review
+aurascan instruction-audit --review REPORT_ID
+aurascan instruction-audit --triage
+aurascan instruction-audit --triage REPORT_ID
+aurascan instruction-audit --enroll-clean REPORT_ID
+aurascan instruction-audit --approve FILE_ID
+aurascan instruction-audit -A FILE_ID  # compact latest-report approval form
+aurascan instruction-audit --disable FILE_ID
+aurascan instruction-audit --restore ACTION_ID
+aurascan instruction-audit --status
+aurascan instruction-audit --enable-monitor
+aurascan instruction-audit --enable-ai
+aurascan instruction-audit --disable-monitor
+aurascan instruction-audit --disable-ai
+```
+
+By default AuraScan scans recognized control surfaces under `$HOME`, including
+`AGENTS.md`, `AGENTS.override.md`, `SKILL.md`, `CLAUDE.md`,
+`CLAUDE.local.md`, and Claude rules, commands, agents, skills, memory, settings,
+hooks, MCP/plugin manifests, and text scripts or resources belonging to a
+discovered skill. It also recognizes repository-local `.codewhale/config.toml`
+and legacy `.deepseek/config.toml`. Their mere presence is neutral baseline
+work. The actual user-global `~/.codewhale/config.toml` and
+`~/.deepseek/config.toml` can contain credentials and are excluded from this
+project review; explicit references to them are refused without reading bytes.
+A supported project top-level `allow_shell = true` requests HIGH-severity review
+of project-controlled execution authority. This does not prove execution or an
+affected installed agent; fixed CodeWhale versions ignore the override.
+Instruction references are bounded data, resolved from the containing workspace
+even when the selected scan root is a broader home. Escapes and credential-file
+references are refused without reading their targets. Config/import symlinks,
+ambiguous parent traversal, and unsupported TOML require manual coverage review.
+Nearby project config presence also confines other discovered controls to that
+project before later discovery pages are processed. The reader supports a
+strict TOML subset on Python 3.8+, not every TOML feature.
+Cursor `.cursor/rules/**/*.mdc`, legacy `.cursorrules`, `.cursor/mcp.json`
+and `.cursor/permissions.json` also enter bounded content and integrity review.
+Clean rules are neutral baseline work. A `mcpAllowlist` entry of `*:*` requests
+HIGH review of approval-free MCP authority; it does not establish maliciousness
+or execution. Supported MCP commands and permission fields receive structural
+analysis, with malformed or unsupported configuration reported as coverage.
+Ordinary `git`/`npm` permission entries and authentication placeholders alone
+are not malicious behavior. AuraScan never starts a server, expands variables,
+reads referenced credential files, or executes a configured command. Cursor
+controls remain manual-only for disable/restore. This covers selected local
+files, not Cursor's effective merged user/team policy, plugin component graph,
+CLI permissions, or proof that Cursor loaded a file.
+`--root PATH` selects an explicit root for testing or a
+deliberate one-shot scan. `--all-markdown` extends content analysis to other
+Markdown files, but those extra files are not added to the integrity baseline.
+`--no-ai` guarantees deterministic-only analysis; one-shot `--ai` requests the
+separately configured provider without enabling the background AI timer. A
+complete clear scan exits 0, a completed scan requiring review exits 1, and a
+configuration or scan failure exits 2. Background capture records findings and
+exits 0 so systemd does not mislabel detection as a failed service.
+
+Discovery follows explicit Markdown imports and file symlinks only when the
+final regular-file target stays inside an allowed root. It never traverses a
+symlinked directory. Cache, trash, dependency, virtual-environment, and VCS
+trees are pruned; directory, entry, candidate, size, and time limits keep each
+run bounded, with continuation state for a large home. Files are opened without
+following a final symlink unexpectedly, checked before and after the bounded
+read, and treated only as inert text.
+
+Deterministic rules correlate behaviors such as fetch plus execution,
+credential access plus archive or upload, automatic activation plus
+concealment, persistence plus dangerous actions, decode plus evaluation, and
+privilege or sudo-policy abuse. The parser distinguishes active constructs from
+quoted examples, fenced code, comments, negation, frontmatter, and invalid
+configuration where possible. A match reports suspicious static instructions;
+it does not prove that an assistant obeyed them or that credentials left the
+machine.
+
+Terminal review starts with a short outcome summary and keeps four different
+states visibly separate:
+
+- **Suspicious instructions** are deterministic content findings such as a
+  fetch-and-execute chain. These findings have a severity and an explanation.
+- **Integrity changes** cover files whose content or safe identity changed, or
+  whose prior approval is not valid on this machine and UID. These need
+  attention even if no known content pattern matched.
+- **Baseline enrollment** is neutral setup work for safely read, clean
+  first-seen files. It is never presented as a threat or LOW-severity malware
+  finding.
+- **Coverage limitations** identify content or parts of discovery that AuraScan
+  could not safely or completely inspect. They prevent a clear result without
+  being presented as proof of malicious content.
+
+The terminal groups those sections instead of presenting every item as the
+same kind of alert, prioritizes suspicious instructions, and wraps explanatory
+text for ordinary terminal widths. For a suspicious correlation, each
+contributing one-based line range is paired with the semantic role found at
+that location, such as network retrieval or later execution. The finding then
+states the fixed deterministic reason those roles matter together. An eligible
+AI interpretation appears only as a separately labeled, advisory explanation
+mapped to that deterministic evidence; it cannot supply or move a line number.
+The summary states how many report content findings received a mapped AI
+explanation; findings outside the bounded AI selection say so explicitly and
+retain their deterministic line roles and reason. Malformed configuration is
+reported as incomplete scan coverage, not as a suspicious-instruction match.
+AuraScan does not print or persist the source lines, snippets, or potential
+secrets. File-level integrity, read, parser, and legacy-report findings say when
+no precise line is available rather than inventing one.
+
+Suspicious first-seen files alert immediately. Clean first-seen files enter one
+unreviewed inventory: safely read files wait in a neutral enrollment queue and
+do not create a danger tooltip or urgent notification. `--triage` opens a
+foreground guided workflow:
+it keeps suspicious line/reason/AI evidence visible, offers confirmed
+reversible disable only where eligible, and provides fixed rescan, leave, or
+quit choices without executing the file or launching an editor. Changed safe
+files may be approved by exact hash; unsafe identities and settings, hook,
+plugin, script, or symlink surfaces remain manual-only.
+Every guided mutation is bound inside the core action to the exact report and
+SHA-256 shown before confirmation. A selected historical report is read-only
+and directs the user to current triage, so a monitor run cannot silently swap
+newer evidence underneath an old prompt.
+
+For a complete, coverage-clear report, `--enroll-clean REPORT_ID` replaces a
+list of per-file commands with one explicit batch confirmation. AuraScan first
+revalidates every selected file's safe parent chain, ownership, regular-file
+identity, metadata, and exact hash. Any stale, changed, suspicious, restored,
+or unsafe baseline candidate aborts the entire serialized private-state
+transaction. Clean content-only Markdown from `--all-markdown` is analyzed but
+excluded from trust; a suspicious or incomplete result in it still blocks
+enrollment. AI analysis remains `not-needed` for this inventory and cannot
+authorize enrollment. Approval records each exact hash and is bound to the
+local machine identity and UID, so restoring an old manifest onto a rebuilt
+machine does not silently establish trust.
+
+If enrollment is interrupted, review and status fail closed until a complete
+deterministic scan of that transaction's exact root revalidates every recorded
+file. An unrelated-root scan or partial continuation cannot clear the recovery
+marker, and recovery never reuses a cached file hash.
+
+When bounded discovery is incomplete, review identifies the displayed files as
+the current page and keeps the saved continuation visible as a coverage action.
+It does not offer batch enrollment until the inventory is complete. Individual
+`-A FILE_ID` approval remains available for an unchanged safely readable file.
+Unsafe or symlinked states say that manual review is required because AuraScan
+cannot safely offer approval.
+Reports, manifests, queued AI jobs, alert state, and disable receipts use
+private permissions under
+`$XDG_STATE_HOME/aurascan/instruction-guard/`. Version 0.9.0 introduces the
+`instruction_guard_report/1.0` schema and Instruction Guard rule version 1.0;
+the existing package-scanner rule version is unchanged.
+Report history is retention-limited to the newest 32 reports and a 256 MiB
+aggregate budget (the current report is always retained). Alert envelopes are
+bounded to 2,048, with at most 256 acknowledged envelopes retained when space
+permits. Pruning never approves content or removes the manifest's persistent
+integrity/review state.
+
+The monitor is installed disabled. After explicit opt-in, its hardened user
+service runs after login and every five minutes with network access disabled,
+a read-only home, private writable state, low CPU/I/O priority, and AI
+credentials removed. A second, separately enabled user timer may process at
+most one pending AI job per run using the configured local or cloud provider.
+It sends at most 12 KiB of opaque evidence IDs, fixed deterministic reasons,
+semantic behavior labels, and deterministic line locations to a tool-free
+strict JSON review. It sends no file path or source snippet. AI may return only
+advisory rationales mapped to those evidence IDs: it cannot invent or change a
+line location, lower deterministic severity, establish trust, claim execution
+or compromise, or propose commands. Disabling Instruction Guard AI makes no
+provider request.
+
+HIGH/CRITICAL and integrity alerts remain visible through CLI review state and
+the tray. Desktop notification is attempted only through a captured and
+revalidated `/usr/bin/notify-send`; if that trusted executable is unavailable,
+private CLI/tray review state remains authoritative. Notifications contain
+only a generic review prompt, never a path, snippet, username, credential, or
+AI text. Acknowledging an alert suppresses an identical notification; it does
+not approve the file.
+
+After explicit confirmation, AuraScan can disable only an unchanged,
+user-owned, standalone regular instruction file. Settings, hook
+configurations, plugin manifests, scripts, shared configurations, and symlinks
+remain manual-only. An eligible file is atomically renamed beside itself to a
+hidden non-discoverable name, and a private receipt supports exact restoration.
+Restore refuses changed or unsafe state, rescans immediately, and returns the
+file to unreviewed status rather than trusting it automatically. There is no
+automatic quarantine.
+
+This is defense in depth, not a same-user security boundary. Malware already
+running as the monitored UID can alter user files or attack AuraScan state;
+root malware can disable or deceive the monitor entirely. Corrupt, symlinked,
+wrongly owned, or permission-weakened guard state fails closed for review
+instead of being overwritten.
+
+The user settings are `AURASCAN_INSTRUCTION_MONITOR_ENABLED`,
+`AURASCAN_INSTRUCTION_AI_ENABLED`, and
+`AURASCAN_INSTRUCTION_SCAN_MODE=agent-surfaces|all-markdown`. Enabling the
+general AuraScan AI provider does not enable Instruction Guard AI or either
+Instruction Guard timer.
+
+## npm Pre-Install Audit
+
+`aurascan npm-audit [PATH]` reviews a JavaScript project before you install it.
+It is offline and non-executing: it reads `package.json` and the project files
+named by the `preinstall`, `install`, `postinstall`, and `prepare` commands as
+inert text, with bounded no-follow reads. It never runs npm, node, a shell, the
+project, or a lifecycle script, and it never contacts a registry.
+
+```bash
+aurascan npm-audit .          # review the project in the current directory
+aurascan npm-audit . --json   # aurascan-npm-audit/1 report
+```
+
+It reports `SUPPLYCHAIN-NPM-INSTALL-ENV-EXFIL-EVAL-001` (CRITICAL, blocking)
+when one install-time file reads environment variables, contacts a network
+destination, and evaluates dynamic code. That is the shape of a recruiter or
+"interview task" payload that runs on `npm install`, harvests the environment,
+and executes whatever the remote end returns. It reports
+`SUPPLYCHAIN-NPM-INSTALL-REMOTE-SCRIPT-001` (HIGH, blocking) when a lifecycle
+command pipes a download into a shell or interpreter. Comments, strings, and
+regular expressions are not treated as evidence, and a partial chain is not
+reported as a backdoor.
+
+Anything AuraScan cannot inspect — a malformed or oversized manifest, or a
+lifecycle entry that is missing, outside the project, or a symlink — becomes
+`SUPPLYCHAIN-NPM-INSPECTION-INCOMPLETE-001`, a manual-review coverage finding
+rather than a clean result. Exit codes are `0` for no findings, `1` for any
+finding, and `2` for a usage or path error.
+
+Dependency lifecycle scripts are reported as unknown: resolving them needs
+package metadata from a registry, which this audit deliberately does not
+fetch. A clean report means the reviewed project files did not show these
+patterns. It does not mean the project is safe to install. If you must install
+something you do not trust, use a disposable environment without credentials,
+or install with `npm install --ignore-scripts` and run only the scripts you
+reviewed.
+
+## Upgrade Preflight
+
+`aurascan upgrade` is an optional first-class upgrade front door for
+Arch-family systems. It previews the pending upgrade, checks local breakage
+risks, then hands repository-only work to pacman when it is reasonable to
+continue. Supported AUR helpers may contribute bounded update context, but are
+not currently trusted as an automatic source-build handoff.
+
+```bash
+aurascan upgrade
+aurascan upgrade --dry-run
+aurascan upgrade --verbose
+aurascan upgrade --json
+aurascan upgrade --aur-helper shelly
+aurascan upgrade --aur-sandbox devtools
+aurascan upgrade --no-ai
+aurascan upgrade --no-config-drift
+aurascan upgrade --no-kernel-module-autopilot
+aurascan upgrade --no-security-audit
+```
+
+The repo-package preview uses pacman, and the final repo-only handoff is:
+
+```bash
+sudo pacman -Syu
+```
+
+When `paru`, `yay`, or `shelly` is selected or auto-detected, AuraScan queries
+AUR update metadata through a trusted absolute helper executable. If the query
+finds no planned AUR builds, AuraScan deliberately uses the repository-only
+`/usr/bin/sudo /usr/bin/pacman -Syu` handoff. If it finds an AUR build, the
+deterministic `UPG-AUR-BUILD-UNSCANNED` finding blocks automatic helper
+execution because AuraScan cannot yet prove that every package will pass
+through `aurascan-makepkg`. Run the repository upgrade with `--aur-helper none`,
+then inspect and build each AUR update through `aurascan-makepkg`. A model or
+`--yes` cannot override this blocker.
+
+With `AURASCAN_AUR_SANDBOX=devtools` (or `--aur-sandbox devtools`), the
+blocker is replaced by the advisory `UPG-AUR-BUILD-SANDBOXED` finding only
+when the backend is available. AuraScan then runs the repository transaction
+first, builds each pending AUR update inside a fresh private copy of the
+`extra-x86_64` devtools chroot, verifies the embedded install hook, scans every
+produced package archive, and installs only those scanned archives. The base
+chroot must be created once with the documented `mkarchroot` command; see
+`docs/AUR_SANDBOX_DESIGN.md`. The helper is never asked
+to build AUR packages in this path. A failed, timed-out, unavailable, or
+mismatched backend keeps the original hard blocker. This is risk reduction,
+not proof of safety: the chroot shares the host kernel and install hooks still
+run as root when the package is installed.
+
+In an interactive session, when this blocker is the only blocking finding and
+at least one repository package is planned, AuraScan offers the isolated AUR
+build as the default continuation when the devtools backend is available,
+with repository-only and keep-blocked alternatives. The sandboxed choice
+re-runs the preflight with `--aur-sandbox devtools`, applies the repository
+transaction first, then builds, scans, and installs each pending AUR update.
+Without an available backend it offers the repository-only continuation
+instead. `--yes`, `--json`, dry runs, and runs with no interactive answer keep
+the hard stop exactly as before. None of the choices clears the blocker, runs
+the AUR helper, or installs an unverified AUR archive.
+
+After the repository-only upgrade completes successfully - or directly when
+you decline it or have no repository updates pending - AuraScan offers to
+handle the pending AUR updates for you instead of leaving manual steps: for
+each update it asks whether to download the package from `aur.archlinux.org`
+and review it, and only when that review passes does it ask whether to build
+and install it through `aurascan-makepkg`. Blocked or manual-review results
+never build anything, both steps ask for consent first, and a passing review is
+a passing review - not a promise that the package is safe.
+
+Before asking to build, AuraScan reads the PKGBUILD's declared build
+dependencies and checks them with read-only pacman queries: dependencies your
+repositories can install are listed before the build step, and a dependency
+that cannot be installed that way stops the build with the exact reason
+instead of running a doomed makepkg. When that dependency is an AUR package,
+AuraScan offers to download, review, build and install it first through the
+same guided flow, and then continues with the original package.
+
+When a scan blocks, needs manual review, or reports HIGH/CRITICAL risk in an
+interactive terminal session and AI is configured (`--no-ai` disables it),
+AuraScan prints one advisory "what, why and where" explanation after the
+deterministic report - including in the guided review step and in
+`aurascan-makepkg` runs. The explanation is written from recorded finding
+facts only (rule id, severity, package, fixed summary texts and the observed
+entry name); file paths, evidence snippets, hashes and raw output never leave
+the machine. It cannot add or remove findings, cannot lower a severity, cannot
+establish trust, and never contains commands or links; a provider failure or a
+rejected response only prints a fixed notice, and the deterministic report
+stays authoritative. JSON output never includes the explanation.
+
+Before the preview, every helper query, and the final handoff, AuraScan binds
+`sudo`, `pacman`, and any selected helper to a root-owned, non-writable,
+non-symlink absolute executable beneath root-owned, non-writable path
+components. It revalidates the file identity and mode before use. A changed or
+unsafe executable fails closed and requires a fresh preflight.
+
+Upgrade preflight is not a safety guarantee. It checks for practical pitfalls
+such as low `/boot` or root space, CachyOS kernel movement when CachyOS kernel
+packages are installed, initramfs or
+bootloader-sensitive updates, ignored packages that can create partial
+upgrades, replacements/conflicts, known AUR campaign exposure, unresolved
+official HIGH/CRITICAL package advisories, AUR rebuild risk, local foreign-package
+dependency/conflict metadata, and pending `.pacnew`/`.pacsave` config drift. A
+clean preflight means AuraScan did not find these signals; pacman, hooks,
+packages, or local configuration can still fail.
+
+Before handing control to pacman, AuraScan labels the output boundary
+so mirror, download, conflict, and replacement messages are not mistaken for
+AuraScan errors. Repository conflicts and replacements are described as package
+transition metadata while remaining advisory. After a successful command,
+AuraScan verifies every planned repository version before explaining that any
+earlier mirror-specific `NotFound`/404 messages were recovered by fallback
+mirrors. A failed or unverifiable transaction never receives that reassurance.
+
+Kernel/Module Autopilot is enabled by default inside `aurascan upgrade`. It
+checks kernel package families, running-kernel mapping, standard Arch kernel
+families such as `linux`, `linux-lts`, `linux-zen`, and `linux-hardened`,
+CachyOS prebuilt NVIDIA module packages when present, DKMS headers/status,
+external module families, fallback kernel evidence, and reboot need. When
+AuraScan can prove the module state is covered, the terminal report says so
+directly. When a deterministic missing package fix is available, AuraScan shows
+the exact package command and asks before running it; `--yes` does not silently
+apply these extra fixes. After a successful upgrade handoff, AuraScan runs a
+post-upgrade kernel/module aftercare check and reports whether a reboot is
+expected. It never reboots automatically.
+
+If HIGH or CRITICAL preflight risk is found, AuraScan asks for one extra
+confirmation before running the package-manager command:
+
+```text
+AuraScan found upgrade risks. Continue anyway? [y/N]
+```
+
+Most breakage-risk findings are advisory checkpoints and `--yes` can skip their
+extra prompt. The AUR source-build wrapper invariant is different: its CRITICAL
+blocker cannot be confirmed away. Pacman still shows its normal confirmation
+and may still fail for ordinary repository-only transactions.
+
+AI review is optional and raise-only. When AI is configured and not disabled
+with `--no-ai`, AuraScan sends a redacted structured summary of package names,
+versions, deterministic findings, and selected local system facts. It does not
+send API keys, environment variables, full command output, or file contents.
+The response may only raise the severity, up to HIGH, of a rule ID already
+present in the deterministic finding set. It cannot create a standalone
+finding or action, lower deterministic risk, mark an upgrade safe, or change a
+finding's blocking policy.
+
+The config keys are `AURASCAN_UPGRADE_PREFLIGHT_ENABLED`,
+`AURASCAN_UPGRADE_AUR_HELPER`, `AURASCAN_AUR_SANDBOX`,
+`AURASCAN_UPGRADE_PREFLIGHT_AI`, and
+`AURASCAN_KERNEL_MODULE_AUTOPILOT_ENABLED`.
+Supported helper values are `auto`, `paru`, `yay`, `shelly`, and `none`.
+Supported sandbox values are `off` (configured default) and `devtools`; an
+interactive upgrade offers `devtools` as the default choice when the backend
+is available, while non-interactive runs keep the blocker.
+`aurascan upgrade --enable-preflight` can temporarily override a disabled
+preflight setting, while `--disable-preflight` disables it for that invocation
+and does not run the upgrade command.
+
+## Contextual Follow-Up Assistant
+
+When an AI provider is configured, interactive foreground upgrade, incident,
+maintenance, and config-drift workflows offer:
+
+```text
+Ask AuraScan about this result, or press Enter to finish:
+```
+
+Existing apply or continue prompts accept `?` to open the same assistant before
+returning to the unchanged confirmation. Results can also be reopened later:
+
+```bash
+aurascan ask
+aurascan ask --latest
+aurascan ask CONTEXT_ID
+aurascan ask --facts-only
+```
+
+Each session is limited to eight questions and twelve provider requests. A
+question may use a second request when AI selects a known bounded local probe
+and AuraScan returns its normalized result. AI responses must use strict JSON
+and may reference only fact, probe, and action IDs generated by AuraScan.
+Unknown IDs, commands, scripts, package targets, paths, and file edits are
+discarded in this guarded assistant.
+
+Questions about hardware, memory pressure, temperatures, cooling, drivers,
+microcode, BIOS, or firmware automatically run a bounded read-only hardware
+probe before the first AI answer. When the local interfaces expose them,
+AuraScan supplies CPU and GPU models, RAM capacity and DIMM topology, mainboard
+and BIOS versions, current driver/module versions, hwmon temperatures and fan
+states, memory pressure, and normalized current-boot hardware-error counts.
+It compares relevant installed support packages with the configured local
+repository databases and uses `fwupd` for supported firmware-update checks.
+
+Hardware coverage remains evidence-based. AuraScan labels stale repository
+metadata, unsupported `fwupd` devices, unavailable sensors, and inaccessible
+SMBIOS data instead of claiming they are current or healthy. SMBIOS usually
+provides RAM type and configured speed, but not exact primary timings; AuraScan
+does not read raw SPD/I2C data. A zero-RPM reading without a hardware alarm is
+reported as stopped or unreported, not as a failed fan. Serial numbers, system
+UUIDs, raw firmware tables, and arbitrary files are excluded.
+
+If a requested operation maps to an existing verified AuraScan recipe, AuraScan
+refreshes local state, previews one combined plan, and asks separately before
+execution. Parent `--yes` flags never authorize follow-up actions. AI cannot
+run an upgrade, reboot, edit arbitrary files, repair filesystems, change a
+bootloader, or turn response text into a command.
+
+Private redacted contexts are retained under
+`~/.local/state/aurascan/follow-up/` for 30 days or 50 records.
+Questions and AI answers stay in memory and are not written to context files.
+JSON,
+non-interactive, `--yes`, `--no-ai`, pacman-hook, root-collector, and background
+service paths never open chat. Config drift follow-up remains facts-only unless
+redacted diff sharing was explicitly allowed for that run.
+
+The interactive commands `/status`, `/stop`, and `/agent ACCESS` are available.
+`/agent user-shell` or `/agent root-shell` starts a separate Repair Agent
+session only when that access has already been configured; access changes
+cannot inherit an existing grant.
+
+## Policy-Gated Repair Agent
+
+`aurascan agent` reuses a retained AuraScan result. Its explicitly configured
+command-enabled profiles may request only policy-validated local diagnostics or
+constrained repository package repairs:
+
+```bash
+aurascan agent
+aurascan agent --latest
+aurascan agent CONTEXT_ID
+aurascan agent --access user-shell
+aurascan agent --access root-shell
+```
+
+Access is layered:
+
+- `guarded` is the default and uses only existing AuraScan-owned probes and
+  verified repairs. AI cannot generate commands in guarded mode.
+- `user-shell` is a compatibility name for a policy-gated local diagnostic
+  profile. It permits a small set of shell output/test builtins and absolute
+  read-only diagnostics under `/usr/bin` or `/usr/sbin`.
+- `root-shell` adds policy-validated root execution for the same diagnostics
+  and constrained exact `/usr/bin/pacman` query, sync, or removal workflows. It
+  requires both a root-owned policy opt-in and the exact per-session phrase
+  `GRANT AI ROOT REPAIR COMMANDS`.
+
+The settings are `AURASCAN_AGENT_ACCESS`, `AURASCAN_AGENT_APPROVAL`,
+`AURASCAN_AGENT_OUTPUT_SHARING`, and `AURASCAN_AGENT_SESSION_TIMEOUT`.
+`aurascan init` configures them. `/etc/aurascan/agent.conf` separately caps
+whether root mode is allowed, its maximum approval mode, and session duration;
+it contains no API credential.
+
+Approval is enforced as `each-command`: AuraScan displays the exact command,
+privilege, working directory, reason, and expected result and asks again before
+every run, including commands proposed after earlier terminal output. Existing
+`whole-plan` and `session` configuration values remain parseable for upgrade
+compatibility, but command-enabled profiles normalize them to `each-command`;
+an initial user/root session grant never authorizes a later model-authored
+command. Commands are noninteractive, limited to 30 per session, and run with a
+minimal environment. Provider requests are limited to 40.
+
+Repair Agent responses must match one bounded JSON schema. Model-authored shell
+text is rejected before confirmation when it contains remote references,
+network clients or remote shells, Git, AUR helpers, source/build front ends,
+interpreters or dynamic loaders, decoding/evaluation, shell expansion,
+redirection, non-allowlisted commands, arbitrary executable paths, or unsafe
+pacman options. Diagnostics must name an allowlisted absolute `/usr/bin` or
+`/usr/sbin` executable and pass command-specific read-only checks. Repository
+package operations must name `/usr/bin/pacman`, cannot target AuraScan itself,
+and cannot use `-U` or alternate root/config/keyring/hook paths. Diagnostics
+that name sensitive paths are rejected, including password-hash backups such
+as `/etc/shadow-`, Git/netrc/cloud credential stores, shell history files and
+shell rc files. Provider-bound output is redacted for those formats as well,
+including underscore-prefixed JSON token keys, `pass =` values and rc-file
+token exports.
+
+Terminal output is shown locally. AI receives at most 32 KiB per command and
+128 KiB per session. Output is redacted by default; `full` requires typing
+`SHARE FULL TERMINAL OUTPUT` for that session. Questions and AI answers remain
+in memory. Private command hashes, redacted command renderings, approvals,
+exit states, and bounded redacted output are retained under
+`~/.local/state/aurascan/agent/` for 30 days or 50 sessions.
+
+Before root mode, AuraScan asks the privileged broker to create and validate a
+Btrfs/Snapper snapshot. If that is unavailable, continuing requires typing
+`CONTINUE WITHOUT ROLLBACK`. A snapshot does not protect other disks,
+firmware, credentials, remote services, networking, or every system file.
+
+The unprivileged AI process never gives API credentials to the root broker.
+Root grants are short-lived and bound to the invoking UID, process identity,
+terminal, context fingerprint, approval ceiling, and capability. Root
+manifests are private under `/var/lib/aurascan/agent/`.
+
+Policy-gated root repair is still consequential: an approved pacman sync or
+removal can change installed packages and system state, and a policy/parser bug
+or unsafe package transaction can cause damage. Read every exact command and
+keep current backups. Read-only diagnostic targets and output may also contain
+private system data; default redaction is best effort, while the separate raw
+output phrase deliberately shares more with the configured provider. This
+allowlist is a narrow repair boundary, not a claim that every permitted query
+or package transaction is harmless.
+
+The agent is foreground-only. JSON output, noninteractive workflows, pacman
+hooks, package-manager `--yes`, incident collectors, background services, and
+AuraScan Recovery cannot start it. Background Safe Autopilot retains its
+two-recipe deterministic allowlist.
+
+## Desktop Evidence Snapshot
+
+`aurascan ui` prints the read-only evidence snapshot consumed by the optional
+desktop evidence console. The console is a development prototype; its design
+and contract live in
+[`docs/DESKTOP_UI_DESIGN.md`](DESKTOP_UI_DESIGN.md).
+
+```bash
+aurascan ui
+aurascan ui --json
+aurascan ui --report scan-report.json --json
+aurascan ui --actions --json
+```
+
+The snapshot is one bounded JSON object with the contract string
+`aurascan-ui/1`. It composes check evidence, the detection-data identity, and
+pending incident counts that AuraScan already owns. It exits 0 whenever the
+snapshot is produced: `doctor.ok` carries the health conclusion, so an
+actionable state is not reported as a command failure.
+
+`--report` projects a saved AuraScan JSON report instead of collecting live
+evidence. The projection drops raw package bytes, absolute paths, finding
+identifiers and file hashes, sanitizes display text, and rejects unknown
+severity, confidence, or risk vocabularies. It is a reading surface, not an
+evidence export.
+
+`--actions` lists the fixed action catalog a desktop shell may run. The renderer
+selects an action ID and declared arguments, never a command; actions that
+install or downgrade packages stay terminal-only and require a fresh
+confirmation.
+
+The optional desktop shell is a development prototype and is not packaged yet.
+To try it from a checkout: `cd desktop && npm install && npm run build &&
+npm run desktop`. It spawns only `/usr/bin/aurascan`, exposes two read-only
+operations, and never executes a package. The reference Arch recipe lives in
+`packaging/desktop/`; it is not published and requires an AuraScan release that
+ships `aurascan ui`.
+
+`aurascan ui` never changes policy or local state, never calls a model, never
+runs a package manager, never executes package or fixture content, and opens no
+network listener. Fields are whitelisted and bounded; malformed or oversized
+evidence fails the whole snapshot instead of rendering a partial view.
+
+## AuraScan Updater Tray Icon
+
+`aurascan updater` runs the optional AuraScan Updater system-tray applet. It is
+an AuraScan-owned icon that can sit beside Cachy-Update and Shelly without
+replacing either launcher.
+
+```bash
+aurascan updater
+aurascan updater --status
+aurascan updater --install-autostart
+aurascan updater --remove-autostart
+aurascan updater --no-tray
+```
+
+The tray menu provides terminal-native AuraScan flows and two checkable
+Instruction Guard controls:
+
+- Run AuraScan Upgrade: `aurascan upgrade`
+- Resolve System Findings: `aurascan incidents --resolve`
+- Review Agent Files: `aurascan instruction-audit --triage`
+- Run System Maintenance Scan: `aurascan incidents --run-maintenance`
+- Instruction Guard Background Scan: enable or disable the login and
+  five-minute deterministic monitor
+- Instruction Guard AI Analysis: separately enable or disable scheduled,
+  raise-only AI review
+- AuraScan Settings: `aurascan init`
+
+The two checkmarks refresh when the tray starts and whenever its right-click
+menu opens. Changes run asynchronously through the same transactional
+`instruction-audit` controls used by the CLI, so the tray remains responsive
+and partial configuration changes are rolled back. AI analysis can be enabled
+only when an existing local or cloud provider is ready. While state is being
+checked, or when private configuration and user-service state disagree, the
+controls are disabled and their tooltips direct the user to Settings or
+`aurascan doctor`. Success and failure notifications remain generic and never
+include paths, command output, credentials, or provider secrets.
+AuraScan temporarily disables its tray Quit action during an enable/disable
+transaction so it cannot interrupt a configuration rollback.
+
+Config drift is handled automatically before and after `aurascan upgrade`, so
+it is intentionally omitted from the beginner-focused tray menu. The
+standalone `aurascan config-drift` command remains available for advanced or
+out-of-band maintenance.
+`aurascan doctor` remains available from a terminal for installation and
+configuration troubleshooting, but is intentionally omitted from the routine
+tray workflow.
+The report-only `aurascan upgrade --dry-run` command likewise remains available
+for advanced terminal use; the normal upgrade action always runs preflight
+before handing control to the package manager.
+
+Double-clicking the icon runs `aurascan upgrade` where the desktop environment
+delivers double-click activation. The right-click menu is the reliable fallback
+on desktops that handle tray activation differently.
+
+Autostart is per-user and reversible. The wizard can install
+`~/.config/autostart/aurascan-updater.desktop` and a matching application
+launcher under `~/.local/share/applications/`; it does not modify
+Cachy-Update, Shelly, or system desktop files. PyQt6 or PySide6 is required only
+for the tray applet, not for normal AuraScan scans.
+
+The tray refreshes incident and Instruction Guard state every five seconds. Its
+normal icon changes to maintenance-due, attention, or critical variants when
+the weekly scan is overdue or agent-file evidence needs attention. Suspicious
+or changed/unsafe agent files use attention or critical states; incomplete
+coverage is labeled as a scan action instead of malware. Clean first-seen files
+use a neutral setup/due state and a `Finish Instruction Guard setup` action,
+not a danger tooltip. Instruction Guard severity takes priority when it is
+higher, and its menu action routes to guided triage rather than the incident
+flow. Clean completed scans are silent.
+System-incident desktop notifications are reserved for HIGH/CRITICAL findings
+and repeated crashes unless separately opted-in background AI completes an
+analysis, in which case the tray shows one bounded completion summary.
+Instruction Guard may notify for a newly recorded MEDIUM-or-higher suspicious,
+integrity, or scan-coverage alert, but uses neutral generic wording with no
+paths or evidence; clean baseline enrollment does not notify. The icon remains
+changed until the applicable guided review completes or report retention
+expires; a verified Safe Autopilot repair may clear only the incident category
+it actually resolved.
+
+The config keys are `AURASCAN_UPDATER_TRAY_ENABLED`,
+`AURASCAN_UPDATER_AUTOSTART`, and `AURASCAN_UPDATER_TERMINAL`.
+
+## Incident Recovery Assistant
+
+`aurascan incidents` diagnoses bounded system and application crash evidence,
+explains likely causes, and can apply a small set of AuraScan-owned repair
+recipes after confirmation.
+
+```bash
+aurascan incidents
+aurascan incidents --resolve
+aurascan incidents --last-boot --dry-run
+aurascan incidents --current-boot --no-ai
+aurascan incidents --history
+aurascan incidents --show INCIDENT_ID
+aurascan incidents --json
+aurascan incidents --run-maintenance
+aurascan incidents --maintenance-status
+aurascan incidents --enable-background-ai
+aurascan incidents --background-ai-status
+aurascan incidents --auto-repair safe
+```
+
+With no explicit target, AuraScan opens a pending previous-boot incident when
+one exists and otherwise scans the current boot. `--dry-run` never repairs.
+`--json` is report-only unless paired with `--yes`, and a truncated scan never
+gets a default-yes repair prompt.
+
+`--resolve` is the tray's single incident workflow. AuraScan opens the
+highest-priority pending evidence and, when incident AI is enabled, uses a
+two-pass AI-guided repair planner. The first pass may select only opaque IDs
+for AuraScan-owned read-only probes. AuraScan runs those probes locally,
+constructs independently verified repair actions, and lets the second pass
+explain and prioritize only known action IDs. Eligible AuraScan-owned repairs
+are applied as one plan after confirmation, followed by deterministic
+aftercare. When no safe automatic
+repair exists, it explains that the evidence is historical and acknowledges
+the pending alert. The tray then returns to normal while reports remain in
+history. A normal icon means findings were handled or reviewed; it is not a
+claim that historical crashes were erased or that an unverified cause was
+fixed. Weekly maintenance advances bounded journal/coredump checkpoints, so
+acknowledged historical events do not create the same tray alert again. A new
+crash creates a new alert, while an explicit scan of an old boot can still show
+its preserved history.
+
+After a foreground incident or manual maintenance scan, the contextual
+follow-up assistant can explain the report or request additional known local
+probes. Any newly prepared incident repair rejoins the same guarded
+confirmation and root-side revalidation path.
+
+Interactive incident scans keep a stage indicator and elapsed timer visible
+while AuraScan reads the journal and coredumps, verifies repair recipes, and
+performs optional AI correlation. These honest stages replace a guessed
+percentage; JSON output and unattended monitor captures remain quiet.
+Each incident AI request has a 60-second response timeout and is not retried
+immediately. Timeouts, provider/network failures, and responses that fail the
+strict JSON contract are reported separately. In every case deterministic
+diagnostics and independently verified repairs remain usable. An unprivileged
+foreground scan silently skips root-only pstore access; the root monitor still
+reports a pstore permission failure because that indicates a collector problem.
+
+The optional root monitor is installed disabled. Its weekly timer is also
+installed disabled, and both are enabled together only through
+`aurascan init --enable-incident-monitor` or `aurascan incidents
+--enable-monitor`. The boot service performs one read-only previous-boot scan
+after journal flush. The persistent weekly timer incrementally scans the
+current boot, runs a bounded baseline when monitoring is first enabled, and
+stores root-only journal/coredump checkpoints so it does not repeatedly scan a
+long-running boot. The root collectors have no network access, make no AI
+requests, and never execute repairs themselves. After successful collection
+they may trigger the separate root Safe Autopilot oneshot. That service also
+has no network access or AI credentials and exits without action unless its
+root-owned policy is explicitly set to `safe`.
+
+Background AI is a second, per-user opt-in. When enabled, a hardened
+`systemd --user` timer processes at most one highest-priority marker every five
+minutes while that user is logged in. It uses the user's existing `0600` AI
+configuration, bounded redacted evidence, and provider retries of 15 minutes,
+1 hour, 6 hours, then 24 hours. It may run the same bounded read-only probes and
+prepare broader repairs, but it cannot run `sudo`, invoke repair execution, or
+write system paths. A matching private prepared plan can be reused for six
+hours; Resolve refreshes its probes and every privileged recipe still performs
+fresh root-side validation. The tray asks it to run immediately for a new
+marker and shows one concise completion notification, including how many
+verified actions await confirmation. Provider failure leaves the alert
+available for the normal **Resolve System Findings** flow.
+
+Safe Autopilot defaults to `off`. In `safe` mode it may apply only a proven
+stale pacman-lock recovery or a verified mirrorlist restoration. Both recipes
+are reversible, freshly revalidated as root, limited to two actions per run,
+recorded in a private manifest, and protected by a 24-hour identical-action
+cooldown. Incomplete/truncated reports and reports with unresolved
+HIGH/CRITICAL findings are refused. Package operations, DKMS, initramfs,
+services, cache deletion, reinstalls, filesystems, bootloaders, and rebooting
+still require the foreground user flow.
+
+Weekly collection uses the same evidence limits as manual diagnostics. A
+truncated scan advances only through its last processed cursor and marks
+maintenance due so the next run can continue. Public maintenance status
+contains only scan times and collection health. Pending markers contain only
+marker type, scan
+generation, boot ID, UID scope, category severities, resolved categories,
+coarse repair state, counts, and a repeated flag, never crash evidence, paths,
+package names, application names, AI text, or commands.
+
+Evidence collection is bounded to 2,000 journal records, 256 KiB of local
+evidence, and 200 coredumps. AuraScan does not inspect core memory, process
+environments, arbitrary files, or complete command lines. Persisted reports are
+redacted and separated by user scope. Foreground incident AI runs when a user
+opens an incident; separately opted-in background AI can run in that user's
+logged-in session. Both receive at most 80 matched excerpts and 12,000 redacted
+characters per request. AI-guided repair planning uses at most two requests per
+incident: triage chooses from at most 24 local probe candidates, then a final
+review sees normalized results from at most 12 executed probes. `facts-only`
+mode sends structured findings without log excerpts.
+
+AI may request up to six known probe IDs, explain findings, and recommend
+existing action IDs. Probe targets are resolved from trusted local evidence
+before the request; the provider never supplies package names, paths, units, or
+arguments that AuraScan executes. AI cannot generate commands, suppress
+deterministic findings, approve repairs, or mark an incident repaired. AuraScan
+reconstructs every privileged command from trusted current state and reruns
+recipe preconditions as root. An AI correlation may
+not blame unrelated packages merely because they were updated in the same boot.
+
+Confirmed repair recipes cover a proven stale pacman lock, guarded repository
+mirror recovery, verified kernel/module support packages, DKMS autoinstall with
+matching headers, backed-up initramfs rebuilds with boot-space checks,
+noncritical service restart/reset, bounded package-cache cleanup, and exact
+official-package reinstall from a matching signed local archive. AuraScan does not automate filesystem repair.
+It also does not automate partition or bootloader edits, authentication
+configuration, firmware changes, user-data deletion, AUR rebuilds, or rebooting.
+
+The user config keys are `AURASCAN_INCIDENT_MONITOR_ENABLED`,
+`AURASCAN_INCIDENT_AI_ENABLED`, `AURASCAN_INCIDENT_AI_EVIDENCE`, and
+`AURASCAN_INCIDENT_BACKGROUND_AI`. Evidence mode is `redacted` or
+`facts-only`. The root-owned `/etc/aurascan/incident-autopilot.conf` accepts
+only `AURASCAN_INCIDENT_AUTO_REPAIR=off|safe` and contains no API credential.
+
+## AuraScan Recovery Environment
+
+`aurascan recovery` manages an optional x86-64 recovery environment for Arch
+Linux, EndeavourOS, Manjaro, and CachyOS. It is intended for systems that cannot
+reach the normal desktop or console reliably enough to run the ordinary
+Incident Recovery Assistant. Installing or upgrading AuraScan does not require
+installing a recovery image, and recovery remains disabled until the user
+chooses it.
+
+```bash
+aurascan recovery --status
+aurascan recovery --install
+aurascan recovery --refresh
+aurascan recovery --remove
+aurascan recovery --dry-run --install
+aurascan recovery --download-iso
+aurascan recovery --write-usb /dev/sdX
+```
+
+The internal image is built locally with mkosi's `mkosi-initrd` profile and `ukify` from an
+installed alternate/LTS kernel when available. AuraScan creates a zipapp from
+the exact installed AuraScan code without intentionally copying provider or
+user configuration, builds in private staging, and performs bounded byte checks
+for credential assignments with bounded values, known provider-token prefixes,
+known private-state paths, and explicitly supplied private markers. These
+checks also cover bounded normalized entry/link metadata, PAX fields, and
+decoded libarchive xattrs; short explicit or host-identity markers fail closed
+instead of being ignored. The checks do not load arbitrary secret stores or
+prove that unknown material is absent from compressed or opaque content. The
+image is signed with an already enrolled sbctl-compatible owner key when Secure
+Boot is enabled and then atomically installed as
+`/boot/EFI/Linux/aurascan-recovery.efi`. Existing recovery image and
+bootloader configuration backups are retained. Secure Boot installation is
+refused when AuraScan cannot prove an enrolled signing key; USB recovery remains
+available.
+
+Limine uses an AuraScan-owned marked EFI chainload block, systemd-boot discovers
+the UKI under `EFI/Linux`, and GRUB uses an AuraScan-owned generated chainloader
+script. Internal installation requires x86-64 UEFI. The release USB image is a
+hybrid BIOS/UEFI Archiso build from `packaging/recovery/`; its packaged manifest
+must contain a pinned SHA-256 digest before download is enabled. The guided USB
+writer accepts only an unmounted removable whole disk, rejects the running/root
+disk, requires the exact device path to be typed, and repeats inspection after
+confirmation and while the exclusive no-follow descriptor is held. Malformed
+or incomplete `lsblk` JSON is a refusal, and the same positive kernel
+`DISK-SEQ` must be present at all three inspections. The final descriptor's
+major/minor number is revalidated before writing and verification; model,
+serial, path, size, and typed confirmation alone are not trusted as identity.
+AuraScan flushes the device and verifies the written bytes.
+
+Recovery-bearing GitHub releases publish exactly these three generated assets,
+in addition to GitHub's automatic source archives:
+
+```text
+aurascan-recovery-VERSION-x86_64.iso
+aurascan-recovery-VERSION-x86_64.iso.sha256
+aurascan-recovery-VERSION-x86_64.iso.packages.txt
+```
+
+The ISO must be smaller than 2 GiB, and all three files belong to the same
+tested build. Release notes identify package-only releases and the exact older
+image they retain, so the application version alone is never presented as
+proof that a matching recovery image was rebuilt. Locally built UKIs are tied
+to the installed kernel, boot setup, and Secure Boot owner key; they are tested
+as part of a recovery-bearing release but are not published as universal
+release assets.
+
+Package installation never installs a recovery boot entry. The wizard offers
+installation with default Yes only after UEFI, ESP space/mount, supported
+bootloader, kernel, `mkosi`, `ukify`, and any required enrolled Secure Boot key
+checks pass. The root-owned
+`/etc/aurascan/recovery.conf` records only enablement, adapter, refresh policy,
+opted-in UID, Wi-Fi-profile permission, image version, and refresh status. It
+contains no AI key or Wi-Fi credential. An enabled automatic refresh uses a
+post-transaction hook after relevant AuraScan, kernel, Python, firmware,
+networking, or storage packages change. Refresh failure leaves the previous
+image bootable, does not fail the completed pacman transaction, and appears in
+`aurascan doctor`.
+
+Inside recovery, AuraScan discovers Arch-family targets read-only across
+Btrfs, ext4, XFS, LUKS2, LVM2, and mdraid layouts. Filesystem checks remain
+read-only. NetworkManager starts automatically; Ethernet and USB tethering use
+DHCP. Saved Wi-Fi profiles are used only with recovery permission, and only
+regular root-owned `0600` NetworkManager profiles are copied into volatile
+`/run` storage. Manual open, WPA2, WPA3, and hidden networks are supported.
+Passwords travel through NetworkManager's secret-agent input, never command
+arguments or reports. Captive portals and enterprise/802.1X remain unsupported;
+use another network, phone tethering, or offline recovery.
+
+Offline deterministic diagnostics start first. AuraScan checks package locks,
+repository health, interrupted transactions, kernel/module trees, initramfs,
+boot-critical config drift, free space, snapshots, the ESP, and the detected
+bootloader. Cloud provider AI runs automatically only when recovery AI was
+separately enabled and a usable non-captive connection exists. A loopback local
+provider can run without external connectivity when its compatible server is
+available inside the recovery environment. AuraScan validates the opted-in
+user's `0600` provider config from the mounted target; otherwise it can accept a
+session-only key that is never persisted. Provider failure does not block the
+deterministic plan.
+
+Recovery reuses the two-pass guarded planner. AI can select only opaque local
+probe IDs and then prioritize only independently verified action IDs. It cannot
+provide package names, paths, units, arguments, file edits, or commands for
+execution. The combined plan can cover stale locks, mirror restoration, bounded
+cache cleanup, complete signed pacman transactions, matching kernel/header and
+DKMS recovery, backed-up initramfs rebuilds, boot config drift, exact signed
+cached packages, and a proven noncritical boot-blocking service. Service-failure
+evidence comes only from systemd's own journal entries (`_COMM=systemd`,
+`_PID=1`); failure-looking text written by other local programs cannot create
+a disable action. Every action is
+reconstructed from current target state and revalidated as root immediately
+before execution. Target programs executed through `arch-chroot` — the package
+manager, keyring helper, initramfs generators, DKMS, snapper, and bootloader
+installers — must first pass the same root-owned, non-symlink, bounded
+regular-executable validation AuraScan applies to data files; a replaced or
+symlinked tool refuses the action. This does not make a compromised target
+safe: an intact tool still runs the target's own hooks and configuration as
+recovery root, so review recovery results with that limit in mind.
+
+Snapshot restoration always creates a pre-recovery snapshot first and requires
+typing `RESTORE SNAPSHOT <id>`, and preparing a one-shot snapshot test boot
+requires typing `TEST BOOT SNAPSHOT <id>`. Snapshot actions are created only
+from directories carrying Snapper's own root-owned `snapshot_info.xml`
+metadata, and the selected snapshot's recorded creation time is shown; the
+list still comes from the target, so confirm the creation time predates the
+incident before booting or restoring it. Full Limine, systemd-boot, or GRUB
+reinstallation
+requires positive loader/ESP detection, backups, post-validation, and typing
+`REINSTALL BOOTLOADER`. Reinstall recipes update loader files without changing
+firmware variables. `--yes` cannot bypass these phrases. AuraScan never
+formats filesystems, changes partitions, performs filesystem repair, enrolls
+Secure Boot keys, flashes firmware, changes authentication policy, deletes user
+data, runs arbitrary AI commands, or reboots automatically.
+
+Private redacted reports and repair manifests are stored under
+`/var/lib/aurascan/recovery/` with `0700` directories and `0600` files. If the
+target is not writable, the report remains in recovery RAM for export to
+removable media. A successful scan or AI explanation cannot guarantee that
+software, storage, firmware, or hardware damage is repairable.
+
+Recovery user settings are `AURASCAN_RECOVERY_AI_ENABLED`,
+`AURASCAN_RECOVERY_AUTO_REFRESH`, and
+`AURASCAN_RECOVERY_WIFI_PROFILES=auto|ask|never`. Recovery AI reuses
+`AURASCAN_INCIDENT_AI_EVIDENCE=redacted|facts-only`.
+
+## Config Drift Assistant
+
+`aurascan config-drift` finds `.pacnew` and `.pacsave` files, explains what
+they mean, prepares safe fixes, and creates backups before every write.
+
+```bash
+aurascan config-drift
+aurascan config-drift --dry-run
+aurascan config-drift --json
+aurascan config-drift --yes
+aurascan config-drift --ai-diffs
+```
+
+`aurascan upgrade` runs the assistant before the package-manager handoff and
+again after it exits, unless disabled with `--no-config-drift` or config. The
+assistant auto-plans low-risk fixes such as duplicate `.pacnew` files,
+missing-target installs, comments-only changes, and mirrorlist-style updates.
+Sensitive files such as `pacman.conf`, bootloader/initramfs config, sudo/PAM,
+networking, users/groups, SSH, systemd, and security policy are treated with
+extra caution.
+
+Before applying any fix, AuraScan backs up the active config and drift file
+under `/var/lib/aurascan/config-drift/<run-id>/` with a JSON manifest. `.pacsave`
+files are explained but not restored or deleted automatically in v1.
+
+AI diff review is optional and opt-in. The configured AI provider sees config diffs only when
+`--ai-diffs` is passed or `AURASCAN_CONFIG_DRIFT_AI_DIFFS=always` is configured.
+Diffs are bounded and redacted first, but AuraScan still treats AI as advisory:
+AI cannot bypass backups, deterministic file classification, or sensitive-file
+confirmation rules.
+Contextual follow-up does not weaken this gate: without explicit diff consent,
+it receives only file classifications, action summaries, and risk metadata.
+
+The config keys are `AURASCAN_CONFIG_DRIFT_ENABLED` and
+`AURASCAN_CONFIG_DRIFT_AI_DIFFS`, where AI diff policy is `ask`, `never`, or
+`always`.
+
+## makepkg Wrapper
+
+`aurascan-makepkg` is the preferred AUR-helper integration point when the helper
+can be configured to use a custom makepkg command.
+
+```bash
+aurascan-makepkg --syncdeps
+aurascan-makepkg --aurascan-deep-static --syncdeps
+aurascan-makepkg --aurascan-json --syncdeps
+aurascan-makepkg --aurascan-scan-only
+aurascan-makepkg --aurascan-sandbox --syncdeps --install
+```
+
+The wrapper scans the current directory's `PKGBUILD` before invoking the real
+`makepkg`. `--aurascan-scan-only` reports the same scan verdict (blocked,
+manual review, or pass) without recording a review acceptance and without
+invoking makepkg; `aurascan upgrade` uses it to show the verdict before the
+build consent of the guided AUR update flow. When AI is configured and the
+interactive scan reports HIGH/CRITICAL or manual-review findings, the wrapper
+also prints the bounded advisory explanation described under Upgrade
+Preflight; `--aurascan-json` output never includes it. AuraScan-only flags use
+the `--aurascan-*` prefix and are stripped before makepkg receives its
+arguments. If AuraScan blocks or requires review, makepkg is not invoked by
+default.
+
+`--aurascan-sandbox` replaces the host `makepkg` invocation with the isolated
+devtools build: the reviewed checkout is copied into a private tree, built in a
+fresh `extra-x86_64` chroot, checked for the exact scanned `.INSTALL` bytes,
+and every produced package archive is scanned before `sudo pacman -U` runs.
+Without `--install`, the scanned artifacts are retained in the private tree and
+no package is installed. `--aurascan-json` is refused in this mode. This is
+risk reduction, not a sandbox guarantee; see `docs/AUR_SANDBOX_DESIGN.md`.
+
+After the scan, the wrapper accepts only a captured `/usr/bin/makepkg` whose
+path components and final file are root-owned, non-writable, regular,
+executable, and non-symlinked. It revalidates the exact device/inode,
+ownership, group, and mode immediately before invocation. A hostile `PATH`, an
+unexpected makepkg location, or replacement after capture stops the wrapper.
+Immediately before that handoff it also recaptures the PKGBUILD, declared hook,
+and bounded checkout identity. The wrapper rejects makepkg options that replace
+the build file/configuration, reuse an unverified build tree, or skip integrity
+checks, and removes direct shell/dynamic-loader code-loading variables such as
+`BASH_ENV`, `ENV`, `LD_PRELOAD`, and `LD_AUDIT` from makepkg's environment.
+It also pins the scanned `./PKGBUILD` as the build script at the handoff and
+refuses to run when a user-level `makepkg.conf` overrides `BUILDFILE`,
+`DLAGENTS`, `VCSCLIENTS`, or `PACMAN`; those settings can replace the build
+script or the programs makepkg executes.
+These restrictions are part of the security boundary; run unusual workflows in
+a separately reviewed disposable build environment instead of bypassing them.
+
+Because only `/usr/bin/makepkg` is accepted, a `makepkg` interceptor earlier on
+`PATH` (for example `~/.local/bin/makepkg`) breaks this entry point:
+`aurascan-makepkg` stops with exit `127` and "Could not locate or safely
+revalidate the trusted system makepkg executable", and no build runs. Keep
+`makepkg` resolving to `/usr/bin/makepkg` and configure the AUR helper itself to
+call `aurascan-makepkg`, which reuses the reviewed scan, review-token, and
+handoff logic instead of a second implementation.
+
+The wrapper protects the pre-build phase. It does not sandbox makepkg, install
+packages, or make package code safe after makepkg starts running build steps.
+
+Declared local `install=` hooks are part of that pre-build gate, including
+dot-prefixed names. If a literal hook target cannot be safely resolved and
+read, or if any component of its declared relative path under the package
+directory is a symlink, the wrapper stops before makepkg. No earlier clear
+result or review token can authorize a package while its declared hook remains
+unresolved.
+
+After makepkg finishes, the wrapper reads back every freshly written package
+archive through the same bounded `.INSTALL` reader. When the scan resolved a
+declared hook, a fresh package missing that hook member, one that cannot be
+inspected, or one whose hook bytes differ from the scanned hook is refused
+with a blocking result. This post-build verification does not cover archives
+written outside the build directory, build-only invocations that copy no
+archive (`--nobuild`, `--packagelist`, custom `PKGDEST`), or an `-i`/`--install`
+run whose pacman install happens inside makepkg before the wrapper regains
+control; treat review acceptance and the pacman hook as the effective checks
+for those flows.
+
+## MCP Server
+
+`aurascan-mcp` exposes a small, strictly read-only slice of AuraScan to any MCP
+client over newline-delimited JSON-RPC 2.0 on stdin/stdout. It ships four tools
+and nothing else, plus two opt-in tools (`verify_evidence` and
+`security_audit_online`, below):
+
+| Tool | What it does |
+| --- | --- |
+| `scan_content` | Scan caller-supplied text for prompt-injection signals. |
+| `scan_path` | Scan one bounded UTF-8 file that must resolve inside an explicit `--root`. |
+| `audit_agent_config` | Audit one agent/MCP configuration document as untrusted data. |
+| `security_audit` | Check the local host offline: one bounded `pacman -Q`, reads only. |
+| `security_audit_online` | Opt-in: the same host audit plus one HTTPS campaign refresh and `arch-audit`. |
+
+The four default tools and `verify_evidence` are annotated `readOnlyHint: true`,
+`destructiveHint: false`, `openWorldHint: false`, so they run unprompted in
+headless sessions (`chat -q`, cron, unattended gateways) as well as approved in
+interactive ones. `security_audit_online` differs: it is `readOnlyHint: false`,
+`openWorldHint: true`, so it prompts on every call even after opt-in.
+Nothing is written, nothing is blocked or quarantined, and a result never
+certifies a package or a host as safe.
+
+AuraScan's injection detector is a static, rule-based first signal — it reports
+text that looks like instructions aimed at an AI reader, nothing is executed, and
+the confidence value is a policy label, not a precision estimate.
+
+```bash
+aurascan-mcp --root "/home/arawn/Documents/Other Projects/AuraScan"
+```
+
+`--root` is repeatable and is the whole filesystem boundary for `scan_path`;
+`--budget <tool>=<seconds>` overrides a per-call timeout and `--max-line-bytes`
+bounds an inbound line. Progress and diagnostics go to stderr and never to
+stdout.
+
+Registration (Hermes `config.yaml`; apply with `hermes config set`, and pin
+`--root` because the server must not derive a boundary from the session's
+working directory):
+
+```yaml
+mcp_servers:
+  aurascan:
+    command: "/home/arawn/.local/bin/aurascan-mcp"
+    args: ["--root", "/home/arawn/Documents/Other Projects/AuraScan"]
+    trust: untrusted
+    protocol: legacy
+    timeout: 120
+    connect_timeout: 30
+    supports_parallel_tool_calls: false
+    tools:
+      include: [scan_content, scan_path, audit_agent_config, security_audit]
+      resources: false
+      prompts: false
+    sampling:
+      enabled: false
+```
+
+```yaml
+command_allowlist:
+  - mcp:aurascan/scan_content
+  - mcp:aurascan/scan_path
+  - mcp:aurascan/audit_agent_config
+  - mcp:aurascan/security_audit
+```
+
+`trust: untrusted` plus `readOnlyHint` keeps interactive consent visible;
+the allowlist is the second line of defence so a lost annotation cannot silently
+disable a tool headless. `tools.include` is an explicit four-name list: a fifth
+tool added to the server later stays invisible until someone opts in. Timeouts
+are 20 s per scan, 60 s for `security_audit` and 110 s for
+`security_audit_online`, still under the client's `timeout: 120`, so the
+server's own `timeout` error arrives instead of a client kill.
+
+`verify_evidence` is that opt-in fifth tool and it is deliberately absent from
+both lists above. Pass `emit_bundle: true` to either scan tool and the payload
+gains an `evidence_bundle` object: the exact payload returned to you, a SHA-256
+digest of it, and a digest of the scan input. `verify_evidence` recomputes the
+bundle digest, re-hashes the bundled payload, and re-runs the same scan against
+the source you supply (`path`, or `content`), so a payload edited and re-hashed
+still fails `rederivation_mismatch`. `consistent` means the internal checks
+agree; it is not a signature and not the word "verified". To use it, add
+`verify_evidence` to `tools.include` and to `command_allowlist` yourself.
+
+`security_audit_online` is the second opt-in tool and the only one that leaves
+the host. It runs the same bounded host audit as `security_audit`, plus one
+HTTPS GET of the packaged campaign source and the `arch-audit --json` pass the
+offline tool skips, and it is annotated `readOnlyHint: false` /
+`openWorldHint: true`, so it prompts every call even after opt-in. The refresh
+is validated (2 MiB cap, UTF-8, package-name syntax, digest) and held in
+memory: AuraScan writes nothing, the cache under
+`$XDG_STATE_HOME/aurascan/security-intel` is read if present and never written,
+and `security_audit`'s result is unaffected. `refresh` defaults true;
+`refresh: false` suppresses only AuraScan's own fetch — `arch-audit` may still
+reach its own feed, so it is not the same thing as "no network". 3xx responses
+are rejected before the redirect target is contacted and proxy environment
+variables are not inherited (a mandatory corporate proxy therefore breaks the
+refresh, though the audit itself still runs). `verified: shape-only` is the
+whole claim: size, UTF-8, name syntax and digest, computed by this same process
+and not signed, so DNS rebinding and a TLS-terminating MITM remain. A failed
+refresh is not an error — `isError` stays false and the caller branches on
+`status` plus `refresh.status`/`refresh.error`. `arch-audit` findings do carry
+`evidence` here when `include_evidence` is true. To use it, opt in the same way:
+
+```yaml
+      # online audit is opt-in: add the name below, then restart the server; it prompts every call
+      # include: [scan_content, scan_path, audit_agent_config, security_audit, security_audit_online]
+```
+
+and add `mcp:aurascan/security_audit_online` to `command_allowlist`.
+
+Snippets (`include_snippet`) are redacted best effort before they leave the
+server: credential-shaped substrings become `<redacted:class>` markers and an
+encoded span is replaced whole by `<redacted:encoded>`, with every count on the
+payload under `snippet_redaction` and the honest caveat under `snippet_policy`.
+Redaction is lossy and the payload never claims to be secret-free, so
+`redaction_applied: false` only means no pattern matched in that snippet.
+`include_raw_snippet` adds the untouched text next to the redacted one when the
+caller wants to see the bytes as they were.
+
+`security_audit` is read-only only while it is pinned to `offline=True,
+refresh=False`; adding an `online` argument would need a fresh annotation
+review. Its description names the one process, every path it stats or reads, and
+that `include_evidence` discloses host-local paths, `hidden_*` BPF object names
+and Tailscale peer markers.
+
+`aurascan/mcp/results.py` resolves two agent-config coverage rule IDs from the
+catalog at import, so renaming either rule without updating the catalog stops
+the server at startup with a named `LookupError`. That is deliberate.
+
+## Pacman Hook
+
+The release-safe pacman hook template is `packaging/arch/aurascan.hook`. The
+root `aurascan.hook` mirrors that release-safe template. It calls the installed
+`/usr/bin/aurascan` executable and does not point at a source checkout, virtual
+environment, or developer home directory.
+
+A pacman hook scans already built package archives before the pacman
+transaction. This is useful for archive and install-metadata review, but it is
+too late to protect against malicious PKGBUILD build-time logic that may have
+run during package creation.
+
+The makepkg wrapper and pacman hook are different tools:
+
+- `aurascan-makepkg` scans before makepkg executes package build functions.
+- The pacman hook scans built package archives before pacman installs them.
+
+The current hook is conservative and does not provide a verified pacman
+transaction context provider for smart update fast paths.
+
+`pip install` does not install pacman hooks. Plainly, pip install does not install pacman hooks. Pacman hooks require root or
+package-manager installation. The preferred release path is an Arch package
+that installs the hook to `/usr/share/libalpm/hooks/aurascan.hook` and removes
+it when the package is uninstalled. `aurascan init` treats that packaged hook as
+already active and does not copy it into `/etc`. Manual installation to
+`/etc/pacman.d/hooks/` is possible, but should be done carefully. Do not leave a
+hook behind that points to a missing executable; remove the hook or reinstall
+AuraScan before continuing pacman transactions.
+
+The hook uses pacman's `NeedsTargets` mode. AuraScan reads target names from
+stdin, scans an existing target path when one is provided, or looks for the
+newest `.pkg.tar.zst` file in `/var/cache/pacman/pkg` whose own `.PKGINFO`
+identity proves the same package name. A same-prefix file name, a corrupted
+archive, or an entry whose identity cannot be read is skipped instead of being
+trusted, and AuraScan notes when it audits a cached copy rather than the file
+being installed. Missing archive targets are reported as warnings and do not
+block by themselves. Blocking findings make AuraScan exit non-zero and the
+hook's `AbortOnFail` aborts the pacman transaction, with the blocked package
+names and rule IDs printed in the final summary.
+
+The hook also reads the root-owned pacman sync databases and binds a cached
+archive to its repository `%FILENAME%` and `%SHA256SUM%`. A verified official
+repository archive receives a fast deterministic install-hook scan: routine
+systemd service management in its install hook is recorded as LOW without
+manual review, and auxiliary ClamAV and AI scans are skipped. The fast path
+still blocks deterministic malicious behavior (remote execution, credential
+access, unsafe SUID/SGID installation, or an unreadable install hook). A local,
+AUR, unknown, or checksum-mismatched archive receives the full scan. An
+unreadable sync database marks the index incomplete; unknown archives then
+stay on the full-scan path. The hook prints one compact transaction summary
+and a full report only for a package with a warning or blocking finding.
+ClamAV runs for local and unverified archives only when `PATH` resolves to a
+captured, root-owned, non-writable
+`/usr/bin/clamscan`, which AuraScan revalidates immediately before the bounded
+scan. Database version reporting uses the same policy for
+`/usr/bin/freshclam`. Symlink following, recursion, scanned bytes, file count,
+runtime, and combined output are bounded; the child receives a fixed minimal
+environment, and an option terminator keeps a package filename from becoming a
+ClamAV flag. Raw ClamAV stdout/stderr is not retained as report evidence. If a
+started ClamAV scan times out, exceeds a bound, or returns an error, AuraScan
+records blocking incomplete inspection rather than a clean result. If trusted
+`clamscan` is unavailable, AuraScan reports that AV scanning was skipped and
+continues with the remaining checks. If
+`/usr/bin/aurascan` is missing, pacman cannot run the hook command and refuses
+the transaction; recover by reinstalling AuraScan or removing the stale hook
+from the hook directory.
+
+## Review Acceptance
+
+Some findings require manual review but are not hard blockers. In the makepkg
+wrapper, eligible manual-review findings produce a review token. After reading
+the findings, the same exact scan can be accepted:
+
+```bash
+aurascan-makepkg --aurascan-accept-review arv-... --syncdeps
+aurascan-makepkg --aurascan-accept-review arv-... --aurascan-review-reason "reviewed warning" --syncdeps
+```
+
+By default, review acceptance is one-time. `--aurascan-remember-review` records
+a reusable decision for the same exact scan fingerprint. `--aurascan-review-once`
+forces one-time behavior. `--aurascan-review-expire-days N` adds an expiry.
+
+List or revoke decisions:
+
+```bash
+aurascan-makepkg --aurascan-list-review-decisions
+aurascan-makepkg --aurascan-revoke-review <decision_id>
+aurascan-makepkg --aurascan-json --aurascan-list-review-decisions
+```
+
+Review acceptance is not clean trust. It does not create a trusted baseline for
+smart update fast paths. Hard blockers cannot be accepted through ordinary
+review. Confirmed malware signatures, checksum mismatches, invalid signatures,
+signer fingerprint mismatches, unsafe archive findings, deterministic CRITICAL
+findings, and findings marked as blocking remain stops.
+
+## Update Scan Policies
+
+AuraScan supports update scan policy scaffolding:
+
+- `full`: normal conservative scan path.
+- `smart`: may use a fast path only with proven update context, an accepted
+  baseline, and trust-diff approval.
+- `new-only`: weaker mode that may skip already-installed updates only when
+  update context is proven or explicitly user-asserted with opt-in.
+
+`new-only` is weaker protection. Plainly, new-only is weaker protection because malicious behavior can be introduced in
+an update. A skipped update does not become a trusted baseline.
+
+"No new dependencies" is not enough to skip a scan. Package name, dependency
+stability, AUR metadata, and version strings alone are also not proof that a
+scan is a safe update.
+
+Local history compares the PKGBUILD's `# Maintainer:` annotation, not the AUR
+account that owns its package base. Adding, removing, or changing that text
+requires review and a normal scan, but never proves orphanhood, adoption,
+restoration, or an ownership transfer. A Git author, push, or adoption-request
+description is not authoritative maintainer state. AuraScan's normal history
+scan has no AUR ownership-event feed and makes no network request to obtain one.
+
+The September [aurweb hardening](https://github.com/archlinux/aurweb/commit/714ea5f8d0332744ebd2c84df79594375b3d834a)
+rejects pushes to deleted bases until restoration, which returns an orphan;
+an existing co-maintainer remains an exception to the restriction on claiming
+an orphan through a push. The [August adoption-review change](https://lists.archlinux.org/archives/list/aur-general@lists.archlinux.org/thread/P5C7GZ4C3OJIH4EXJ62JAF6X6PY2BCQ4/)
+does not establish that any particular package's adoption was reviewed or that
+its code is safe. These platform changes do not lower AuraScan's risk weights.
+Confirmed ownership transitions require separate, package-bound authoritative
+before-and-after state; collection of that evidence remains future work.
+
+`--scan-context auto` uses a local package database provider. It reads local
+pacman DB metadata without root, package installation, makepkg, package-code
+execution, or network access. If identity, installed state, candidate version,
+version comparison, or split-package mapping is ambiguous, AuraScan falls back
+to normal conservative behavior.
+
+Manual `--scan-context update` is user-asserted, not provider-verified. It can
+participate in smart or new-only decisions only with
+`--allow-user-asserted-update-context`, and reports label it as user asserted.
+
+## Privacy And External Tools
+
+Default scans are deterministic and local unless AI analysis has been
+explicitly enabled or a legacy-compatible cloud configuration has an API key
+but no explicit enable flag. Local providers never enable implicitly. The
+first-run wizard writes an explicit `AURASCAN_AI_ENABLED` value so the user's
+choice is clear. When enabled, package AI analysis may send package
+metadata, PKGBUILD text, and install-script text to the configured provider.
+For `lmstudio` and `llamacpp`, that provider is a loopback HTTP server; AuraScan
+does not redirect or proxy the request to another host. Config drift diff review
+has an additional opt-in gate and sends only redacted bounded diffs.
+Incident AI normally runs when the user opens an incident. A separate explicit
+opt-in permits background AI only in the logged-in user service. The root boot,
+weekly, and Safe Autopilot services have no network access and never load API
+credentials. Incident evidence is bounded and redacted before persistence or
+AI use, and `facts-only` mode omits raw evidence excerpts. See
+[`docs/PRIVACY.md`](PRIVACY.md) for process and storage boundaries.
+
+Instruction Guard's deterministic user service is a separate opt-in and runs
+without network access or AI credentials. Its AI assistant has another consent
+bit, processes at most one queued job per timer run, and receives no more than
+12 KiB of redacted suspicious evidence. Agent-file reports and manifests are
+private user security state; public notifications and tray status never include
+file paths, snippets, usernames, credentials, or provider text.
+
+Contextual follow-up uses the same configured foreground provider consent. It
+sends at most 12,000 redacted characters per request and accepts only
+AuraScan-generated opaque fact, probe, and action IDs. Private source contexts
+are retained with `0700`/`0600` permissions, while questions and AI answers are
+not persisted. Follow-up never runs in root collectors or pacman hooks.
+Hardware-aware questions may include bounded model, capacity, version, sensor,
+memory-pressure, and normalized hardware-error facts. AuraScan excludes serial
+numbers, UUIDs, raw DMI/SPD data, and raw journal text from that hardware
+summary. Firmware and driver checks are read-only and never install an update.
+
+Policy-Gated Repair Agent access is a separate foreground authority. Redacted
+output sharing is the default, raw output requires a typed session grant, and
+API keys are removed from the executor environment. Private audits retain
+command hashes and redacted command/output material. The command gate accepts
+only allowlisted absolute read-only diagnostics plus constrained exact
+`/usr/bin/pacman` workflows; remote acquisition, arbitrary executables,
+AUR/build tools, interpreters, decoders, expansion, and redirection are refused.
+Approved package repairs can still change installed software, and diagnostic
+output can contain private data, so each exact command remains a meaningful
+consent boundary.
+
+Recovery AI has a separate consent bit. The local-UKI and release-ISO workflows
+are designed not to copy API keys, user configuration, saved WLAN profiles,
+host identity, home paths, or incident evidence. Release validation performs
+bounded checks for credential assignments with bounded values, known provider-
+token prefixes, known private-state paths, the builder identity, and explicitly
+supplied private markers across regular bytes, normalized path/link metadata,
+PAX fields, and decoded libarchive xattrs. Short markers fail closed. This
+cannot prove the absence of every unknown secret or recursively inspect every
+opaque container.
+A validated target-user provider config is read only after target mount and
+runtime setup; an optional session key remains in memory. Recovery AI receives
+the same bounded redacted/facts-only evidence
+and opaque probe/action IDs as foreground incident AI. A local provider's
+`127.0.0.1` address refers to the recovery environment itself, not the installed
+system. Recovery neither starts nor forwards LM Studio or `llama-server`; if no
+compatible server is already running inside recovery, the AI step remains
+unavailable and deterministic recovery continues without a cloud fallback.
+
+Supported AI provider IDs are `openai`, `anthropic`, `deepseek`, `gemini`, and
+`openrouter`, plus the local `lmstudio` and `llamacpp` providers.
+Provider-specific keys for cloud providers use `AURASCAN_OPENAI_API_KEY`,
+`AURASCAN_ANTHROPIC_API_KEY`, `AURASCAN_DEEPSEEK_API_KEY`,
+`AURASCAN_GEMINI_API_KEY`, or `AURASCAN_OPENROUTER_API_KEY`. Legacy
+`AURASCAN_AI_KEY` remains supported for existing setups. Local providers use
+the optional `AURASCAN_LOCAL_AI_API_KEY`; their endpoint may be overridden with
+`AURASCAN_AI_BASE_URL` subject to the loopback-only policy.
+
+Deep static source acquisition can contact source hosts and, unless disabled,
+a configured keyserver for PGP key lookup. The metadata-only tuning helper
+fetches only PKGBUILD and `.SRCINFO` text from the AUR and does not download
+declared sources.
+
+External tools are optional only where the workflow can safely continue.
+ClamAV may be skipped with an explicit warning, while failed explicit source
+acquisition remains incomplete and blocking. The package archive reader,
+ClamAV integration, source Git/GPG paths, makepkg wrapper, notification path,
+and upgrade handoff use their documented absolute system executables and
+revalidate identities where applicable. The makepkg wrapper requires trusted
+`/usr/bin/makepkg`; it never falls back to another executable found on `PATH`.
+
+## False Positives
+
+AuraScan is intentionally cautious. System service files, cron jobs, dynamic
+shell evaluation, checksum changes, signature metadata, and install hooks can
+all be legitimate. The terminal presenter tries to explain what was checked,
+what was not proven, and what action is recommended.
+
+When a finding is unclear, review the evidence. Do not treat a warning as proof
+of malicious intent, and do not treat a clean report as proof of safety.
+
+## Tests And Tuning
+
+The developer [security intelligence and model research contract](SECURITY_MODEL_RND.md)
+describes curated evidence, training/evaluation separation and future specialized
+model evaluation. Its [offline metadata contract](../security-data/README.md) and
+[explicit developer intake](SECURITY_DATA_INTAKE.md) support private
+quarantine of selected public sources and existing regression fixtures.
+Acquisition and review never grant training/evaluation eligibility or infer
+ground truth from scanner results. Operational scans are not collected for
+research; existing scanning and AI consent boundaries are unchanged.
+
+Run the core validation:
+
+```bash
+python -m compileall aurascan tests tools
+.venv/bin/python -m pytest -q
+.venv/bin/python tools/audit_presenter_coverage.py
+.venv/bin/python tools/audit_presenter_coverage.py --strict
+.venv/bin/python tools/audit_presenter_coverage.py --strict-medium
+```
+
+Run the metadata-only AUR warning tuning helper:
+
+```bash
+.venv/bin/python tools/aur_warning_tune.py --package-list-file tools/package_lists/aur-warning-tune-mixed.txt --limit 50
+.venv/bin/python tools/aur_warning_tune.py --package-list-file tools/package_lists/aur-warning-tune-mixed.txt --output-markdown tools/reports/aur-warning-tune.md
+```
+
+Metadata-only tuning is opt-in. Live AUR tuning is not part of normal pytest.
+
+## License
+
+AuraScan is released under the MIT License. See [LICENSE](../LICENSE).
+
+## Threat Model
+
+AuraScan focuses on reducing package-install risk from malicious or suspicious
+packaging behavior, unsafe source archives, weakened source integrity,
+dangerous static patterns, suspicious update drift, and known malware
+signatures when local scanners are available. Its optional Agent Instruction
+Guard also detects suspicious content and integrity changes in recognized
+AI-agent control files through bounded periodic static scans.
+
+It is a review and blocking layer, not a complete endpoint security system.
+Use it alongside normal Arch-family package trust practices, source review,
+maintainer reputation checks, careful review of links and pasted commands, and
+system backups. The Instruction Guard does not synchronously intercept file
+access, inspect running processes, or establish a security boundary against
+same-UID or root malware.

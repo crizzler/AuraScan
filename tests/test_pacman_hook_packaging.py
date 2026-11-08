@@ -341,7 +341,7 @@ def test_arch_install_script_is_advisory_only():
 
 
 def test_readme_documents_hook_install_uninstall_and_wrapper_boundary():
-    text = read_text("README.md").lower()
+    text = read_text("docs/REFERENCE.md").lower()
     normalized = " ".join(text.split())
 
     required = [

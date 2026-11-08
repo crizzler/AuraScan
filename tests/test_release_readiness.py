@@ -102,7 +102,9 @@ def test_entry_point_targets_import():
 
 
 def test_readme_contains_release_safety_boundaries():
-    readme = read_text("README.md").lower()
+    # Detailed safety boundaries live in the long-form reference; the landing
+    # README keeps a short summary and links here.
+    readme = read_text("docs/REFERENCE.md").lower()
 
     required_phrases = [
         "does not prove that a package is safe",
@@ -171,6 +173,17 @@ def test_readme_contains_release_safety_boundaries():
     assert "user-authorized remote code execution" not in readme
 
 
+def test_landing_readme_keeps_short_boundaries_and_reference_link():
+    readme = " ".join(read_text("README.md").lower().split())
+
+    assert "developer preview" in readme
+    assert "does not prove a package is safe" in readme
+    assert "aurascan --pkgbuild" in readme
+    assert "read-only evidence snapshot" in readme
+    assert "fixed set of consented actions" in readme
+    assert "docs/reference.md" in readme
+
+
 def test_license_is_mit_for_public_release():
     license_text = read_text("LICENSE")
 
@@ -206,7 +219,7 @@ def test_privacy_document_covers_policy_gated_agent_boundaries():
 
 
 def test_advisory_ai_documentation_keeps_model_prose_untrusted():
-    readme = " ".join(read_text("README.md").lower().split())
+    readme = " ".join(read_text("docs/REFERENCE.md").lower().split())
     privacy = " ".join(read_text("docs/PRIVACY.md").lower().split())
     developing = " ".join(read_text("DEVELOPING.md").lower().split())
     checklist = " ".join(read_text("docs/RELEASE_CHECKLIST.md").lower().split())
@@ -232,7 +245,7 @@ def test_instruction_guard_v090_documentation_contract():
     def normalized(relative: str) -> str:
         return " ".join(read_text(relative).lower().split())
 
-    readme = normalized("README.md")
+    readme = normalized("docs/REFERENCE.md")
     privacy = normalized("docs/PRIVACY.md")
     checklist = normalized("docs/RELEASE_CHECKLIST.md")
     release = normalized("docs/releases/v0.9.0.md")
@@ -332,7 +345,7 @@ def test_aur_maintainer_worm_v092_release_contract():
     def normalized(relative: str) -> str:
         return " ".join(read_text(relative).lower().split())
 
-    readme = normalized("README.md")
+    readme = normalized("docs/REFERENCE.md")
     developing = normalized("DEVELOPING.md")
     agents = normalized("AGENTS.md")
     skill = normalized("SKILL.md")

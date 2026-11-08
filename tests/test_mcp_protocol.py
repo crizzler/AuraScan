@@ -87,17 +87,17 @@ def test_03_tools_list_is_the_pinned_surface(tmp_path):
     assert "read-only process" in by_name["security_audit"]
 
     # The registration block a human applies names the shipped four tools, slice for slice. The
-    # fifth tool is documented in the README as opt-in and stays out of the include list and the
-    # allowlist until an operator adds it.
+    # fifth tool is documented in the long-form reference as opt-in and stays out
+    # of the include list and the allowlist until an operator adds it.
     names = sorted(by_name)
-    readme = Path(__file__).resolve().parents[1] / "README.md"
+    reference = Path(__file__).resolve().parents[1] / "docs" / "REFERENCE.md"
     registration = Path(__file__).resolve().parent / "fixtures" / "mcp" / "registration.yaml"
-    readme_text = readme.read_text(encoding="utf-8")
+    reference_text = reference.read_text(encoding="utf-8")
     registration_text = registration.read_text(encoding="utf-8")
-    for source, text in ((readme, readme_text), (registration, registration_text)):
+    for source, text in ((reference, reference_text), (registration, registration_text)):
         assert "tools.include" in text or "include:" in text
     for name in names:
-        assert name in readme_text, (readme, name)
+        assert name in reference_text, (reference, name)
     for name in ("audit_agent_config", "scan_content", "scan_path", "security_audit"):
         assert name in registration_text, (registration, name)
     include_line = [

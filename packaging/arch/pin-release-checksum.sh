@@ -41,7 +41,8 @@ curl --fail --silent --show-error --location \
     --proto '=https' --tlsv1.2 --max-time 120 --max-filesize 104857600 \
     --output "$archive" "$archive_url"
 
-first_path="$(tar -tzf "$archive" | head -n 1)"
+tar -tzf "$archive" > "$tmp/listing"
+first_path="$(head -n 1 "$tmp/listing")"
 case "$first_path" in
     "AuraScan-$pkgver/"*) ;;
     *)

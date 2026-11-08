@@ -25,8 +25,11 @@ def test_ci_workflow_runs_for_supported_change_paths():
 def test_ci_workflow_covers_oldest_and_current_supported_python():
     text = workflow_text()
 
-    assert 'python-version: ["3.8", "3.14"]' in text
-    assert "runs-on: ubuntu-latest" in text
+    assert 'python-version: "3.8"' in text
+    assert 'python-version: "3.14"' in text
+    assert "runs-on: ${{ matrix.os }}" in text
+    assert "os: ubuntu-22.04" in text
+    assert "os: ubuntu-latest" in text
     assert "fail-fast: false" in text
     assert "fetch-depth: 0" in text
 

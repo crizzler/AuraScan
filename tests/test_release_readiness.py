@@ -806,7 +806,9 @@ def test_current_package_only_release_contract():
         )
         for phrase in forbidden_release_phrases:
             assert phrase not in release
-        assert "sha256sums=('skip')" in pkgbuild.lower()
+        assert "sha256sums=('skip')" in pkgbuild.lower() or re.search(
+            r"sha256sums=\('[0-9a-f]{64}'\)", pkgbuild.lower()
+        )
 
 
 def test_release_checklist_references_required_validation_and_safety_items():

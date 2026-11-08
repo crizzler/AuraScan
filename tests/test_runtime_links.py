@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,9 +19,9 @@ from aurascan.core.upgrade_models import UpgradePlan
 
 
 def _host_elf() -> Path:
-    for candidate in ("/bin/ls", "/usr/bin/ls", "/bin/sh"):
-        path = Path(candidate)
-        if path.is_file() and not path.is_symlink():
+    for candidate in (sys.executable, "/usr/bin/ls", "/bin/ls", "/bin/sh"):
+        path = Path(candidate).resolve()
+        if path.is_file():
             return path
     raise AssertionError("no host ELF binary is available for the fixture")
 

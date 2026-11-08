@@ -9,6 +9,7 @@
  */
 
 const path = require("node:path");
+const net = require("node:net");
 
 const CONTRACT = "aurascan-ui/1";
 const SETTINGS_SCHEMA = "aurascan-settings/1";
@@ -28,18 +29,18 @@ const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
 const FILE_ID = /^[a-z0-9]{8,64}$/;
 const REPORT_ID = /^report-[a-z0-9]{8,64}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
+// Provider ids are shape-checked here and validated against the real inventory
+// by the CLI, so a new provider needs no shell release. The model shape and the
+// base URL rules mirror the CLI's own validation.
+const PROVIDER_ID = /^[a-z][a-z0-9_]{0,31}$/;
+// Bounded model text. `~` is part of the shipped OpenRouter default
+// (`~openai/gpt-latest`), which the Settings form submits unchanged.
+const MODEL_ID = /^[A-Za-z0-9._~:/@+-]{1,120}$/;
+const MAX_BASE_URL_CHARS = 512;
 
-// Mirrors the provider inventory in aurascan/core/ai_provider.py. A provider id
-// is never taken from the renderer without being checked against this list.
-const AI_PROVIDERS = Object.freeze([
-  "openai",
-  "anthropic",
-  "deepseek",
-  "gemini",
-  "openrouter",
-  "lmstudio",
-  "llamacpp"
-]);
+// Provider ids are validated by shape only (PROVIDER_ID) — the CLI owns the
+// inventory, so adding a provider is a Python-only change. A parity test keeps
+// the known presets listed in the desktop suite aligned with PROVIDERS.
 
 // The tray may ask the shell to open a specific view. Only these names are
 // accepted; anything else is ignored, so an argument can never become data the
@@ -129,6 +130,7 @@ const READ_ONLY_ACTIONS = Object.freeze([
 ]);
 const MUTATING_ACTIONS = Object.freeze([
   "set_ai_key",
+  "configure_ai",
   "instruction_scan",
   "instruction_approve",
   "instruction_disable",
@@ -236,14 +238,281 @@ function actionArgv(actionId, values) {
     }
     return argv;
   }
+  if (actionId === "configure_ai") {
+    const provider = values && values.provider;
+    if (typeof provider !== "string" || !PROVIDER_ID.test(provider)) {
+      return null;
+    }
+    const argv = ["settings", "set-ai-config", "--provider", provider];
+    if (values.model !== undefined && values.model !== null && values.model !== "") {
+      if (typeof values.model !== "string" || !MODEL_ID.test(values.model)) {
+        return null;
+      }
+      argv.push("--model", values.model);
+    }
+    if (values.base_url !== undefined && values.base_url !== null && values.base_url !== "") {
+      if (!validBaseUrl(values.base_url)) {
+        return null;
+      }
+      argv.push("--base-url", values.base_url);
+    }
+    if (values.enabled !== undefined && values.enabled !== null) {
+      if (typeof values.enabled !== "boolean") {
+        return null;
+      }
+      argv.push("--enabled", values.enabled ? "1" : "0");
+    }
+    argv.push("--json");
+    return argv;
+  }
   if (actionId === "set_ai_key") {
     const provider = values && values.provider;
-    if (typeof provider !== "string" || !AI_PROVIDERS.includes(provider)) {
+    if (typeof provider !== "string" || !PROVIDER_ID.test(provider)) {
       return null;
     }
     return ["settings", "set-ai-key", "--provider", provider, "--json"];
   }
   return null;
+}
+
+/**
+ * Accept only a base URL the CLI would also accept: http(s), no credentials,
+ * query or fragment, bounded length, plain HTTP only on a loopback literal and
+ * no literal private address. The CLI revalidates the stored value and stays
+ * authoritative; this pre-spawn mirror exists so a bad value is refused before
+ * a child starts.
+ *
+ * The raw string is parsed by hand because WHATWG `URL` collapses `..` path
+ * segments before any raw-path rule could see them, and the CLI validates the
+ * raw path. Literal addresses are classified the way `ipaddress` does, so a
+ * private, link-local, multicast or reserved IPv4/IPv6 literal is refused.
+ */
+const CUSTOM_PATH = /^[A-Za-z0-9._~%/-]*$/;
+const URL_SCHEME = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//;
+
+function ipv4Parts(host) {
+  const parts = host.split(".");
+  if (parts.length !== 4) {
+    return null;
+  }
+  if (!parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)) {
+    return null;
+  }
+  return parts.map(Number);
+}
+
+function loopbackIpv4(host) {
+  const parts = ipv4Parts(host);
+  return parts !== null && parts[0] === 127;
+}
+
+function privateIpv4Literal(host) {
+  const parts = ipv4Parts(host);
+  if (parts === null) {
+    return false;
+  }
+  const [a, b, c] = parts;
+  return (
+    a === 0 ||
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254) ||
+    (a === 192 && b === 0 && c === 0) ||
+    (a === 192 && b === 0 && c === 2) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    (a === 198 && b === 51 && c === 100) ||
+    (a === 203 && b === 0 && c === 113) ||
+    (a >= 224 && a <= 239) ||
+    a >= 240
+  );
+}
+
+/** Expand a validated IPv6 literal to sixteen bytes, or null. */
+function ipv6Bytes(host) {
+  if (!net.isIPv6(host)) {
+    return null;
+  }
+  const [head, tail] = host.split("::");
+  const left = head === "" ? [] : head.split(":");
+  const right = tail === undefined || tail === "" ? [] : tail.split(":");
+  // An embedded IPv4 tail occupies two groups.
+  const width = (group) => (group.includes(".") ? 2 : 1);
+  const used = [...left, ...right].reduce((total, group) => total + width(group), 0);
+  const groups = [...left, ...new Array(8 - used).fill("0"), ...right];
+  const bytes = [];
+  for (let index = 0; index < groups.length; index += 1) {
+    const group = groups[index];
+    if (group.includes(".")) {
+      const embedded = ipv4Parts(group);
+      if (embedded === null) {
+        return null;
+      }
+      bytes.push(embedded[0], embedded[1], embedded[2], embedded[3]);
+      continue;
+    }
+    const value = parseInt(group, 16);
+    bytes.push(value >> 8, value & 0xff);
+  }
+  return bytes.length === 16 ? bytes : null;
+}
+
+/** "loopback", "private" or "public", or null when the text is not an IPv6 literal. */
+function classifyIpv6(host) {
+  const bytes = ipv6Bytes(host);
+  if (bytes === null) {
+    return null;
+  }
+  const zero = (from) => bytes.slice(from).every((value) => value === 0);
+  const zeroRange = (from, to) => bytes.slice(from, to).every((value) => value === 0);
+  if (zeroRange(0, 15) && bytes[15] === 1) {
+    return "loopback"; // ::1
+  }
+  if (zero(0)) {
+    return "private"; // ::
+  }
+  if (zeroRange(0, 10) && bytes[10] === 0xff && bytes[11] === 0xff) {
+    // IPv4-mapped address: classify the embedded IPv4 literal instead.
+    const embedded = `${bytes[12]}.${bytes[13]}.${bytes[14]}.${bytes[15]}`;
+    if (loopbackIpv4(embedded)) {
+      return "loopback";
+    }
+    return privateIpv4Literal(embedded) ? "private" : "public";
+  }
+  if (bytes[0] === 0xfc || bytes[0] === 0xfd) {
+    return "private"; // fc00::/7 unique local
+  }
+  if (bytes[0] === 0xfe && (bytes[1] & 0xc0) === 0x80) {
+    return "private"; // fe80::/10 link-local
+  }
+  if (bytes[0] === 0xff) {
+    return "private"; // ff00::/8 multicast
+  }
+  if (bytes[0] === 0x20 && bytes[1] === 0x01 && bytes[2] === 0x0d && bytes[3] === 0xb8) {
+    return "private"; // 2001:db8::/32 documentation
+  }
+  if (bytes[0] === 0x20 && bytes[1] === 0x01 && bytes[2] === 0x00 && bytes[3] === 0x00) {
+    return "private"; // 2001::/32 Teredo
+  }
+  if (bytes[0] === 0x20 && bytes[1] === 0x02) {
+    return "private"; // 2002::/16 6to4
+  }
+  if (bytes[0] === 0x01 && zeroRange(1, 8)) {
+    return "private"; // 100::/64 discard-only
+  }
+  if (
+    bytes[0] === 0x00 &&
+    bytes[1] === 0x64 &&
+    bytes[2] === 0xff &&
+    bytes[3] === 0x9b &&
+    zeroRange(4, 12)
+  ) {
+    return "private"; // 64:ff9b::/96 NAT64
+  }
+  if (bytes[0] === 0x3f && (bytes[1] & 0xf0) === 0xf0) {
+    return "private"; // 3fff::/20 documentation
+  }
+  if (bytes[0] === 0x5f && bytes[1] === 0x00) {
+    return "private"; // 5f00::/16 segment routing
+  }
+  if (zeroRange(0, 12)) {
+    return "private"; // remaining ::/96 reserved
+  }
+  return "public";
+}
+
+/** Split an authority into host/port, keeping IPv6 brackets intact. */
+function splitAuthority(authority) {
+  if (authority.startsWith("[")) {
+    const end = authority.indexOf("]");
+    if (end === -1) {
+      return null;
+    }
+    const rest = authority.slice(end + 1);
+    if (rest === "") {
+      return { host: authority.slice(1, end), port: "" };
+    }
+    return rest.startsWith(":") ? { host: authority.slice(1, end), port: rest.slice(1) } : null;
+  }
+  const colon = authority.lastIndexOf(":");
+  if (colon === -1) {
+    return { host: authority, port: "" };
+  }
+  return { host: authority.slice(0, colon), port: authority.slice(colon + 1) };
+}
+
+function validBaseUrl(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const raw = value.trim();
+  if (raw.length === 0 || raw.length > MAX_BASE_URL_CHARS || CONTROL_CHARS.test(raw)) {
+    return false;
+  }
+  const schemeMatch = URL_SCHEME.exec(raw);
+  if (schemeMatch === null) {
+    return false;
+  }
+  const scheme = schemeMatch[1].toLowerCase();
+  if (scheme !== "https" && scheme !== "http") {
+    return false;
+  }
+  let rest = raw.slice(schemeMatch[0].length);
+  const hashAt = rest.indexOf("#");
+  if (hashAt !== -1) {
+    if (rest.slice(hashAt + 1) !== "") {
+      return false;
+    }
+    rest = rest.slice(0, hashAt);
+  }
+  const queryAt = rest.indexOf("?");
+  if (queryAt !== -1) {
+    if (rest.slice(queryAt + 1) !== "") {
+      return false;
+    }
+    rest = rest.slice(0, queryAt);
+  }
+  const slashAt = rest.indexOf("/");
+  const authority = slashAt === -1 ? rest : rest.slice(0, slashAt);
+  const urlPath = slashAt === -1 ? "" : rest.slice(slashAt);
+  if (authority === "" || authority.includes("@")) {
+    return false;
+  }
+  const split = splitAuthority(authority);
+  if (split === null || split.host === "") {
+    return false;
+  }
+  if (split.port !== "") {
+    if (!/^\d+$/.test(split.port)) {
+      return false;
+    }
+    const port = Number(split.port);
+    if (port < 1 || port > 65535) {
+      return false;
+    }
+  }
+  // The CLI checks the raw path, so a normalized `..` would slip through.
+  if (!CUSTOM_PATH.test(urlPath) || urlPath.split("/").includes("..")) {
+    return false;
+  }
+  let kind;
+  if (net.isIPv6(split.host)) {
+    kind = classifyIpv6(split.host);
+  } else if (net.isIPv4(split.host)) {
+    kind = loopbackIpv4(split.host) ? "loopback" : privateIpv4Literal(split.host) ? "private" : "public";
+  } else {
+    kind = "hostname";
+  }
+  if (kind === null) {
+    return false;
+  }
+  if (kind === "loopback") {
+    return true;
+  }
+  if (scheme === "http") {
+    return false;
+  }
+  return kind !== "private";
 }
 
 /**
@@ -327,11 +596,27 @@ function parseSettings(stdout) {
  * A write response carries only the confirmation and the resulting AI state.
  * It must never be treated as a full settings payload: a successful write that
  * failed to parse would otherwise be reported to the user as a failure.
+ *
+ * A write is confirmed only by the expected action *and* `stored === true`; a
+ * missing or non-boolean flag is not a confirmation.
  */
+const WRITE_ACTIONS = Object.freeze(["set_ai_key", "set_ai_config"]);
+
 function parseSettingsWrite(stdout) {
   const parsed = parseJsonObject(stdout);
-  if (parsed.schema !== SETTINGS_SCHEMA || parsed.stored !== true) {
+  if (parsed.schema !== SETTINGS_SCHEMA) {
+    throw new Error("settings write schema is not supported");
+  }
+  if (!WRITE_ACTIONS.includes(parsed.action)) {
+    throw new Error("settings write action is not supported");
+  }
+  if (parsed.stored !== true) {
     throw new Error("settings write was not confirmed");
+  }
+  if (parsed.action === "set_ai_config") {
+    if (typeof parsed.provider !== "string" || !PROVIDER_ID.test(parsed.provider)) {
+      throw new Error("settings write was not confirmed");
+    }
   }
   if (
     parsed.ai === null ||
@@ -446,7 +731,6 @@ module.exports = {
   INCIDENT_TIMEOUT_MS,
   SNAPSHOT_TIMEOUT_MS,
   FORWARDED_ENV,
-  AI_PROVIDERS,
   DESKTOP_VIEWS,
   TERMINAL_CANDIDATES,
   upgradeTerminalArgv,
@@ -456,6 +740,7 @@ module.exports = {
   resolveCli,
   buildEnv,
   actionArgv,
+  validBaseUrl,
   validSecret,
   parseSnapshot,
   parseSettings,

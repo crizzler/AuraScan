@@ -26,7 +26,11 @@ from aurascan.core.ai_provider import (
     AI_MODEL_ENV,
     AI_PROVIDER_ENV,
     PROVIDERS,
+    AIProviderError,
     get_provider_spec,
+    normalize_custom_base_url,
+    normalize_local_base_url,
+    normalize_model,
     parse_bool,
     resolve_ai_config,
 )
@@ -64,7 +68,7 @@ FEATURES = (
 
 # Mutations this command exposes. A desktop client may only ever name one of
 # these; there is no generic key/value writer.
-MUTATIONS = ("set_ai_key",)
+MUTATIONS = ("set_ai_key", "set_ai_config")
 
 
 class SettingsError(RuntimeError):
@@ -143,6 +147,8 @@ def _provider_entries(env: Mapping[str, str]) -> List[Dict[str, object]]:
                 "requires_key": bool(spec.requires_api_key),
                 "key_env": spec.key_env,
                 "default_model": spec.default_model,
+                "base_url": spec.base_url,
+                "user_base_url": bool(spec.user_base_url),
                 "key_present": bool(env.get(spec.key_env, "").strip()),
                 "selected": provider_id == selected,
             }
@@ -286,6 +292,115 @@ def store_ai_key(provider: str, secret: str, *, config_path: Optional[Path] = No
     }
 
 
+def store_ai_config(
+    provider: str,
+    *,
+    model: Optional[str] = None,
+    base_url: Optional[str] = None,
+    enabled: Optional[bool] = None,
+    config_path: Optional[Path] = None,
+) -> Dict[str, object]:
+    """Write the non-secret AI configuration fields that were supplied.
+
+    Only supplied values are written. The stored credential is untouched, and a
+    preset switch drops a stale model/base-URL override so the preset default
+    applies. Nothing here enables AI unless ``enabled`` was passed.
+    """
+
+    spec = get_provider_spec(provider)
+    if spec is None:
+        raise SettingsError("unsupported AI provider: {0}".format(_bounded(provider, 40)))
+    provider_id = spec.provider_id
+
+    path = config_path or user_env_path()
+    try:
+        existing = read_env_file(path) if path.exists() else {}
+    except OSError as exc:
+        raise SettingsError("existing configuration could not be read") from exc
+    switching = existing.get(AI_PROVIDER_ENV, "").strip().lower() != provider_id
+
+    updates: Dict[str, str] = {}
+    remove: List[str] = []
+
+    if model is not None and str(model).strip():
+        try:
+            updates[AI_MODEL_ENV] = normalize_model(str(model))
+        except AIProviderError:
+            raise SettingsError("invalid AI model id") from None
+    elif provider_id == "custom":
+        if switching:
+            raise SettingsError("a custom provider needs a model id")
+        stored = existing.get(AI_MODEL_ENV, "").strip()
+        if not stored:
+            raise SettingsError("a custom provider needs a model id")
+        try:
+            updates[AI_MODEL_ENV] = normalize_model(stored)
+        except AIProviderError:
+            raise SettingsError("invalid AI model id") from None
+    elif switching:
+        # The previous provider's model id means nothing here.
+        remove.append(AI_MODEL_ENV)
+
+    if base_url is not None and str(base_url).strip():
+        try:
+            if spec.local:
+                updates[AI_BASE_URL_ENV] = normalize_local_base_url(str(base_url))
+            elif provider_id == "custom":
+                updates[AI_BASE_URL_ENV] = normalize_custom_base_url(str(base_url))
+            else:
+                raise SettingsError(
+                    "a base URL is accepted only for local and custom providers"
+                )
+        except AIProviderError as exc:
+            raise SettingsError(str(exc)) from None
+    elif provider_id == "custom":
+        if switching:
+            raise SettingsError("a custom provider needs a base URL")
+        stored_url = existing.get(AI_BASE_URL_ENV, "").strip()
+        if not stored_url:
+            raise SettingsError("a custom provider needs a base URL")
+        try:
+            updates[AI_BASE_URL_ENV] = normalize_custom_base_url(stored_url)
+        except AIProviderError as exc:
+            raise SettingsError(str(exc)) from None
+    elif spec.local and not switching:
+        # Keep the user's existing loopback endpoint; the preset supplies one
+        # when nothing is stored.
+        pass
+    else:
+        # A preset owns its fixed URL, so a stale override must not survive.
+        remove.append(AI_BASE_URL_ENV)
+
+    if enabled is None:
+        # Never enable implicitly: an unset flag is exactly what would do that.
+        if AI_ENABLED_ENV not in existing:
+            updates[AI_ENABLED_ENV] = "0"
+    else:
+        updates[AI_ENABLED_ENV] = "1" if enabled else "0"
+
+    updates[AI_PROVIDER_ENV] = provider_id
+
+    try:
+        written = write_user_env(updates, path, remove_keys=tuple(remove))
+    except (OSError, ValueError) as exc:
+        raise SettingsError("configuration could not be written") from exc
+
+    state = _config_state(written)
+    projection = project_settings(
+        read_env_file(written) if state["readable"] else {},
+        config_path=written,
+        config_state=state,
+    )
+    return {
+        "schema": SETTINGS_SCHEMA,
+        "action": "set_ai_config",
+        "stored": True,
+        "provider": provider_id,
+        "config": projection["config"],
+        "ai": projection["ai"],
+    }
+
+
 def _print_summary(projection: Mapping[str, object], stream) -> None:
     config = projection.get("config", {})
     ai = projection.get("ai", {})
@@ -326,6 +441,22 @@ def build_settings_parser() -> argparse.ArgumentParser:
     )
     set_key.add_argument("--provider", required=True, help="AI provider id")
     set_key.add_argument("--json", action="store_true", dest="json_mode", help="emit a structured JSON document")
+    set_config = commands.add_parser(
+        "set-ai-config",
+        help="select a provider and write its non-secret configuration",
+    )
+    set_config.add_argument("--provider", required=True, help="AI provider id")
+    set_config.add_argument("--model", help="model id (required for a custom provider)")
+    set_config.add_argument(
+        "--base-url",
+        help="endpoint override (local and custom providers only)",
+    )
+    set_config.add_argument(
+        "--enabled",
+        choices=("0", "1"),
+        help="explicit AI enable flag; omit to leave it unchanged",
+    )
+    set_config.add_argument("--json", action="store_true", dest="json_mode", help="emit a structured JSON document")
     return parser
 
 
@@ -343,6 +474,15 @@ def run_settings(argv: Sequence[str], *, stdin=None, stdout=None, stderr=None) -
             secret = _read_secret(stdin or sys.stdin)
             result = store_ai_key(args.provider, secret)
             del secret
+            print(json.dumps(result, indent=2, sort_keys=True), file=out)
+            return 0
+        if args.verb == "set-ai-config":
+            result = store_ai_config(
+                args.provider,
+                model=args.model,
+                base_url=args.base_url,
+                enabled=None if args.enabled is None else args.enabled == "1",
+            )
             print(json.dumps(result, indent=2, sort_keys=True), file=out)
             return 0
         projection = read_settings()

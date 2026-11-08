@@ -12,6 +12,12 @@ interface SettingsProps {
   shellAvailable: boolean;
   onReload: () => void;
   onStoreCredential: (provider: string, secret: string) => Promise<void>;
+  onConfigureAi: (values: {
+    provider: string;
+    model?: string;
+    base_url?: string;
+    enabled?: boolean;
+  }) => Promise<void>;
 }
 
 function featureState(feature: SettingsFeature): { tone: "ok" | "warn" | "neutral"; label: string } {
@@ -40,10 +46,14 @@ export function Settings({
   busy,
   shellAvailable,
   onReload,
-  onStoreCredential
+  onStoreCredential,
+  onConfigureAi
 }: SettingsProps) {
   const [provider, setProvider] = useState("");
   const [secret, setSecret] = useState("");
+  const [model, setModel] = useState<string | null>(null);
+  const [baseUrl, setBaseUrl] = useState<string | null>(null);
+  const [enable, setEnable] = useState<boolean | null>(null);
 
   if (!shellAvailable) {
     return (
@@ -88,8 +98,38 @@ export function Settings({
   const activeProvider = provider === "" ? settings.ai.provider : provider;
   const selected = settings.providers.find((entry) => entry.id === activeProvider);
   const needsKey = selected ? selected.requires_key : true;
+  const sameProvider = selected ? selected.id === settings.ai.provider : false;
+  const modelValue = model ?? (sameProvider ? settings.ai.model : selected?.default_model ?? "");
+  const baseUrlValue = baseUrl ?? (sameProvider ? settings.ai.base_url ?? "" : "");
+  // The switch is off unless AI is already enabled.
+  const enabledValue = enable ?? settings.ai.enabled;
+  const userBaseUrl = selected ? selected.user_base_url : false;
 
-  const submit = () => {
+  const chooseProvider = (id: string) => {
+    const entry = settings.providers.find((candidate) => candidate.id === id);
+    setProvider(id);
+    setModel(entry ? entry.default_model : "");
+    setBaseUrl(entry ? entry.base_url : "");
+    setEnable(settings.ai.enabled);
+  };
+
+  const submitConfig = () => {
+    if (!selected || modelValue.trim().length === 0) {
+      return;
+    }
+    const values: {
+      provider: string;
+      model: string;
+      base_url?: string;
+      enabled: boolean;
+    } = { provider: selected.id, model: modelValue.trim(), enabled: enabledValue };
+    if (userBaseUrl && baseUrlValue.trim().length > 0) {
+      values.base_url = baseUrlValue.trim();
+    }
+    void onConfigureAi(values).then(() => onReload());
+  };
+
+  const submitCredential = () => {
     const value = secret;
     if (value.trim().length === 0) {
       return;
@@ -133,8 +173,8 @@ export function Settings({
         </div>
         <dl className="kv">
           <div>
-            <dt>Provider</dt>
-            <dd>{settings.ai.provider_label || settings.ai.provider}</dd>
+            <dt>Active provider</dt>
+            <dd>{settings.ai.provider_label || settings.ai.provider || "unset"}</dd>
           </div>
           <div>
             <dt>Model</dt>
@@ -142,7 +182,7 @@ export function Settings({
           </div>
           <div>
             <dt>Endpoint</dt>
-            <dd className="mono">{settings.ai.base_url ?? (settings.ai.local ? "—" : "provider default")}</dd>
+            <dd className="mono">{settings.ai.base_url ?? (settings.ai.local ? "provider default" : "—")}</dd>
           </div>
           <div>
             <dt>Credential</dt>
@@ -154,38 +194,118 @@ export function Settings({
         {settings.ai.error ? (
           <p className="card__note">Configuration problem: {settings.ai.error}</p>
         ) : null}
-        <p className="card__note">
-          AI stays opt-in and advisory. Storing a credential does not enable it, and it
-          can never lower a deterministic finding.
-        </p>
-      </section>
 
-      <section className="card">
-        <div className="card__header">
-          <h2>Store a provider credential</h2>
-        </div>
+        <form
+          className="kv"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submitConfig();
+          }}
+        >
+          <div>
+            <dt>
+              <label htmlFor="ai-provider">Provider</label>
+            </dt>
+            <dd>
+              <select
+                id="ai-provider"
+                className="input"
+                value={activeProvider}
+                onChange={(event) => chooseProvider(event.target.value)}
+                disabled={busy}
+              >
+                {settings.providers.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.label}
+                    {entry.local ? " (local)" : ""}
+                    {entry.user_base_url ? " (endpoint)" : ""}
+                    {entry.key_present ? " — stored" : ""}
+                  </option>
+                ))}
+              </select>
+            </dd>
+          </div>
+          <div>
+            <dt>
+              <label htmlFor="ai-model">Model</label>
+            </dt>
+            <dd>
+              <input
+                id="ai-model"
+                className="input"
+                type="text"
+                value={modelValue}
+                spellCheck={false}
+                placeholder={selected && selected.default_model ? selected.default_model : "Model id"}
+                onChange={(event) => setModel(event.target.value)}
+                disabled={busy}
+              />
+            </dd>
+          </div>
+          {userBaseUrl ? (
+            <div>
+              <dt>
+                <label htmlFor="ai-base-url">Base URL</label>
+              </dt>
+              <dd>
+                <input
+                  id="ai-base-url"
+                  className="input"
+                  type="text"
+                  value={baseUrlValue}
+                  spellCheck={false}
+                  placeholder={selected?.base_url || "https://host/v1"}
+                  onChange={(event) => setBaseUrl(event.target.value)}
+                  disabled={busy}
+                />
+              </dd>
+            </div>
+          ) : (
+            <div>
+              <dt>Base URL</dt>
+              <dd className="mono">{selected?.base_url || "—"} (fixed)</dd>
+            </div>
+          )}
+          <div>
+            <dt>
+              <label htmlFor="ai-enabled">AI enabled</label>
+            </dt>
+            <dd>
+              <input
+                id="ai-enabled"
+                type="checkbox"
+                role="switch"
+                checked={enabledValue}
+                onChange={(event) => setEnable(event.target.checked)}
+                disabled={busy}
+              />
+            </dd>
+          </div>
+          <div>
+            <dt>Write configuration</dt>
+            <dd>
+              <button
+                type="submit"
+                className="button"
+                disabled={busy || modelValue.trim().length === 0 || !selected}
+              >
+                Save AI configuration
+              </button>
+            </dd>
+          </div>
+        </form>
+        <p className="card__note">
+          Nothing is enabled by this save unless the switch is on. Consent is per feature and
+          AI output stays advisory: it can never lower a deterministic finding.
+        </p>
+
         <form
           className="chip-row"
           onSubmit={(event) => {
             event.preventDefault();
-            submit();
+            submitCredential();
           }}
         >
-          <select
-            className="input"
-            aria-label="AI provider"
-            value={activeProvider}
-            onChange={(event) => setProvider(event.target.value)}
-            disabled={busy}
-          >
-            {settings.providers.map((entry) => (
-              <option key={entry.id} value={entry.id}>
-                {entry.label}
-                {entry.local ? " (local)" : ""}
-                {entry.key_present ? " — stored" : ""}
-              </option>
-            ))}
-          </select>
           <input
             className="input"
             type="password"
@@ -206,8 +326,8 @@ export function Settings({
           </button>
         </form>
         <p className="card__note">
-          The value is written straight to the configuration file with private
-          permissions and is never shown again, logged, or sent anywhere by this console.
+          The credential goes to {settings.config.path} with mode 0600 and is never shown
+          again, logged, passed in argv, or sent anywhere by this console.
         </p>
         {notice ? <p className="card__note">{notice}</p> : null}
         {error ? <div className="banner banner--error" role="alert">{error}</div> : null}

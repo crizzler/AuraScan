@@ -49,6 +49,7 @@ describe("desktop shell boundary", () => {
       "aurascan:open-report",
       "aurascan:settings",
       "aurascan:set-ai-key",
+      "aurascan:configure-ai",
       "aurascan:instruction-review",
       "aurascan:instruction-scan",
       "aurascan:instruction-approve",
@@ -74,6 +75,7 @@ describe("desktop shell boundary", () => {
   it("never passes a credential through argv or the environment", () => {
     expect(mainSource).toContain("helpers.validSecret(secret)");
     expect(mainSource).toContain('helpers.actionArgv("set_ai_key", { provider })');
+    expect(mainSource).toContain('helpers.actionArgv("configure_ai", values || {})');
     expect(mainSource).toMatch(/input: secret \+ "\\n"/);
     expect(mainSource).not.toContain("API_KEY");
   });

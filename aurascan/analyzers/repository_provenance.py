@@ -10,10 +10,11 @@ import os
 import posixpath
 import re
 import shlex
+from bisect import bisect_left
 from pathlib import Path, PurePosixPath
 from typing import Dict, Iterable, List, NamedTuple, Optional, Sequence, Set, Tuple
 
-from aurascan.analyzers.aur_propagation import _active_shell_text
+from aurascan.analyzers.aur_propagation import _active_shell_text, _mask_shell_comments
 from aurascan.analyzers.python_bytecode import (
     PYTHON_PRECOMPILED_KINDS,
     python_precompiled_findings,
@@ -281,6 +282,10 @@ class _FunctionInvocation(NamedTuple):
 class RequiredRepositoryPaths(NamedTuple):
     paths: Tuple[str, ...]
     complete: bool
+    # Construct family when the PKGBUILD command scope could not be classified.
+    # Bound to this capture result so a later analysis of a saved input cannot
+    # inherit another input's diagnostic.
+    family: str = ""
 
 
 def _resolve(token: str, constants: Dict[str, str]) -> str:
@@ -388,6 +393,7 @@ def _scoped_commands(
     *,
     top_level_repository_cwd: bool = False,
     lifecycle_kind: str = "pkgbuild",
+    family: Optional[List[str]] = None,
 ) -> Optional[List[_ScopedCommand]]:
     """Return reachable commands with constants valid at that point.
 
@@ -397,10 +403,15 @@ def _scoped_commands(
     positional values are propagated per invocation.  Function-local
     assignments do not leak into a different invocation, and a later
     assignment never resolves an earlier command.
+
+    ``family`` receives the single-element split-classification diagnostic for
+    this exact call, so callers no longer share module state.
     """
 
     if lifecycle_kind not in {"install_hook", "pkgbuild"}:
         return None
+    if family is not None:
+        family[:] = [""]
     if (
         _SIMPLE_STDOUT_REDIRECTION_MARKER in text
         or _commands_and_constants(text) is None
@@ -419,13 +430,10 @@ def _scoped_commands(
         definitions[region.name] = region
 
     top_level = list(active)
-    top_level_original = list(text)
     for region in regions:
         for index in range(region.start, region.end):
             if top_level[index] not in {"\n", "\r"}:
                 top_level[index] = " "
-            if top_level_original[index] not in {"\n", "\r"}:
-                top_level_original[index] = " "
     (
         top_commands,
         globals_after,
@@ -448,8 +456,9 @@ def _scoped_commands(
 
     split_lifecycle_roots = (
         _declared_split_package_functions(
-            "".join(top_level_original),
+            text,
             definitions,
+            family,
         )
         if lifecycle_kind == "pkgbuild"
         else set()
@@ -585,9 +594,509 @@ def _scoped_commands(
     return collected
 
 
+_SPLIT_PKGNAME_TOKEN = re.compile(r"(?<![A-Za-z0-9_])pkgname(?![A-Za-z0-9_])")
+_SPLIT_DECLARATION = re.compile(r"pkgname[ \t]*=[ \t]*(.*)", re.DOTALL)
+_SPLIT_HEREDOC_OPERATOR = re.compile(r"<<(?!<)-?")
+_SPLIT_COMMAND_WORD = re.compile(r"([A-Za-z_.][A-Za-z0-9_.+-]*)")
+_SPLIT_CASE_KEYWORD = re.compile(r"(?<![A-Za-z0-9_])(case|esac)(?![A-Za-z0-9_])")
+_SPLIT_NUMERIC_OPERATOR = re.compile(
+    r"(?<![A-Za-z0-9_-])-(?:eq|ne|lt|le|gt|ge)(?![A-Za-z0-9_-])"
+)
+_SPLIT_COMPUTED_TARGET = re.compile(
+    r"(?:\$[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\})(?:=.*)?"
+)
+_SPLIT_COMPUTED_ASSIGNMENT = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*=(?:\$[A-Za-z_][A-Za-z0-9_]*"
+    r"|\$\{[A-Za-z_][A-Za-z0-9_]*\})"
+)
+_SPLIT_NAMEREF_FLAG = re.compile(r"[-+][A-Za-z]*n[A-Za-z]*")
+_SPLIT_OPAQUE_COMMANDS = frozenset({"eval", "source", "."})
+_SPLIT_MUTATOR_COMMANDS = frozenset(
+    {
+        "declare", "export", "getopts", "let", "local", "mapfile", "printf",
+        "read", "readarray", "readonly", "typeset", "unset",
+    }
+)
+_SPLIT_COMMAND_SEPARATORS = frozenset(";|&{}\n\r")
+# Commands whose argument positions are declarations, not references: with an
+# integer or trace attribute the right-hand side is evaluated as arithmetic, so
+# no occurrence inside their arguments is inert (Red amendment B).
+_SPLIT_DECLARATION_COMMANDS = frozenset(
+    {"declare", "export", "local", "readonly", "typeset"}
+)
+# Leading words that do not run themselves; the command after them is the
+# effective one (compound-command positions and command/builtin prefixes).
+_SPLIT_COMMAND_PREFIXES = frozenset(
+    {
+        "!",
+        "{",
+        "}",
+        "builtin",
+        "command",
+        "do",
+        "elif",
+        "else",
+        "exec",
+        "if",
+        "nohup",
+        "then",
+        "time",
+        "until",
+        "while",
+    }
+)
+_SPLIT_ASSIGNMENT_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*(?=\s|$)")
+# Scalar assignment head, but not an array literal (``x=(``): the elements of
+# an array literal are separate words, so the arithmetic RHS rule does not
+# apply to them.
+_SPLIT_ASSIGNMENT_HEAD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=(?!\()")
+# Bounded so a pathological prefix run still yields one decision.
+_MAX_SPLIT_PREFIX_STRIPS = 8
+_MAX_SPLIT_HELPER_DEPTH = 8
+_MAX_SPLIT_HELPER_VISITS = 64
+_SPLIT_EVIDENCE_FAMILIES = frozenset(
+    {
+        "arithmetic context",
+        "builtin target write",
+        "command-prefix assignment",
+        "computed variable name",
+        "dynamic assignment",
+        "helper function mutation",
+        "multiple declarations",
+        "opaque evaluation (eval/source)",
+        "parameter-expansion operator",
+        "unsupported reference context",
+    }
+)
+
+class _SplitIncomplete(Exception):
+    """A fail-closed split-package classification with a construct family."""
+
+    def __init__(self, family: str) -> None:
+        super().__init__(family)
+        self.family = family
+
+
+def _split_command_anchor(text: str, position: int) -> bool:
+    """Return whether ``position`` starts a complete simple command.
+
+    Bash treats ``((pkgname=x))`` and ``$((pkgname))`` as arithmetic, but the
+    shared segmenter collapses them into a bare ``pkgname=x`` segment.  A
+    command start is the beginning of the text or a separator; a ``(`` before
+    the word proves the segment is not a top-level declaration.
+    """
+
+    index = position - 1
+    while index >= 0 and text[index] in " \t\r":
+        index -= 1
+    if index < 0:
+        return True
+    return text[index] in _SPLIT_COMMAND_SEPARATORS
+
+
+def _split_exact_reference(text: str, position: int) -> bool:
+    """Return whether the occurrence is byte-exact ``$pkgname`` or ``${pkgname}``."""
+
+    if position >= 2 and text.startswith("${pkgname}", position - 2):
+        return position + 7 < len(text) and text[position + 7] == "}"
+    if position >= 1 and text.startswith("$pkgname", position - 1):
+        following = text[position + 7:position + 8]
+        return not following or not (following.isalnum() or following == "_")
+    return False
+
+
+def _split_segment_start(text: str, position: int) -> int:
+    """Return the offset where the command word containing ``position`` starts."""
+
+    start = position
+    while start > 0 and text[start - 1] not in _SPLIT_COMMAND_SEPARATORS:
+        start -= 1
+    return start
+
+
+def _split_containing_word(text: str, position: int) -> str:
+    """Return the maximal non-whitespace word containing ``position``.
+
+    Red amendment A requires the containing word (not the token) to decide the
+    arithmetic channel, because ``arr[$pkgname]=x`` is arithmetic only because
+    of the bracket adjacency.
+    """
+
+    start = position
+    while start > 0 and not text[start - 1].isspace():
+        start -= 1
+    end = position
+    while end < len(text) and not text[end].isspace():
+        end += 1
+    return text[start:end]
+
+
+def _split_arithmetic_context(text: str, position: int) -> bool:
+    """Return whether the occurrence sits in arithmetic evaluation context.
+
+    Bash evaluates array subscripts as arithmetic expressions, so bracket
+    adjacency alone proves the occurrence is arithmetic even when it is not
+    wrapped in ``$((``/``((``/``let``.  The deprecated ``$[ ]`` form is caught
+    through its segment token.  Unrecognized positions fall through to the
+    caller, which then refuses the whole scope.
+    """
+
+    word = _split_containing_word(text, position)
+    if "[" in word or "]" in word:
+        return True
+    if "$[" in text[_split_segment_start(text, position):position]:
+        return True
+
+    depth = 0
+    index = position - 1
+    while index >= 0:
+        character = text[index]
+        if character == ")":
+            depth += 1
+        elif character == "(":
+            if depth:
+                depth -= 1
+            elif index >= 1 and text[index - 1] == "(":
+                # ``((`` and ``$((`` both evaluate arithmetic.
+                return True
+            elif index >= 1 and text[index - 1] == "$":
+                # Plain command substitution is classified separately.
+                return False
+        elif depth == 0 and character in _SPLIT_COMMAND_SEPARATORS:
+            break
+        index -= 1
+    return (
+        re.match(
+            r"[ \t]*let(?![A-Za-z0-9_])",
+            text[_split_segment_start(text, position):position],
+        )
+        is not None
+    )
+
+
+def _split_assignment_arithmetic_rhs(text: str, position: int) -> bool:
+    """Return whether the occurrence is a non-exact scalar assignment value.
+
+    A bare ``x=$pkgname`` is a plain string value, but ``x=${pkgname}+0`` and
+    ``x=${pkgname}-suffix`` concatenate further bytes onto the expansion.  An
+    integer-attributed assignment would evaluate that as arithmetic and could
+    rebind ``pkgname`` recursively; v1 cannot see the attribute here, so it
+    refuses anything that is not exactly the reference.  Array literals
+    (``x=(...)``) keep their existing element wording and are exempt.
+    """
+
+    start = position
+    while start > 0 and not text[start - 1].isspace():
+        start -= 1
+    prefix = text[start:position]
+    if _SPLIT_ASSIGNMENT_HEAD.match(prefix) is None:
+        return False
+    end = (
+        position + 8
+        if position >= 2 and text.startswith("${pkgname}", position - 2)
+        else position + 7
+    )
+    while end < len(text) and not text[end].isspace():
+        end += 1
+    tail = text[position + 7:end]
+    if position >= 2 and text.startswith("${pkgname}", position - 2):
+        if tail.startswith("}"):
+            tail = tail[1:]
+    if tail.endswith(("\"", "'")):
+        tail = tail[:-1]
+    return bool(tail.strip(";|&"))
+
+
+def _split_effective_command(segment: str) -> Tuple[str, str]:
+    """Return the segment without leading prefixes plus its effective command.
+
+    ``if true; then eval "$v"; fi`` reaches the segmenter as ``then eval
+    "$v"`` and ``x=1 eval "$v"`` hides behind an assignment word.  Both the
+    mutation screen and helper resolution must judge the command that actually
+    runs, not the first word.  Normalization is textual and bounded: at most
+    ``_MAX_SPLIT_PREFIX_STRIPS`` leading tokens are removed and an unrecognized
+    token ends the walk with itself as the command.
+    """
+
+    text = segment.lstrip()
+    for _strip in range(_MAX_SPLIT_PREFIX_STRIPS):
+        if not text:
+            return text, ""
+        if text[0] in "{!}":
+            text = text[1:].lstrip()
+            continue
+        assignment = _SPLIT_ASSIGNMENT_WORD.match(text)
+        if assignment is not None:
+            text = text[assignment.end():].lstrip()
+            continue
+        word_match = _SPLIT_COMMAND_WORD.match(text)
+        if word_match is None:
+            return text, ""
+        command = word_match.group(1)
+        if command not in _SPLIT_COMMAND_PREFIXES:
+            return text, command
+        text = text[word_match.end():].lstrip()
+        # ``command``/``builtin``/``exec``/``time`` take their own flags.
+        while text.startswith("-"):
+            flag_end = 0
+            while flag_end < len(text) and not text[flag_end].isspace():
+                flag_end += 1
+            text = text[flag_end:].lstrip()
+    if text:
+        # Prefix stripping is bounded so a pathological run cannot loop, but
+        # exhaustion must fail closed: an unscreened trailing token could be
+        # ``eval``/``unset`` or a mutating helper.  Returning an empty command
+        # here would make both the mutation screen and helper resolution skip
+        # the segment entirely.
+        raise _SplitIncomplete("command-prefix assignment")
+    return text, ""
+
+
+def _split_numeric_test_context(text: str, position: int) -> bool:
+    """Return whether the occurrence is an arithmetic operand of ``[[ ... ]]``."""
+
+    opened = text.rfind("[[", 0, position)
+    if opened < 0:
+        return False
+    closed = text.find("]]", position)
+    window = text[opened:closed + 2 if closed >= 0 else len(text)]
+    return _SPLIT_NUMERIC_OPERATOR.search(window) is not None
+
+
+def _split_subscript_context(text: str, position: int) -> bool:
+    """Return whether the occurrence is an array subscript inside ``${...}``."""
+
+    opened = text.rfind("${", 0, position)
+    if opened < 0:
+        return False
+    if text.find("}", opened, position) >= 0:
+        return False
+    inner = text[opened + 2:position]
+    return "[" in inner and "]" not in inner
+
+
+def _split_in_case(text: str, position: int) -> bool:
+    """Return whether the occurrence lies at or inside a ``case`` construct."""
+
+    depth = 0
+    for match in reversed(list(_SPLIT_CASE_KEYWORD.finditer(text, 0, position))):
+        if match.group(1) == "esac":
+            depth += 1
+        elif depth:
+            depth -= 1
+        else:
+            return True
+    return False
+
+
+def _split_reference_family(text: str, position: int) -> str:
+    """Name the construct family for a non-exact occurrence."""
+
+    if position >= 1 and text[position - 1] == "$":
+        return "parameter-expansion operator"
+    if position >= 2 and text[position - 2:position] == "${":
+        return "parameter-expansion operator"
+    return "dynamic assignment"
+
+
+def _split_mutation_family(segment: str) -> Optional[str]:
+    """Name the construct family when a segment can write ``pkgname``.
+
+    Tokens which spell ``pkgname`` are also rejected by the reference check.
+    This screen covers the channels that never spell the literal name because
+    the target is a computed variable.  Prefixes, assignment words and
+    compound-command positions are normalized away first, so the screen judges
+    the command that actually runs.
+    """
+
+    normalized, command = _split_effective_command(segment)
+    if not command:
+        return None
+    if command == "source" and normalized.lstrip().startswith("="):
+        # ``source=(...)`` is an assignment word, not the sourcing builtin.
+        return None
+    if command in _SPLIT_OPAQUE_COMMANDS:
+        return "opaque evaluation (eval/source)"
+    if command not in _SPLIT_MUTATOR_COMMANDS:
+        return None
+    try:
+        words = shlex.split(normalized, comments=False, posix=True)
+    except ValueError:
+        return "builtin target write"
+    arguments = words[1:]
+    if command == "printf":
+        for index, value in enumerate(arguments):
+            if value == "-v":
+                target = arguments[index + 1] if index + 1 < len(arguments) else ""
+                return (
+                    "computed variable name"
+                    if "$" in target
+                    else "builtin target write"
+                )
+            if value.startswith("-v") and len(value) > 2:
+                return (
+                    "computed variable name"
+                    if "$" in value[2:]
+                    else "builtin target write"
+                )
+        return None
+    if command in {"declare", "typeset"} and any(
+        _SPLIT_NAMEREF_FLAG.fullmatch(value) for value in arguments
+    ):
+        # A nameref target can resolve to ``pkgname``; the write-through that
+        # follows spells only the nameref.
+        if any("$" in value for value in arguments):
+            return "computed variable name"
+    if any(
+        _SPLIT_COMPUTED_TARGET.fullmatch(value)
+        or _SPLIT_COMPUTED_ASSIGNMENT.fullmatch(value)
+        for value in arguments
+    ):
+        return "computed variable name"
+    return None
+
+
+def _split_normalized(text: str) -> Tuple[str, List[int]]:
+    """Strip line continuations and keep a normalized→raw index map.
+
+    The shared segmenter drops a backslash-newline pair entirely, so segment
+    text can no longer be located in the raw text.  Normalizing once keeps
+    offsets meaningful without re-implementing the splitter.
+    """
+
+    output: List[str] = []
+    index_map: List[int] = []
+    index = 0
+    while index < len(text):
+        if text[index] == "\\" and index + 1 < len(text) and text[index + 1] == "\n":
+            index += 2
+            continue
+        output.append(text[index])
+        index_map.append(index)
+        index += 1
+    index_map.append(len(text))
+    return "".join(output), index_map
+
+
+def _split_collect_declarations(
+    text: str,
+    windows: Dict[str, Tuple[int, int]],
+    span_of: Dict[str, int],
+    spans: List[Tuple[int, int]],
+    scope_index: int,
+    window: Tuple[int, int],
+    depth: int,
+    visiting: frozenset,
+    visits: List[int],
+) -> List[str]:
+    """Classify one shell scope and return its canonical declaration values.
+
+    ``text`` is the normalized text and keeps function bodies intact.  Only
+    segments inside ``window`` are classified, and segments inside a nested
+    function span are skipped so inner bodies are reached through their own
+    call sites.
+    """
+
+    if depth > _MAX_SPLIT_HELPER_DEPTH:
+        raise _SplitIncomplete("helper function mutation")
+    base, end = window
+    body = text[base:end]
+    # Heredoc bodies reach the segmenter as ordinary segments; v1 does not
+    # prove delimiter state, so data lines must not manufacture roots.  Only
+    # heredocs in this scope count: a nested body is classified through its
+    # own call site.
+    heredoc_window = list(body)
+    for index, (span_start, span_end) in enumerate(spans):
+        if index == scope_index:
+            continue
+        for position in range(max(span_start, base), min(span_end, end)):
+            if heredoc_window[position - base] not in {"\n", "\r"}:
+                heredoc_window[position - base] = " "
+    if _SPLIT_HEREDOC_OPERATOR.search(_mask_shell_comments("".join(heredoc_window))):
+        raise _SplitIncomplete("unsupported reference context")
+
+    declarations: List[str] = []
+    cursor = 0
+    for segment, _line in _iter_shell_segments(body):
+        stripped = segment.strip()
+        if not stripped:
+            continue
+        start = body.find(stripped, cursor)
+        if start < 0:
+            first = body.find(segment, cursor)
+            if first < 0:
+                raise _SplitIncomplete("unsupported reference context")
+            start = first
+        cursor = start + len(stripped)
+        position_start = base + start
+        if any(
+            span_start <= position_start < span_end
+            for index, (span_start, span_end) in enumerate(spans)
+            if index != scope_index
+        ):
+            continue
+
+        occurrences = list(_SPLIT_PKGNAME_TOKEN.finditer(stripped))
+        declaration = _SPLIT_DECLARATION.fullmatch(stripped)
+        if declaration is not None and _split_command_anchor(text, position_start):
+            declarations.append(declaration.group(1).strip())
+            continue
+
+        normalized, command = _split_effective_command(stripped)
+        if command in _SPLIT_DECLARATION_COMMANDS and occurrences:
+            # Red amendment B: declaration arguments are not references.  With
+            # an integer or trace attribute the right hand side is arithmetic
+            # and can rebind ``pkgname``; without one the argument is still not
+            # a provable read.  Conservative either way.
+            raise _SplitIncomplete("arithmetic context")
+
+        family = _split_mutation_family(stripped)
+        if family is not None:
+            raise _SplitIncomplete(family)
+        if command == "let":
+            raise _SplitIncomplete("arithmetic context")
+
+        if command and command in windows:
+            if command in visiting:
+                raise _SplitIncomplete("helper function mutation")
+            visits[0] += 1
+            if visits[0] > _MAX_SPLIT_HELPER_VISITS:
+                raise _SplitIncomplete("helper function mutation")
+            helper_index = span_of[command]
+            if _split_collect_declarations(
+                text,
+                windows,
+                span_of,
+                spans,
+                helper_index,
+                windows[command],
+                depth + 1,
+                visiting | {command},
+                visits,
+            ):
+                # A function-local assignment reselects nothing at top level.
+                raise _SplitIncomplete("helper function mutation")
+
+        for match in occurrences:
+            position = position_start + match.start()
+            if _split_in_case(text, position):
+                raise _SplitIncomplete("unsupported reference context")
+            if (
+                _split_arithmetic_context(text, position)
+                or _split_subscript_context(text, position)
+                or _split_numeric_test_context(text, position)
+                or _split_assignment_arithmetic_rhs(text, position)
+            ):
+                raise _SplitIncomplete("arithmetic context")
+            if not _split_exact_reference(text, position):
+                raise _SplitIncomplete(_split_reference_family(text, position))
+    return declarations
+
+
 def _declared_split_package_functions(
     top_level: str,
     definitions: Dict[str, _FunctionRegion],
+    family: Optional[List[str]] = None,
 ) -> Optional[Set[str]]:
     """Return only split-package functions proven reachable by ``pkgname``.
 
@@ -597,26 +1106,58 @@ def _declared_split_package_functions(
     This intentionally accepts only one bounded literal scalar/array
     declaration.  If split functions exist but their reachability is dynamic,
     correlation coverage is incomplete rather than guessed.
+
+    ``family`` receives the single-element construct family when the
+    classification fails, so a caller can bind the diagnostic to the exact
+    input instead of a module global.
     """
+
+    def fail(value: str) -> None:
+        if family is not None:
+            family[:] = [value]
 
     available = {
         name for name in definitions if name.startswith("package_")
     }
     if not available:
+        fail("")
         return set()
 
-    declarations: List[str] = []
-    suspicious_mutation = False
-    for segment, _line in _iter_shell_segments(top_level):
-        stripped = segment.strip()
-        if not re.search(r"(?:^|[^A-Za-z0-9_])pkgname", stripped):
-            continue
-        match = re.fullmatch(r"pkgname[ \t]*=[ \t]*(.*)", stripped, re.DOTALL)
-        if match is None:
-            suspicious_mutation = True
-            continue
-        declarations.append(match.group(1).strip())
-    if suspicious_mutation or len(declarations) != 1:
+    try:
+        normalized, index_map = _split_normalized(top_level)
+        spans: List[Tuple[int, int]] = []
+        windows: Dict[str, Tuple[int, int]] = {}
+        span_of: Dict[str, int] = {}
+        for region in definitions.values():
+            span_of[region.name] = len(spans)
+            spans.append(
+                (
+                    bisect_left(index_map, region.start),
+                    bisect_left(index_map, region.end),
+                )
+            )
+            windows[region.name] = (
+                bisect_left(index_map, region.body_start),
+                bisect_left(index_map, region.body_end),
+            )
+        declarations = _split_collect_declarations(
+            normalized,
+            windows,
+            span_of,
+            spans,
+            -1,
+            (0, len(normalized)),
+            0,
+            frozenset(),
+            [0],
+        )
+    except _SplitIncomplete as exc:
+        fail(exc.family)
+        return None
+    fail("")
+
+    if len(declarations) != 1:
+        fail("multiple declarations" if declarations else "dynamic assignment")
         return None
 
     raw_value = declarations[0]
@@ -624,20 +1165,32 @@ def _declared_split_package_functions(
         not raw_value
         or any(marker in raw_value for marker in ("$", "`", "$(", ";", "|", "&"))
     ):
+        fail("dynamic assignment")
         return None
     if raw_value.startswith("("):
         if not raw_value.endswith(")"):
+            fail("unsupported reference context")
             return None
         raw_value = raw_value[1:-1].strip()
-    elif "(" in raw_value or ")" in raw_value:
-        return None
+        parenthesized = True
+    else:
+        parenthesized = False
+        if "(" in raw_value or ")" in raw_value:
+            fail("unsupported reference context")
+            return None
     try:
         names = shlex.split(raw_value, comments=False, posix=True)
     except ValueError:
+        fail("unsupported reference context")
         return None
     if not names or len(names) > _MAX_FUNCTION_SCOPES:
+        fail("unsupported reference context")
+        return None
+    if not parenthesized and len(names) != 1:
+        fail("command-prefix assignment")
         return None
     if any(_PACKAGE_NAME.fullmatch(name) is None for name in names):
+        fail("unsupported reference context")
         return None
     return {
         "package_" + name
@@ -1585,7 +2138,9 @@ def collect_required_repository_paths(
     analyzer = RepositoryProvenanceAnalyzer()
     paths: Set[str] = set()
     complete = True
+    family = ""
     for content_index, content in enumerate(contents):
+        content_family: List[str] = []
         scoped_commands = _scoped_commands(
             content,
             checkout_dir,
@@ -1593,9 +2148,14 @@ def collect_required_repository_paths(
             lifecycle_kind=(
                 "pkgbuild" if content_index == 0 else "install_hook"
             ),
+            family=content_family,
         )
         if scoped_commands is None:
             complete = False
+            # Only the PKGBUILD scope classifies split reachability, so only
+            # its diagnostic describes this result.
+            if content_index == 0 and content_family:
+                family = content_family[0]
             continue
         pending = [
             (
@@ -1791,7 +2351,11 @@ def collect_required_repository_paths(
                 if relative:
                     paths.add(relative)
                 if len(paths) > 256:
-                    return RequiredRepositoryPaths(tuple(sorted(paths)), complete)
+                    return RequiredRepositoryPaths(
+                        tuple(sorted(paths)),
+                        complete,
+                        family,
+                    )
             if not wrapper_complete and relevant_arguments:
                 complete = False
             nested_commands, nested_complete, nested_work = analyzer._literal_shell_commands(
@@ -1819,7 +2383,7 @@ def collect_required_repository_paths(
                 )
             elif nested_commands:
                 complete = False
-    return RequiredRepositoryPaths(tuple(sorted(paths)), complete)
+    return RequiredRepositoryPaths(tuple(sorted(paths)), complete, family)
 
 
 class RepositoryProvenanceAnalyzer:
@@ -1845,6 +2409,11 @@ class RepositoryProvenanceAnalyzer:
                 pkg_ver,
                 repository_snapshot.error_code,
                 observed_detail=repository_snapshot.failure_detail,
+                family=(
+                    repository_snapshot.required_paths_family
+                    if repository_snapshot.error_code == "required_path_ambiguous"
+                    else ""
+                ),
             )
             return AnalysisResult(
                 False,
@@ -1916,11 +2485,13 @@ class RepositoryProvenanceAnalyzer:
                 preexisting_findings,
             )
 
+        pkgbuild_family: List[str] = []
         pkgbuild_commands = _scoped_commands(
             pkgbuild_content,
             checkout_dir,
             top_level_repository_cwd=True,
             lifecycle_kind="pkgbuild",
+            family=pkgbuild_family,
         )
         if pkgbuild_commands is None:
             finding = self._incomplete_finding(
@@ -1928,6 +2499,7 @@ class RepositoryProvenanceAnalyzer:
                 pkg_name,
                 pkg_ver,
                 "command_parser_limit",
+                family=pkgbuild_family[0] if pkgbuild_family else "",
             )
             return AnalysisResult(
                 False,
@@ -1937,11 +2509,13 @@ class RepositoryProvenanceAnalyzer:
         hook_commands: List[_ScopedCommand] = []
         hook_path = str(install_hook.path or pkgbuild_path)
         if install_hook.status == INSTALL_HOOK_RESOLVED:
+            hook_family: List[str] = []
             scoped_hook = _scoped_commands(
                 install_hook.content,
                 checkout_dir,
                 top_level_repository_cwd=False,
                 lifecycle_kind="install_hook",
+                family=hook_family,
             )
             if scoped_hook is None:
                 finding = self._incomplete_finding(
@@ -1949,6 +2523,7 @@ class RepositoryProvenanceAnalyzer:
                     pkg_name,
                     pkg_ver,
                     "command_parser_limit",
+                    family=hook_family[0] if hook_family else "",
                 )
                 return AnalysisResult(
                     False,
@@ -4585,6 +5160,7 @@ class RepositoryProvenanceAnalyzer:
         pkg_ver: str,
         reason_code: str = "",
         observed_detail: str = "",
+        family: str = "",
     ) -> Finding:
         allowed_reasons = {
             "analysis_limit",
@@ -4625,6 +5201,9 @@ class RepositoryProvenanceAnalyzer:
         evidence = "bounded package-checkout inspection did not complete"
         if safe_reason:
             evidence += ": " + safe_reason.replace("_", " ")
+        safe_family = family if family in _SPLIT_EVIDENCE_FAMILIES else ""
+        if safe_family:
+            evidence += " (" + safe_family + ")"
         observed = ""
         safe_detail = sanitize_terminal_text(
             observed_detail,

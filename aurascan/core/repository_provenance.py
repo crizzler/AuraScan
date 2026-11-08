@@ -111,6 +111,11 @@ class RepositorySnapshot:
     entry_count: int = 0
     editor_tasks: Tuple[RepositoryEditorTask, ...] = ()
     source_owned_subtrees: Tuple[str, ...] = ()
+    # Split-classification diagnostic for the captured PKGBUILD, when capture
+    # failed on ambiguous required paths.  Diagnostic only: deliberately not
+    # part of the snapshot digest, which is derived from the separate PKGBUILD
+    # and hook identities.
+    required_paths_family: str = ""
 
 
 @dataclass
@@ -158,6 +163,7 @@ def capture_repository_snapshot(
     independently_bound_relative_paths: Iterable[object] = (),
     required_relative_paths: Iterable[object] = (),
     required_paths_complete: bool = True,
+    required_paths_family: str = "",
 ) -> RepositorySnapshot:
     """Capture a stable, no-follow package-directory identity.
 
@@ -181,6 +187,7 @@ def capture_repository_snapshot(
             entry_count,
             (),
             (),
+            required_paths_family=required_paths_family,
         )
     try:
         excluded_paths = _normalize_exclusions(excluded_relative_paths)
@@ -206,6 +213,7 @@ def capture_repository_snapshot(
             (),
             (),
             failure_detail=exc.detail,
+            required_paths_family=required_paths_family,
         )
 
     state = _CaptureState(
@@ -1406,6 +1414,7 @@ def _build_snapshot(
     editor_tasks: Sequence[RepositoryEditorTask] = (),
     source_owned_subtrees: Sequence[str] = (),
     failure_detail: str = "",
+    required_paths_family: str = "",
 ) -> RepositorySnapshot:
     ordered_entries = sorted(
         (dict(entry) for entry in entries),
@@ -1442,4 +1451,5 @@ def _build_snapshot(
         entry_count=int(entry_count),
         editor_tasks=tuple(sorted(editor_tasks, key=lambda task: task.relative_path)),
         source_owned_subtrees=tuple(sorted(source_owned_subtrees)),
+        required_paths_family=required_paths_family,
     )

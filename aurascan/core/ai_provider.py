@@ -1,6 +1,7 @@
 import ipaddress
 import json
 import os
+import re
 import socket
 import urllib.error
 import urllib.parse
@@ -18,7 +19,16 @@ class AIProviderSpec:
     api_family: str
     requires_api_key: bool = True
     local: bool = False
-    default_base_url: str = ""
+    base_url: str = ""
+    # Preset URL is authoritative for cloud presets; local presets may be
+    # overridden with a loopback URL. ``custom`` carries no preset URL.
+    user_base_url: bool = False
+
+    @property
+    def default_base_url(self) -> str:
+        """Compatibility alias for the pre-``base_url`` field name."""
+
+        return self.base_url
 
 
 @dataclass
@@ -56,11 +66,51 @@ class AIProviderConfig:
 
 
 PROVIDERS: Dict[str, AIProviderSpec] = {
-    "openai": AIProviderSpec("openai", "OpenAI", "AURASCAN_OPENAI_API_KEY", "gpt-4o", "chat_completions"),
+    "openai": AIProviderSpec(
+        "openai", "OpenAI", "AURASCAN_OPENAI_API_KEY", "gpt-4o", "chat_completions",
+        base_url="https://api.openai.com/v1",
+    ),
     "anthropic": AIProviderSpec("anthropic", "Anthropic", "AURASCAN_ANTHROPIC_API_KEY", "claude-3-5-sonnet-latest", "anthropic_messages"),
-    "deepseek": AIProviderSpec("deepseek", "DeepSeek", "AURASCAN_DEEPSEEK_API_KEY", "deepseek-chat", "chat_completions"),
+    "deepseek": AIProviderSpec(
+        "deepseek", "DeepSeek", "AURASCAN_DEEPSEEK_API_KEY", "deepseek-chat", "chat_completions",
+        base_url="https://api.deepseek.com",
+    ),
     "gemini": AIProviderSpec("gemini", "Gemini", "AURASCAN_GEMINI_API_KEY", "gemini-1.5-flash", "gemini_generate_content"),
-    "openrouter": AIProviderSpec("openrouter", "OpenRouter", "AURASCAN_OPENROUTER_API_KEY", "~openai/gpt-latest", "chat_completions"),
+    "openrouter": AIProviderSpec(
+        "openrouter", "OpenRouter", "AURASCAN_OPENROUTER_API_KEY", "~openai/gpt-latest", "chat_completions",
+        base_url="https://openrouter.ai/api/v1",
+    ),
+    "venice": AIProviderSpec(
+        "venice", "Venice.ai", "AURASCAN_VENICE_API_KEY",
+        "deepseek-v4-1-flash-uncensored", "chat_completions",
+        base_url="https://api.venice.ai/api/v1",
+    ),
+    "refuseless": AIProviderSpec(
+        "refuseless", "Refuseless", "AURASCAN_REFUSELESS_API_KEY",
+        "glm-5.3-abliterated", "chat_completions",
+        base_url="https://api.refuseless.com/v1",
+    ),
+    "experientiallabs": AIProviderSpec(
+        "experientiallabs", "ExperientialLabs", "AURASCAN_EXPERIENTIALLABS_API_KEY",
+        "deepseek-v4.1-flash-uncensored", "chat_completions",
+        base_url="https://api.experientiallabs.ai/v1",
+    ),
+    "apinex": AIProviderSpec(
+        "apinex", "Apinex", "AURASCAN_APINEX_API_KEY",
+        "gpt-6.1-sol", "chat_completions",
+        base_url="https://api.apinex.bond/v1",
+    ),
+    "xiaomi": AIProviderSpec(
+        "xiaomi", "Xiaomi MiMo", "AURASCAN_XIAOMI_API_KEY",
+        "mimo-v2.6-pro", "chat_completions",
+        base_url="https://api.xiaomimimo.com/v1",
+    ),
+    # Generic OpenAI-compatible endpoint. Both base URL and model are required
+    # from the user; nothing is guessed.
+    "custom": AIProviderSpec(
+        "custom", "Custom (OpenAI-compatible)", "AURASCAN_CUSTOM_API_KEY",
+        "", "chat_completions", user_base_url=True,
+    ),
     "lmstudio": AIProviderSpec(
         "lmstudio",
         "LM Studio",
@@ -69,7 +119,8 @@ PROVIDERS: Dict[str, AIProviderSpec] = {
         "chat_completions",
         requires_api_key=False,
         local=True,
-        default_base_url="http://127.0.0.1:1234/v1",
+        base_url="http://127.0.0.1:1234/v1",
+        user_base_url=True,
     ),
     "llamacpp": AIProviderSpec(
         "llamacpp",
@@ -79,7 +130,8 @@ PROVIDERS: Dict[str, AIProviderSpec] = {
         "chat_completions",
         requires_api_key=False,
         local=True,
-        default_base_url="http://127.0.0.1:8080/v1",
+        base_url="http://127.0.0.1:8080/v1",
+        user_base_url=True,
     ),
 }
 
@@ -210,20 +262,112 @@ def normalize_local_base_url(value: str) -> str:
     return urllib.parse.urlunsplit((parsed.scheme.lower(), netloc, "/v1", "", ""))
 
 
+MAX_BASE_URL_CHARS = 512
+MAX_MODEL_CHARS = 120
+# Same shapes the desktop shell checks. The CLI stays authoritative; the shell
+# copy only rejects obvious junk before a process is spawned.
+MODEL_PATTERN = re.compile(r"^[A-Za-z0-9._~:/@+-]{1,120}$")
+PROVIDER_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+_CUSTOM_PATH_PATTERN = re.compile(r"^[A-Za-z0-9._~%/-]*$")
+
+
+def normalize_custom_base_url(value: str) -> str:
+    """Validate and normalize a user-supplied OpenAI-compatible base URL.
+
+    HTTPS is accepted for any public host. Plain HTTP is accepted only for a
+    loopback literal. A literal private, link-local, multicast, unspecified or
+    reserved IP is refused so a typo cannot silently point the scanner at a
+    neighbour host; DNS rebinding of a public name stays a documented
+    residual.
+    """
+
+    raw = (value or "").strip()
+    if not raw:
+        raise AIProviderError("custom AI base URL is required")
+    if len(raw) > MAX_BASE_URL_CHARS:
+        raise AIProviderError("custom AI base URL is too long")
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in raw):
+        raise AIProviderError("custom AI base URL contains control characters")
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+        port = parsed.port
+    except ValueError as exc:
+        raise AIProviderError("invalid custom AI base URL") from exc
+
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise AIProviderError("custom AI base URL must use http or https")
+    if not parsed.netloc or parsed.hostname is None:
+        raise AIProviderError("custom AI base URL must include a host")
+    if parsed.username is not None or parsed.password is not None:
+        raise AIProviderError("custom AI base URL must not contain credentials")
+    if parsed.query or parsed.fragment:
+        raise AIProviderError("custom AI base URL must not contain a query or fragment")
+    if port is not None and not 1 <= port <= 65535:
+        raise AIProviderError("custom AI base URL has an invalid port")
+
+    path = parsed.path or ""
+    if not _CUSTOM_PATH_PATTERN.match(path) or ".." in path.split("/"):
+        raise AIProviderError("custom AI base URL has an unsupported path")
+
+    host = parsed.hostname.lower()
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if not literal.is_loopback and (
+            literal.is_private
+            or literal.is_link_local
+            or literal.is_multicast
+            or literal.is_unspecified
+            or literal.is_reserved
+        ):
+            raise AIProviderError("custom AI base URL must not use a private address")
+    if scheme == "http" and (literal is None or not literal.is_loopback):
+        raise AIProviderError("plain HTTP custom AI base URL must use a loopback address")
+
+    normalized_host = f"[{host}]" if ":" in host else host
+    netloc = normalized_host if port is None else f"{normalized_host}:{port}"
+    return urllib.parse.urlunsplit((scheme, netloc, path.rstrip("/"), "", ""))
+
+
+def normalize_model(value: str) -> str:
+    model = (value or "").strip()
+    if not MODEL_PATTERN.match(model):
+        raise AIProviderError("invalid AI model id")
+    return model
+
+
 def resolve_ai_config(env: Optional[Mapping[str, str]] = None) -> AIProviderConfig:
     source = env if env is not None else os.environ
     provider = source.get(AI_PROVIDER_ENV, "gemini").strip().lower() or "gemini"
     spec = get_provider_spec(provider)
     error = "" if spec else "unsupported_provider"
-    model = source.get(AI_MODEL_ENV, "").strip() or (spec.default_model if spec else "")
+    model = source.get(AI_MODEL_ENV, "").strip()
+    if not model and spec is not None:
+        # Presets keep an editable default; ``custom`` has none.
+        model = spec.default_model
 
     base_url = ""
-    if spec and spec.local:
-        candidate = source.get(AI_BASE_URL_ENV, "").strip() or spec.default_base_url
-        try:
-            base_url = normalize_local_base_url(candidate)
-        except AIProviderError:
-            error = error or "invalid_base_url"
+    if spec is not None:
+        if spec.local:
+            candidate = source.get(AI_BASE_URL_ENV, "").strip() or spec.base_url
+            try:
+                base_url = normalize_local_base_url(candidate)
+            except AIProviderError:
+                error = error or "invalid_base_url"
+        elif provider == "custom":
+            candidate = source.get(AI_BASE_URL_ENV, "").strip()
+            try:
+                base_url = normalize_custom_base_url(candidate)
+            except AIProviderError:
+                error = error or ("missing_base_url" if not candidate else "invalid_base_url")
+            if not model:
+                error = error or "missing_model"
+        else:
+            # A cloud preset owns its URL; a stale override cannot redirect it.
+            base_url = spec.base_url
 
     api_key = ""
     key_env = ""
@@ -273,25 +417,23 @@ def build_request(config: AIProviderConfig, prompt: str) -> urllib.request.Reque
     headers = {"Content-Type": "application/json"}
     payload = {}
 
-    if spec.local:
-        base_url = normalize_local_base_url(config.base_url or spec.default_base_url)
-        url = f"{base_url}/chat/completions"
+    if spec.api_family == "chat_completions":
+        if spec.local:
+            base_url = normalize_local_base_url(config.base_url or spec.base_url)
+        elif spec.provider_id == "custom":
+            base_url = normalize_custom_base_url(config.base_url)
+        else:
+            base_url = spec.base_url
+        if not base_url:
+            raise AIProviderError("AI provider has no endpoint", category="configuration")
+        url = base_url.rstrip("/") + "/chat/completions"
         if config.api_key:
             headers["Authorization"] = f"Bearer {config.api_key}"
-        payload = _chat_payload(config.model, prompt, max_tokens=1024)
-    elif config.provider == "openai":
-        url = "https://api.openai.com/v1/chat/completions"
-        headers["Authorization"] = f"Bearer {config.api_key}"
-        payload = _chat_payload(config.model, prompt)
-    elif config.provider == "deepseek":
-        url = "https://api.deepseek.com/chat/completions"
-        headers["Authorization"] = f"Bearer {config.api_key}"
-        payload = _chat_payload(config.model, prompt)
-    elif config.provider == "openrouter":
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        headers["Authorization"] = f"Bearer {config.api_key}"
-        headers["X-OpenRouter-Title"] = "AuraScan"
-        payload = _chat_payload(config.model, prompt)
+        if spec.provider_id == "openrouter":
+            headers["X-OpenRouter-Title"] = "AuraScan"
+        payload = _chat_payload(
+            config.model, prompt, max_tokens=1024 if spec.local else None
+        )
     elif config.provider == "anthropic":
         url = "https://api.anthropic.com/v1/messages"
         headers["x-api-key"] = config.api_key
@@ -367,6 +509,29 @@ def _cloud_urlopen(request: urllib.request.Request, *, timeout: int):
     return opener.open(request, timeout=timeout)
 
 
+def _is_loopback_endpoint(config: AIProviderConfig) -> bool:
+    """Return True when a custom endpoint points at the local machine.
+
+    A loopback endpoint must not inherit ``HTTP_PROXY``/``ALL_PROXY``: the
+    proxy would receive the request line, the prompt and the Bearer key.
+    """
+
+    if config.provider != "custom" or not config.base_url:
+        return False
+    try:
+        host = urllib.parse.urlsplit(config.base_url).hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def call_ai_provider(
     config: AIProviderConfig,
     prompt: str,
@@ -376,7 +541,10 @@ def call_ai_provider(
 ) -> str:
     opener = urlopen
     if opener is None:
-        opener = _local_urlopen if config.is_local else _cloud_urlopen
+        if config.is_local or _is_loopback_endpoint(config):
+            opener = _local_urlopen
+        else:
+            opener = _cloud_urlopen
     try:
         req = build_request(config, prompt)
         with opener(req, timeout=timeout) as response:

@@ -35,6 +35,8 @@ function settingsFixture(change?: (value: Record<string, unknown>) => void): unk
         requires_key: true,
         key_env: "AURASCAN_DEEPSEEK_API_KEY",
         default_model: "deepseek-chat",
+        base_url: "https://api.deepseek.com",
+        user_base_url: false,
         key_present: true,
         selected: true
       },
@@ -45,6 +47,8 @@ function settingsFixture(change?: (value: Record<string, unknown>) => void): unk
         requires_key: false,
         key_env: "AURASCAN_LOCAL_AI_API_KEY",
         default_model: "local-model",
+        base_url: "http://127.0.0.1:1234/v1",
+        user_base_url: true,
         key_present: false,
         selected: false
       }
@@ -158,6 +162,21 @@ describe("parseSettingsWrite", () => {
     }
   });
 
+  it("accepts a set_ai_config confirmation", () => {
+    const result = parseSettingsWrite({
+      schema: SETTINGS_SCHEMA,
+      action: "set_ai_config",
+      stored: true,
+      provider: "venice",
+      ai: (settingsFixture() as Record<string, any>).ai
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.ai.provider).toBe("deepseek");
+    }
+  });
+
   it("rejects anything that is not an explicit confirmation", () => {
     expect(parseSettingsWrite({ schema: SETTINGS_SCHEMA }).ok).toBe(false);
     expect(parseSettingsWrite({ schema: SETTINGS_SCHEMA, stored: false }).ok).toBe(false);
@@ -169,5 +188,37 @@ describe("parseSettingsWrite", () => {
       }).ok
     ).toBe(false);
     expect(parseSettingsWrite(null).ok).toBe(false);
+  });
+
+  it("requires an explicit boolean stored flag for both write actions", () => {
+    const ai = (settingsFixture() as Record<string, any>).ai;
+
+    for (const [action, extra] of [
+      ["set_ai_key", { provider: "deepseek" }],
+      ["set_ai_config", { provider: "venice" }]
+    ] as const) {
+      for (const stored of [false, undefined, null, "true", 1]) {
+        const payload: Record<string, unknown> = { schema: SETTINGS_SCHEMA, action, ai, ...extra };
+        if (stored !== undefined) {
+          payload.stored = stored;
+        }
+        expect([action, stored, parseSettingsWrite(payload).ok]).toEqual([action, stored, false]);
+      }
+      expect(parseSettingsWrite({ schema: SETTINGS_SCHEMA, action, stored: true, ai, ...extra }).ok).toBe(
+        true
+      );
+    }
+  });
+
+  it("rejects an unknown or missing write action even with stored true", () => {
+    const ai = (settingsFixture() as Record<string, any>).ai;
+
+    expect(parseSettingsWrite({ schema: SETTINGS_SCHEMA, stored: true, ai }).ok).toBe(false);
+    expect(
+      parseSettingsWrite({ schema: SETTINGS_SCHEMA, action: "read_settings", stored: true, ai }).ok
+    ).toBe(false);
+    expect(
+      parseSettingsWrite({ schema: SETTINGS_SCHEMA, action: "set_ai_config", stored: true, ai }).ok
+    ).toBe(false);
   });
 });

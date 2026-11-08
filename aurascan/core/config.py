@@ -4,7 +4,7 @@ import re
 import sys
 import tempfile
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 MAX_SCRIPT_SIZE = 5 * 1024 * 1024  # 5 MB
 SYSTEM_ENV_PATH = Path("/etc/aurascan/.env")
@@ -100,9 +100,16 @@ def _format_env_line(key: str, value: str) -> str:
     return f"{key}={value}"
 
 
-def write_user_env(updates: Mapping[str, str], path: Optional[Path] = None) -> Path:
+def write_user_env(
+    updates: Mapping[str, str],
+    path: Optional[Path] = None,
+    *,
+    remove_keys: Sequence[str] = (),
+) -> Path:
     env_file = path or user_env_path()
     ensure_user_config_dir(env_file.parent)
+
+    drop = {key for key in remove_keys if key not in updates}
 
     existing_lines = []
     if env_file.exists():
@@ -112,6 +119,10 @@ def write_user_env(updates: Mapping[str, str], path: Optional[Path] = None) -> P
     seen = set()
     for line in existing_lines:
         key = _line_key(line)
+        if key and key in drop:
+            # Dropped keys remove their line entirely so a stale override cannot
+            # survive a provider switch.
+            continue
         if key and key in updates:
             updated_lines.append(_format_env_line(key, str(updates[key])))
             seen.add(key)

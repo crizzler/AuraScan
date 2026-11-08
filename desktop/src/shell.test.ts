@@ -1,7 +1,11 @@
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
+const here = dirname(fileURLToPath(import.meta.url));
 const helpers = require("../electron/argv.cjs") as {
   CONTRACT: string;
   PACKAGED_CLI: string;
@@ -14,14 +18,14 @@ const helpers = require("../electron/argv.cjs") as {
   SNAPSHOT_TIMEOUT_MS: number;
   READ_ONLY_ACTIONS: readonly string[];
   MUTATING_ACTIONS: readonly string[];
-  AI_PROVIDERS: readonly string[];
+  validBaseUrl: (value: unknown) => boolean;
   resolveCli: (isPackaged: boolean, env: Record<string, string | undefined>) => string;
   buildEnv: (env: Record<string, string | undefined>) => Record<string, string>;
   actionArgv: (id: string, values?: Record<string, unknown>) => string[] | null;
   validSecret: (value: unknown) => boolean;
   parseSnapshot: (stdout: string) => { contract: string };
   parseSettings: (stdout: string) => { schema: string };
-  parseSettingsWrite: (stdout: string) => { schema: string; stored: boolean };
+  parseSettingsWrite: (stdout: string) => { schema: string; stored: boolean; action?: string };
   parseReview: (stdout: string) => { schema: string; report_id: string };
   parseInstructionAction: (stdout: string) => { status: string; file_id: string };
   parseIncidents: (stdout: string) => { schema: string; incident_id: string };
@@ -85,9 +89,19 @@ describe("shell action argv", () => {
     expect(
       helpers.actionArgv("set_ai_key", { provider: "deepseek" })
     ).toEqual(["settings", "set-ai-key", "--provider", "deepseek", "--json"]);
-    expect(helpers.actionArgv("set_ai_key", { provider: "nope" })).toBeNull();
+    // The provider list is the CLI's; the shell only checks the shape.
+    expect(helpers.actionArgv("set_ai_key", { provider: "venice" })).toEqual([
+      "settings",
+      "set-ai-key",
+      "--provider",
+      "venice",
+      "--json"
+    ]);
+    expect(helpers.actionArgv("set_ai_key", { provider: "Nope!" })).toBeNull();
+    expect(helpers.actionArgv("set_ai_key", { provider: "-oops" })).toBeNull();
     expect(helpers.MUTATING_ACTIONS).toEqual([
       "set_ai_key",
+      "configure_ai",
       "instruction_scan",
       "instruction_approve",
       "instruction_disable",
@@ -269,8 +283,227 @@ describe("shell settings parsing", () => {
 
     expect(helpers.parseSettingsWrite(confirmation).stored).toBe(true);
     expect(() => helpers.parseSettingsWrite(confirmation.replace('"stored":true', '"stored":false'))).toThrow();
+    // Missing, null and non-boolean markers are not confirmations.
+    for (const stored of [undefined, null, "true", 1]) {
+      const payload: Record<string, unknown> = {
+        schema: "aurascan-settings/1",
+        action: "set_ai_key",
+        provider: "deepseek",
+        ai: { provider: "deepseek", key_present: true }
+      };
+      if (stored !== undefined) {
+        payload.stored = stored;
+      }
+      expect(() => helpers.parseSettingsWrite(JSON.stringify(payload))).toThrow();
+    }
+    // An unrelated action must not pass on stored alone.
+    expect(() =>
+      helpers.parseSettingsWrite(
+        JSON.stringify({ schema: "aurascan-settings/1", action: "read_settings", stored: true, ai: { key_present: false } })
+      )
+    ).toThrow();
     expect(() => helpers.parseSettingsWrite(JSON.stringify({ schema: "aurascan-settings/1" }))).toThrow();
     // A write response is not a full settings payload.
     expect(() => helpers.parseSettings(confirmation)).toThrow();
+  });
+
+  it("accepts a set-ai-config confirmation too", () => {
+    const confirmation = JSON.stringify({
+      schema: "aurascan-settings/1",
+      action: "set_ai_config",
+      stored: true,
+      provider: "venice",
+      ai: { provider: "venice", key_present: true, enabled: true }
+    });
+
+    expect(helpers.parseSettingsWrite(confirmation).action).toBe("set_ai_config");
+    expect(() =>
+      helpers.parseSettingsWrite(confirmation.replace('"provider":"venice"', '"provider":"Nope!"'))
+    ).toThrow();
+    for (const stored of [false, undefined, "true", 1]) {
+      const payload: Record<string, unknown> = {
+        schema: "aurascan-settings/1",
+        action: "set_ai_config",
+        provider: "venice",
+        ai: { provider: "venice", key_present: true }
+      };
+      if (stored !== undefined) {
+        payload.stored = stored;
+      }
+      expect(() => helpers.parseSettingsWrite(JSON.stringify(payload))).toThrow();
+    }
+  });
+});
+
+describe("configure_ai argv", () => {
+  it("builds the exact fixed argv and omits empty optional flags", () => {
+    expect(
+      helpers.actionArgv("configure_ai", {
+        provider: "venice",
+        model: "deepseek-v4-1-flash-uncensored",
+        enabled: true
+      })
+    ).toEqual([
+      "settings",
+      "set-ai-config",
+      "--provider",
+      "venice",
+      "--model",
+      "deepseek-v4-1-flash-uncensored",
+      "--enabled",
+      "1",
+      "--json"
+    ]);
+    expect(helpers.actionArgv("configure_ai", { provider: "openai", enabled: false })).toEqual([
+      "settings",
+      "set-ai-config",
+      "--provider",
+      "openai",
+      "--enabled",
+      "0",
+      "--json"
+    ]);
+    expect(
+      helpers.actionArgv("configure_ai", {
+        provider: "custom",
+        model: "m",
+        base_url: "https://api.example.invalid/v1",
+        enabled: false
+      })
+    ).toEqual([
+      "settings",
+      "set-ai-config",
+      "--provider",
+      "custom",
+      "--model",
+      "m",
+      "--base-url",
+      "https://api.example.invalid/v1",
+      "--enabled",
+      "0",
+      "--json"
+    ]);
+  });
+
+  it("refuses a malformed provider, model, URL or enabled flag", () => {
+    expect(helpers.actionArgv("configure_ai", {})).toBeNull();
+    expect(helpers.actionArgv("configure_ai", { provider: "Nope!" })).toBeNull();
+    expect(helpers.actionArgv("configure_ai", { provider: "-oops" })).toBeNull();
+    expect(helpers.actionArgv("configure_ai", { provider: "venice", model: "bad model" })).toBeNull();
+    expect(helpers.actionArgv("configure_ai", { provider: "venice", model: "x".repeat(121) })).toBeNull();
+    expect(
+      helpers.actionArgv("configure_ai", { provider: "custom", base_url: "http://api.example.invalid/v1" })
+    ).toBeNull();
+    expect(
+      helpers.actionArgv("configure_ai", { provider: "custom", base_url: "https://192.168.1.4/v1" })
+    ).toBeNull();
+    expect(
+      helpers.actionArgv("configure_ai", { provider: "custom", base_url: "https://u:p@api.example.invalid/v1" })
+    ).toBeNull();
+    expect(
+      helpers.actionArgv("configure_ai", { provider: "custom", base_url: "https://api.example.invalid/v1?x=1" })
+    ).toBeNull();
+    expect(
+      helpers.actionArgv("configure_ai", { provider: "custom", base_url: "https://api.example.invalid/" + "a".repeat(500) })
+    ).toBeNull();
+    expect(helpers.actionArgv("configure_ai", { provider: "openai", enabled: "yes" })).toBeNull();
+    // No secret ever rides in argv.
+    const argv = helpers.actionArgv("configure_ai", { provider: "venice", model: "m" }) || [];
+    expect(argv).not.toContain("sk-test");
+  });
+
+  it("accepts loopback literals for plain HTTP", () => {
+    for (const url of [
+      "http://127.0.0.1:8080/v1",
+      "http://[::1]:8080/v1",
+      "http://[::ffff:127.0.0.1]/v1",
+      "https://api.example.invalid/v1",
+      "https://api.example.invalid"
+    ]) {
+      expect(helpers.validBaseUrl(url)).toBe(true);
+    }
+  });
+
+  it("agrees with the CLI on the shared URL case table", () => {
+    // The CLI is authoritative; tests/fixtures/ai_base_url_cases.json is read by
+    // tests/test_ai_provider.py too, so both layers must match on every row.
+    const cases = JSON.parse(
+      readFileSync(join(here, "..", "..", "tests", "fixtures", "ai_base_url_cases.json"), "utf8")
+    ) as { accept: string[]; reject: string[] };
+
+    expect(cases.accept.length).toBeGreaterThan(0);
+    expect(cases.reject.length).toBeGreaterThan(0);
+    for (const url of cases.accept) {
+      expect([url, helpers.validBaseUrl(url)]).toEqual([url, true]);
+    }
+    for (const url of cases.reject) {
+      expect([url, helpers.validBaseUrl(url)]).toEqual([url, false]);
+    }
+  });
+
+  it("refuses dot segments and private or link-local IPv6 literals", () => {
+    // The WHATWG URL parser would normalize these away before a raw check.
+    expect(helpers.validBaseUrl("https://api.example.invalid/a/../v1")).toBe(false);
+    expect(helpers.validBaseUrl("https://[fc00::1]/v1")).toBe(false);
+    expect(helpers.validBaseUrl("https://[fe80::1]/v1")).toBe(false);
+    expect(helpers.validBaseUrl("https://[::ffff:192.168.1.1]/v1")).toBe(false);
+    expect(helpers.validBaseUrl("https://[2606:4700::1111]/v1")).toBe(true);
+  });
+
+  it("builds argv for every nonempty shipped default model", () => {
+    const source = readFileSync(
+      join(here, "..", "..", "aurascan", "core", "ai_provider.py"),
+      "utf8"
+    );
+    const block = source.slice(source.indexOf("PROVIDERS: Dict"));
+    const entries = Array.from(
+      block.matchAll(
+        /^ {4}"([a-z][a-z0-9_]{0,31})": AIProviderSpec\(\s*"[^"]*",\s*"[^"]*",\s*"[^"]*",\s*"([^"]*)"/gm
+      )
+    ).map((match) => [match[1], match[2]] as const);
+
+    expect(entries.length).toBeGreaterThan(5);
+    expect(new Map(entries).get("openrouter")).toBe("~openai/gpt-latest");
+    for (const [provider, model] of entries) {
+      if (model === "") {
+        continue;
+      }
+      const argv = helpers.actionArgv("configure_ai", { provider, model, enabled: false });
+      expect([provider, argv === null]).toEqual([provider, false]);
+      expect(argv).toContain(model);
+    }
+  });
+
+  it("keeps parity with every provider the CLI ships", () => {
+    const source = readFileSync(
+      join(here, "..", "..", "aurascan", "core", "ai_provider.py"),
+      "utf8"
+    );
+    const block = source.slice(source.indexOf("PROVIDERS: Dict"));
+    const ids = Array.from(block.matchAll(/^ {4}"([a-z][a-z0-9_]{0,31})": AIProviderSpec/gm)).map(
+      (match) => match[1]
+    );
+
+    expect(ids).toEqual(
+      expect.arrayContaining([
+        "openai",
+        "anthropic",
+        "deepseek",
+        "gemini",
+        "openrouter",
+        "venice",
+        "refuseless",
+        "experientiallabs",
+        "apinex",
+        "xiaomi",
+        "custom",
+        "lmstudio",
+        "llamacpp"
+      ])
+    );
+    for (const id of ids) {
+      expect(helpers.actionArgv("set_ai_key", { provider: id })).not.toBeNull();
+      expect(helpers.actionArgv("configure_ai", { provider: id })).not.toBeNull();
+    }
   });
 });

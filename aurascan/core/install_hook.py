@@ -142,6 +142,7 @@ def capture_package_scan_input(
         independently_bound_relative_paths=excluded_paths,
         required_relative_paths=required_repository_paths.paths,
         required_paths_complete=required_repository_paths.complete,
+        required_paths_family=required_repository_paths.family,
     )
     try:
         verified_pkgbuild_bytes = _read_pkgbuild_snapshot(

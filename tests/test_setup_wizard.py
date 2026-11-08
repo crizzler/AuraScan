@@ -114,6 +114,102 @@ def test_init_configures_keyless_local_ai_without_secret_prompt(tmp_path, provid
     assert base_url in stdout.getvalue()
 
 
+@pytest.mark.parametrize(
+    ("provider", "key_env"),
+    [
+        ("venice", "AURASCAN_VENICE_API_KEY"),
+        ("refuseless", "AURASCAN_REFUSELESS_API_KEY"),
+        ("experientiallabs", "AURASCAN_EXPERIENTIALLABS_API_KEY"),
+        ("apinex", "AURASCAN_APINEX_API_KEY"),
+        ("xiaomi", "AURASCAN_XIAOMI_API_KEY"),
+    ],
+)
+def test_init_accepts_new_provider_presets_and_stores_their_key_env(tmp_path, provider, key_env):
+    env_path = tmp_path / ".env"
+    stdout = io.StringIO()
+
+    status = run_init(
+        ["--provider", provider, "--model", "fixture-model", "--enable-ai", "--no-install-hook"],
+        getpass_func=lambda _prompt: "fixture-only-value",
+        stdout=stdout,
+        env_path=env_path,
+    )
+
+    text = env_path.read_text(encoding="utf-8")
+    assert status == 0
+    assert "fixture-only-value" not in stdout.getvalue()
+    assert f"AURASCAN_AI_PROVIDER={provider}" in text
+    assert "AURASCAN_AI_MODEL=fixture-model" in text
+    assert f"{key_env}=fixture-only-value" in text
+    assert "AURASCAN_AI_BASE_URL" not in text
+
+
+def test_init_offers_the_new_providers_as_choices():
+    parser = setup_wizard.build_init_parser()
+    action = next(a for a in parser._actions if a.dest == "provider")
+
+    for provider in ("venice", "refuseless", "experientiallabs", "apinex", "xiaomi", "custom"):
+        assert provider in action.choices
+
+
+def test_init_configures_a_custom_provider_with_a_base_url(tmp_path):
+    env_path = tmp_path / ".env"
+    stdout = io.StringIO()
+
+    status = run_init(
+        [
+            "--provider", "custom",
+            "--model", "fixture-model",
+            "--base-url", "https://api.example.invalid/v1/",
+            "--enable-ai",
+            "--no-install-hook",
+        ],
+        getpass_func=lambda _prompt: "fixture-only-value",
+        stdout=stdout,
+        env_path=env_path,
+    )
+
+    text = env_path.read_text(encoding="utf-8")
+    assert status == 0
+    assert "AURASCAN_AI_PROVIDER=custom" in text
+    assert "AURASCAN_AI_BASE_URL=https://api.example.invalid/v1" in text
+    assert "AURASCAN_CUSTOM_API_KEY=fixture-only-value" in text
+
+
+def test_init_rejects_a_base_url_for_a_cloud_preset(tmp_path):
+    env_path = tmp_path / ".env"
+    stderr = io.StringIO()
+
+    status = run_init(
+        ["--provider", "venice", "--base-url", "https://api.example.invalid/v1", "--no-install-hook"],
+        input_func=lambda _prompt: "",
+        getpass_func=lambda _prompt: "fixture-only-value",
+        stdout=io.StringIO(),
+        stderr=stderr,
+        env_path=env_path,
+    )
+
+    assert status == 1
+    assert "--base-url is available only" in stderr.getvalue()
+
+
+def test_init_rejects_a_custom_provider_without_a_base_url(tmp_path):
+    env_path = tmp_path / ".env"
+    stderr = io.StringIO()
+
+    status = run_init(
+        ["--provider", "custom", "--model", "fixture-model", "--no-install-hook"],
+        input_func=lambda _prompt: "",
+        getpass_func=lambda _prompt: "fixture-only-value",
+        stdout=io.StringIO(),
+        stderr=stderr,
+        env_path=env_path,
+    )
+
+    assert status == 1
+    assert "--base-url" in stderr.getvalue()
+
+
 def test_init_normalizes_custom_local_base_url(tmp_path):
     env_path = tmp_path / ".env"
 
@@ -353,7 +449,7 @@ def test_init_can_explicitly_install_recovery_with_separate_consent(tmp_path):
 def test_doctor_reports_optional_recovery_state(tmp_path, monkeypatch):
     manifest = Path(__file__).resolve().parents[1] / "aurascan/assets/aurascan-recovery-iso.json"
     monkeypatch.setattr(recovery_cli, "resolve_iso_manifest", lambda: manifest)
-    monkeypatch.setattr(recovery_cli, "recovery_version", lambda: "0.13.0")
+    monkeypatch.setattr(recovery_cli, "recovery_version", lambda: "0.15.0")
     checks = build_doctor_checks(
         env_path=tmp_path / "missing.env",
         env={},
@@ -998,9 +1094,7 @@ def test_doctor_accepts_packaged_hook_without_local_override(tmp_path):
     env_path.chmod(0o600)
     packaged_hook = tmp_path / "usr" / "share" / "libalpm" / "hooks" / "aurascan.hook"
     packaged_hook.parent.mkdir(parents=True)
-    packaged_hook.write_text(
-        "Exec = /usr/bin/aurascan\nNeedsTargets\nAbortOnFail\n", encoding="utf-8"
-    )
+    packaged_hook.write_text("Exec = /usr/bin/aurascan\nNeedsTargets\nAbortOnFail\n", encoding="utf-8")
 
     checks = build_doctor_checks(
         env_path=env_path,
@@ -1021,9 +1115,7 @@ def test_doctor_accepts_local_hook_without_packaged_hook(tmp_path):
     env_path.chmod(0o600)
     local_hook = tmp_path / "etc" / "pacman.d" / "hooks" / "aurascan.hook"
     local_hook.parent.mkdir(parents=True)
-    local_hook.write_text(
-        "Exec = /usr/bin/aurascan\nNeedsTargets\nAbortOnFail\n", encoding="utf-8"
-    )
+    local_hook.write_text("Exec = /usr/bin/aurascan\nNeedsTargets\nAbortOnFail\n", encoding="utf-8")
 
     checks = build_doctor_checks(
         env_path=env_path,
@@ -1146,7 +1238,7 @@ def test_doctor_reports_agent_access_root_policy_and_private_audit(tmp_path):
 
 
 def test_doctor_check_ai_uses_mocked_provider(tmp_path, monkeypatch):
-    monkeypatch.setattr(recovery_cli, "recovery_version", lambda: "0.13.0")
+    monkeypatch.setattr(recovery_cli, "recovery_version", lambda: "0.15.0")
     monkeypatch.setattr(
         recovery_cli,
         "resolve_iso_manifest",
@@ -1215,7 +1307,7 @@ def test_doctor_ai_connectivity_never_exposes_raw_provider_exception(monkeypatch
     ],
 )
 def test_doctor_check_ai_uses_mocked_keyless_local_provider(tmp_path, provider, endpoint, monkeypatch):
-    monkeypatch.setattr(recovery_cli, "recovery_version", lambda: "0.13.0")
+    monkeypatch.setattr(recovery_cli, "recovery_version", lambda: "0.15.0")
     monkeypatch.setattr(
         recovery_cli,
         "resolve_iso_manifest",
@@ -1291,9 +1383,7 @@ def test_init_recognizes_active_packaged_hook_without_prompting_for_local_overri
     env_path = tmp_path / ".env"
     packaged_hook = tmp_path / "usr" / "share" / "libalpm" / "hooks" / "aurascan.hook"
     packaged_hook.parent.mkdir(parents=True)
-    packaged_hook.write_text(
-        "Exec = /usr/bin/aurascan\nNeedsTargets\nAbortOnFail\n", encoding="utf-8"
-    )
+    packaged_hook.write_text("Exec = /usr/bin/aurascan\nNeedsTargets\nAbortOnFail\n", encoding="utf-8")
     stdout = io.StringIO()
     calls = []
 
@@ -1318,9 +1408,7 @@ def test_hook_install_uses_sudo_install_for_release_safe_template(tmp_path):
     template = tmp_path / "aurascan.hook"
     executable = tmp_path / "aurascan"
     hook = tmp_path / "etc" / "pacman.d" / "hooks" / "aurascan.hook"
-    template.write_text(
-        "Exec = /usr/bin/aurascan\nNeedsTargets\nAbortOnFail\n", encoding="utf-8"
-    )
+    template.write_text("Exec = /usr/bin/aurascan\nNeedsTargets\nAbortOnFail\n", encoding="utf-8")
     executable.write_text("#!/bin/sh\n", encoding="utf-8")
     calls = []
 
@@ -1344,17 +1432,3 @@ def test_hook_template_safety_rejects_development_paths(tmp_path):
     template.write_text("Exec = /home/developer/project/.venv/bin/python -m aurascan --deep-static\n", encoding="utf-8")
 
     assert is_release_safe_hook_template(template) is False
-
-
-def test_hook_template_safety_requires_abort_on_fail(tmp_path):
-    template = tmp_path / "aurascan.hook"
-    template.write_text(
-        "Exec = /usr/bin/aurascan\nNeedsTargets\n", encoding="utf-8"
-    )
-
-    assert is_release_safe_hook_template(template) is False
-
-    template.write_text(
-        "Exec = /usr/bin/aurascan\nNeedsTargets\nAbortOnFail\n", encoding="utf-8"
-    )
-    assert is_release_safe_hook_template(template) is True

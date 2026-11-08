@@ -138,6 +138,18 @@ function storeAiKey(provider, secret) {
   );
 }
 
+function configureAi(values) {
+  const args = helpers.actionArgv("configure_ai", values || {});
+  if (args === null) {
+    return Promise.resolve({ ok: false, error: "That AI configuration is not usable" });
+  }
+  // Only non-secret fields travel in argv; the credential stays on disk/stdin.
+  return runCli(args, {
+    parse: helpers.parseSettingsWrite,
+    failure: "AuraScan could not write that AI configuration"
+  });
+}
+
 function requestReview() {
   const args = helpers.actionArgv("instruction_review");
   if (args === null) {
@@ -334,6 +346,8 @@ function registerIpc() {
   ipcMain.handle("aurascan:set-ai-key", (_event, provider, secret) =>
     storeAiKey(provider, secret)
   );
+
+  ipcMain.handle("aurascan:configure-ai", (_event, values) => configureAi(values));
 
   ipcMain.handle("aurascan:instruction-review", () => requestReview());
 

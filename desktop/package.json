@@ -15,6 +15,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "desktop": "electron .",
+    "desktop:smoke": "AURASCAN_DESKTOP_SELF_TEST=1 electron .",
     "desktop:dev": "npm run build && electron ."
   },
   "dependencies": {
@@ -22,7 +23,6 @@
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
-    "@types/node": "^26.6.5",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",

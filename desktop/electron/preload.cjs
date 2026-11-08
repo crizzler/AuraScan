@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld(
     readSettings: () => ipcRenderer.invoke("aurascan:settings"),
     setAiKey: (provider, secret) =>
       ipcRenderer.invoke("aurascan:set-ai-key", provider, secret),
+    configureAi: (values) => ipcRenderer.invoke("aurascan:configure-ai", values),
     reviewInstructions: () => ipcRenderer.invoke("aurascan:instruction-review"),
     scanInstructions: () => ipcRenderer.invoke("aurascan:instruction-scan"),
     approveInstruction: (fileId, reportId, sha256) =>

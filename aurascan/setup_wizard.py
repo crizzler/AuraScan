@@ -21,6 +21,7 @@ from aurascan.core.ai_provider import (
     call_ai_provider,
     connectivity_prompt,
     get_provider_spec,
+    normalize_custom_base_url,
     normalize_local_base_url,
     provider_choices,
     resolve_ai_config,
@@ -333,6 +334,9 @@ def run_init(
         if model is None:
             prompt_label = "Model ID" if spec.local else "Model"
             model = input_func(f"{prompt_label} [{model_default}]: ").strip() or model_default
+        if not model:
+            print("An AI model id is required.", file=stderr)
+            return 1
 
         if spec.local:
             base_default = existing.get(AI_BASE_URL_ENV, "").strip() if same_provider else ""
@@ -359,8 +363,20 @@ def run_init(
             if not enabled:
                 print("Local AI analysis is configured but disabled.", file=stdout)
         else:
-            if args.base_url:
-                print("--base-url is available only for LM Studio and llama.cpp providers.", file=stderr)
+            base_url = ""
+            if provider == "custom":
+                base_default = existing.get(AI_BASE_URL_ENV, "").strip() if same_provider else ""
+                base_candidate = args.base_url or base_default
+                if not base_candidate:
+                    print("A custom provider needs --base-url (or a stored endpoint).", file=stderr)
+                    return 1
+                try:
+                    base_url = normalize_custom_base_url(base_candidate)
+                except AIProviderError as exc:
+                    print(f"Invalid custom AI base URL: {exc}", file=stderr)
+                    return 1
+            elif args.base_url:
+                print("--base-url is available only for LM Studio, llama.cpp and custom providers.", file=stderr)
                 return 1
             key = getpass_func(f"{spec.label} API key (input hidden): ").strip()
             if not key:
@@ -380,7 +396,11 @@ def run_init(
                     spec.key_env: key,
                     AI_ENABLED_ENV: "1" if enabled else "0",
                 })
-                print(f"Configured {spec.label}. API key saved without printing it.", file=stdout)
+                if base_url:
+                    updates[AI_BASE_URL_ENV] = base_url
+                    print(f"Configured {spec.label} at {base_url}. API key saved without printing it.", file=stdout)
+                else:
+                    print(f"Configured {spec.label}. API key saved without printing it.", file=stdout)
                 if not enabled:
                     print("AI analysis is configured but disabled.", file=stdout)
 

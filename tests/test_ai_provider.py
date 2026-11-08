@@ -2,6 +2,7 @@ import json
 import socket
 import urllib.error
 import urllib.parse
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -61,6 +62,10 @@ def set_provider_env(monkeypatch, provider):
     spec = ai_provider.PROVIDERS[provider]
     monkeypatch.setenv("AURASCAN_AI_ENABLED", "1")
     monkeypatch.setenv("AURASCAN_AI_PROVIDER", provider)
+    if provider == "custom":
+        # ``custom`` has no preset endpoint or model of its own.
+        monkeypatch.setenv("AURASCAN_AI_BASE_URL", "https://api.example.invalid/v1")
+        monkeypatch.setenv("AURASCAN_AI_MODEL", "fixture-custom-model")
     if spec.requires_api_key:
         monkeypatch.setenv(spec.key_env, "fixture-only-value")
 
@@ -302,8 +307,183 @@ def test_cloud_provider_ignores_local_base_url_override():
 
     request = ai_provider.build_request(config, "fixture prompt")
 
-    assert config.base_url == ""
+    assert config.base_url == "https://api.openai.com/v1"
     assert request.full_url == "https://api.openai.com/v1/chat/completions"
+
+
+NEW_PRESET_ENDPOINTS = {
+    "venice": "https://api.venice.ai/api/v1/chat/completions",
+    "refuseless": "https://api.refuseless.com/v1/chat/completions",
+    "experientiallabs": "https://api.experientiallabs.ai/v1/chat/completions",
+    "apinex": "https://api.apinex.bond/v1/chat/completions",
+    "xiaomi": "https://api.xiaomimimo.com/v1/chat/completions",
+}
+
+
+@pytest.mark.parametrize("provider", sorted(NEW_PRESET_ENDPOINTS))
+def test_new_presets_use_fixed_url_and_bearer_auth(provider):
+    spec = ai_provider.PROVIDERS[provider]
+    config = ai_provider.resolve_ai_config({
+        "AURASCAN_AI_PROVIDER": provider,
+        "AURASCAN_AI_ENABLED": "1",
+        spec.key_env: "fixture-only-value",
+        # A preset must ignore this, or a typo could redirect package text.
+        "AURASCAN_AI_BASE_URL": "https://typo.example.invalid/v1",
+    })
+
+    assert config.error == ""
+    assert config.model == spec.default_model
+    request = ai_provider.build_request(config, "fixture prompt")
+    headers = {key.lower(): value for key, value in request.header_items()}
+
+    assert request.full_url == NEW_PRESET_ENDPOINTS[provider]
+    assert headers["authorization"] == "Bearer fixture-only-value"
+    assert spec.api_family == "chat_completions"
+
+
+def test_custom_provider_requires_base_url_and_model():
+    missing_both = ai_provider.resolve_ai_config({
+        "AURASCAN_AI_PROVIDER": "custom",
+        "AURASCAN_CUSTOM_API_KEY": "fixture-only-value",
+        "AURASCAN_AI_ENABLED": "1",
+    })
+    missing_model = ai_provider.resolve_ai_config({
+        "AURASCAN_AI_PROVIDER": "custom",
+        "AURASCAN_CUSTOM_API_KEY": "fixture-only-value",
+        "AURASCAN_AI_ENABLED": "1",
+        "AURASCAN_AI_BASE_URL": "https://api.example.invalid/v1",
+    })
+
+    assert missing_both.error == "missing_base_url"
+    assert missing_model.error == "missing_model"
+    for config in (missing_both, missing_model):
+        assert config.ready is False
+        with pytest.raises(ai_provider.AIProviderError, match="invalid AI provider configuration"):
+            ai_provider.build_request(config, "fixture prompt")
+
+
+def test_custom_provider_builds_supplied_endpoint():
+    config = ai_provider.resolve_ai_config({
+        "AURASCAN_AI_PROVIDER": "custom",
+        "AURASCAN_CUSTOM_API_KEY": "fixture-only-value",
+        "AURASCAN_AI_ENABLED": "1",
+        "AURASCAN_AI_BASE_URL": "https://api.example.invalid/v1/",
+        "AURASCAN_AI_MODEL": "fixture-custom-model",
+    })
+
+    request = ai_provider.build_request(config, "fixture prompt")
+    headers = {key.lower(): value for key, value in request.header_items()}
+
+    assert config.error == ""
+    assert request.full_url == "https://api.example.invalid/v1/chat/completions"
+    assert headers["authorization"] == "Bearer fixture-only-value"
+
+
+def test_unknown_provider_is_rejected():
+    config = ai_provider.resolve_ai_config({"AURASCAN_AI_PROVIDER": "nope"})
+
+    assert config.error == "unsupported_provider"
+    assert config.supported is False
+    with pytest.raises(ai_provider.AIProviderError, match="unsupported"):
+        ai_provider.build_request(config, "fixture prompt")
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "",
+        "ftp://api.example.invalid/v1",
+        "http://api.example.invalid/v1",
+        "https://user:secret@api.example.invalid/v1",
+        "https://api.example.invalid/v1?token=secret",
+        "https://api.example.invalid/v1#fragment",
+        "https://192.168.1.4/v1",
+        "https://10.0.0.2/v1",
+        "https://169.254.1.1/v1",
+        "https://224.0.0.1/v1",
+        "https://0.0.0.0/v1",
+        "https://api.example.invalid/v1/../other",
+        "https://api.example.invalid/v1\u0001",
+        "https://api.example.invalid/" + "a" * 500,
+    ],
+)
+def test_custom_base_url_rejects_unsafe_values(base_url):
+    with pytest.raises(ai_provider.AIProviderError):
+        ai_provider.normalize_custom_base_url(base_url)
+
+
+@pytest.mark.parametrize(
+    ("raw", "normalized"),
+    [
+        ("https://api.example.invalid/v1", "https://api.example.invalid/v1"),
+        ("https://api.example.invalid", "https://api.example.invalid"),
+        ("http://127.0.0.1:8080/v1", "http://127.0.0.1:8080/v1"),
+        ("http://[::1]:8080/v1/", "http://[::1]:8080/v1"),
+        ("HTTPS://API.example.invalid/v1/", "https://api.example.invalid/v1"),
+    ],
+)
+def test_custom_base_url_normalization(raw, normalized):
+    assert ai_provider.normalize_custom_base_url(raw) == normalized
+
+
+# Shared with desktop/src/shell.test.ts: the CLI is authoritative, and the
+# Electron pre-spawn check must agree on every row in both directions.
+BASE_URL_CASES = json.loads(
+    (Path(__file__).parent / "fixtures" / "ai_base_url_cases.json").read_text(encoding="utf-8")
+)
+
+
+@pytest.mark.parametrize("base_url", BASE_URL_CASES["accept"])
+def test_shared_base_url_cases_are_accepted(base_url):
+    assert ai_provider.normalize_custom_base_url(base_url)
+
+
+@pytest.mark.parametrize("base_url", BASE_URL_CASES["reject"])
+def test_shared_base_url_cases_are_rejected(base_url):
+    with pytest.raises(ai_provider.AIProviderError):
+        ai_provider.normalize_custom_base_url(base_url)
+
+
+def test_invalid_custom_url_error_never_contains_the_url_or_key():
+    key = "fixture-custom-key-must-not-leak"
+    url = "http://api.example.invalid/v1?token=secret"
+    config = ai_provider.resolve_ai_config({
+        "AURASCAN_AI_PROVIDER": "custom",
+        "AURASCAN_CUSTOM_API_KEY": key,
+        "AURASCAN_AI_ENABLED": "1",
+        "AURASCAN_AI_BASE_URL": url,
+        "AURASCAN_AI_MODEL": "fixture-custom-model",
+    })
+
+    with pytest.raises(ai_provider.AIProviderError) as excinfo:
+        ai_provider.build_request(config, "fixture prompt")
+    message = str(excinfo.value)
+
+    assert "invalid_base_url" in message
+    assert key not in message
+    assert url not in message
+    assert "api.example.invalid" not in message
+
+
+@pytest.mark.parametrize("model", ["", "bad model", "a" * 121, "x\ny"])
+def test_invalid_model_id_is_refused(model):
+    with pytest.raises(ai_provider.AIProviderError, match="invalid AI model id"):
+        ai_provider.normalize_model(model)
+
+
+def test_openrouter_bounded_default_model_is_admitted():
+    # `~` is part of OpenRouter's shipped latest-alias default; the Settings form
+    # submits it unchanged, so the validator must accept it as-is.
+    assert ai_provider.normalize_model("~openai/gpt-latest") == "~openai/gpt-latest"
+
+
+@pytest.mark.parametrize(
+    "provider", [name for name, spec in sorted(ai_provider.PROVIDERS.items()) if spec.default_model]
+)
+def test_every_shipped_default_model_passes_normalize_model(provider):
+    spec = ai_provider.PROVIDERS[provider]
+
+    assert ai_provider.normalize_model(spec.default_model) == spec.default_model
 
 
 def test_gemini_request_keeps_api_key_out_of_url():
@@ -364,6 +544,97 @@ def test_local_default_opener_disables_proxies_and_redirects(monkeypatch):
     proxy_handler, redirect_handler = captured["handlers"]
     assert proxy_handler.proxies == {}
     assert isinstance(redirect_handler, ai_provider._NoRedirectHandler)
+
+
+EXPLICIT_PROXY = "http://127.0.0.1:18991"
+
+
+def _set_explicit_proxy(monkeypatch):
+    """Make environment-proxy discovery observable and deterministic."""
+
+    monkeypatch.setenv("HTTP_PROXY", EXPLICIT_PROXY)
+    monkeypatch.setenv("http_proxy", EXPLICIT_PROXY)
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://127.0.0.1:11434/v1",
+        "http://[::1]:11434/v1",
+        "http://[::ffff:127.0.0.1]/v1",
+        "https://127.0.0.1:11434/v1",
+    ],
+)
+def test_custom_loopback_endpoint_disables_proxies(monkeypatch, base_url):
+    captured = {}
+    _set_explicit_proxy(monkeypatch)
+
+    class FakeOpener:
+        def open(self, request, timeout):
+            captured["request"] = request
+            return FakeResponse(provider_payload("custom", "BENIGN: local custom"))
+
+    def fake_build_opener(*handlers):
+        captured["handlers"] = handlers
+        return FakeOpener()
+
+    monkeypatch.setattr(ai_provider.urllib.request, "build_opener", fake_build_opener)
+    config = ai_provider.resolve_ai_config({
+        "AURASCAN_AI_PROVIDER": "custom",
+        "AURASCAN_AI_BASE_URL": base_url,
+        "AURASCAN_AI_MODEL": "fixture-model",
+        "AURASCAN_AI_ENABLED": "1",
+        "AURASCAN_CUSTOM_API_KEY": "fixture-only-value",
+    })
+
+    assert ai_provider.call_ai_provider(config, "fixture prompt") == "BENIGN: local custom"
+    proxy_handler, redirect_handler = captured["handlers"]
+    assert isinstance(proxy_handler, ai_provider.urllib.request.ProxyHandler)
+    assert proxy_handler.proxies == {}
+    assert isinstance(redirect_handler, ai_provider._NoRedirectHandler)
+
+
+def test_custom_public_endpoint_keeps_environment_proxy_discovery(monkeypatch):
+    """A public Custom endpoint still inherits HTTP_PROXY, unlike loopback."""
+
+    captured = {}
+    _set_explicit_proxy(monkeypatch)
+    real_build_opener = ai_provider.urllib.request.build_opener
+
+    class FakeOpener:
+        def open(self, request, timeout):
+            captured["request"] = request
+            return FakeResponse(provider_payload("custom", "BENIGN: public custom"))
+
+    def fake_build_opener(*handlers):
+        captured["handlers"] = handlers
+        return FakeOpener()
+
+    monkeypatch.setattr(ai_provider.urllib.request, "build_opener", fake_build_opener)
+    config = ai_provider.resolve_ai_config({
+        "AURASCAN_AI_PROVIDER": "custom",
+        "AURASCAN_AI_BASE_URL": "https://public.example.invalid/v1",
+        "AURASCAN_AI_MODEL": "fixture-model",
+        "AURASCAN_AI_ENABLED": "1",
+        "AURASCAN_CUSTOM_API_KEY": "fixture-only-value",
+    })
+
+    assert ai_provider.call_ai_provider(config, "fixture prompt") == "BENIGN: public custom"
+    assert len(captured["handlers"]) == 1
+    assert isinstance(captured["handlers"][0], ai_provider._NoRedirectHandler)
+
+    # urllib installs its default ProxyHandler when none is supplied; the real
+    # builder runs without opening a socket.
+    default_opener = real_build_opener(*captured["handlers"])
+    proxies = [
+        handler
+        for handler in default_opener.handlers
+        if isinstance(handler, ai_provider.urllib.request.ProxyHandler)
+    ]
+    assert proxies
+    assert proxies[0].proxies.get("http") == EXPLICIT_PROXY
 
 
 def test_cloud_default_opener_preserves_proxy_discovery_and_disables_redirects(monkeypatch):

@@ -38,6 +38,7 @@ describe("desktopBridge", () => {
       openReport: () => record("openReport"),
       readSettings: () => record("readSettings"),
       setAiKey: (provider: string) => record(`setAiKey:${provider}`),
+      configureAi: (values: { provider: string }) => record(`configureAi:${values.provider}`),
       reviewInstructions: () => record("reviewInstructions"),
       scanInstructions: () => record("scanInstructions"),
       approveInstruction: (fileId: string, reportId: string, sha256: string) =>
@@ -58,6 +59,7 @@ describe("desktopBridge", () => {
     await bridge.openReport();
     await bridge.readSettings();
     await bridge.setAiKey("deepseek", "sk-test");
+    await bridge.configureAi({ provider: "venice", model: "m" });
     await bridge.reviewInstructions();
     await bridge.scanInstructions();
     await bridge.approveInstruction("file-1", "report-1", sha);
@@ -72,6 +74,7 @@ describe("desktopBridge", () => {
       "openReport",
       "readSettings",
       "setAiKey:deepseek",
+      "configureAi:venice",
       "reviewInstructions",
       "scanInstructions",
       `approve:file-1:report-1:${sha}`,

@@ -458,8 +458,8 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
     "AUR-REPO-INSPECTION-INCOMPLETE-001": {
         "title": "Package-repository provenance inspection did not complete.",
         "summary": "AuraScan could not obtain a bounded, stable, no-follow snapshot of the files beside the PKGBUILD.",
-        "why": "Allowing a build after skipping an unreadable, replaced, oversized, linked, or unsupported entry could leave an opaque payload uninspected.",
-        "checked": "AuraScan validated directory and file types, bounded traversal and reads, and rechecked identities after capture.",
+        "why": "Allowing a build after skipping an unreadable, replaced, oversized, linked, or unsupported entry could leave an opaque payload uninspected. When the split-package `pkgname` binding itself cannot be proven, the evidence names the construct family (dynamic assignment, arithmetic context, parameter-expansion operator, builtin target write, opaque eval/source, computed variable name, helper-function mutation, command-prefix assignment, multiple declarations, unsupported reference context) so the blocker is actionable.",
+        "checked": "AuraScan validated directory and file types, bounded traversal and reads, rechecked identities after capture, and classified the `pkgname` binding as one anchored literal declaration or a named unprovable construct.",
         "not_prove": "Incomplete inspection is not evidence that the package or an omitted file is malicious.",
         "action": "Do not build until the package checkout can be captured completely as stable regular files within the documented limits.",
     },

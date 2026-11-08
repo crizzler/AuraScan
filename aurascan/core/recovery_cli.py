@@ -20,10 +20,13 @@ from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from aurascan.core.ai_provider import (
+    AI_BASE_URL_ENV,
     AI_ENABLED_ENV,
     AI_MODEL_ENV,
     AI_PROVIDER_ENV,
+    AIProviderError,
     get_provider_spec,
+    normalize_custom_base_url,
     provider_choices,
     resolve_ai_config,
 )
@@ -138,7 +141,7 @@ def recovery_version() -> str:
     try:
         return importlib.metadata.version("aurascan")
     except importlib.metadata.PackageNotFoundError:
-        return "0.14.0-dev"
+        return "0.15.0-dev"
 
 
 def rooted(root: Path, path: Path) -> Path:
@@ -834,6 +837,12 @@ def _in_memory_ai_environment(
         AI_MODEL_ENV: model,
         AI_ENABLED_ENV: "1",
     })
+    if provider == "custom":
+        endpoint = input_func("OpenAI-compatible base URL: ").strip()
+        try:
+            result[AI_BASE_URL_ENV] = normalize_custom_base_url(endpoint)
+        except AIProviderError:
+            return result
     configured = resolve_ai_config(result)
     if configured.authentication_ready and not configured.error:
         return result

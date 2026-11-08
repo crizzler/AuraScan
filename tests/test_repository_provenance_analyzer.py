@@ -4,9 +4,14 @@ import pytest
 
 from aurascan.analyzers.repository_provenance import (
     RepositoryProvenanceAnalyzer,
+    _active_shell_text,
+    _declared_split_package_functions,
+    _function_regions,
+    _MAX_SPLIT_HELPER_VISITS,
     _scoped_commands,
     collect_required_repository_paths,
 )
+from aurascan.analyzers.remote_access import mask_shell_quoted_text
 from aurascan.core.install_hook import (
     INSTALL_HOOK_NONE,
     INSTALL_HOOK_RESOLVED,
@@ -2157,6 +2162,446 @@ def test_dynamic_split_package_declaration_fails_closed():
 
     assert result.is_safe is False
     assert rule_ids(result) == {"AUR-REPO-INSPECTION-INCOMPLETE-001"}
+
+
+# --- split-package reference grammar (corrected v1) -----------------------
+
+SPLIT_DEFINITIONS = (
+    "package_a() {\n  :\n}\n"
+    "package_b() {\n  :\n}\n"
+    "package_other() {\n  :\n}\n"
+)
+SHELLY_PKGBUILD = (
+    Path(__file__).resolve().parents[1] / "findings" / "issue-001" / "shelly-PKGBUILD"
+)
+
+
+def split_roots(text):
+    """Classify the top level exactly as ``_scoped_commands`` does."""
+
+    regions = _function_regions(mask_shell_quoted_text(_active_shell_text(text))) or []
+    definitions = {region.name: region for region in regions}
+    return _declared_split_package_functions(text, definitions)
+
+
+def test_split_pkgname_source_reference_preserves_declared_roots():
+    scalar = 'pkgname=a\nsource=("$pkgname.tar.gz")\n' + SPLIT_DEFINITIONS
+    array = (
+        "pkgname=('a' 'b')\n"
+        'source=("${pkgname}-${pkgver}.tar.gz::https://example.invalid/x")\n'
+        + SPLIT_DEFINITIONS
+    )
+
+    assert split_roots(scalar) == {"package_a"}
+    assert split_roots(array) == {"package_a", "package_b"}
+    assert split_roots("pkgname=a\n" + SPLIT_DEFINITIONS) == {"package_a"}
+    assert split_roots("pkgname=('a' 'b')\n" + SPLIT_DEFINITIONS) == {
+        "package_a",
+        "package_b",
+    }
+
+
+def test_split_pkgname_source_reference_completes_minimal_capture():
+    content = (
+        "pkgname=('a' 'b')\n"
+        'source=("${pkgname}-${pkgver}.tar.gz::https://example.invalid/x")\n'
+        "package_a() {\n  :\n}\n"
+        "package_b() {\n  :\n}\n"
+    )
+    required = collect_required_repository_paths(
+        (content,),
+        Path("/tmp/fixture-package"),
+    )
+    result = analyze(content, artifact())
+
+    assert required.complete is True
+    assert required.paths == ()
+    assert "AUR-REPO-INSPECTION-INCOMPLETE-001" not in rule_ids(result)
+
+
+def test_split_pkgname_reference_does_not_enroll_dead_helper():
+    content = (
+        "pkgname=('a' 'b')\n"
+        'source=("${pkgname}-${pkgver}.tar.gz::https://example.invalid/x")\n'
+        "package_a() {\n"
+        '  "$startdir/payload"\n'
+        "}\n"
+        "package_b() {\n  :\n}\n"
+        "package_unused() {\n"
+        '  "$startdir/payload"\n'
+        "}\n"
+    )
+
+    result = analyze(content, artifact())
+
+    assert rule_ids(result) == {"AUR-REPO-OPAQUE-BINARY-EXEC-001"}
+
+
+def test_split_reference_resolution_does_not_imply_capture_complete():
+    content = "pkgname=('a' 'b')\n[[ $pkgname == a ]] && :\n" + SPLIT_DEFINITIONS
+    required = collect_required_repository_paths(
+        (content,),
+        Path("/tmp/fixture-package"),
+    )
+
+    assert split_roots(content) == {"package_a", "package_b"}
+    # The collector cannot classify the inline test guard; roots still resolve.
+    assert required.complete is False
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        'echo "${pkgname:=0}"',
+        'echo "${pkgname=0}"',
+        'echo "${pkgname:+0}"',
+        'echo "${pkgname#x}"',
+        'echo "${pkgname%x}"',
+        'echo "${pkgname/x/y}"',
+        'echo "${pkgname:1}"',
+        'echo "${pkgname[0]}"',
+        'echo "${!pkgname}"',
+        'echo "${pkgname@Q}"',
+        'echo "${pkgname[@]}"',
+        'echo "${pkgname##*/}"',
+        'echo "${#pkgname}"',
+        'echo "pkgname=y"',
+        "echo pkgname",
+    ),
+)
+def test_split_pkgname_unsupported_reference_fails_closed(reference):
+    content = f"pkgname=a\n{reference}\n" + SPLIT_DEFINITIONS
+
+    assert split_roots(content) is None
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "y=$((pkgname))",
+        "a='pkgname=0'; y=$((pkgname))",
+        "v='pkgname=1'; ((v))",
+        "[[ (pkgname=0) -eq 0 ]]",
+        "[[ $pkgname -eq 0 ]]",
+        "((pkgname=1))",
+        "((pkgname++))",
+        "echo $((pkgname))",
+        "let pkgname=1",
+        "pkgname+=('x')",
+        "pkgname[0]=x",
+        "export pkgname=x",
+        "declare pkgname=x",
+        "typeset pkgname=x",
+        "local pkgname=x",
+        "readonly pkgname=x",
+        "printf -v pkgname x",
+        "printf -vpkgname x",
+        "read pkgname",
+        "unset pkgname",
+        "mapfile -t pkgname",
+        "readarray -t pkgname",
+        "getopts o pkgname",
+        "for pkgname in x; do :; done",
+        "select pkgname in x; do :; done",
+        "pkgname=x env true",
+        'eval "$v=(x)"',
+        'source "$f"',
+        '. "$f"',
+        "case $pkgname in a) : ;; esac",
+        "case $x in pkgname) : ;; esac",
+    ),
+)
+def test_split_pkgname_mutation_fails_closed(statement):
+    content = f"pkgname=a\n{statement}\n" + SPLIT_DEFINITIONS
+
+    assert split_roots(content) is None
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "arr[$pkgname]=x",
+        "arr[${pkgname}]=x",
+        'echo "${pkgname[0]}"',
+        "[[ -v x[$pkgname] ]]",
+        "echo $((1 + $pkgname))",
+        "declare -i x=${pkgname}+0",
+        "typeset -i x=${pkgname}+0",
+        "readonly -i x=${pkgname}+0",
+        "local -i x=${pkgname}+0",
+        "x=${pkgname}+0",
+        "x=$pkgname+0",
+        "x=${pkgname}-suffix",
+    ),
+)
+def test_split_pkgname_arithmetic_position_fails_closed(statement):
+    content = f"pkgname=(a b)\n{statement}\n" + SPLIT_DEFINITIONS
+
+    assert split_roots(content) is None
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "x=$pkgname",
+        "x=${pkgname}",
+        'x="${pkgname}"',
+        'x="a"$pkgname',
+        'source=("${pkgname}-${pkgver}.tar.gz::https://example.invalid/x")',
+        "[[ $pkgname == a ]] && :",
+        "[[ $pkgname == a*b ]] && :",
+        "[[ $pkgname =~ ^a ]] && :",
+    ),
+)
+def test_split_pkgname_plain_value_position_stays_inert(statement):
+    content = f"pkgname=(a b)\n{statement}\n" + SPLIT_DEFINITIONS
+
+    assert split_roots(content) == {"package_a", "package_b"}
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        'command eval "$v"',
+        'builtin unset "$v"',
+        'x=1 eval "$v"',
+        'if true; then eval "$v"; fi',
+        'command printf -v "$v" x',
+        'builtin printf -v "$v" x',
+        '! eval "$v"',
+    ),
+)
+def test_split_pkgname_prefixed_opaque_command_fails_closed(statement):
+    content = 'pkgname=a\nv="${pkgname}"\n' + statement + "\n" + SPLIT_DEFINITIONS
+
+    assert split_roots(content) is None
+
+
+@pytest.mark.parametrize(
+    "call",
+    (
+        "command mut",
+        "if true; then mut; fi",
+        "x=1 mut",
+        "! mut",
+        "while mut; do :; done",
+    ),
+)
+def test_split_pkgname_effective_helper_call_fails_closed(call):
+    content = "mut() {\n  pkgname=b\n}\npkgname=a\n" + call + "\n" + SPLIT_DEFINITIONS
+
+    assert split_roots(content) is None
+
+
+@pytest.mark.parametrize("prefixes", (7, 8))
+def test_split_pkgname_prefix_strip_exhaustion_fails_closed(prefixes):
+    calls = "command " * prefixes + "mut"
+    content = "mut() {\n  pkgname=b\n}\npkgname=a\n" + calls + "\n" + SPLIT_DEFINITIONS
+
+    assert split_roots(content) is None
+
+
+@pytest.mark.parametrize("prefixes", (7, 8))
+def test_split_pkgname_assignment_prefix_exhaustion_fails_closed(prefixes):
+    assignments = " ".join(f"a{index}=1" for index in range(prefixes))
+    content = (
+        'pkgname=a\nv="${pkgname}"\n' + assignments + ' eval "$v"\n' + SPLIT_DEFINITIONS
+    )
+
+    assert split_roots(content) is None
+
+
+@pytest.mark.parametrize("statement", ('x=$pkgname"x"', "x=${pkgname}-suffix"))
+def test_split_pkgname_non_separator_tail_fails_closed(statement):
+    content = f"pkgname=(a b)\n{statement}\n" + SPLIT_DEFINITIONS
+
+    assert split_roots(content) is None
+
+
+@pytest.mark.parametrize(
+    "call",
+    ("command noop", "if true; then noop; fi", "x=1 noop"),
+)
+def test_split_pkgname_prefixed_neutral_command_is_accepted(call):
+    content = "noop() {\n  :\n}\npkgname=a\n" + call + "\n" + SPLIT_DEFINITIONS
+
+    assert split_roots(content) == {"package_a"}
+
+
+@pytest.mark.parametrize(
+    "write",
+    (
+        'unset "$v"',
+        'mapfile "$v"',
+        'readarray "$v"',
+        'typeset "$v=zz"',
+        'declare "$v=x"',
+        'export "$v"=x',
+        'printf -v "$v" x',
+        'read "$v"',
+        'getopts o "$v"',
+        'declare -n ref="$v"\nref=zz',
+    ),
+)
+def test_split_pkgname_computed_name_write_fails_closed(write):
+    content = 'pkgname=a\nv="${pkgname}"\n' + write + "\n" + SPLIT_DEFINITIONS
+
+    assert split_roots(content) is None
+
+
+@pytest.mark.parametrize(
+    "second",
+    ("pkgname=b", "pkgname=('b' 'other')"),
+)
+def test_split_pkgname_two_declarations_fail_closed(second):
+    content = f"pkgname=a\n{second}\n" + SPLIT_DEFINITIONS
+
+    assert split_roots(content) is None
+
+
+@pytest.mark.parametrize(
+    "content",
+    (
+        "cat <<'EOF'\npkgname=other\nEOF\n",
+        "pkgname=a\ncat <<'EOF'\npkgname=other\nEOF\n",
+        "pkgname=a\ncat <<'EOF'\n${pkgname}\nEOF\n",
+        "pkgname=a\ncat <<-'EOF'\npkgname=other\nEOF\n",
+    ),
+)
+def test_split_pkgname_top_level_heredoc_fails_closed(content):
+    assert split_roots(content + SPLIT_DEFINITIONS) is None
+
+
+def test_split_pkgname_helper_function_mutation_fails_closed():
+    direct = "mut() {\n  pkgname=b\n}\npkgname=a\nmut\n" + SPLIT_DEFINITIONS
+    transitive = (
+        "mut() {\n  pkgname=b\n}\n"
+        "outer() {\n  mut\n}\n"
+        "pkgname=a\nouter\n" + SPLIT_DEFINITIONS
+    )
+    cycle = "x() {\n  y\n}\ny() {\n  x\n}\npkgname=a\nx\n" + SPLIT_DEFINITIONS
+
+    assert split_roots(direct) is None
+    assert split_roots(transitive) is None
+    assert split_roots(cycle) is None
+
+
+def test_split_pkgname_neutral_helper_is_accepted():
+    content = "noop() {\n  :\n}\npkgname=a\nnoop\n" + SPLIT_DEFINITIONS
+
+    assert split_roots(content) == {"package_a"}
+
+
+def test_split_pkgname_oversize_helper_recursion_fails_closed():
+    chain = "".join(f"h{index}() {{\n  h{index + 1}\n}}\n" for index in range(12))
+    content = (
+        "pkgname=a\n"
+        + chain
+        + "h12() {\n  :\n}\n"
+        + "h0\n"
+        + SPLIT_DEFINITIONS
+    )
+
+    assert split_roots(content) is None
+
+
+def test_shelly_pkgname_reference_fix_preserves_residual_incomplete():
+    content = SHELLY_PKGBUILD.read_text(encoding="utf-8")
+    required = collect_required_repository_paths(
+        (content,),
+        Path("/tmp/fixture-package"),
+    )
+
+    assert split_roots(content) == {
+        "package_shelly",
+        "package_shelly-flatpak-backend",
+    }
+    # Independent collector/cwd layers still block complete capture.
+    assert required.complete is False
+
+
+def test_split_pkgname_helper_visit_limit_fails_closed():
+    # Depth stays at one; only the total visit counter can refuse this.
+    calls = "h\n" * (_MAX_SPLIT_HELPER_VISITS + 1)
+    content = "pkgname=a\nh() {\n  :\n}\n" + calls + SPLIT_DEFINITIONS
+
+    assert split_roots(content) is None
+
+
+def _write_split_package(root: Path, extra, *, hook: bool) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    text = "pkgname=(a b)\n" + extra + "\n" + SPLIT_DEFINITIONS
+    if hook:
+        text = text.replace("package_a", "install=fixture.install\npackage_a", 1)
+        (root / "fixture.install").write_text(
+            "post_install() {\n  :\n}\n",
+            encoding="utf-8",
+        )
+    pkgbuild = root / "PKGBUILD"
+    pkgbuild.write_text(text, encoding="utf-8")
+    return pkgbuild
+
+
+def _captured_result(pkgbuild: Path):
+    captured = capture_package_scan_input(pkgbuild)
+    return RepositoryProvenanceAnalyzer().analyze_scan_input(
+        str(pkgbuild),
+        captured.pkgbuild_content,
+        captured.install_hook,
+        captured.repository_snapshot,
+        pkg_name="fixture-package",
+        pkg_ver="1",
+    )
+
+
+@pytest.mark.parametrize("hook", (False, True))
+def test_split_pkgname_incomplete_evidence_names_the_family(tmp_path: Path, hook):
+    """The family must reach the finding through the real capture path."""
+
+    pkgbuild = _write_split_package(tmp_path, "y=$((pkgname))", hook=hook)
+
+    result = _captured_result(pkgbuild)
+
+    incomplete = finding(result, "AUR-REPO-INSPECTION-INCOMPLETE-001")
+    assert incomplete.evidence_snippet.endswith("(arithmetic context)")
+    assert incomplete.severity == Severity.HIGH
+    assert incomplete.blocks_installation is True
+    assert "pkgname" not in incomplete.evidence_snippet
+
+
+def test_split_pkgname_family_is_bound_to_its_own_capture(tmp_path: Path):
+    arithmetic = _write_split_package(tmp_path / "arithmetic", "y=$((pkgname))", hook=False)
+    opaque = _write_split_package(tmp_path / "opaque", "eval x", hook=False)
+    captured_arithmetic = capture_package_scan_input(arithmetic)
+    captured_opaque = capture_package_scan_input(opaque)
+
+    def evidence(captured, pkgbuild):
+        result = RepositoryProvenanceAnalyzer().analyze_scan_input(
+            str(pkgbuild),
+            captured.pkgbuild_content,
+            captured.install_hook,
+            captured.repository_snapshot,
+        )
+        return finding(result, "AUR-REPO-INSPECTION-INCOMPLETE-001").evidence_snippet
+
+    # Analysing a saved snapshot must not inherit the later capture's family.
+    assert evidence(captured_arithmetic, arithmetic).endswith("(arithmetic context)")
+    assert evidence(captured_opaque, opaque).endswith(
+        "(opaque evaluation (eval/source))"
+    )
+
+
+def test_split_package_independent_required_path_failure_has_no_family(tmp_path: Path):
+    pkgbuild = _write_split_package(tmp_path, "[[ $pkgname == a ]] && :", hook=False)
+    captured = capture_package_scan_input(pkgbuild)
+
+    assert captured.repository_snapshot.error_code == "required_path_ambiguous"
+    assert captured.repository_snapshot.required_paths_family == ""
+    incomplete = finding(
+        _captured_result(pkgbuild),
+        "AUR-REPO-INSPECTION-INCOMPLETE-001",
+    )
+    assert incomplete.evidence_snippet.endswith("required path ambiguous")
 
 
 @pytest.mark.parametrize(

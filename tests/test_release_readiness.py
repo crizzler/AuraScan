@@ -64,7 +64,7 @@ def test_pyproject_console_scripts_are_registered():
     data = tomllib.loads(read_text("pyproject.toml"))
 
     scripts = data["project"]["scripts"]
-    assert data["project"]["version"] == "0.14.0"
+    assert data["project"]["version"] == "0.15.0"
     assert scripts["aurascan"] == "aurascan.cli:main"
     assert scripts["aurascan-makepkg"] == "aurascan.makepkg_wrapper:main"
     assert data["project"]["requires-python"] == ">=3.8"
@@ -500,7 +500,7 @@ def test_repository_provenance_v0102_release_contract():
     assert "for v0.10.2, the package-scanner rule version is `1.5.0`" in checklist
     assert "v0.10.2 release adds an always-on static provenance check" in announcement
     assert 'self.scanner_version = "2.6.0"' in engine_source
-    assert 'self.rule_version = "1.14.0"' in engine_source
+    assert 'self.rule_version = "1.15.0"' in engine_source
     assert 'PACKAGE_SCAN_INPUT_VERSION = "2.0"' in scan_input_source
     assert 'REPOSITORY_SNAPSHOT_VERSION = "1.3"' in repository_source
     assert 'INSTRUCTION_GUARD_SCHEMA_VERSION = "1.0"' in instruction_source

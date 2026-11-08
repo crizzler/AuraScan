@@ -465,6 +465,42 @@ export function App() {
     }
   };
 
+  const configureAi = async (values: {
+    provider: string;
+    model?: string;
+    base_url?: string;
+    enabled?: boolean;
+  }) => {
+    if (!bridge) {
+      return;
+    }
+    setSettingsBusy(true);
+    setSettingsNotice("");
+    setSettingsError("");
+    try {
+      const result = await bridge.configureAi(values);
+      if (!result.ok) {
+        setSettingsError(result.error);
+        return;
+      }
+      const written = parseSettingsWrite(result.payload);
+      if (!written.ok) {
+        setSettingsError(written.reason);
+        return;
+      }
+      const label = written.ai.provider_label || written.ai.provider;
+      setSettingsNotice(
+        written.ai.enabled
+          ? `AI configuration saved for ${label}. AI is enabled.`
+          : `AI configuration saved for ${label}. AI stays disabled until you enable it.`
+      );
+    } catch {
+      setSettingsError("AuraScan could not be reached");
+    } finally {
+      setSettingsBusy(false);
+    }
+  };
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -590,6 +626,7 @@ export function App() {
             shellAvailable={Boolean(bridge)}
             onReload={loadSettings}
             onStoreCredential={storeCredential}
+            onConfigureAi={configureAi}
           />
         )}
         {view === "about" && <About snapshot={snapshot} />}

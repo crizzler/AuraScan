@@ -279,13 +279,15 @@ def _run(
     command: Sequence[str],
     *,
     timeout: int = 600,
+    redact: bool = True,
 ) -> Tuple[int, str]:
     try:
         result = runner(list(command), capture_output=True, text=True, timeout=timeout, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         return 127, redact_incident_text(str(exc))[:4000]
     output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
-    return result.returncode, redact_incident_text(output)[:4000]
+    rendered = redact_incident_text(output) if redact else output
+    return result.returncode, rendered[:4000]
 
 
 def _package_manager_running(runner: Callable) -> bool:
@@ -342,6 +344,7 @@ def _prepare_write_target(report: RecoveryReport, runner: Callable) -> Tuple[boo
                 runner,
                 ["findmnt", "--noheadings", "--output", "TARGET,OPTIONS", "--target", str(requested)],
                 timeout=15,
+                redact=False,
             )
             fields = output.splitlines()[0].split(None, 1) if code == 0 and output.splitlines() else []
             if len(fields) != 2:
@@ -361,6 +364,7 @@ def _prepare_write_target(report: RecoveryReport, runner: Callable) -> Tuple[boo
                 runner,
                 ["findmnt", "--noheadings", "--output", "OPTIONS", "--target", str(mountpoint)],
                 timeout=15,
+                redact=False,
             )
             verified_options = {item.strip() for item in verify.splitlines()[0].split(",")} if code == 0 and verify.splitlines() else set()
             if "rw" not in verified_options or "ro" in verified_options:

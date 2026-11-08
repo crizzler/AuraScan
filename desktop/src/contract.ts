@@ -581,6 +581,8 @@ export interface SettingsProvider {
   requires_key: boolean;
   key_env: string;
   default_model: string;
+  base_url: string;
+  user_base_url: boolean;
   key_present: boolean;
   selected: boolean;
 }
@@ -685,7 +687,7 @@ function parseProviderEntries(raw: unknown): SettingsProvider[] | null {
     if (!isRecord(entry)) {
       return null;
     }
-    const { id, label, local, requires_key, key_env, default_model, key_present, selected } = entry;
+    const { id, label, local, requires_key, key_env, default_model, base_url, user_base_url, key_present, selected } = entry;
     if (typeof id !== "string" || !PROVIDER_ID.test(id)) {
       return null;
     }
@@ -693,8 +695,10 @@ function parseProviderEntries(raw: unknown): SettingsProvider[] | null {
       typeof label !== "string" ||
       typeof key_env !== "string" ||
       typeof default_model !== "string" ||
+      typeof base_url !== "string" ||
       typeof local !== "boolean" ||
       typeof requires_key !== "boolean" ||
+      typeof user_base_url !== "boolean" ||
       typeof key_present !== "boolean" ||
       typeof selected !== "boolean"
     ) {
@@ -707,6 +711,8 @@ function parseProviderEntries(raw: unknown): SettingsProvider[] | null {
       requires_key,
       key_env,
       default_model,
+      base_url,
+      user_base_url,
       key_present,
       selected
     });
@@ -766,15 +772,35 @@ export function parseSettings(raw: unknown): SettingsParseResult {
   return { ok: true, settings: { schema: SETTINGS_SCHEMA, config, ai, providers, features } };
 }
 
-/** A `settings set-ai-key` response: a confirmation plus the new effective state. */
+/**
+ * A `settings set-ai-key` or `settings set-ai-config` response: a confirmation
+ * plus the new effective state. The credential itself never appears here.
+ *
+ * A write is confirmed only by the expected action *and* `stored === true`; a
+ * missing or non-boolean flag is not a confirmation, and an unrelated action
+ * must not pass on `stored` alone.
+ */
+const WRITE_ACTIONS = ["set_ai_key", "set_ai_config"];
+
 export function parseSettingsWrite(
   raw: unknown
 ): { ok: true; ai: SettingsAi } | { ok: false; reason: string } {
   if (!isRecord(raw)) {
     return { ok: false, reason: "response is not an object" };
   }
-  if (raw.schema !== SETTINGS_SCHEMA || raw.stored !== true) {
-    return { ok: false, reason: "the credential was not stored" };
+  if (raw.schema !== SETTINGS_SCHEMA) {
+    return { ok: false, reason: "unsupported settings response schema" };
+  }
+  if (typeof raw.action !== "string" || !WRITE_ACTIONS.includes(raw.action)) {
+    return { ok: false, reason: "unsupported settings write action" };
+  }
+  if (raw.stored !== true) {
+    return { ok: false, reason: "the write was not confirmed" };
+  }
+  if (raw.action === "set_ai_config") {
+    if (typeof raw.provider !== "string" || !PROVIDER_ID.test(raw.provider)) {
+      return { ok: false, reason: "the AI configuration was not written" };
+    }
   }
   const ai = parseAiPayload(raw.ai);
   if (ai === null) {

@@ -20,11 +20,19 @@ export interface ShellErrorResult {
 
 export type ShellResult = ShellPayloadResult | ShellErrorResult;
 
+export interface AiConfigInput {
+  provider: string;
+  model?: string;
+  base_url?: string;
+  enabled?: boolean;
+}
+
 export interface DesktopBridge {
   refresh(): Promise<ShellResult>;
   openReport(): Promise<ShellResult>;
   readSettings(): Promise<ShellResult>;
   setAiKey(provider: string, secret: string): Promise<ShellResult>;
+  configureAi(values: AiConfigInput): Promise<ShellResult>;
   reviewInstructions(): Promise<ShellResult>;
   scanInstructions(): Promise<ShellResult>;
   approveInstruction(fileId: string, reportId: string, sha256: string): Promise<ShellResult>;
@@ -46,6 +54,7 @@ export function desktopBridge(): DesktopBridge | null {
     "openReport",
     "readSettings",
     "setAiKey",
+    "configureAi",
     "reviewInstructions",
     "scanInstructions",
     "approveInstruction",
@@ -67,6 +76,7 @@ export function desktopBridge(): DesktopBridge | null {
     openReport: () => call("openReport")(),
     readSettings: () => call("readSettings")(),
     setAiKey: (provider: string, secret: string) => call("setAiKey")(provider, secret),
+    configureAi: (values: AiConfigInput) => call("configureAi")(values),
     reviewInstructions: () => call("reviewInstructions")(),
     scanInstructions: () => call("scanInstructions")(),
     approveInstruction: (fileId: string, reportId: string, sha256: string) =>

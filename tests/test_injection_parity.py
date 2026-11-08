@@ -275,6 +275,21 @@ def test_check_anchors_detects_a_dirty_anticopy_checkout(tmp_path, monkeypatch):
     assert parity.check_anchors() == parity.EXIT_CORPUS
 
 
+def _anticopy_is_clean() -> bool:
+    if not os.path.isdir(parity.ANTICOPY):
+        return False
+    result = subprocess.run(
+        ["git", "-C", parity.ANTICOPY, "status", "--porcelain"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    return result.returncode == 0 and not result.stdout.strip()
+
+
+@pytest.mark.skipif(
+    not _anticopy_is_clean(), reason="AntiCopy checkout is absent or dirty"
+)
 def test_check_anchors_detects_a_golden_anchor_mismatch(tmp_path, monkeypatch):
     with open(parity.GOLDEN, "r", encoding="utf-8") as handle:
         golden = json.load(handle)

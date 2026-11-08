@@ -2172,7 +2172,7 @@ SPLIT_DEFINITIONS = (
     "package_other() {\n  :\n}\n"
 )
 SHELLY_PKGBUILD = (
-    Path(__file__).resolve().parents[1] / "findings" / "issue-001" / "shelly-PKGBUILD"
+    Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "shelly-PKGBUILD"
 )
 
 

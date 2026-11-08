@@ -20,7 +20,7 @@ from aurascan.core.upgrade_models import UpgradePlan
 def _host_elf() -> Path:
     for candidate in ("/bin/ls", "/usr/bin/ls", "/bin/sh"):
         path = Path(candidate)
-        if path.is_file():
+        if path.is_file() and not path.is_symlink():
             return path
     raise AssertionError("no host ELF binary is available for the fixture")
 

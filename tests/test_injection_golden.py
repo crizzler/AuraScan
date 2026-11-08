@@ -59,6 +59,9 @@ def test_golden_header_is_anchored(golden):
     assert golden["version"] == 1
 
 
+@pytest.mark.skipif(
+    not os.path.isdir(ANTICOPY), reason="AntiCopy checkout is not available"
+)
 def test_golden_head_matches_the_live_anticopy_head(golden):
     result = subprocess.run(
         ["git", "-C", ANTICOPY, "rev-parse", "HEAD"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False

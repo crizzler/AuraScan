@@ -15,6 +15,7 @@ opener is still the real one, the redirect handler is still the real one.
 
 import json
 import os
+import shutil
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -516,6 +517,7 @@ def test_123_every_fetch_failure_is_a_fixed_label_and_not_an_error(tmp_path, mon
         ] == ["Campaign refresh failed; retained validated bundled data: %s" % (suffix,)]
 
 
+@pytest.mark.skipif(shutil.which("pacman") is None, reason="requires a pacman host")
 def test_124_no_raw_exception_text_reaches_the_wire(tmp_path, monkeypatch):
     _state(tmp_path, monkeypatch)
     _root_patch(tmp_path, monkeypatch)

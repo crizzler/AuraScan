@@ -13,6 +13,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 GUARD_PATH = ROOT / "packaging/recovery/smoke_guard.py"
 TOOL_GUARD_PATH = ROOT / "packaging/recovery/smoke-tool-guard.sh"
+ARCH_HOST = pytest.mark.skipif(
+    not Path("/etc/arch-release").exists(),
+    reason="requires the Arch recovery host tool layout",
+)
 
 
 def _load_guard():
@@ -731,6 +735,7 @@ def test_detach_reattach_binding_requires_exact_signed_bytes(tmp_path):
         guard.verify_payload_binding(signed, unsigned, reattached)
 
 
+@ARCH_HOST
 def test_trusted_tool_guard_checks_the_complete_absolute_component_chain(tmp_path):
     trusted_python = str(Path("/usr/bin/python3").resolve(strict=True))
     accepted = _run_tool_guard("/usr/bin/stat", trusted_python)
@@ -828,6 +833,7 @@ def _run_minimal_tool_environment(runtime: str = "attested") -> subprocess.Compl
         os.close(read_fd)
 
 
+@ARCH_HOST
 def test_minimal_tool_environment_passes_only_attested_runtime():
     result = _run_minimal_tool_environment()
 
@@ -853,6 +859,7 @@ def test_minimal_tool_environment_passes_only_attested_runtime():
     }
 
 
+@ARCH_HOST
 @pytest.mark.parametrize(
     "runtime",
     (

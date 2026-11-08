@@ -13,6 +13,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "packaging/recovery/prepare-secure-boot.py"
+ARCH_HOST = pytest.mark.skipif(
+    not Path("/etc/arch-release").exists(),
+    reason="requires the Arch recovery host tool layout",
+)
 
 
 def _load_helper():
@@ -194,6 +198,7 @@ def test_native_capture_and_artifact_file_size_limits_are_independent(tmp_path):
     assert not refused.exists() or refused.stat().st_size <= 4096
 
 
+@ARCH_HOST
 def test_trusted_tool_resolution_executes_on_the_python38_compatible_path_api():
     helper = _load_helper()
     resolved, metadata = helper._resolved_trusted_tool("/usr/bin/stat")

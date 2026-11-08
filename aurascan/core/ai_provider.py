@@ -7,7 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Callable, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -210,6 +210,19 @@ def parse_bool(value: Optional[str]) -> Optional[bool]:
     return None
 
 
+def _as_ipv4_if_mapped(value: Any) -> Any:
+    if isinstance(value, ipaddress.IPv6Address) and value.ipv4_mapped is not None:
+        return value.ipv4_mapped
+    return value
+
+
+def _is_loopback_literal(host: str) -> bool:
+    try:
+        return _as_ipv4_if_mapped(ipaddress.ip_address(host)).is_loopback
+    except ValueError:
+        return False
+
+
 def provider_choices() -> Tuple[str, ...]:
     return tuple(PROVIDERS.keys())
 
@@ -246,11 +259,7 @@ def normalize_local_base_url(value: str) -> str:
         if parsed.scheme.lower() != "http":
             raise AIProviderError("HTTPS local AI URLs must use a loopback IP literal")
         host = "127.0.0.1"
-    try:
-        is_loopback = ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        is_loopback = False
-    if not is_loopback:
+    if not _is_loopback_literal(host):
         raise AIProviderError("local AI base URL must use a loopback host")
 
     path = parsed.path or ""
@@ -316,6 +325,9 @@ def normalize_custom_base_url(value: str) -> str:
     except ValueError:
         literal = None
     if literal is not None:
+        if isinstance(literal, ipaddress.IPv6Address) and literal.sixtofour is not None:
+            raise AIProviderError("custom AI base URL must not use a 6to4 address")
+        literal = _as_ipv4_if_mapped(literal)
         if not literal.is_loopback and (
             literal.is_private
             or literal.is_link_local
@@ -526,10 +538,7 @@ def _is_loopback_endpoint(config: AIProviderConfig) -> bool:
         return False
     if host.lower() == "localhost":
         return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
+    return _is_loopback_literal(host)
 
 
 def call_ai_provider(

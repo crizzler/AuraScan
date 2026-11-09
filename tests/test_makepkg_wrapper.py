@@ -1,7 +1,9 @@
 import io
 import json
 import os
+import re
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -560,6 +562,49 @@ def test_wrapper_pins_scanned_pkgbuild_through_makepkg_assignment_channel(tmp_pa
         ("PACMAN=fixture-pacman\n", "PACMAN"),
         ("export DLAGENTS=('fixture-agent')\n", "DLAGENTS"),
         ("DLAGENTS+=('fixture-agent')\n", "DLAGENTS"),
+        ("declare PACMAN=fixture\n", "PACMAN"),
+        ("declare -x PACMAN=fixture\n", "PACMAN"),
+        ("declare -xr PACMAN=fixture\n", "PACMAN"),
+        ("readonly PACMAN=fixture\n", "PACMAN"),
+        ("typeset PACMAN=fixture\n", "PACMAN"),
+        ("local PACMAN=fixture\n", "PACMAN"),
+        ("export\tPACMAN=fixture\n", "PACMAN"),
+        ("export FOO=1 PACMAN=fixture\n", "PACMAN"),
+        ("export PACMAN\n", "PACMAN"),
+        ("PACMAN=\n", "PACMAN"),
+        # Unquoted separators and source-time assignment spellings (R6 class).
+        ("FOO=1;PACMAN=x\n", "PACMAN"),
+        ("FOO=1&&PACMAN=x\n", "PACMAN"),
+        ("FOO=1&PACMAN=x\n", "PACMAN"),
+        ("export FOO=1;PACMAN=x\n", "PACMAN"),
+        ("FOO=${PACMAN:=x}\n", "PACMAN"),
+        ('FOO="$((PACMAN=7))"\n', "could not be verified safely"),
+        # F1-N: code-loading, tool-selection, and makepkg-internal names.
+        ("PATH=/evil:$PATH\n", "PATH"),
+        ("readonly PATH+=/evil\n", "PATH"),
+        ("export LD_PRELOAD=/evil.so\n", "LD_PRELOAD"),
+        ("export BASH_ENV=/evil.sh\n", "BASH_ENV"),
+        ("export LD_LIBRARY_PATH=/evil\n", "LD_LIBRARY_PATH"),
+        ("export LD_AUDIT=/evil.so\n", "LD_AUDIT"),
+        ("MAKEPKG_CONF=/evil.conf\n", "MAKEPKG_CONF"),
+        ("MAKEPKG_LIBRARY=/evil\n", "MAKEPKG_LIBRARY"),
+        ("ENV=/evil\n", "ENV"),
+        ("declare -x ENV=/evil\n", "ENV"),
+        ("extra_environment=('BUILDFILE=evil')\n", "extra_environment"),
+        ("extra_environment+=('LD_PRELOAD=/evil')\n", "extra_environment"),
+        ("declare -a extra_environment=(x)\n", "extra_environment"),
+        ("export extra_environment\n", "extra_environment"),
+        ("restore_envvars='x'\n", "restore_envvars"),
+        ("shellopts='x'\n", "shellopts"),
+        ("CARCH=x86_64\n", "CARCH"),
+        # F2-S: value-side command and process substitution.
+        ("FOO=$(evil)\n", "could not be verified safely"),
+        ("FOO=`evil`\n", "could not be verified safely"),
+        ('FOO="$(evil)"\n', "could not be verified safely"),
+        ("ARR=($(evil))\n", "could not be verified safely"),
+        ("FOO=<(evil)\n", "could not be verified safely"),
+        ("ARR=(<(evil))\n", "could not be verified safely"),
+        ('MAKEFLAGS="-j$(PACMAN=x)"\n', "could not be verified safely"),
     ],
 )
 def test_wrapper_refuses_user_makepkg_config_overrides_before_handoff(
@@ -592,6 +637,512 @@ def test_wrapper_refuses_user_makepkg_config_overrides_before_handoff(
     assert "makepkg configuration" in output
     assert ".makepkg.conf" in output
     assert key in output
+
+
+def test_wrapper_refuses_unverifiable_user_makepkg_config(tmp_path):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".makepkg.conf").write_text("if true; then\n  echo hi\nfi\n", encoding="utf-8")
+    order = []
+    makepkg_calls = []
+    factory, _created = fake_engine_factory(order)
+    stdout = io.StringIO()
+
+    code = run(
+        ["--syncdeps"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        environ={"HOME": str(home)},
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    assert code == EXIT_SCAN_BLOCKED
+    assert makepkg_calls == []
+    assert "could not be verified safely" in stdout.getvalue()
+
+
+@pytest.mark.parametrize(
+    "config_body,kind,key,line",
+    [
+        # X2: expansion assignment of a guarded key is a `sets` problem.
+        ("FOO=${PACMAN:=x}\n", "sets", "PACMAN", None),
+        ('FOO="${PACMAN:=x}"\n', "sets", "PACMAN", None),
+        ("FOO=${PACMAN=x}\n", "sets", "PACMAN", None),
+        ("FOO=(${PACMAN:=x})\n", "sets", "PACMAN", None),
+        ("FOO=${DLAGENTS:=x}\n", "sets", "DLAGENTS", None),
+        ("FOO=${BUILDFILE=x}\n", "sets", "BUILDFILE", None),
+        ("FOO=${VCSCLIENTS:=x}\n", "sets", "VCSCLIENTS", None),
+        ("FOO=$\\\n{PACMAN=x}\n", "sets", "PACMAN", None),
+        ("FOO=${PA\\\nCMAN=x}\n", "sets", "PACMAN", None),
+        # X3: arithmetic shapes are unverifiable at the physical line.
+        ("((PACMAN=7))\n", "unverifiable", None, 1),
+        ("FOO=$((PACMAN=7))\n", "unverifiable", None, 1),
+        ('FOO="$((PACMAN=7))"\n', "unverifiable", None, 1),
+        ("FOO=$[PACMAN=7]\n", "unverifiable", None, 1),
+        ("(\\\n(PACMAN=7))\n", "unverifiable", None, 1),
+        ("FOO=1\nFOO=$[PACMAN=7]\n", "unverifiable", None, 2),
+        # X4: nameref declaration options are unverifiable at the option line.
+        ("declare -n r=PACMAN\nr=evil\n", "unverifiable", None, 1),
+        ("declare -xn r=PACMAN\nr=evil\n", "unverifiable", None, 1),
+        ("typeset -n r=PACMAN\nr=evil\n", "unverifiable", None, 1),
+        ("readonly -n r=PACMAN\n", "unverifiable", None, 1),
+        ("local -n r=PACMAN\n", "unverifiable", None, 1),
+        ("FOO=1\ndeclare -n r=PACMAN\n", "unverifiable", None, 2),
+        # Backslash-newline-joined assignment still refuses (line of first word).
+        ("PAC\\\nMAN=x\n", "unverifiable", None, 1),
+        # F1-N: the composed guarded set reports exact message kinds.
+        ("PATH=/evil:$PATH\n", "sets", "PATH", None),
+        ("export LD_PRELOAD=/evil.so\n", "sets", "LD_PRELOAD", None),
+        ("export BASH_ENV=/evil.sh\n", "sets", "BASH_ENV", None),
+        ("export LD_LIBRARY_PATH=/evil\n", "sets", "LD_LIBRARY_PATH", None),
+        ("export LD_AUDIT=/evil.so\n", "sets", "LD_AUDIT", None),
+        ("MAKEPKG_CONF=/evil.conf\n", "sets", "MAKEPKG_CONF", None),
+        ("MAKEPKG_LIBRARY=/evil\n", "sets", "MAKEPKG_LIBRARY", None),
+        ("ENV=/evil\n", "sets", "ENV", None),
+        ("declare -x ENV=/evil\n", "sets", "ENV", None),
+        ("extra_environment=('BUILDFILE=evil')\n", "sets", "extra_environment", None),
+        ("extra_environment+=('LD_PRELOAD=/evil')\n", "sets", "extra_environment", None),
+        ("declare -a extra_environment=(x)\n", "sets", "extra_environment", None),
+        ("restore_envvars='x'\n", "sets", "restore_envvars", None),
+        ("shellopts='x'\n", "sets", "shellopts", None),
+        ("CARCH=x86_64\n", "sets", "CARCH", None),
+        ("export PATH\n", "declares", "PATH", None),
+        ("readonly extra_environment\n", "declares", "extra_environment", None),
+        # F2-S: refused value-side execution shapes carry the physical line.
+        ("FOO=$(evil)\n", "unverifiable", None, 1),
+        ("FOO=`evil`\n", "unverifiable", None, 1),
+        ('FOO="$(evil)"\n', "unverifiable", None, 1),
+        ("ARR=($(evil))\n", "unverifiable", None, 1),
+        ("FOO=<(evil)\n", "unverifiable", None, 1),
+        ("ARR=(<(evil))\n", "unverifiable", None, 1),
+        ('MAKEFLAGS="-j$(PACMAN=x)"\n', "unverifiable", None, 1),
+        ("FOO=1\nBAR=$(evil)\n", "unverifiable", None, 2),
+    ],
+)
+def test_config_guard_reports_expected_problem_kind(config_body, kind, key, line):
+    problem = makepkg_wrapper._config_problem_from_text(config_body)
+
+    assert problem is not None
+    if kind == "sets":
+        assert problem == f"sets {key}"
+    elif kind == "declares":
+        assert problem == f"declares {key}"
+    else:
+        assert problem.startswith("could not be verified safely")
+        if line is not None:
+            assert problem == f"could not be verified safely (line {line})"
+
+
+_ORACLE_GUARDED_KEYS = (
+    "BUILDFILE",
+    "DLAGENTS",
+    "PACMAN",
+    "VCSCLIENTS",
+    "BASH_ENV",
+    "ENV",
+    "LD_AUDIT",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "MAKEPKG_CONF",
+    "MAKEPKG_LIBRARY",
+    "PATH",
+    "extra_environment",
+    "restore_envvars",
+    "shellopts",
+    "CARCH",
+)
+_ORACLE_BASH = shutil.which("bash")
+# Snapshot each guarded name's full `declare -p` output before and after
+# sourcing.  PATH always carries an ambient declaration, so a presence flag
+# cannot tell whether a body changed it; the declaration text can.
+_ORACLE_SCRIPT = (
+    "set +u; "
+    "declare -A before=(); "
+    'for key in "${@:2}"; do before[$key]=$(declare -p "$key" 2>/dev/null); done; '
+    '. "$1"; status=$?; '
+    'printf "status=%s\\n" "$status"; '
+    'for key in "${@:2}"; do '
+    'after=$(declare -p "$key" 2>/dev/null); '
+    '[ "$after" = "${before[$key]}" ] || printf "set=%s\\n" "$key"; '
+    "done"
+)
+
+# Bodies that set a guarded key when bash sources them (design section 2,
+# backslash-newline-joined spellings verified against bash, and the F1-N/F2-S
+# attack rows of design/security-0.15.1-r6-f1-f2.md section 6.5).
+_R6_ATTACK_BODIES = [
+    "FOO=1;PACMAN=x\n",
+    "FOO=1&&PACMAN=x\n",
+    "FOO=1&PACMAN=x\n",
+    "export FOO=1;PACMAN=x\n",
+    "FOO=${PACMAN:=x}\n",
+    'FOO="${PACMAN:=x}"\n',
+    "FOO=${PACMAN=x}\n",
+    "FOO=(${PACMAN:=x})\n",
+    "((PACMAN=7))\n",
+    "FOO=$((PACMAN=7))\n",
+    'FOO="$((PACMAN=7))"\n',
+    "FOO=$[PACMAN=7]\n",
+    "declare -n r=PACMAN\nr=evil\n",
+    "declare -xn r=PACMAN\nr=evil\n",
+    "typeset -n r=PACMAN\nr=evil\n",
+    "(\\\n(PACMAN=7))\n",
+    "FOO=$\\\n{PACMAN=x}\n",
+    "FOO=${PA\\\nCMAN=x}\n",
+    "PATH=/evil:$PATH\n",
+    "export LD_PRELOAD=/evil.so\n",
+    "extra_environment=('BASH_ENV=/x')\n",
+    "restore_envvars='x'\n",
+    "shellopts='x'\n",
+    "CARCH=x\n",
+    "FOO=<(x)\n",
+]
+
+# Bodies that set no guarded key and must keep being allowed (design section 2
+# plus the F1-N/F2-S benign rows of the same design).
+_R6_BENIGN_BODIES = [
+    "# PACMAN=1\n",
+    'FOO="x PACMAN y"\n',
+    "CFLAGS='-O2'\nMAKEFLAGS='-j4'\n",
+    "FOO=(\n  'a=PACMAN'\n)\n",
+    "FOO=1; BAR=2\n",
+    "FOO=1;BAR=2\n",
+    "FOO=${PACMAN:-x}\n",
+    "FOO=${#PACMAN}\n",
+    "FOO=${BAR:=x}\n",
+    "FOO=${PACMAN2:=x}\n",
+    "FOO=a\\;PACMAN=x\n",
+    "FOO='${PACMAN:=x}'\n",
+    "FOO=\\${PACMAN:=x}\n",
+    'FOO="PACMAN=x"\n',
+    "FOO=(a;b)\n",
+    "export -n FOO=1\n",
+    "declare -x CFLAGS=-O2\n",
+    'FOO="$HOME/bin"\n',
+    "FOO='$(PACMAN=x)'\n",
+    "FOO=\\$(PACMAN=x)\n",
+    'FOO="<(x)"\n',
+    "FOO='<('\n",
+    "FOO=a\\<(b\n",
+    'PACKAGER="Dev <d@x>"\n',
+    "MAKEFLAGS=-j4\n",
+    "CFLAGS='-O2'\n",
+]
+
+# Frozen boundary (design/security-0.15.1-r6-f1-f2.md sections 4 and 6.4):
+# these are deliberate fail-closed refusals of shapes bash accepts without
+# touching a guarded key.  Changing a row requires design review; without this
+# table a future lexer "fix" could widen the allow side silently.
+_ACCEPTED_FAIL_CLOSED_ROWS = [
+    ("FOO=$((1+1))\n", "unverifiable", None, 1),
+    ('FOO="a((b"\n', "unverifiable", None, 1),
+    ("declare -n r=OTHER\n", "unverifiable", None, 1),
+    ("FOO=1|PACMAN=x\n", "sets", "PACMAN", None),
+    ("FOO=1||PACMAN=x\n", "sets", "PACMAN", None),
+    ("FOO=1;;PACMAN=x\n", "sets", "PACMAN", None),
+    ('"PACMAN=x"\n', "unverifiable", None, 1),
+    ("FOO=$(PACMAN=x)\n", "unverifiable", None, 1),
+    ("FOO=`PACMAN=x`\n", "unverifiable", None, 1),
+]
+
+# Bash itself rejects these deliberately inert rows while sourcing them, so
+# the oracle must keep observing a non-zero source status for them instead of
+# requiring zero.  The observed codes (1/2 for parse failures, 127 for the
+# unresolved command) are bash 5.x values; only "non-zero" is asserted so a
+# different bash patch level is not reported as a guard regression.  Every
+# other row must source with status 0: a non-zero status there would mean the
+# body did not run as the measurement claims.
+_R6_NONZERO_SOURCE_STATUS_BODIES = frozenset(
+    {
+        "FOO=(a;b)\n",
+        "FOO=\\$(PACMAN=x)\n",
+        "FOO=a\\<(b\n",
+        "FOO=1;;PACMAN=x\n",
+        '"PACMAN=x"\n',
+    }
+)
+
+
+class _OracleMeasurementError(AssertionError):
+    """The bash source-gate oracle did not produce one usable measurement."""
+
+
+_ORACLE_STATUS_PATTERN = re.compile(r"[0-9]{1,3}")
+
+
+def _parse_oracle_measurement(stdout, returncode, *, stderr=""):
+    """Return the single ``(keys, source_status)`` pair the oracle measured.
+
+    The measurement is usable only when the helper exited cleanly, emitted
+    exactly one well-formed ``status=`` marker, and reported changed names only
+    from the guarded boundary.  A missing, duplicated, malformed or foreign
+    marker raises instead of degrading to "no guarded key changed", because a
+    broken measurement must not satisfy the source-gate comparison.
+    """
+
+    if returncode != 0:
+        raise _OracleMeasurementError(
+            f"source oracle helper failed (exit {returncode}): {stderr[:400]!r}"
+        )
+    status = None
+    keys = set()
+    for line in stdout.splitlines():
+        if line.startswith("status="):
+            if status is not None:
+                raise _OracleMeasurementError("duplicate status marker")
+            raw_status = line.split("=", 1)[1]
+            if not _ORACLE_STATUS_PATTERN.fullmatch(raw_status):
+                raise _OracleMeasurementError(
+                    f"malformed status marker: {raw_status[:80]!r}"
+                )
+            status = int(raw_status)
+            if status > 255:
+                raise _OracleMeasurementError(f"status out of range: {status}")
+        elif line.startswith("set="):
+            key = line.split("=", 1)[1]
+            if key not in _ORACLE_GUARDED_KEYS:
+                raise _OracleMeasurementError(
+                    f"set marker outside the oracle boundary: {key[:80]!r}"
+                )
+            if key in keys:
+                raise _OracleMeasurementError(f"duplicate set marker: {key}")
+            keys.add(key)
+        elif line.strip():
+            raise _OracleMeasurementError(
+                f"unexpected oracle output: {line[:120]!r}"
+            )
+    if status is None:
+        raise _OracleMeasurementError("missing status marker")
+    return keys, status
+
+
+def _sourced_guarded_keys(config_body, tmp_path, *, bash=None):
+    """Source one body in a clean bash and report the guarded keys it sets.
+
+    Returns ``(keys, source_status)``; a body bash cannot source reports a
+    non-zero status.  Raises :class:`_OracleMeasurementError` when bash emits
+    no unambiguous measurement.  Guarded names are compared by their full
+    ``declare -p`` snapshot, so an ambient declaration (``PATH``) only counts
+    when the body changed it.
+    """
+
+    config_path = tmp_path / "oracle-makepkg.conf"
+    config_path.write_text(config_body, encoding="utf-8")
+    completed = subprocess.run(
+        [
+            "env",
+            "-i",
+            "PATH=/usr/bin:/bin",
+            bash or _ORACLE_BASH or "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            _ORACLE_SCRIPT,
+            "bash",
+            str(config_path),
+            *_ORACLE_GUARDED_KEYS,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return _parse_oracle_measurement(
+        completed.stdout, completed.returncode, stderr=completed.stderr
+    )
+
+
+@pytest.mark.skipif(_ORACLE_BASH is None, reason="bash is required to source config bodies")
+def test_config_guard_matches_real_bash_source_semantics(tmp_path):
+    """No body may set a guarded key in bash while the bounded guard allows it."""
+
+    accepted_bodies = [row[0] for row in _ACCEPTED_FAIL_CLOSED_ROWS]
+    corpus = set(_R6_ATTACK_BODIES) | set(_R6_BENIGN_BODIES) | set(accepted_bodies)
+    assert _R6_NONZERO_SOURCE_STATUS_BODIES <= corpus, (
+        "non-zero source-status table names a body outside the oracle corpus"
+    )
+    failures = []
+    for config_body in _R6_ATTACK_BODIES + _R6_BENIGN_BODIES + accepted_bodies:
+        problem = makepkg_wrapper._config_problem_from_text(config_body)
+        sourced_keys, source_status = _sourced_guarded_keys(config_body, tmp_path)
+        note = (
+            f"body={config_body!r} guard={problem!r} "
+            f"bash_sets={sorted(sourced_keys)} source_status={source_status}"
+        )
+        if source_status < 0:
+            failures.append("missing oracle measurement: " + note)
+        elif config_body in _R6_NONZERO_SOURCE_STATUS_BODIES:
+            if source_status == 0:
+                failures.append("oracle expected a non-zero source status: " + note)
+        elif source_status != 0:
+            failures.append(
+                "oracle reported an unexpected non-zero source status: " + note
+            )
+        if sourced_keys and problem is None:
+            failures.append("MISS: guard allows a guarded set: " + note)
+        if config_body in _R6_ATTACK_BODIES and problem is None:
+            failures.append("attack body allowed: " + note)
+        if config_body in _R6_BENIGN_BODIES:
+            if problem is not None:
+                failures.append("benign body refused: " + note)
+            elif sourced_keys:
+                failures.append("benign body sets a guarded key: " + note)
+        if config_body in accepted_bodies:
+            if problem is None:
+                failures.append("accepted fail-closed body allowed: " + note)
+            if sourced_keys:
+                failures.append("accepted fail-closed body sets a guarded key: " + note)
+    assert not failures, "\n".join(failures)
+
+
+def test_source_gate_oracle_covers_the_composed_production_guard_set():
+    """The bash oracle must measure exactly the names the production guard arms.
+
+    ``_ORACLE_GUARDED_KEYS`` stays an explicit list so the measurement stays
+    independent of the code under test; this equality is what forces a future
+    code-loading or tool-selection addition into the oracle instead of letting
+    it silently escape source-gate coverage.
+    """
+
+    assert len(_ORACLE_GUARDED_KEYS) == len(set(_ORACLE_GUARDED_KEYS))
+    assert sorted(_ORACLE_GUARDED_KEYS) == sorted(
+        makepkg_wrapper._USER_MAKEPKG_CONFIG_GUARDED_KEYS
+    )
+
+
+# A measurement is only usable when it carries exactly the markers the oracle
+# script emits.  Each row below is a plausible way for a broken, truncated or
+# spoofed measurement to look quiet; none may be read as "no guarded change".
+_UNUSABLE_MEASUREMENT_OUTPUTS = [
+    ("", 0),
+    ("set=PACMAN\n", 0),
+    ("status=0\nstatus=0\n", 0),
+    ("status=\n", 0),
+    ("status=zero\n", 0),
+    ("status=-1\n", 0),
+    ("status=256\n", 0),
+    ("status=0\nset=NOT_A_GUARDED_NAME\n", 0),
+    ("status=0\nset=PACMAN\nset=PACMAN\n", 0),
+    ("status=0\nunexpected output\n", 0),
+    ("status=0\n", 1),
+]
+
+
+@pytest.mark.parametrize(
+    "stdout,returncode",
+    _UNUSABLE_MEASUREMENT_OUTPUTS,
+    ids=[
+        "missing-status",
+        "change-marker-without-status",
+        "duplicate-status",
+        "empty-status",
+        "non-numeric-status",
+        "negative-status",
+        "status-out-of-range",
+        "set-marker-outside-boundary",
+        "duplicate-set-marker",
+        "unexpected-stdout",
+        "failed-helper",
+    ],
+)
+def test_source_gate_oracle_rejects_unusable_measurement(stdout, returncode):
+    with pytest.raises(_OracleMeasurementError):
+        _parse_oracle_measurement(stdout, returncode)
+
+
+@pytest.mark.skipif(_ORACLE_BASH is None, reason="bash is required to source config bodies")
+@pytest.mark.parametrize("helper_name", ["true", "false"])
+def test_source_gate_oracle_rejects_a_measurement_without_a_status(
+    tmp_path, helper_name
+):
+    """A helper that never emits the oracle script's markers is not a measurement.
+
+    ``true`` exits 0 with empty output (the missing-marker case the reviewer
+    reproduced) and ``false`` exits non-zero; both must raise instead of
+    degrading to an empty key set with status -1.
+    """
+
+    helper = shutil.which(helper_name)
+    assert helper is not None
+    with pytest.raises(_OracleMeasurementError):
+        _sourced_guarded_keys("FOO=oracle_inert\n", tmp_path, bash=helper)
+
+
+@pytest.mark.skipif(_ORACLE_BASH is None, reason="bash is required to source config bodies")
+def test_source_gate_oracle_measures_known_controls(tmp_path):
+    """Calibrate the oracle against bodies with known bash-observable effects."""
+
+    keys, status = _sourced_guarded_keys("PACMAN=oracle_inert\n", tmp_path)
+    assert (keys, status) == ({"PACMAN"}, 0)
+    keys, status = _sourced_guarded_keys("PATH=/oracle/inert:$PATH\n", tmp_path)
+    assert (keys, status) == ({"PATH"}, 0)
+    keys, status = _sourced_guarded_keys("FOO=oracle_inert\n", tmp_path)
+    assert (keys, status) == (set(), 0)
+
+
+@pytest.mark.parametrize("config_body,kind,key,line", _ACCEPTED_FAIL_CLOSED_ROWS)
+def test_accepted_fail_closed_false_positives(config_body, kind, key, line):
+    problem = makepkg_wrapper._config_problem_from_text(config_body)
+
+    assert problem is not None
+    if kind == "sets":
+        assert problem == f"sets {key}"
+    else:
+        assert problem == f"could not be verified safely (line {line})"
+
+
+@pytest.mark.parametrize(
+    "config_body",
+    [
+        "# PACMAN=1\ndeclare -x CFLAGS=-O2\nFOO=\"x PACMAN y\"\n",
+        "FOO=(\n  'a=PACMAN'\n)\n",
+        "FOO=1;BAR=2\n",
+        "FOO=1; BAR=2\n",
+        "FOO=${PACMAN:-x}\n",
+        "FOO=${#PACMAN}\n",
+        "FOO=${BAR:=x}\n",
+        "FOO=a\\;PACMAN=x\n",
+        "FOO='${PACMAN:=x}'\n",
+        "FOO=\\${PACMAN:=x}\n",
+        'FOO="PACMAN=x"\n',
+        "FOO=(a;b)\n",
+        "export -n FOO=1\n",
+        'FOO="$HOME/bin"\n',
+        "FOO='$(PACMAN=x)'\n",
+        "FOO=\\$(PACMAN=x)\n",
+        'FOO="<(x)"\n',
+        "FOO='<('\n",
+        "FOO=a\\<(b\n",
+        'PACKAGER="Dev <d@x>"\n',
+        "MAKEFLAGS=-j4\n",
+        "CFLAGS='-O2'\n",
+    ],
+)
+def test_wrapper_allows_unrelated_declaration_forms(tmp_path, config_body):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".makepkg.conf").write_text(config_body, encoding="utf-8")
+    order = []
+    makepkg_calls = []
+    factory, _created = fake_engine_factory(order)
+
+    code = run(
+        ["--syncdeps"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        environ={"HOME": str(home)},
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == 0
+    assert makepkg_calls
 
 
 def test_wrapper_checks_only_the_user_config_makepkg_would_source(tmp_path):
@@ -673,6 +1224,52 @@ def test_wrapper_refuses_oversized_user_makepkg_config(tmp_path):
     assert code == EXIT_SCAN_BLOCKED
     assert makepkg_calls == []
     assert "too large" in stdout.getvalue()
+
+
+def test_user_config_guard_runs_after_final_scan_input(tmp_path, monkeypatch):
+    # Both the sandbox and direct handoff paths leave run() through the same
+    # point, so this ordering covers both.
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n", encoding="utf-8")
+    order = []
+    makepkg_calls = []
+    factory, _created = fake_engine_factory(order)
+    real_capture = makepkg_wrapper.capture_package_scan_input
+
+    def recording_capture(*args, **kwargs):
+        order.append("scan_input_recapture")
+        return real_capture(*args, **kwargs)
+
+    def recording_config_check(_environment):
+        order.append("config_check")
+        return None
+
+    monkeypatch.setattr(
+        makepkg_wrapper, "capture_package_scan_input", recording_capture
+    )
+    monkeypatch.setattr(
+        makepkg_wrapper, "_user_makepkg_config_override", recording_config_check
+    )
+
+    code = run(
+        ["--syncdeps"],
+        cwd=tmp_path,
+        engine_factory=factory,
+        makepkg_locator=lambda: "/usr/bin/makepkg",
+        subprocess_run=fake_makepkg_runner(order, makepkg_calls),
+        environ={"HOME": str(tmp_path / "home")},
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == 0
+    assert makepkg_calls
+    assert "config_check" in order
+    last_recapture = max(
+        index for index, entry in enumerate(order) if entry == "scan_input_recapture"
+    )
+    config_check = order.index("config_check")
+    assert last_recapture < config_check
+    assert config_check < order.index("makepkg")
 
 
 def test_wrapper_json_reports_user_makepkg_config_override(tmp_path):

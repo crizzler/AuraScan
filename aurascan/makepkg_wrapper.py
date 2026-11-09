@@ -137,15 +137,34 @@ _MAKEPKG_CODE_LOADING_ENV_KEYS = frozenset({
     "MAKEPKG_LIBRARY",
 })
 _MAKEPKG_CODE_LOADING_ENV_PREFIXES = ("BASH_FUNC_",)
-# User-level makepkg.conf overrides that can redirect what makepkg executes:
-# the build script, download/VCS agents, or the pacman command run under sudo.
-_USER_MAKEPKG_CONFIG_GUARDED_KEYS = frozenset({
-    "BUILDFILE",
-    "DLAGENTS",
-    "PACMAN",
-    "VCSCLIENTS",
+# makepkg-internal control variables a user config must not touch:
+#   extra_environment  makepkg exports these as env overrides AFTER config
+#                      load (argv-pin channel; config-injected entries
+#                      reorder/defeat the wrapper's trailing BUILDFILE= pin)
+#   restore_envvars    load_makepkg_config evals this after sourcing
+#   shellopts          source_safe evals this after every source
+#   CARCH              merge_arch_attrs evals it into command text
+_USER_MAKEPKG_CONFIG_GUARDED_MAKEPKG_INTERNALS = frozenset({
+    "CARCH", "extra_environment", "restore_envvars", "shellopts",
 })
+# User-level makepkg.conf overrides that can replace the build script,
+# redirect or re-introduce what makepkg executes, or run code while makepkg
+# loads its configuration. The code-loading names are the exact env strip
+# set so the two policies cannot drift.
+_USER_MAKEPKG_CONFIG_GUARDED_KEYS = (
+    _MAKEPKG_CODE_LOADING_ENV_KEYS
+    | frozenset({"DLAGENTS", "PACMAN", "PATH", "VCSCLIENTS"})
+    | _USER_MAKEPKG_CONFIG_GUARDED_MAKEPKG_INTERNALS
+)
 _USER_MAKEPKG_CONFIG_MAX_BYTES = 64 * 1024
+#: Declaration prefixes whose following words are declarations, not commands.
+_USER_MAKEPKG_CONFIG_DECLARATION_PREFIXES = frozenset(
+    {"export", "declare", "readonly", "typeset", "local"}
+)
+#: Declaration prefixes whose ``n`` option creates a nameref (`export` is exempt).
+_USER_MAKEPKG_CONFIG_NAMEREF_PREFIXES = frozenset(
+    {"declare", "readonly", "typeset", "local"}
+)
 
 
 class WrapperArgumentError(ValueError):
@@ -567,16 +586,6 @@ def run(
             scan_warnings,
         )
     makepkg_environment = _sanitized_makepkg_environment(environ)
-    config_override = _user_makepkg_config_override(makepkg_environment)
-    if config_override is not None:
-        return _emit_user_makepkg_config_override(
-            options,
-            report,
-            pkgbuild_path,
-            stdout,
-            scan_warnings,
-            config_override,
-        )
     # Review/history persistence and trusted-tool revalidation may take long
     # enough for a mutable checkout to change.  Re-capture the complete input
     # identity as the final package-state operation before the handoff.  The
@@ -590,6 +599,19 @@ def run(
             pkgbuild_path,
             stdout,
             scan_warnings,
+        )
+    # Read the user config as late as possible: the final recapture above
+    # narrows the mutation window, so the config guard follows it and precedes
+    # the handoff for both the sandbox and direct paths.
+    config_override = _user_makepkg_config_override(makepkg_environment)
+    if config_override is not None:
+        return _emit_user_makepkg_config_override(
+            options,
+            report,
+            pkgbuild_path,
+            stdout,
+            scan_warnings,
+            config_override,
         )
     if not options.json_output:
         _print_passed(stdout)
@@ -779,11 +801,11 @@ def _emit_user_makepkg_config_override(
 ) -> int:
     safe_detail = sanitize_terminal_text(detail, max_chars=300, single_line=True)
     error = (
-        "User-level makepkg configuration can replace the build script or the "
-        "programs makepkg executes ("
+        "User-level makepkg configuration can replace the build script, redirect the "
+        "programs makepkg executes, or run commands while makepkg loads it ("
         + safe_detail
-        + "); makepkg was not invoked. Remove the BUILDFILE, DLAGENTS, "
-        "VCSCLIENTS, or PACMAN override from the user makepkg.conf and run again."
+        + "); makepkg was not invoked. Remove the named override and any command "
+        "substitution from the user makepkg.conf and run again."
     )
     if options.json_output:
         _emit_json(stdout, _wrapper_envelope(
@@ -1183,8 +1205,329 @@ def _user_makepkg_config_paths(environment: Mapping[str, str]) -> List[Path]:
     ]
 
 
+def _unverifiable_config(line: int) -> str:
+    return "could not be verified safely (line %d)" % (line,)
+
+
+def _is_config_identifier(name: str) -> bool:
+    """True only for the ASCII ``[A-Za-z_][A-Za-z0-9_]*`` shape the lexer can classify."""
+
+    if not name or not (name[0] == "_" or "a" <= name[0] <= "z" or "A" <= name[0] <= "Z"):
+        return False
+    for char in name[1:]:
+        if not (
+            char == "_" or "a" <= char <= "z" or "A" <= char <= "Z" or "0" <= char <= "9"
+        ):
+            return False
+    return True
+
+
+def _is_config_option_word(word: str) -> bool:
+    if word == "--":
+        return True
+    return len(word) > 1 and word[0] == "-" and all(
+        "a" <= char <= "z" or "A" <= char <= "Z" for char in word[1:]
+    )
+
+
+def _normalized_config_name(word: str):
+    """Return ``(kind, name)`` for one statement word.
+
+    ``kind`` is ``"assignment"``, ``"bare"`` or ``"invalid"``. Values are never parsed
+    or expanded: only the text before the first ``=`` is normalized and checked.
+    """
+
+    assignment = "=" in word
+    name = word.split("=", 1)[0] if assignment else word
+    name = name.strip()
+    if name.endswith("+"):
+        name = name[:-1]
+    if len(name) >= 2 and name[0] == name[-1] and name[0] in ("'", '"'):
+        name = name[1:-1]
+    if not _is_config_identifier(name):
+        return "invalid", name
+    return ("assignment" if assignment else "bare"), name
+
+
+def _config_skips_line_continuations(text: str, index: int) -> int:
+    """Return ``index`` advanced past any backslash-newline pairs.
+
+    Bash removes every backslash-newline before parsing, so the lookahead
+    checks below join the same way. The scan itself still treats the pair as a
+    word separator; only lookahead joins.
+    """
+
+    while index + 1 < len(text) and text[index] == "\\" and text[index + 1] == "\n":
+        index += 2
+    return index
+
+
+def _config_next_joined_char(text: str, index: int) -> str:
+    index = _config_skips_line_continuations(text, index)
+    return text[index] if index < len(text) else ""
+
+
+def _config_joined_prefix_end(text: str, index: int, prefix: str) -> Optional[int]:
+    """Return the index after ``prefix`` when only backslash-newlines intervene."""
+
+    for expected in prefix:
+        index = _config_skips_line_continuations(text, index)
+        if index >= len(text) or text[index] != expected:
+            return None
+        index += 1
+    return index
+
+
+def _config_expansion_assignment_key(text: str, index: int) -> Optional[str]:
+    """Return the guarded key assigned by a ``${[!]NAME=...}`` shape at ``$``.
+
+    Only the literal shape of the assignment forms (``${NAME=...}`` and
+    ``${NAME:=...}``) is matched, with backslash-newlines joined the way bash
+    joins them before parsing; the value is never parsed or expanded.
+    """
+
+    cursor = _config_skips_line_continuations(text, index + 1)
+    if cursor >= len(text) or text[cursor] != "{":
+        return None
+    cursor = _config_skips_line_continuations(text, cursor + 1)
+    if cursor < len(text) and text[cursor] == "!":
+        cursor = _config_skips_line_continuations(text, cursor + 1)
+    for name in sorted(_USER_MAKEPKG_CONFIG_GUARDED_KEYS):
+        end = _config_joined_prefix_end(text, cursor, name)
+        if end is None:
+            continue
+        end = _config_skips_line_continuations(text, end)
+        if end < len(text) and text[end] == ":":
+            end = _config_skips_line_continuations(text, end + 1)
+        if end < len(text) and text[end] == "=":
+            return name
+    return None
+
+
+def _lex_config_statements(text: str):
+    """Split config text into statements of ``(word, line, depth)`` words.
+
+    This is a bounded lexical splitter, not a shell parser: spaces, tabs and
+    newlines separate words, a backslash-newline continues onto the next
+    physical line (it still separates words), any other backslash pair outside
+    quotes keeps both characters verbatim, quotes group literally, ``#`` at a
+    word start comments out the rest of the line, unquoted ``;``, ``&`` and
+    ``|`` at paren depth 0 end the current statement, and parentheses only
+    track array depth so array elements are treated as values.
+
+    Literal shapes that can assign or execute at source time are refused here
+    instead of being classified as values: ``${NAME=...}``/``${NAME:=...}``
+    for a guarded name, ``((`` and ``$[`` arithmetic, command substitution
+    (``$(``) and backticks outside single quotes (they execute in double
+    quotes too), and ``<(`` outside quote state (inside double quotes it is
+    literal). Backslash-newlines are joined in those lookaheads only, matching
+    bash, and a backslash pair outside quotes keeps its trigger characters
+    literal. Returns ``(statements, problem)`` where ``problem`` is a message
+    or None.
+    """
+
+    statements = []
+    current = []
+    word = []
+    word_line = 0
+    word_depth = 0
+    line = 1
+    depth = 0
+    escaped_parens = 0
+    quote = None
+    quote_line = 0
+
+    def flush_word():
+        nonlocal word
+        if word:
+            current.append(("".join(word), word_line, word_depth))
+            word = []
+
+    def end_statement():
+        nonlocal current
+        if current:
+            statements.append(current)
+            current = []
+
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote == "'":
+            word.append(char)
+            if char == "'":
+                quote = None
+            elif char == "\n":
+                line += 1
+            index += 1
+            continue
+        if quote == '"':
+            if char == "\\" and index + 1 < len(text):
+                following = text[index + 1]
+                word.append(char)
+                word.append(following)
+                if following == "\n":
+                    line += 1
+                index += 2
+                continue
+            if char == "(" and _config_next_joined_char(text, index + 1) == "(":
+                return [], _unverifiable_config(line)
+            if char == "`":
+                return [], _unverifiable_config(line)
+            if char == "$":
+                following = _config_next_joined_char(text, index + 1)
+                if following in ("(", "["):
+                    return [], _unverifiable_config(line)
+                key = _config_expansion_assignment_key(text, index)
+                if key is not None:
+                    return [], "sets %s" % (key,)
+            word.append(char)
+            if char == '"':
+                quote = None
+            elif char == "\n":
+                line += 1
+            index += 1
+            continue
+        if char in " \t":
+            flush_word()
+            index += 1
+            continue
+        if char == "\\" and index + 1 < len(text) and text[index + 1] == "\n":
+            flush_word()
+            line += 1
+            index += 2
+            continue
+        if char == "\\" and index + 1 < len(text):
+            if not word:
+                word_line = line
+                word_depth = depth
+            word.append(char)
+            word.append(text[index + 1])
+            index += 2
+            continue
+        if char == "\n":
+            flush_word()
+            if depth == 0:
+                escaped_parens = 0
+                end_statement()
+            line += 1
+            index += 1
+            continue
+        if char == "#" and not word:
+            while index < len(text) and text[index] != "\n":
+                index += 1
+            continue
+        if char in ";&|" and depth == 0:
+            flush_word()
+            escaped_parens = 0
+            end_statement()
+            index += 1
+            continue
+        if char == "(":
+            if _config_next_joined_char(text, index + 1) == "(":
+                return [], _unverifiable_config(line)
+            if len(word) >= 2 and word[-2] == "\\" and word[-1] == "<":
+                # An escaped ``<`` cannot start a process substitution; bash
+                # rejects the bare ``(`` that follows, so keep it literal
+                # instead of tracking it as array depth (the same
+                # cannot-be-sourced allowance as ``FOO=(a;b)``).
+                word.append(char)
+                escaped_parens += 1
+                index += 1
+                continue
+            flush_word()
+            depth += 1
+            index += 1
+            continue
+        if char == ")":
+            if escaped_parens:
+                word.append(char)
+                escaped_parens -= 1
+                index += 1
+                continue
+            flush_word()
+            depth -= 1
+            if depth < 0:
+                return [], _unverifiable_config(line)
+            index += 1
+            continue
+        if char == "`":
+            return [], _unverifiable_config(line)
+        if char == "<" and _config_next_joined_char(text, index + 1) == "(":
+            return [], _unverifiable_config(line)
+        if char == "$":
+            following = _config_next_joined_char(text, index + 1)
+            if following in ("(", "["):
+                return [], _unverifiable_config(line)
+            key = _config_expansion_assignment_key(text, index)
+            if key is not None:
+                return [], "sets %s" % (key,)
+        if not word:
+            word_line = line
+            word_depth = depth
+        if char in ("'", '"'):
+            quote = char
+            quote_line = line
+        word.append(char)
+        index += 1
+
+    if quote is not None:
+        return [], _unverifiable_config(quote_line)
+    flush_word()
+    if depth != 0:
+        return [], _unverifiable_config(line)
+    end_statement()
+    return statements, None
+
+
+def _config_problem_from_text(text: str) -> Optional[str]:
+    """Return the guarded-key or unverifiable problem in one makepkg.conf body.
+
+    Any declaration touching a name in
+    :data:`_USER_MAKEPKG_CONFIG_GUARDED_KEYS` (the code-loading environment
+    strip, tool-selection overrides, ``PATH``, and makepkg-internal control
+    names) is a problem, whether assigned (any value, including empty),
+    appended or bare; a line whose shape the bounded lexer cannot classify is
+    also a problem. Values are never parsed or expanded, but the literal
+    source-time ``$(...)``/backtick/``<(...)`` shapes and the assignment
+    shapes refused by :func:`_lex_config_statements`, plus a nameref (``n``
+    option) declaration, also refuse the handoff.
+    """
+
+    statements, problem = _lex_config_statements(text)
+    if problem is not None:
+        return problem
+    for statement in statements:
+        words = [(word, line) for (word, line, depth) in statement if depth == 0]
+        if not words:
+            continue
+        if words[0][0] in _USER_MAKEPKG_CONFIG_DECLARATION_PREFIXES:
+            prefix = words[0][0]
+            for word, line in words[1:]:
+                if _is_config_option_word(word):
+                    if (
+                        prefix in _USER_MAKEPKG_CONFIG_NAMEREF_PREFIXES
+                        and word != "--"
+                        and "n" in word.lower()
+                    ):
+                        return _unverifiable_config(line)
+                    continue
+                kind, name = _normalized_config_name(word)
+                if kind == "invalid":
+                    return _unverifiable_config(line)
+                if name in _USER_MAKEPKG_CONFIG_GUARDED_KEYS:
+                    return ("declares %s" if kind == "bare" else "sets %s") % (name,)
+            continue
+        for word, line in words:
+            kind, name = _normalized_config_name(word)
+            if kind != "assignment":
+                return _unverifiable_config(line)
+            if name in _USER_MAKEPKG_CONFIG_GUARDED_KEYS:
+                return "sets %s" % (name,)
+    return None
+
+
 def _user_makepkg_config_problem(path: Path) -> Optional[str]:
-    """Describe a guarded override in one user makepkg.conf, if present.
+    """Describe a guarded override or unverifiable line in one user makepkg.conf.
 
     The file is treated as hostile text: it is read as a bounded byte
     snapshot and never sourced or expanded.  Lookalike lines fail closed.
@@ -1197,29 +1540,20 @@ def _user_makepkg_config_problem(path: Path) -> Optional[str]:
         return "could not be read for a safety check"
     if len(data) > _USER_MAKEPKG_CONFIG_MAX_BYTES:
         return "is too large to verify safely"
-    text = data.decode("utf-8", errors="replace")
-    for line in text.splitlines():
-        entry = line.strip()
-        if not entry or entry.startswith("#"):
-            continue
-        if entry.startswith("export "):
-            entry = entry[len("export "):].lstrip()
-        if "=" not in entry:
-            continue
-        name = entry.split("=", 1)[0].strip().rstrip("+").strip()
-        name = name.strip("'\"")
-        if name in _USER_MAKEPKG_CONFIG_GUARDED_KEYS:
-            return f"sets {name}"
-    return None
+    return _config_problem_from_text(data.decode("utf-8", errors="replace"))
 
 
 def _user_makepkg_config_override(environment: Mapping[str, str]) -> Optional[str]:
     """Name the user makepkg.conf override that would redirect makepkg.
 
     makepkg sources the first readable user-level config after the system
-    configuration; a user BUILDFILE/DLAGENTS/VCSCLIENTS/PACMAN override can
-    replace the build script or the programs makepkg executes, defeating the
-    scanned-input binding, so the wrapper refuses the handoff instead.
+    configuration. A user assignment of a code-loading key (the same set the
+    environment strip removes), a tool-selection key (``DLAGENTS``,
+    ``PACMAN``, ``PATH``, ``VCSCLIENTS``), or a makepkg-internal control name
+    (``CARCH``, ``extra_environment``, ``restore_envvars``, ``shellopts``)
+    can replace the build script, redirect the programs makepkg executes, or
+    run code while makepkg loads its configuration, so the wrapper refuses
+    the handoff instead.
     """
 
     for candidate in _user_makepkg_config_paths(environment):

@@ -20,6 +20,8 @@ TOOL_ERROR_CODES = (
     "path_not_regular_file",
     "path_too_large",
     "path_unreadable",
+    "path_changed",
+    "invalid_root",
     "content_too_large",
     "bundle_unsupported",
     "bundle_too_large",

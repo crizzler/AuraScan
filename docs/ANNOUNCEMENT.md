@@ -4,6 +4,21 @@ Use this as a starting point for Arch-family communities, Reddit, Mastodon,
 Matrix, or Discord posts. Keep the tone transparent: AuraScan reduces risk, but
 it does not prove package safety.
 
+## v0.15.1 release
+
+The v0.15.1 release is a package-only security update. It hardens the MCP file
+guard by binding the opened descriptor to the device and inode captured at
+resolution, refusing symlink, rename and parent-directory swaps, and rejecting
+a configured root that resolves to `/`. It also closes the user `makepkg.conf`
+guard's declaration, separator, expansion, arithmetic, nameref and literal
+command-substitution gaps, and refuses the code-loading environment keys,
+`PATH` and the makepkg-internal control names that could replace the build
+script or execute code while makepkg loads its configuration. The guard remains
+a bounded check, not a sandbox; compiler, linker and compression settings are
+still trusted input. The v0.10.11 recovery image remains the retained image,
+and the ISO and local-UKI gates were not rerun for v0.15.1. The `ukify`-absent
+recovery-image validation gap is deferred to a recovery-bearing release.
+
 ## v0.15.0 release
 
 The v0.15.0 release is a package-only update. It fixes the split-package

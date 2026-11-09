@@ -219,7 +219,7 @@ is recorded, and a second call site in that layer needs an annotation review.
 
 | # | Limitation | Disposition |
 | --- | --- | --- |
-| L1 | `mcp/guards.read_capped` re-decides regular-file type and size on the opened descriptor but never re-decides root containment there, and it opens without `O_NOFOLLOW`. A symlink swapped in between `resolve_regular_file` and that open is read from outside the root, which contradicts the containment the module docstring promises. `read_path`'s contract is one check short today. | its own card; any path-based tool inherits it |
+| L1 | *(closed in 0.15.1)* `mcp/guards.read_capped` bound the opened descriptor only to type and size: it never re-decided root containment there and opened without `O_NOFOLLOW`, so a symlink swapped in between `resolve_regular_file` and that open could be read from outside the root. | Fixed: `resolve_regular_file` returns a `ResolvedFile` carrying the checked file's `(st_dev, st_ino)`, `read_capped` accepts only that record, opens with `O_NOFOLLOW`, and refuses a descriptor whose type, identity or size changed (`path_changed`). A configured root that resolves to `/` is refused (`invalid_root`). |
 
 Notably, **no analyzer executes a process** (INV-001). Analyzers obtain native
 tool results through the trusted adapters, so the execution boundary stays in

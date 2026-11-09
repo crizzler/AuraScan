@@ -1,10 +1,14 @@
 """Root containment, regular-file and byte-cap guards, all decided before any scan."""
 
+import io
+import json
 import os
+import sys
 
 import pytest
 
 from aurascan.mcp import guards
+from aurascan.mcp.errors import ToolError
 from helpers.mcp_client import Loop, spawn
 
 
@@ -204,7 +208,7 @@ def test_65_truncated_utf8_at_the_cap_decodes_with_replacement(tree):
         marker + b"a" * (guards.MAX_FILE_BYTES - 3 - len(marker)) + "\U0001f600".encode("utf-8")[:3]
     )
 
-    text = guards.read_capped(str(partial))
+    text = guards.read_capped(guards.resolve_regular_file([str(root)], "partial.md"))
     assert text.endswith("\ufffd")
 
     with spawn(root) as client:
@@ -214,3 +218,174 @@ def test_65_truncated_utf8_at_the_cap_decodes_with_replacement(tree):
     assert message["result"]["isError"] is False
     body = __import__("json").loads(message["result"]["content"][0]["text"])
     assert body["count"] >= 1
+
+
+def test_symlink_swap_between_resolution_and_open_is_refused(tree, monkeypatch):
+    _, root, outside = tree
+    target = root / "swap.md"
+    target.write_text("inside bytes\n", encoding="utf-8")
+    (outside / "escape.md").write_text("OUTSIDE-BYTES\n", encoding="utf-8")
+
+    real_open = os.open
+    watched = os.path.realpath(str(target))
+
+    def swapping_open(path, flags, *args, **kwargs):
+        if path == watched:
+            target.unlink()
+            target.symlink_to(outside / "escape.md")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(guards.os, "open", swapping_open)
+
+    loop = Loop([str(root)])
+    is_error, body = _call(loop, "swap.md")
+
+    assert target.is_symlink()
+    assert is_error is True
+    assert body["error"]["code"] == "path_changed"
+    assert "OUTSIDE-BYTES" not in json.dumps(body)
+
+
+def test_directory_swap_reports_a_type_refusal(tree, monkeypatch):
+    _, root, _outside = tree
+    target = root / "swap.md"
+    target.write_text("inside bytes\n", encoding="utf-8")
+
+    real_open = os.open
+    watched = os.path.realpath(str(target))
+
+    def swapping_open(path, flags, *args, **kwargs):
+        if path == watched:
+            target.unlink()
+            target.mkdir()
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(guards.os, "open", swapping_open)
+
+    loop = Loop([str(root)])
+    is_error, body = _call(loop, "swap.md")
+
+    assert target.is_dir()
+    assert is_error is True
+    assert body["error"]["code"] in ("path_changed", "path_not_regular_file")
+
+
+def test_regular_file_swap_between_resolution_and_open_is_refused(tree, monkeypatch):
+    _, root, outside = tree
+    target = root / "swap.md"
+    target.write_text("inside bytes\n", encoding="utf-8")
+    evil = outside / "evil.md"
+    evil.write_text("OUTSIDE-BYTES\n", encoding="utf-8")
+
+    real_open = os.open
+    watched = os.path.realpath(str(target))
+
+    def swapping_open(path, flags, *args, **kwargs):
+        if path == watched:
+            os.replace(str(evil), path)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(guards.os, "open", swapping_open)
+
+    loop = Loop([str(root)])
+    is_error, body = _call(loop, "swap.md")
+
+    assert target.read_text(encoding="utf-8") == "OUTSIDE-BYTES\n"
+    assert is_error is True
+    assert body["error"]["code"] == "path_changed"
+    assert "OUTSIDE-BYTES" not in json.dumps(body)
+
+
+def test_directory_component_swap_between_resolution_and_open_is_refused(tree, monkeypatch):
+    _, root, outside = tree
+    (root / "sub" / "file.md").write_text("inside bytes\n", encoding="utf-8")
+    shadow = outside / "shadow"
+    shadow.mkdir()
+    (shadow / "file.md").write_text("OUTSIDE-BYTES\n", encoding="utf-8")
+
+    real_open = os.open
+    watched = os.path.realpath(str(root / "sub" / "file.md"))
+
+    def swapping_open(path, flags, *args, **kwargs):
+        if path == watched:
+            os.replace(str(root / "sub"), str(root / "sub-aside"))
+            (root / "sub").symlink_to(shadow, target_is_directory=True)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(guards.os, "open", swapping_open)
+
+    loop = Loop([str(root)])
+    is_error, body = _call(loop, "sub/file.md")
+
+    assert (root / "sub").is_symlink()
+    assert is_error is True
+    assert body["error"]["code"] == "path_changed"
+    assert "OUTSIDE-BYTES" not in json.dumps(body)
+
+
+def test_read_capped_requires_captured_identity():
+    with pytest.raises(TypeError):
+        guards.read_capped("a-string")
+
+
+def test_removed_file_between_resolution_and_open_is_refused(tree, monkeypatch):
+    _, root, _outside = tree
+    target = root / "vanishing.md"
+    target.write_text("inside bytes\n", encoding="utf-8")
+
+    real_open = os.open
+    watched = os.path.realpath(str(target))
+
+    def removing_open(path, flags, *args, **kwargs):
+        if path == watched:
+            os.unlink(path)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(guards.os, "open", removing_open)
+
+    loop = Loop([str(root)])
+    is_error, body = _call(loop, "vanishing.md")
+
+    assert not target.exists()
+    assert is_error is True
+    assert body["error"]["code"] == "path_changed"
+
+
+def test_read_capped_refuses_when_nofollow_is_unavailable(tree, monkeypatch):
+    _, root, _outside = tree
+    resolved = guards.resolve_regular_file([str(root)], "inside.md")
+    monkeypatch.delattr(guards.os, "O_NOFOLLOW")
+
+    with pytest.raises(ToolError) as excinfo:
+        guards.read_capped(resolved)
+
+    assert excinfo.value.code == "path_unreadable"
+
+
+def test_root_slash_is_refused_at_startup(monkeypatch):
+    from aurascan.mcp import __main__ as entry
+    from aurascan.mcp import protocol
+
+    monkeypatch.setattr(protocol.Protocol, "run", lambda self, *args, **kwargs: None)
+    errors = io.StringIO()
+    saved_stdout = sys.stdout
+    saved_fd = os.dup(1)
+    try:
+        monkeypatch.setattr(sys, "stderr", errors)
+        assert entry.main(["--root", "/"]) == 2
+        assert "resolves to the filesystem root" in errors.getvalue()
+        assert entry.main(["--root", "/tmp/.."]) == 2
+        assert "resolves to the filesystem root" in errors.getvalue()
+        assert entry.main(["--root", " / "]) == 2
+        assert "resolves to the filesystem root" in errors.getvalue()
+    finally:
+        sys.stdout = saved_stdout
+        os.dup2(saved_fd, 1)
+        os.close(saved_fd)
+
+
+def test_root_with_surrounding_whitespace_is_refused_by_the_guard():
+    for root in ("/", "/tmp/..", " / ", " /tmp/.. "):
+        with pytest.raises(ToolError) as excinfo:
+            guards.resolve_regular_file([root], "x")
+        assert excinfo.value.code == "invalid_root"

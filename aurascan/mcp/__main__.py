@@ -83,7 +83,11 @@ def main(argv=None):
         _log("--max-line-bytes: must be at least 1")
         return 2
 
-    roots = [os.path.realpath(item) for item in (args.root or [os.getcwd()])]
+    roots = [os.path.realpath(item.strip()) for item in (args.root or [os.getcwd()])]
+    for root in roots:
+        if root.rstrip(os.sep) == "":
+            _log('--root: "%s" resolves to the filesystem root; name a specific directory' % (root,))
+            return 2
     _log("aurascan-mcp %s; roots: %s" % (server_module.SERVER_INFO["version"], ", ".join(roots)))
 
     server = server_module.Server(roots)

@@ -211,12 +211,14 @@ See [`docs/AI_PROVIDER_CONFIGURATION.md`](docs/AI_PROVIDER_CONFIGURATION.md) and
 
 ## Status
 
-AuraScan is a developer preview. The current package is **0.15.0**.
+AuraScan is a developer preview. The current package is **0.15.1**.
 
-The 0.15.0 release is package-only. It retains the validated v0.10.11 recovery
-image; no new ISO or UKI was built for this release. Release notes, retained
-image details, and known limits are in
-[`docs/releases/v0.15.0.md`](docs/releases/v0.15.0.md).
+The 0.15.1 release is package-only. It contains the MCP containment and
+`makepkg.conf` guard hardening and retains the validated
+v0.10.11 recovery image; no new ISO or UKI was built for this release. R8, the
+`ukify`-absent recovery-image validation gap, is deferred to a recovery-bearing
+release. Release notes, retained image details, and known limits are in
+[`docs/releases/v0.15.1.md`](docs/releases/v0.15.1.md).
 
 The verified release runtime is Python 3.14. The Python 3.8 compatibility check
 is not green; do not treat 3.8 as verified for this release.

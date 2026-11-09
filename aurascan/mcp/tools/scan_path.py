@@ -55,7 +55,7 @@ def run(
         evidence, source_type, raw, max_findings, include_snippet, include_raw
     )
     payload["requested_path"] = raw
-    payload["resolved_path"] = resolved
+    payload["resolved_path"] = resolved.path
     payload["byte_cap"] = MAX_FILE_BYTES
     if emit_bundle:
         payload["evidence_bundle"] = bundle.build(

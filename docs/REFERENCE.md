@@ -1974,11 +1974,31 @@ the build file/configuration, reuse an unverified build tree, or skip integrity
 checks, and removes direct shell/dynamic-loader code-loading variables such as
 `BASH_ENV`, `ENV`, `LD_PRELOAD`, and `LD_AUDIT` from makepkg's environment.
 It also pins the scanned `./PKGBUILD` as the build script at the handoff and
-refuses to run when a user-level `makepkg.conf` overrides `BUILDFILE`,
-`DLAGENTS`, `VCSCLIENTS`, or `PACMAN`; those settings can replace the build
-script or the programs makepkg executes.
+refuses to run when a user-level `makepkg.conf` assigns a guarded name: the
+same code-loading keys the wrapper strips from makepkg's environment
+(`BASH_ENV`, `ENV`, `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`,
+`MAKEPKG_CONF`, `MAKEPKG_LIBRARY`, `BUILDFILE`), the tool-selection keys
+`DLAGENTS`, `PACMAN`, `VCSCLIENTS`, and `PATH`, or the makepkg-internal
+control names `CARCH`, `extra_environment`, `restore_envvars`, and
+`shellopts`; those settings can replace the build script, redirect the
+programs makepkg executes, or run code while makepkg loads its configuration.
+The check covers bare assignments and
+the `export`, `declare`, `readonly`, `typeset`, and `local` declaration forms,
+including their option words, tabs, and multiple assignments on one line.
+Unquoted `;`, `&`, and `|` separate statements, and the check also refuses
+source-time assignment spellings: `${GUARDED=...}`/`${GUARDED:=...}` expansion
+assignments, `((...))`/`$[...]` arithmetic, and `declare`/`readonly`/`typeset`/
+`local` nameref (`-n`) declarations, including backslash-newline-joined
+variants. Values are never expanded, but the literal source-time execution
+shapes `$(...)`, backticks, and `<(...)` outside single quotes also refuse
+the handoff. A line the bounded check cannot classify also refuses the handoff
+instead of being ignored.
 These restrictions are part of the security boundary; run unusual workflows in
 a separately reviewed disposable build environment instead of bypassing them.
+The guard does not inspect compiler, linker, or compression configuration.
+Names such as `CFLAGS`, `CC`, `CXX`, `RUSTFLAGS`, or `COMPRESS*` can still
+influence which programs or code the build loads, so a user `makepkg.conf`
+remains trusted input for those settings.
 
 Because only `/usr/bin/makepkg` is accepted, a `makepkg` interceptor earlier on
 `PATH` (for example `~/.local/bin/makepkg`) breaks this entry point:
@@ -2042,8 +2062,9 @@ aurascan-mcp --root "/home/arawn/Documents/Other Projects/AuraScan"
 
 `--root` is repeatable and is the whole filesystem boundary for `scan_path`;
 `--budget <tool>=<seconds>` overrides a per-call timeout and `--max-line-bytes`
-bounds an inbound line. Progress and diagnostics go to stderr and never to
-stdout.
+bounds an inbound line. A root that resolves to `/` is refused at startup
+(exit 2): name a specific directory instead. Progress and diagnostics go to
+stderr and never to stdout.
 
 Registration (Hermes `config.yaml`; apply with `hermes config set`, and pin
 `--root` because the server must not derive a boundary from the session's

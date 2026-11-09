@@ -46,7 +46,7 @@ optdepends=(
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 # Source archive for the public v0.15.1 tag.
-sha256sums=('SKIP')
+sha256sums=('87bd2be397c74e0a2b8430fc8d0e2e53d5ea0651b5661c213b325a9be8d60fc9')
 
 build() {
   cd "AuraScan-$pkgver"

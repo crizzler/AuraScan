@@ -81,6 +81,7 @@ SUDO_INVALIDATION_UNCONFIRMED = "unconfirmed"
 SUDO_INVALIDATION_UNTRUSTED = "untrusted"
 SUDO_INVALIDATION_TIMEOUT = 15.0
 WRAPPER_VERSION = "1.0"
+_TRUSTED_MAKEPKG_PATH = "/usr/bin/makepkg"
 
 _BOOL_FLAGS = {
     "--aurascan-deep-static": "deep_static",
@@ -507,7 +508,7 @@ def run(
     if (
         makepkg_tool is None
         or makepkg_tool.name != "makepkg"
-        or os.path.normpath(makepkg_tool.path) != "/usr/bin/makepkg"
+        or os.path.normpath(makepkg_tool.path) != _TRUSTED_MAKEPKG_PATH
     ):
         return _emit_makepkg_tool_unavailable(
             options,
@@ -1232,7 +1233,16 @@ def _user_makepkg_config_override(environment: Mapping[str, str]) -> Optional[st
 
 
 def locate_real_makepkg(current_executable: Optional[str] = None, path_env: Optional[str] = None) -> str:
+    """Find the system makepkg, preferring the trusted canonical location.
+
+    Some environments put /usr/sbin before /usr/bin even though both entries
+    point at the same pacman-owned tool. Returning the /usr/sbin hard link
+    makes the wrapper's exact-path trust check reject an otherwise valid
+    makepkg, so prefer /usr/bin/makepkg whenever PATH exposes it.
+    """
+
     current = _realpath(current_executable or sys.argv[0])
+    candidates: List[str] = []
     for directory in (path_env if path_env is not None else os.environ.get("PATH", "")).split(os.pathsep):
         if not directory:
             continue
@@ -1241,8 +1251,11 @@ def locate_real_makepkg(current_executable: Optional[str] = None, path_env: Opti
             continue
         if _realpath(str(candidate)) == current:
             continue
-        return str(candidate)
-    return ""
+        candidates.append(str(candidate))
+    for candidate in candidates:
+        if os.path.normpath(candidate) == _TRUSTED_MAKEPKG_PATH:
+            return candidate
+    return candidates[0] if candidates else ""
 
 
 def _handle_list_review_decisions(

@@ -998,6 +998,31 @@ def test_locate_real_makepkg_avoids_recursion(tmp_path):
     assert found == str(real)
 
 
+def test_locate_real_makepkg_prefers_canonical_path_over_sbin(tmp_path, monkeypatch):
+    sbin_dir = tmp_path / "sbin"
+    bin_dir = tmp_path / "bin"
+    sbin_dir.mkdir()
+    bin_dir.mkdir()
+    sbin_makepkg = sbin_dir / "makepkg"
+    canonical_makepkg = bin_dir / "makepkg"
+    wrapper = tmp_path / "aurascan-makepkg"
+    for path in (sbin_makepkg, canonical_makepkg, wrapper):
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+    monkeypatch.setattr(
+        makepkg_wrapper,
+        "_TRUSTED_MAKEPKG_PATH",
+        str(canonical_makepkg),
+    )
+
+    found = locate_real_makepkg(
+        current_executable=str(wrapper),
+        path_env=os.pathsep.join([str(sbin_dir), str(bin_dir)]),
+    )
+
+    assert found == str(canonical_makepkg)
+
+
 def test_entry_point_is_registered():
     pyproject = Path("pyproject.toml").read_text()
 

@@ -1,0 +1,281 @@
+{
+  "schema_version": 1,
+  "corpus_version": "1.0.0",
+  "created": "2026-11-09",
+  "baseline": {
+    "revision": "02ac13d",
+    "aurascan_version": "0.15.0",
+    "rule_version": "1.15.0"
+  },
+  "visibility": {
+    "class": "public-synthetic",
+    "exposed": true,
+    "private_holdout": false,
+    "real_world_prevalence_claim": false,
+    "note": "Every fixture in this corpus is synthetic, inert, committed to the public repository, and visible to any reader. Results cannot support a private-holdout, independence, or real-world-prevalence claim."
+  },
+  "role_definitions": {
+    "malicious-intent": "The fixture embodies an adversarial technique named in the research charter. The label describes the test's intended semantics; it is not a claim that the technique is used in the wild or that the fixture is a working payload.",
+    "benign-control": "The fixture exercises the same surface without the adversarial technique. Any finding is a false positive for this case.",
+    "coverage": "The fixture is deliberately incomplete so the test can assert that inspection reports incomplete coverage rather than a clean result."
+  },
+  "families": [
+    {
+      "id": "encoded-command",
+      "surface": "PKGBUILD control text",
+      "description": "A command is encoded and decoded into a shell, compared with a benign decode-to-data-file control."
+    },
+    {
+      "id": "install-hook",
+      "surface": "declared install hook",
+      "description": "A declared install hook contains a privileged invocation, compared with a message-only hook."
+    },
+    {
+      "id": "npm-lifecycle",
+      "surface": "npm package manifest and local lifecycle entry",
+      "description": "An install-time entry reads the environment, reaches a network destination, and evaluates dynamic code, compared with a benign local build entry and an uncaptured-entry coverage case."
+    },
+    {
+      "id": "source-provenance",
+      "surface": "declared source metadata",
+      "description": "An abbreviated Git selector cannot establish an immutable pin, compared with an archive source bound to a full SHA-256 checksum."
+    }
+  ],
+  "cases": [
+    {
+      "id": "DB-ENC-001",
+      "family": "encoded-command",
+      "category": "obfuscated-execution",
+      "role": "malicious-intent",
+      "intent": "Decode inert text from base64 and pipe it to a shell.",
+      "scanner": "deterministic_pkgbuild",
+      "files": [
+        {
+          "path": "fixtures/pkgbuild-base64-exec/PKGBUILD",
+          "sha256": "3b0c5fa5d1381910b43ed0daa0a27d6c42a820629c08a82f13b5f00f8c69a158"
+        }
+      ],
+      "expected": {
+        "outcome": "FINDING",
+        "rule_ids": ["EXEC-B64-001"],
+        "absent_rule_ids": [],
+        "min_severity": "CRITICAL",
+        "blocking": true,
+        "manual_review": false,
+        "phases": ["pkgbuild_static"]
+      },
+      "reproduction": ".venv/bin/python -m pytest -q tests/security_research/test_detector_corpus.py -k DB-ENC-001"
+    },
+    {
+      "id": "DB-ENC-002",
+      "family": "encoded-command",
+      "category": "benign-decode",
+      "role": "benign-control",
+      "intent": "Decode inert bytes into a data file without executing them.",
+      "scanner": "deterministic_pkgbuild",
+      "files": [
+        {
+          "path": "fixtures/pkgbuild-base64-benign/PKGBUILD",
+          "sha256": "871f15f757b1ed0c93326533647966bb10b666a7a213a492999872a15919d1e3"
+        }
+      ],
+      "expected": {
+        "outcome": "NO_FINDING",
+        "rule_ids": [],
+        "absent_rule_ids": ["EXEC-B64-001"],
+        "min_severity": null,
+        "blocking": false,
+        "manual_review": false,
+        "phases": []
+      },
+      "reproduction": ".venv/bin/python -m pytest -q tests/security_research/test_detector_corpus.py -k DB-ENC-002"
+    },
+    {
+      "id": "DB-HOOK-001",
+      "family": "install-hook",
+      "category": "privileged-lifecycle-action",
+      "role": "malicious-intent",
+      "intent": "An install hook invokes sudo although the hook already runs with package-manager privileges.",
+      "scanner": "install_hook",
+      "files": [
+        {
+          "path": "fixtures/install-hook-privileged/PKGBUILD",
+          "sha256": "f3097ceccbe55e87d6688382cbccc9aae7d602c6017654c5dc4d24a427997a51"
+        },
+        {
+          "path": "fixtures/install-hook-privileged/corpus-install-hook-privileged.install",
+          "sha256": "3219ddb7a99e290ec6169ca5d0472987240c7100206f8a7b2a907bed7fc8ed14"
+        }
+      ],
+      "expected": {
+        "outcome": "FINDING",
+        "rule_ids": ["EXEC-INSTALL-HOOK-SUDO-001"],
+        "absent_rule_ids": [],
+        "min_severity": "CRITICAL",
+        "blocking": true,
+        "manual_review": false,
+        "phases": ["install_hook_static"]
+      },
+      "reproduction": ".venv/bin/python -m pytest -q tests/security_research/test_detector_corpus.py -k DB-HOOK-001"
+    },
+    {
+      "id": "DB-HOOK-002",
+      "family": "install-hook",
+      "category": "benign-lifecycle-action",
+      "role": "benign-control",
+      "intent": "An install hook only prints messages.",
+      "scanner": "install_hook",
+      "files": [
+        {
+          "path": "fixtures/install-hook-benign/PKGBUILD",
+          "sha256": "5079c4dfa948a215c978151a95308fbb3030095dddf9b7e33adbaa4e2a78bd9a"
+        },
+        {
+          "path": "fixtures/install-hook-benign/corpus-install-hook-benign.install",
+          "sha256": "4044f797d19829a769bb6b92b86c0f70f3faa0f99a211efb570325be45038049"
+        }
+      ],
+      "expected": {
+        "outcome": "NO_FINDING",
+        "rule_ids": [],
+        "absent_rule_ids": ["EXEC-INSTALL-HOOK-SUDO-001", "PRIV-BUILD-PRIVILEGE-ELEVATION-001"],
+        "min_severity": null,
+        "blocking": false,
+        "manual_review": false,
+        "phases": []
+      },
+      "reproduction": ".venv/bin/python -m pytest -q tests/security_research/test_detector_corpus.py -k DB-HOOK-002"
+    },
+    {
+      "id": "DB-NPM-001",
+      "family": "npm-lifecycle",
+      "category": "install-time-environment-exfiltration",
+      "role": "malicious-intent",
+      "intent": "A postinstall entry reads process environment data, sends it to a network destination, and evaluates a returned command.",
+      "scanner": "npm_install_audit",
+      "files": [
+        {
+          "path": "fixtures/npm-lifecycle-env-exfil/package.json",
+          "sha256": "035c4373fa2ea67b2f483e84b3d7248c9cfd2d001bb7f5ee996d00f6563f9740"
+        },
+        {
+          "path": "fixtures/npm-lifecycle-env-exfil/setup.js",
+          "sha256": "2428d29931556361b7a30358ddea0573f78bda6e2c27e962d1ddbd397238794c"
+        }
+      ],
+      "entry_files": ["setup.js"],
+      "expected": {
+        "outcome": "FINDING",
+        "rule_ids": ["SUPPLYCHAIN-NPM-INSTALL-ENV-EXFIL-EVAL-001"],
+        "absent_rule_ids": [],
+        "min_severity": "CRITICAL",
+        "blocking": true,
+        "manual_review": false,
+        "phases": ["unpacked_source_scan"]
+      },
+      "reproduction": ".venv/bin/python -m pytest -q tests/security_research/test_detector_corpus.py -k DB-NPM-001"
+    },
+    {
+      "id": "DB-NPM-002",
+      "family": "npm-lifecycle",
+      "category": "benign-install-entry",
+      "role": "benign-control",
+      "intent": "A postinstall entry writes a local build report and prints a message.",
+      "scanner": "npm_install_audit",
+      "files": [
+        {
+          "path": "fixtures/npm-lifecycle-benign/package.json",
+          "sha256": "3b8ebd37406f8f3c65c6cb8eaffc1050f5d5d2e8af0f8d560bb9e183625693bf"
+        },
+        {
+          "path": "fixtures/npm-lifecycle-benign/build.js",
+          "sha256": "3fba731e16d592c4717213f9e72baec86c2574aef2800f9d95f5cb541b197f48"
+        }
+      ],
+      "entry_files": ["build.js"],
+      "expected": {
+        "outcome": "NO_FINDING",
+        "rule_ids": [],
+        "absent_rule_ids": ["SUPPLYCHAIN-NPM-INSTALL-ENV-EXFIL-EVAL-001"],
+        "min_severity": null,
+        "blocking": false,
+        "manual_review": false,
+        "phases": []
+      },
+      "reproduction": ".venv/bin/python -m pytest -q tests/security_research/test_detector_corpus.py -k DB-NPM-002"
+    },
+    {
+      "id": "DB-NPM-003",
+      "family": "npm-lifecycle",
+      "category": "incomplete-coverage",
+      "role": "coverage",
+      "intent": "The lifecycle command names an entry file that is not captured; the scan must report incomplete inspection instead of a clean result.",
+      "scanner": "npm_install_audit",
+      "files": [
+        {
+          "path": "fixtures/npm-lifecycle-incomplete/package.json",
+          "sha256": "e38bd1bc7021c6bd28fdc7327c73867a9614fb1f0dd0a115f4f55ce744976ef7"
+        }
+      ],
+      "entry_files": [],
+      "expected": {
+        "outcome": "INCOMPLETE",
+        "rule_ids": ["NPM-LIFECYCLE-INSPECTION-INCOMPLETE-001"],
+        "absent_rule_ids": [],
+        "min_severity": "HIGH",
+        "blocking": false,
+        "manual_review": true,
+        "phases": ["unpacked_source_scan"]
+      },
+      "reproduction": ".venv/bin/python -m pytest -q tests/security_research/test_detector_corpus.py -k DB-NPM-003"
+    },
+    {
+      "id": "DB-SRC-001",
+      "family": "source-provenance",
+      "category": "provenance-ambiguity",
+      "role": "malicious-intent",
+      "intent": "An abbreviated Git commit selector is presented as a pin but cannot establish an immutable revision.",
+      "scanner": "source_metadata",
+      "files": [
+        {
+          "path": "fixtures/pkgbuild-source-git-ambiguous/PKGBUILD",
+          "sha256": "ec484617c7640cb5c8089d76ddda85cf9e020c6d1bee7a2232dfbcc33f8aad4e"
+        }
+      ],
+      "expected": {
+        "outcome": "FINDING",
+        "rule_ids": ["SOURCE-META-GIT-SELECTOR-UNRESOLVED"],
+        "absent_rule_ids": [],
+        "min_severity": "HIGH",
+        "blocking": false,
+        "manual_review": true,
+        "phases": ["pkgbuild_static"]
+      },
+      "reproduction": ".venv/bin/python -m pytest -q tests/security_research/test_detector_corpus.py -k DB-SRC-001"
+    },
+    {
+      "id": "DB-SRC-002",
+      "family": "source-provenance",
+      "category": "benign-pinned-archive",
+      "role": "benign-control",
+      "intent": "An archive source is bound to a full SHA-256 checksum.",
+      "scanner": "source_metadata",
+      "files": [
+        {
+          "path": "fixtures/pkgbuild-source-pinned-archive/PKGBUILD",
+          "sha256": "1a39e7f3461ae8969cc197c2c0e577c1e2ab5063cf4c19ba53146ee60f980f36"
+        }
+      ],
+      "expected": {
+        "outcome": "NO_FINDING",
+        "rule_ids": [],
+        "absent_rule_ids": ["SOURCE-META-GIT-SELECTOR-UNRESOLVED", "SOURCE-META-SKIP-ARCHIVE-NO-SIGNATURE"],
+        "min_severity": null,
+        "blocking": false,
+        "manual_review": false,
+        "phases": []
+      },
+      "reproduction": ".venv/bin/python -m pytest -q tests/security_research/test_detector_corpus.py -k DB-SRC-002"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+# Inert fixture hook. It is inspected as text and never executed.
+post_install() {
+  /usr/bin/sudo /usr/bin/true
+}
+
+post_upgrade() {
+  echo "Inert fixture: no privileged helper is run."
+}

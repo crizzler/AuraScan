@@ -1,0 +1,8 @@
+# Inert fixture hook. It is inspected as text and never executed.
+post_install() {
+  echo "Inert corpus fixture installed."
+}
+
+post_upgrade() {
+  echo "Inert corpus fixture upgraded."
+}

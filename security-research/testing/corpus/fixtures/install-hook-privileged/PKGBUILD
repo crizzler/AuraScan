@@ -1,0 +1,15 @@
+# Maintainer: Inert Corpus <corpus@example.invalid>
+pkgname=corpus-install-hook-privileged
+pkgver=1.0
+pkgrel=1
+pkgdesc="Inert fixture: install hook contains a privileged invocation"
+arch=("x86_64")
+url="https://example.invalid/corpus/install-hook-privileged"
+license=("MIT")
+install=corpus-install-hook-privileged.install
+source=("https://example.invalid/corpus/install-hook-privileged-1.0.tar.gz")
+sha256sums=("3333333333333333333333333333333333333333333333333333333333333333")
+
+package() {
+  install -Dm644 fixture-data.txt "$pkgdir/usr/share/corpus/fixture-data.txt"
+}

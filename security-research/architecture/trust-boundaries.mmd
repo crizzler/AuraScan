@@ -1,0 +1,165 @@
+%% AuraScan trust boundaries at baseline 02ac13d (0.15.0, rules 1.15.0)
+%% Legend:
+%%   [==> ] privilege transition      -..-> consent gate (user confirmation)
+%%   ==|>  deterministic policy authoritative over AI (AI is raise-only advisory)
+%%   subgraph = trust zone; an edge crossing a subgraph crosses a trust boundary
+%% Read the prose model in trust-boundaries.md for path:line evidence.
+
+flowchart TB
+
+  subgraph UNTRUSTED["UNTRUSTED INPUT — data, never instruction, never executed"]
+    PKGBUILD["PKGBUILD text, source=() arrays,<br/>declared .install hooks, .SRCINFO"]
+    SRC["Acquired sources<br/>--deep-static only, explicit opt-in"]
+    PKGARCH["Built package archives<br/>.PKGINFO / .INSTALL members"]
+    AGENTFILES["Agent instruction files<br/>AGENTS.md, SKILL.md, Cursor/MCP configs"]
+    NPMETA["npm manifests, lockfiles,<br/>editor task configs"]
+    CACHE["User-writable pacman cache<br/>/var/cache/pacman/pkg"]
+    HOSTSTATE["Host state, package metadata,<br/>mirror config, diagnostic output"]
+  end
+
+  subgraph CAPTURE["CAPTURE / NORMALIZATION — bounded, no-follow, fail closed"]
+    HOOKREAD["install-hook reader<br/>core/install_hook.py"]
+    ARCHREAD["bounded package reader<br/>core/package_archive.py"]
+    PROVWALK["repository provenance walk<br/>core/repository_provenance.py"]
+    IGENUM["Instruction Guard discovery<br/>core/instruction_guard.py"]
+    SRCACQ["source acquisition snapshot<br/>core/source_acquisition.py"]
+  end
+
+  subgraph ANALYSIS["STATIC ANALYSIS — deterministic first, no analyzer executes a process (INV-001)"]
+    DET["deterministic rules<br/>analyzers/deterministic.py"]
+    DEEP["deep-static analyzers<br/>analyzers/deep_static.py"]
+    NPMAN["npm / bytecode / editor-task<br/>analyzers/*"]
+    IGA["Instruction Guard analysis<br/>deterministic, network-isolated"]
+  end
+
+  subgraph POLICY["POLICY / DECISION — deterministic policy is authoritative"]
+    ENGINE["engine + risk + rule catalog<br/>core/engine.py, core/risk.py"]
+    BLOCK["blockers, review requirements,<br/>coverage findings"]
+    ENGINE --> BLOCK
+  end
+
+  subgraph AIZONE["AI PLANE — separately opt-in, advisory, raise-only"]
+    AIPROV["AI provider client<br/>core/ai_provider.py<br/>strict schema, no redirects,<br/>loopback-only local providers"]
+    AIADVIS["raise-only advisory merge<br/>analyzers/ai_static.py"]
+    EXPLAIN["display-only finding explanation<br/>core/finding_explainer.py"]
+    IGAI["Instruction Guard AI<br/>bounded opaque evidence IDs only"]
+  end
+
+  subgraph NATIVE["NATIVE TOOLS over hostile data — risk reduction, not a sandbox"]
+    TTOOLS["trusted tool boundary<br/>core/trusted_tools.py, trusted_executable.py<br/>absolute root-owned non-symlink,<br/>identity revalidated before use"]
+    BSDTAR["bsdtar / git / gpg / clamscan<br/>bounded input, output, runtime"]
+  end
+
+  subgraph PRIV["PRIVILEGED EXECUTION SURFACES"]
+    WRAP["makepkg wrapper handoff<br/>aurascan/makepkg_wrapper.py<br/>executes package build logic"]
+    SANDBOX["opt-in devtools build sandbox<br/>core/build_sandbox.py<br/>arch-nspawn chroot, hash-bound artifacts"]
+    SUDOPACMAN["sudo / pacman<br/>/usr/bin/sudo, /usr/bin/pacman<br/>upgrade + repair handoffs"]
+    INCREP["incident / repository repairs<br/>core/incident_repairs.py,<br/>repository_repair.py"]
+    RECIP["recovery repair executor<br/>core/recovery_repairs.py<br/>arch-chroot into target as recovery root"]
+    INTEL["intelligence updater<br/>unprivileged download,<br/>network-isolated privileged verify<br/>+ atomic install"]
+  end
+
+  subgraph DESKTOP["DESKTOP SHELL — renderer is a pure view"]
+    RENDER["Electron renderer<br/>sandboxed, contextIsolation,<br/>no nodeIntegration"]
+    PRELOAD["preload bridge<br/>13 fixed operations"]
+    MAINPROC["main process<br/>fixed action IDs -> fixed argv<br/>spawns /usr/bin/aurascan only"]
+    UICLI["aurascan ui snapshot<br/>core/ui_cli.py, ui_actions.py<br/>read-only, contract aurascan-ui/1"]
+  end
+
+  subgraph MCPZONE["MCP SERVER — read-only stdio JSON-RPC"]
+    MCPCLIENT["MCP client / agent host"]
+    MCPSRV["mcp/server.py + tools<br/>scan_content, scan_path,<br/>audit_agent_config, security_audit*"]
+  end
+
+  subgraph STATE["LOCAL STATE — private, bounded, user-owned"]
+    CFG["user config, .env credentials<br/>core/config.py"]
+    CACHESTATE["caches, review state, snapshots<br/>core/cache.py, state_file.py"]
+    REPORTS["private reports, integrity manifests,<br/>alert state"]
+  end
+
+  subgraph NETWORK["NETWORK INTERFACES — explicit workflows only"]
+    INTELNET["intelligence feed download<br/>core/intelligence_transport.py"]
+    SRCNET["source acquisition<br/>--deep-static only"]
+    AINET["AI provider HTTPS<br/>cloud: own key; local: loopback"]
+    ADVISNET["advisory / campaign feeds<br/>core/security_audit.py,<br/>upgrade_preflight.py"]
+  end
+
+  subgraph RECOVERYENV["RECOVERY TARGET / BOOT ENVIRONMENT"]
+    TARGET["target filesystem<br/>untrusted host state"]
+    RECOVERYBOOT["recovery boot env + local UKI<br/>core/recovery.py, recovery_boot.py"]
+  end
+
+  %% ---- analysis flow ----
+  PKGBUILD --> HOOKREAD --> DET
+  PKGARCH --> ARCHREAD --> DET
+  SRC --> SRCACQ --> DEEP
+  AGENTFILES --> IGENUM --> IGA
+  NPMETA --> PROVWALK
+  CACHE --> ARCHREAD
+  HOSTSTATE --> DET
+  PROVWALK --> DET
+  DET --> ENGINE
+  DEEP --> ENGINE
+  NPMAN --> ENGINE
+  IGA --> BLOCK
+  BLOCK --> REPORTS
+
+  %% ---- AI plane: raise-only, deterministic policy stays authoritative ----
+  AIPROV --- AIADVIS
+  AIADVIS ==>|"raise-only: cannot lower or clear"| ENGINE
+  ENGINE -.->|"display-only"| EXPLAIN
+  IGAI ==>|"raise-only"| IGA
+  AINET -.-> AIPROV
+
+  %% ---- native tools over hostile data ----
+  DET -.->|"hostile bytes in, bounded results out"| BSDTAR
+  TTOOLS --> BSDTAR
+  SRCACQ -.->|"git"| TTOOLS
+  ARCHREAD -.->|"bsdtar"| TTOOLS
+  INTEL -.->|"gpg"| TTOOLS
+
+  %% ---- privilege transitions (bold arrows cross into root/sudo) ----
+  ENGINE ==>|"consented handoff"| WRAP
+  WRAP ==>|"package build executes<br/>package code as the user"| SUDOPACMAN
+  WRAP ==> SANDBOX
+  SANDBOX ==>|"chroot build + sudo pacman -U<br/>of scanned, hash-bound archives"| SUDOPACMAN
+  BLOCK ==>|"consented upgrade/repair"| SUDOPACMAN
+  INCREP ==> SUDOPACMAN
+  TARGET --> RECIP
+  RECIP ==>|"arch-chroot as recovery root"| TARGET
+  INTELNET --> INTEL
+  INTEL ==>|"privileged verify + atomic install"| SUDOPACMAN
+
+  %% ---- consent gates (dashed, user confirmation) ----
+  WRAP -..->|"review acceptance + fresh handoff consent;<br/>sudo -k before build"| USER(["USER CONSENT"])
+  SANDBOX -..->|"explicit opt-in per run"| USER
+  SUDOPACMAN -..->|"sudo password / typed confirmation"| USER
+  RECIP -..->|"typed confirmation phrase per action"| USER
+  INCREP -..->|"fresh just-in-time confirmation<br/>per exact command"| USER
+  INTEL -..->|"explicit refresh or enabled timer"| USER
+  RENDER -..->|"renderer confirmation dialogs;<br/>main revalidates binding"| USER
+
+  %% ---- desktop chain ----
+  RENDER --> PRELOAD --> MAINPROC
+  MAINPROC ==>|"spawns fixed argv"| UICLI
+  UICLI --> REPORTS
+  UICLI --> CACHESTATE
+  MAINPROC -.->|"terminal-only actions stay in terminal"| USER
+
+  %% ---- MCP chain ----
+  MCPCLIENT -->|"stdio JSON-RPC, read-only tools"| MCPSRV
+  MCPSRV --> IGA
+  MCPSRV --> ENGINE
+  MCPSRV -.->|"security_audit: injected subprocess<br/>(offline; online variant fetches feed)"| TTOOLS
+
+  %% ---- network boundaries ----
+  INTELNET -.->|"redirects refused, bounded"| INTEL
+  SRCNET -.->|"credentials / localhost /<br/>non-public literals rejected"| SRCACQ
+  ADVISNET -.->|"bounded"| ENGINE
+
+  %% ---- state ----
+  CFG --> ENGINE
+  CACHESTATE --> ENGINE
+  REPORTS --> RENDER
+  REPORTS --> MCPSRV
+  RECOVERYBOOT --> TARGET

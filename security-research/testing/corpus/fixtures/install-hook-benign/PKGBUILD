@@ -1,0 +1,15 @@
+# Maintainer: Inert Corpus <corpus@example.invalid>
+pkgname=corpus-install-hook-benign
+pkgver=1.0
+pkgrel=1
+pkgdesc="Inert fixture: install hook only prints a message"
+arch=("x86_64")
+url="https://example.invalid/corpus/install-hook-benign"
+license=("MIT")
+install=corpus-install-hook-benign.install
+source=("https://example.invalid/corpus/install-hook-benign-1.0.tar.gz")
+sha256sums=("4444444444444444444444444444444444444444444444444444444444444444")
+
+package() {
+  install -Dm644 fixture-data.txt "$pkgdir/usr/share/corpus/fixture-data.txt"
+}

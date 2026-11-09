@@ -1,0 +1,18 @@
+# Maintainer: Inert Corpus <corpus@example.invalid>
+pkgname=corpus-pkgbuild-base64-data
+pkgver=1.0
+pkgrel=1
+pkgdesc="Inert fixture: decoded bytes are written to a data file"
+arch=("x86_64")
+url="https://example.invalid/corpus/pkgbuild-base64-data"
+license=("MIT")
+source=("https://example.invalid/corpus/pkgbuild-base64-data-1.0.tar.gz")
+sha256sums=("2222222222222222222222222222222222222222222222222222222222222222")
+
+build() {
+  base64 -d data/fixture-icon.b64 > fixture-icon.png
+}
+
+package() {
+  install -Dm644 fixture-icon.png "$pkgdir/usr/share/pixmaps/fixture-icon.png"
+}

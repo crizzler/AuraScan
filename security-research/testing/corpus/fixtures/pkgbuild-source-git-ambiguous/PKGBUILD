@@ -1,0 +1,14 @@
+# Maintainer: Inert Corpus <corpus@example.invalid>
+pkgname=corpus-source-git-ambiguous
+pkgver=1.0
+pkgrel=1
+pkgdesc="Inert fixture: abbreviated Git selector is not an immutable pin"
+arch=("x86_64")
+url="https://example.invalid/corpus/source-git-ambiguous"
+license=("MIT")
+source=("git+https://example.invalid/corpus/repo.git#commit=abc123")
+sha256sums=(SKIP)
+
+package() {
+  install -Dm644 fixture-data.txt "$pkgdir/usr/share/corpus/fixture-data.txt"
+}

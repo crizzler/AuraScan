@@ -12,7 +12,10 @@ it inspected, what it could not prove, and what needs a human decision.
 
 Developer preview. AuraScan reduces risk; it does not prove a package is safe.
 
-[Quick start](#quick-start) · [What it checks](#what-it-checks) · [Safety boundaries](#safety-boundaries) · [Documentation](#documentation) · [Development](#development)
+[Quick start](#quick-start) · [What it checks](#what-it-checks) ·
+[Sandboxed builds](#sandboxed-builds-and-headless-agents) ·
+[Safety boundaries](#safety-boundaries) · [Documentation](#documentation) ·
+[Development](#development)
 
 ## Quick start
 
@@ -142,6 +145,26 @@ approval is the MCP client's policy; the server advertises read-only hints for
 the default tools. Scanned content and package code are never executed, blocked,
 quarantined, or removed through the MCP server, but the host-audit tools do run
 bounded diagnostic subprocesses such as `pacman -Q`.
+
+## Sandboxed builds and headless agents
+
+For reviewed AUR builds, the optional devtools sandbox runs the build in a fresh
+chroot and scans every produced package archive before installation:
+
+```bash
+aurascan upgrade --aur-sandbox devtools
+aurascan-makepkg --aurascan-sandbox --syncdeps --install
+```
+
+This is risk reduction, not kernel isolation. The chroot shares the host kernel,
+and install hooks still run as root when the package is installed.
+
+`aurascan-mcp` is also usable by unattended review clients. Register it with
+`trust: untrusted` and a narrow include/allowlist, as shown in the
+[MCP reference](docs/REFERENCE.md#mcp-server). A headless security agent or an
+AI council can then use the read-only scan tools as one static input before a
+human approves an install or build. AuraScan does not sandbox that agent, grant
+it install authority, or turn a clean result into permission to proceed.
 
 ## Safety boundaries
 

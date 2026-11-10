@@ -123,6 +123,18 @@ _POSITIONAL_REFERENCE = re.compile(
     r"\$(?:\{(?P<braced>[1-9][0-9]*)\}|(?P<plain>[1-9]))"
 )
 _DECLARATION_COMMANDS = {"declare", "export", "local", "readonly", "typeset"}
+# ``_iter_shell_segments`` keeps a compound keyword attached to the first command
+# of a body, so the single-line ``for f in a; do lang=$(...)`` yields the segment
+# ``do lang=$(...)``.  POSIX.1-2017 XCU 2.9.1 makes an assignment with no command
+# name affect the current execution environment, so that spelling assigns in the
+# same way as the multi-line form and must not lose the assignment.  These are
+# the keywords that may precede such a statement: the shared ``_CONTROL_WORDS``
+# set minus the boundary-only ``(``/``{``, which open a subshell/group and must
+# not be treated as persisting here.
+_ASSIGNMENT_CONTROL_PREFIX_WORDS = frozenset(
+    {"!", "do", "elif", "else", "if", "then", "until", "while"}
+)
+_MAX_ASSIGNMENT_CONTROL_PREFIX_WORDS = 2
 _SPECIAL_PATH_VARIABLES = {"pkgbuilddir", "pkgdir", "srcdir", "startdir"}
 _MAX_SCOPED_COMMANDS = 16_384
 _MAX_SCOPED_CONSTANTS = 4_096
@@ -1800,6 +1812,19 @@ def _has_relevant_extglob_operand(content: str) -> bool:
     return False
 
 
+def _control_prefix_end(tokens: List[str]) -> int:
+    """Return the index of the first token after leading control keywords."""
+
+    index = 0
+    while (
+        index < _MAX_ASSIGNMENT_CONTROL_PREFIX_WORDS
+        and index < len(tokens)
+        and tokens[index] in _ASSIGNMENT_CONTROL_PREFIX_WORDS
+    ):
+        index += 1
+    return index
+
+
 def _constant_assignment_statement(
     segment: str,
     constants: Dict[str, str],
@@ -1809,7 +1834,15 @@ def _constant_assignment_statement(
     Set[str],
     Set[str],
 ]:
-    """Recognize bounded assignment-only statements and resolve in order."""
+    """Recognize bounded assignment-only statements and resolve in order.
+
+    A bounded leading control keyword is skipped first: the shared segmenter
+    keeps it attached to the first command of a compound, and POSIX XCU 2.9.1
+    makes the resulting assignment affect the current execution environment.
+    The remainder must still be assignment-only, so a command after the
+    assignment (``x=1 make``) remains untracked: prefix assignments do not
+    persist.
+    """
 
     try:
         tokens = shlex.split(segment, comments=False, posix=True)
@@ -1817,9 +1850,12 @@ def _constant_assignment_statement(
         return False, {}, set(), set()
     if not tokens:
         return False, {}, set(), set()
-    declaration_name = _basename(tokens[0]).lower()
+    index = _control_prefix_end(tokens)
+    if index >= len(tokens):
+        return False, {}, set(), set()
+    declaration_name = _basename(tokens[index]).lower()
     declaration = declaration_name in _DECLARATION_COMMANDS
-    index = 1 if declaration else 0
+    index += 1 if declaration else 0
     declaration_options: List[str] = []
     if declaration:
         while index < len(tokens) and tokens[index].startswith("-"):
@@ -1906,17 +1942,24 @@ def _static_assignment_value(
 
 
 def _nameref_declaration_names(segment: str) -> Set[str]:
-    """Return names declared through a statically recognizable nameref."""
+    """Return names declared through a statically recognizable nameref.
+
+    The same bounded control prefix accepted by ``_constant_assignment_statement``
+    is skipped here: a control-prefixed declaration now reaches the
+    assignment-only path, so its nameref indirection must still taint later
+    reads instead of being resolved as an ordinary scalar.
+    """
 
     try:
         tokens = shlex.split(segment, comments=False, posix=True)
     except ValueError:
         return set()
-    if not tokens or _basename(tokens[0]).lower() not in {
+    index = _control_prefix_end(tokens)
+    if index >= len(tokens) or _basename(tokens[index]).lower() not in {
         "declare", "local", "readonly", "typeset",
     }:
         return set()
-    index = 1
+    index += 1
     nameref = False
     while index < len(tokens) and tokens[index].startswith("-"):
         option = tokens[index]

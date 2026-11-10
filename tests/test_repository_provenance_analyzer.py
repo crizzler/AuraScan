@@ -5,9 +5,11 @@ import pytest
 from aurascan.analyzers.repository_provenance import (
     RepositoryProvenanceAnalyzer,
     _active_shell_text,
+    _constant_assignment_statement,
     _declared_split_package_functions,
     _function_regions,
     _MAX_SPLIT_HELPER_VISITS,
+    _nameref_declaration_names,
     _scoped_commands,
     collect_required_repository_paths,
 )
@@ -3011,3 +3013,175 @@ def test_incomplete_provenance_report_shows_the_unsupported_entry_by_default():
         "(a symbolic link)."
     ) in rendered
     assert "could not obtain a bounded, stable, no-follow snapshot" not in rendered
+
+
+def _control_word_package(body):
+    return "pkgname=fixture-package\npackage() {\n  " + body + "\n}\n"
+
+
+def _control_word_scope(body):
+    return _scoped_commands(
+        _control_word_package(body),
+        Path("/tmp/fixture-package"),
+        top_level_repository_cwd=True,
+        lifecycle_kind="pkgbuild",
+    )
+
+
+@pytest.mark.parametrize(
+    "segment, expected",
+    (
+        ("do lang=$", (True, {"lang": None}, set(), set())),
+        ("then lang=lit", (True, {"lang": "lit"}, set(), set())),
+        ("else export LANG=lit", (True, {"LANG": "lit"}, {"LANG"}, set())),
+        ("while ! lang=lit", (True, {"lang": "lit"}, set(), set())),
+    ),
+)
+def test_control_word_prefixed_assignment_is_tracked(segment, expected):
+    """The single-line loop head must assign like its multi-line spelling.
+
+    ``_iter_shell_segments`` leaves the compound keyword attached to the first
+    command, and POSIX XCU 2.9.1 makes an assignment with no command name
+    affect the current execution environment.
+    """
+
+    assert _constant_assignment_statement(segment, {}) == expected
+    # Only a bounded number of leading keywords is accepted: a third keyword
+    # keeps today's rejection instead of scanning arbitrary shell text.
+    assert _constant_assignment_statement("if then else lang=lit", {}) == (
+        False,
+        {},
+        set(),
+        set(),
+    )
+    # A command name after the assignment position still rejects the segment.
+    assert _constant_assignment_statement("do echo lang=lit", {}) == (
+        False,
+        {},
+        set(),
+        set(),
+    )
+
+    single = _control_word_scope(
+        'for f in a; do lang=lit; install "$lang" "$pkgdir/y"; done'
+    )
+    multi = _control_word_scope(
+        'for f in a; do\n    lang=lit\n    install "$lang" "$pkgdir/y"\n  done'
+    )
+
+    assert single is not None
+    assert multi is not None
+    single_install = [item for item in single if item.command.executable == "install"]
+    multi_install = [item for item in multi if item.command.executable == "install"]
+    assert len(single_install) == 1
+    assert len(multi_install) == 1
+    assert single_install[0].constants["lang"] == "lit"
+    assert single_install[0].constants == multi_install[0].constants
+
+
+def test_stale_constant_not_carried_past_control_word_assignment():
+    """A dropped control-word assignment must never leave a stale constant.
+
+    Previously the single-line form resolved ``$lang`` from an older
+    assignment and the collector fabricated ``d/old`` with ``complete=True``.
+    """
+
+    single = _control_word_scope(
+        'lang=old\n  for f in a; do lang=lit; install "d/$lang" x; done'
+    )
+    multi = _control_word_scope(
+        'lang=old\n  for f in a; do\n    lang=lit\n    install "d/$lang" x\n  done'
+    )
+
+    assert single is not None
+    assert multi is not None
+    # The ``for`` head still reflects the value in effect before the body ran;
+    # everything after the control-word assignment must not see the old value.
+    assert all(
+        item.constants.get("lang") != "old"
+        for item in single
+        if item.command.executable != "for"
+    )
+    single_install = [item for item in single if item.command.executable == "install"]
+    multi_install = [item for item in multi if item.command.executable == "install"]
+    assert len(single_install) == 1
+    assert len(multi_install) == 1
+    assert single_install[0].constants["lang"] == "lit"
+    assert single_install[0].constants == multi_install[0].constants
+
+    required = collect_required_repository_paths(
+        (
+            _control_word_package(
+                'lang=old\n  for f in a; do lang=lit; install "d/$lang" x; done'
+            ),
+        ),
+        Path("/tmp/fixture-package"),
+    )
+    assert "d/old" not in required.paths
+    assert required.paths == ("d/lit",)
+
+
+def test_dynamic_assignment_after_control_word_fails_closed_like_multiline():
+    """The taint the single-line form used to drop now withholds correlation."""
+
+    single_body = (
+        'lang=old\n  for f in a; do lang=$(cat v); install "d/$lang" x; done'
+    )
+    multi_body = (
+        'lang=old\n  for f in a; do\n    lang=$(cat v)\n'
+        '    install "d/$lang" x\n  done'
+    )
+
+    assert _control_word_scope(single_body) is None
+    assert _control_word_scope(multi_body) is None
+
+    single = collect_required_repository_paths(
+        (_control_word_package(single_body),), Path("/tmp/fixture-package")
+    )
+    multi = collect_required_repository_paths(
+        (_control_word_package(multi_body),), Path("/tmp/fixture-package")
+    )
+    assert single.complete is False
+    assert single == multi
+    assert "d/old" not in single.paths
+
+
+def test_command_prefix_assignment_stays_untracked():
+    """POSIX prefix assignments do not affect the current execution environment."""
+
+    assert _constant_assignment_statement("x=1 install a b", {}) == (
+        False,
+        {},
+        set(),
+        set(),
+    )
+    assert _constant_assignment_statement("do x=1 install a b", {}) == (
+        False,
+        {},
+        set(),
+        set(),
+    )
+
+    scoped = _control_word_scope('x=1 install a b\n  install "$x" "$pkgdir/y"')
+
+    assert scoped is not None
+    installs = [item for item in scoped if item.command.executable == "install"]
+    assert [item.constants.get("x") for item in installs] == [None, None]
+
+
+def test_control_word_prefixed_nameref_stays_tainted():
+    """Skipping the keyword must not turn a nameref into an ordinary scalar."""
+
+    assert _nameref_declaration_names("do declare -n ref=x") == {"ref"}
+
+    for body in (
+        'for f in a; do declare -n ref=x; install "$ref/payload" "$pkgdir/y"; done',
+        'for f in a; do\n    declare -n ref=x\n'
+        '    install "$ref/payload" "$pkgdir/y"\n  done',
+    ):
+        assert _control_word_scope(body) is None
+        required = collect_required_repository_paths(
+            (_control_word_package(body),), Path("/tmp/fixture-package")
+        )
+        assert required.complete is False
+        assert required.paths == ()

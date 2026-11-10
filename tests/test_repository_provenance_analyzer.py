@@ -10,7 +10,10 @@ from aurascan.analyzers.repository_provenance import (
     _function_regions,
     _MAX_SPLIT_HELPER_VISITS,
     _nameref_declaration_names,
+    _resolve,
+    _resolve_bounded_expansion,
     _scoped_commands,
+    _static_assignment_value,
     collect_required_repository_paths,
 )
 from aurascan.analyzers.remote_access import mask_shell_quoted_text
@@ -3185,3 +3188,199 @@ def test_control_word_prefixed_nameref_stays_tainted():
         )
         assert required.complete is False
         assert required.paths == ()
+
+
+_EXPANSION_CHECKOUT = Path("/tmp/fixture-package")
+
+
+def _expansion_package(value):
+    return (
+        "pkgname=fixture-package\n"
+        "pkgver=3.2.0\n"
+        "package() {\n"
+        '  _source_dir="Shelly-ALPM-%s"\n'
+        '  cd "$srcdir/${_source_dir}"\n'
+        '  install "bin/tool" "$pkgdir/usr/bin/tool"\n'
+        "}\n"
+    ) % value
+
+
+def _expansion_scope(value):
+    return _scoped_commands(
+        _expansion_package(value),
+        _EXPANSION_CHECKOUT,
+        top_level_repository_cwd=True,
+        lifecycle_kind="pkgbuild",
+    )
+
+
+def _expansion_install(value):
+    scoped = _expansion_scope(value)
+    assert scoped is not None
+    installs = [item for item in scoped if item.command.executable == "install"]
+    assert len(installs) == 1
+    return scoped, installs[0]
+
+
+def test_bounded_expansion_resolves_known_constant():
+    """A literal expansion over a known constant is provably side-effect-free.
+
+    The A-shape pinned in ``findings/issue-001/residual-pin.py`` S3 used to
+    leave ``_source_dir`` unresolved, tainting ``cd "$srcdir/${_source_dir}"``
+    and withholding the whole scope.  A plain ``${pkgver}`` (A2) and the
+    literal spelling (A3) keep their previous outcome.
+    """
+
+    assert (
+        _resolve_bounded_expansion("${pkgver//+/-}", {"pkgver": "3.2.0"})
+        == "3.2.0"
+    )
+    assert (
+        _resolve_bounded_expansion("${pkgver//./-}", {"pkgver": "3.2.0"})
+        == "3-2-0"
+    )
+    assert (
+        _resolve_bounded_expansion("${pkgname%-git}", {"pkgname": "shelly-git"})
+        == "shelly"
+    )
+    assert (
+        _resolve_bounded_expansion("${pkgname#shelly-}", {"pkgname": "shelly-git"})
+        == "git"
+    )
+    assert (
+        _resolve_bounded_expansion("${pkgver:-fallback}", {"pkgver": "3.2.0"})
+        == "3.2.0"
+    )
+    assert (
+        _resolve_bounded_expansion("${empty:-fallback}", {"empty": ""})
+        == "fallback"
+    )
+    assert _resolve_bounded_expansion("${empty+present}", {"empty": ""}) == "present"
+    # The name is unknown, so ``:-`` must not resolve to its default word.
+    assert (
+        _resolve_bounded_expansion("${SHELLY_LIBALPM:-true}", {"pkgver": "3.2.0"})
+        == "${SHELLY_LIBALPM:-true}"
+    )
+
+    outcomes = {}
+    for label, value in (
+        ("substitution", "${pkgver//+/-}"),
+        ("expansion", "${pkgver}"),
+        ("literal", "3.2.0"),
+    ):
+        scoped, install = _expansion_install(value)
+        assert all(item.tainted_constants == () for item in scoped)
+        assert install.constants["_source_dir"] == "Shelly-ALPM-3.2.0"
+        assert install.repository_cwd == "src/Shelly-ALPM-3.2.0"
+        outcomes[label] = (
+            install.constants["_source_dir"],
+            install.repository_cwd,
+            install.tainted_constants,
+        )
+    assert outcomes["substitution"] == outcomes["expansion"] == outcomes["literal"]
+
+
+@pytest.mark.parametrize(
+    "form",
+    (
+        "${pkgver:=0}",
+        "${pkgver=0}",
+        "${pkgver:0}",
+        "${pkgver:0:3}",
+        "${pkgver[0]}",
+        "${pkgname[pkgname=0]}",
+        "${!pkgver}",
+        "${!pkg*}",
+        "${#pkgver}",
+        "${pkgver?err}",
+        "${pkgver:?err}",
+        "${pkgver:+word}",
+        "${pkgver//${pkgname}/x}",
+        "${pkgver//$(id)/x}",
+        "${pkgver//`id`/x}",
+        "${pkgver//*/x}",
+        "${pkgver/a?/x}",
+        "${pkgver/[a]/x}",
+        "${pkgver/#a/b}",
+        "${pkgver/%a/b}",
+        "${pkgver//a/}",
+        "${pkgver/a}",
+        "${}",
+        "$${pkgver}",
+    ),
+)
+def test_unsupported_expansion_forms_stay_unresolved(form):
+    """Every form outside the allowlist returns the token unchanged."""
+
+    constants = {"pkgname": "shelly-git", "pkgver": "3.2.0"}
+    assert _resolve_bounded_expansion(form, constants) == form
+    assert _static_assignment_value(form, form, constants) is None
+    # The resolved prefix of a neighbouring form is not enough: a denied form
+    # keeps the whole token unresolved.
+    assert (
+        _resolve_bounded_expansion("${pkgver}" + form, constants)
+        == "${pkgver}" + form
+    )
+    # Oversized input is refused before any parsing.
+    oversized = "${pkgver//" + "a" * 4096 + "/b}"
+    assert _resolve_bounded_expansion(oversized, constants) == oversized
+
+
+def test_expansion_side_effects_fail_closed(tmp_path):
+    """The reference-grammar side effects must stay fail closed.
+
+    ``:=``/``=`` assign, subscripts and substring offsets evaluate arithmetic,
+    and an arithmetic read can recurse into a variable's value.  None of them
+    may resolve to a constant or open a ``pkgname`` mutation path.
+    """
+
+    constants = {"pkgname": "fixture-package", "pkgver": "3.2.0"}
+    for form in ("${pkgname:=0}", "${pkgname=0}", "${pkgname[pkgname=0]}"):
+        assert _resolve_bounded_expansion(form, constants) == form
+        assert _static_assignment_value(form, form, constants) is None
+
+    assert _expansion_scope("${pkgver:=0}") is None
+    assert _expansion_scope("${pkgver[pkgver=0]}") is None
+
+    countercheck = {
+        "parameter_default_write": 'pkgname=()\nx="${pkgname:=0}"',
+        "arithmetic_recursive_read": 'a="pkgname=0"\ny=$((pkgname))',
+        "parameter_index_write": 'x="${pkgname[pkgname=0]}"',
+    }
+    definitions = "package_a() {\n :\n}\npackage_b() {\n :\n}\n"
+    for label, extra in countercheck.items():
+        required = collect_required_repository_paths(
+            ("pkgname=(a b)\n" + extra + "\n" + definitions,),
+            tmp_path,
+        )
+        assert required.complete is False, label
+        assert required.paths == (), label
+
+
+def test_nested_expansion_is_not_laundered():
+    """A denied nested pattern must never become an accepted literal form.
+
+    ``_resolve`` still resolves plain references (today's behaviour) and runs
+    repeatedly, so an unmasked ``${pkgname}`` inside a denied pattern would turn
+    ``${pkgver//${pkgname}/x}`` into a literal substitution on a later pass.
+    With ``pkgname=a/b`` that split would fabricate a different value than
+    Bash's literal ``a/b`` pattern, i.e. a wrong path in the unsafe direction.
+    """
+
+    constants = {"pkgver": "a1a2", "pkgname": "a/b"}
+    token = "${pkgver//${pkgname}/x}"
+    for _index in range(4):
+        assert _resolve(token, constants) == token
+    assert _static_assignment_value(token, token, constants) is None
+    assert _resolve_bounded_expansion(token, constants) == token
+
+
+def test_denied_expansion_masks_only_itself():
+    """Masking a denied construct must not stop unrelated references resolving."""
+
+    assert _resolve("${x:=0}$cmd", {"cmd": "install"}) == "${x:=0}install"
+    assert _resolve("${x:=0}$1", {"1": "arg"}) == "${x:=0}arg"
+    assert (
+        _resolve_bounded_expansion("${x:=0}$cmd", {"cmd": "install"})
+        == "${x:=0}$cmd"
+    )

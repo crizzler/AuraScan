@@ -12,3 +12,11 @@ Changes after v0.15.1:
   ...`) remain untracked, and control-prefixed `declare -n` namerefs remain
   tainted. Package-scanner rule version advances to `1.16.0`, invalidating cached
   results from earlier rule versions.
+- Repository-provenance analysis now resolves a bounded set of side-effect-free
+  parameter expansions over constants it has already proven: `${name}`, literal
+  `#`/`##`/`%`/`%%` trims, literal `/`/`//` substitutions, and
+  `${name:-word}`/`${name+word}` whose name is known. A path built from such a
+  literal value is no longer left as unresolved taint, while assignment
+  (`:=`/`=`), subscript, substring-offset, indirection, nested and glob-pattern
+  forms stay fail closed and unchanged. Package-scanner rule version advances to
+  `1.17.0`, invalidating cached results from earlier rule versions.

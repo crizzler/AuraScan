@@ -93,6 +93,21 @@ _SUID_SYMBOLIC_MODE = re.compile(
     re.IGNORECASE,
 )
 _MAX_RESOLUTION_PASSES = 4
+_MAX_BOUNDED_EXPANSION_CHARS = 4_096
+# A bounded parameter expansion may only name a constant the table already
+# holds and may only carry literal operands.  Bash parameter expansion is not
+# read-only: ``:=``/``=`` assign, substring offsets and array subscripts
+# evaluate arithmetic, and patterns/replacements can nest further expansion.
+# These character classes are the exact inert subset R1 accepts; everything
+# else returns the token unchanged so today's unresolved/tainted outcome
+# survives.
+_BOUNDED_EXPANSION_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# ``~`` is excluded because Bash tilde-expands the word of ``:-``/``+`` and the
+# replacement of ``/``-substitution, so returning it literally would fabricate
+# a different value.
+_BOUNDED_EXPANSION_PATTERN = re.compile(r"[A-Za-z0-9._+:@,=-]+\Z")
+_BOUNDED_EXPANSION_REPLACEMENT = re.compile(r"[A-Za-z0-9._+:@,=/-]+\Z")
+
 _MAX_CORRELATION_OPERATIONS = 262_144
 _MAX_OBSERVED_DETAIL_CHARS = 300
 _LITERAL_SHELL_WORK_CHARS = 256
@@ -300,12 +315,194 @@ class RequiredRepositoryPaths(NamedTuple):
     family: str = ""
 
 
+def _bounded_expansion_value(
+    body: str,
+    constants: Dict[str, str],
+) -> Optional[str]:
+    """Return the static value of one supported ``${...}`` body, else ``None``.
+
+    ``body`` is the text between ``${`` and the first ``}``.  ``None`` means
+    this bounded evaluator does not resolve the spelling; the caller masks it
+    so it stays unresolved and cannot be rewritten later.
+    """
+
+    match = _BOUNDED_EXPANSION_NAME.match(body)
+    if match is None:
+        return None
+    name = match.group(0)
+    # Only a value the bounded constant table already proved is usable.  A
+    # name that is unset here may still come from the environment at runtime,
+    # so ``:-``/``+`` and every operator form stay unresolved for it too.
+    if name not in constants:
+        return None
+    value = constants[name]
+    if len(value) > _MAX_BOUNDED_EXPANSION_CHARS:
+        return None
+    remainder = body[match.end():]
+    if not remainder:
+        return value
+
+    if remainder.startswith("/"):
+        operator_length = 2 if remainder.startswith("//") else 1
+        pattern, separator, replacement = remainder[operator_length:].partition("/")
+        # The replacement is required; a leading ``#``/``%`` pattern would be
+        # Bash's anchored form and is not what a literal substitution means.
+        if not separator:
+            return None
+        if _BOUNDED_EXPANSION_PATTERN.fullmatch(pattern) is None:
+            return None
+        if _BOUNDED_EXPANSION_REPLACEMENT.fullmatch(replacement) is None:
+            return None
+        if operator_length == 2:
+            return value.replace(pattern, replacement)
+        return value.replace(pattern, replacement, 1)
+
+    if remainder.startswith("##") or remainder.startswith("#"):
+        pattern = remainder[2:] if remainder.startswith("##") else remainder[1:]
+        if _BOUNDED_EXPANSION_PATTERN.fullmatch(pattern) is None:
+            return None
+        if not value.startswith(pattern):
+            return value
+        return value[len(pattern):]
+
+    if remainder.startswith("%%") or remainder.startswith("%"):
+        pattern = remainder[2:] if remainder.startswith("%%") else remainder[1:]
+        if _BOUNDED_EXPANSION_PATTERN.fullmatch(pattern) is None:
+            return None
+        if not value.endswith(pattern):
+            return value
+        return value[: -len(pattern)]
+
+    if remainder.startswith(":-"):
+        word = remainder[2:]
+        if _BOUNDED_EXPANSION_REPLACEMENT.fullmatch(word) is None:
+            return None
+        return value if value else word
+
+    if remainder.startswith("+"):
+        word = remainder[1:]
+        if _BOUNDED_EXPANSION_REPLACEMENT.fullmatch(word) is None:
+            return None
+        # The name is known, so it is set and ``${name+word}`` is ``word``.
+        return word
+
+    # ``:=``, ``=``, ``:?``, ``?``, ``:offset``, ``:offset:length``,
+    # ``[subscript]``, ``!indirection``, ``#length``, ``:+`` and every other
+    # spelling fall through here unresolved.
+    return None
+
+
+def _scan_bounded_expansions(
+    token: str,
+    constants: Dict[str, str],
+    masked: List[str],
+) -> Optional[str]:
+    """Resolve supported expansions and mask unsupported ones in ``token``.
+
+    Every ``${...}`` construct this evaluator does not resolve is replaced by
+    a NUL-delimited placeholder and appended to ``masked``.  The placeholder
+    carries no ``$``, so the named resolver that runs afterwards cannot rewrite
+    a denied operator into an accepted literal form on a later pass.  ``None``
+    means the token cannot be scanned safely: unterminated construct, ``$$``
+    prefix, NUL byte, or oversized input.
+    """
+
+    # ``masked`` is non-empty only when this scan inserted a placeholder, so
+    # this NUL check applies to the caller-supplied token, not to later passes.
+    if len(token) > _MAX_BOUNDED_EXPANSION_CHARS or (
+        "\x00" in token and not masked
+    ):
+        return None
+    output: List[str] = []
+    cursor = 0
+    changed = False
+    while True:
+        start = token.find("${", cursor)
+        if start < 0:
+            break
+        if start > 0 and token[start - 1] == "$":
+            # ``$${...}`` is the shell PID followed by literal text, not a
+            # parameter expansion.
+            return None
+        end = token.find("}", start + 2)
+        if end < 0:
+            return None
+        output.append(token[cursor:start])
+        replacement = _bounded_expansion_value(token[start + 2:end], constants)
+        if replacement is None:
+            output.append("\x00%d\x00" % len(masked))
+            masked.append(token[start:end + 1])
+        else:
+            output.append(replacement)
+        cursor = end + 1
+        changed = True
+    if not changed:
+        return token
+    output.append(token[cursor:])
+    scanned = "".join(output)
+    if len(scanned) > 2 * _MAX_BOUNDED_EXPANSION_CHARS:
+        return None
+    return scanned
+
+
+def _restore_bounded_expansions(
+    resolved: str,
+    masked: Sequence[str],
+    fallback: str,
+) -> str:
+    """Restore masked constructs and fall back to ``fallback`` when over budget."""
+
+    restored = resolved
+    for index, construct in enumerate(masked):
+        restored = restored.replace("\x00%d\x00" % index, construct)
+    return restored if len(restored) <= 8192 else fallback
+
+
+def _resolve_bounded_expansion(token: str, constants: Dict[str, str]) -> str:
+    """Resolve provably side-effect-free parameter expansions over constants.
+
+    Only spellings that cannot assign, index, indirect or evaluate arithmetic
+    are accepted: ``${name}``, literal ``#``/``##``/``%``/``%%`` trims, literal
+    ``/``/``//`` substitutions, and ``${name:-word}``/``${name+word}`` whose
+    name the bounded constant table already holds.  Every other spelling
+    returns the token unchanged, preserving today's unresolved and tainted
+    outcomes.
+    """
+
+    if "${" not in token or len(token) > _MAX_BOUNDED_EXPANSION_CHARS:
+        return token
+    masked: List[str] = []
+    scanned = token
+    for _index in range(_MAX_RESOLUTION_PASSES):
+        updated = _scan_bounded_expansions(scanned, constants, masked)
+        if updated is None:
+            return token
+        if updated == scanned:
+            break
+        scanned = updated
+    else:
+        return token
+    return token if masked else scanned
+
+
 def _resolve(token: str, constants: Dict[str, str]) -> str:
     """Resolve bounded named and positional constants in one shell token."""
 
-    resolved = _resolve_named_variables(token, constants)
-    if not resolved or len(resolved) > 8192:
-        return resolved
+    masked: List[str] = []
+    scanned = token
+    if "${" in token:
+        for _index in range(_MAX_RESOLUTION_PASSES):
+            updated = _scan_bounded_expansions(scanned, constants, masked)
+            if updated is None:
+                return token
+            if updated == scanned:
+                break
+            scanned = updated
+    resolved = _resolve_named_variables(scanned, constants)
+    if not resolved:
+        return _restore_bounded_expansions(resolved, masked, token)
+    if len(resolved) > 8192:
+        return _restore_bounded_expansions(resolved, masked, token)
     output: List[str] = []
     cursor = 0
     size = 0
@@ -315,14 +512,14 @@ def _resolve(token: str, constants: Dict[str, str]) -> str:
         replacement = constants.get(name, match.group(0))
         size += len(literal) + len(replacement)
         if size > 8192:
-            return resolved
+            return _restore_bounded_expansions(resolved, masked, token)
         output.extend((literal, replacement))
         cursor = match.end()
     suffix = resolved[cursor:]
     if size + len(suffix) > 8192:
-        return resolved
+        return _restore_bounded_expansions(resolved, masked, token)
     output.append(suffix)
-    return "".join(output)
+    return _restore_bounded_expansions("".join(output), masked, token)
 
 
 def _function_regions(active_text: str) -> Optional[List[_FunctionRegion]]:
@@ -1992,9 +2189,11 @@ def _tainted_command_requires_failure(scoped: _ScopedCommand) -> bool:
     """Withhold exact correlation when a mutated variable controls a path.
 
     A normal unresolved environment command such as ``$CC`` remains outside
-    this rule.  Taint is introduced only by observed dynamic mutation (read,
-    printf -v, nameref, sourced/evaluated state), and is consumed only in a
-    command position or an analyzer-relevant path position.
+    this rule.  Taint has two producers: observed dynamic mutation (read,
+    printf -v, nameref, sourced/evaluated state), and an assignment whose value
+    cannot be resolved statically, which ``_constant_assignment_statement``
+    records as ``None``.  Taint is consumed only in a command position or an
+    analyzer-relevant path position.
     """
 
     tainted = set(scoped.tainted_constants)

@@ -164,6 +164,10 @@ _MAX_CONDITIONAL_NESTING = 4
 _MAX_CONDITIONAL_SPAN_CHARS = 4_096
 _MAX_CASE_COMPOUNDS = 64
 _MAX_CASE_NESTING = 4
+# Only these characters immediately before ``(`` open an extglob group whose
+# ``)`` belongs to the pattern; every other ``(`` is pattern data (including
+# Bash's optional leading ``(pattern)`` group).
+_CASE_EXTGLOB_OPENERS = "@*+?!"
 # Test commands (``[``/``[[``/``test``) are builtin names, not repository
 # operands.  Their argument grammar is classified with a bounded table: only
 # file-test primary operands are path operands; string/integer operands are
@@ -1988,6 +1992,14 @@ def _blank_case_arm_patterns(content: str) -> str:
     spaces, while the ``)`` boundaries, the ``case`` word and every arm body
     stay intact so arm-body commands are still analyzed and captured.
 
+    Bash's optional leading ``(`` group (``case $x in (a) ...``) belongs to the
+    pattern list, so the ``)`` that closes it is the arm terminator rather than
+    a subshell close.  Only an extglob opener (``@(``, ``*(``, ``+(``, ``?(``,
+    ``!(``) raises the parenthesis depth, so the arm body always resumes at the
+    first depth-zero ``)``.  A pattern list that reaches ``;;``/``;&``/``;;&``
+    or ``esac`` without that terminator is malformed Bash, and blanking it
+    would hide an arm body: refuse instead.
+
     Embedded command substitutions are left in place: a pattern word can
     undergo command substitution, and blanking it with the pattern would hide
     a command the shared parser used to see.  Anything unterminated,
@@ -2012,10 +2024,19 @@ def _blank_case_arm_patterns(content: str) -> str:
                 content, index
             ):
                 # The final arm terminator is followed directly by ``esac``;
-                # Bash accepts no further pattern there.
+                # Bash accepts no further pattern there.  Pattern text before
+                # ``esac`` means the list was never closed by its ``)``: that
+                # is malformed Bash, and blanking it would hide an arm body.
+                if stack[-1][2]:
+                    return content
                 stack.pop()
                 index += 4
                 continue
+            if content.startswith(";;", index) or content.startswith(";&", index):
+                # An arm terminator inside a pattern list can only appear when
+                # the arm's ``)`` is missing; refuse rather than blank what is
+                # really an arm body.
+                return content
             if char in {"'", '"'}:
                 end = _shell_quote_end(content, index)
                 if end is None:
@@ -2029,11 +2050,13 @@ def _blank_case_arm_patterns(content: str) -> str:
                     "$(" not in region and "`" not in region
                 ):
                     changed = _blank_case_region(chars, index, end) or changed
+                stack[-1][2] = True
                 index = end
                 continue
             if char == "\\":
                 chars[index] = " "
                 changed = True
+                stack[-1][2] = True
                 if index + 1 < length and content[index + 1] == "\n":
                     index += 1
                 else:
@@ -2046,6 +2069,7 @@ def _blank_case_arm_patterns(content: str) -> str:
                 if end is None:
                     return content
                 # Backtick content executes; keep it visible to the parser.
+                stack[-1][2] = True
                 index = end
                 continue
             if char == "$" and content.startswith("$(", index):
@@ -2053,12 +2077,19 @@ def _blank_case_arm_patterns(content: str) -> str:
                 if end is None:
                     return content
                 # $(...) content executes; keep it visible to the parser.
+                stack[-1][2] = True
                 index = end
                 continue
             if char == "(":
-                stack[-1][1] = int(stack[-1][1]) + 1
+                # Only an extglob opener starts a group whose ``)`` belongs to
+                # the pattern.  Bash's optional leading ``(`` group and any
+                # other parenthesis are pattern data, so they never delay the
+                # arm terminator.
+                if index > 0 and content[index - 1] in _CASE_EXTGLOB_OPENERS:
+                    stack[-1][1] = int(stack[-1][1]) + 1
                 chars[index] = " "
                 changed = True
+                stack[-1][2] = True
                 index += 1
                 continue
             if char == ")":
@@ -2066,13 +2097,19 @@ def _blank_case_arm_patterns(content: str) -> str:
                     stack[-1][1] = int(stack[-1][1]) - 1
                     chars[index] = " "
                     changed = True
+                    stack[-1][2] = True
                 else:
-                    stack[-1] = ["body", 0]
+                    # The arm terminator, including the close of a leading
+                    # ``(pattern)`` group: keep the boundary and resume the
+                    # arm body so its commands are still analyzed.
+                    stack[-1] = ["body", 0, False]
                 index += 1
                 continue
             if char in "\r\n":
                 index += 1
                 continue
+            if not char.isspace():
+                stack[-1][2] = True
             chars[index] = " "
             changed = True
             index += 1
@@ -2112,14 +2149,14 @@ def _blank_case_arm_patterns(content: str) -> str:
                 compounds += 1
                 if compounds > _MAX_CASE_COMPOUNDS:
                     return content
-                stack.append(["word", 0])
+                stack.append(["word", 0, False])
                 index += 4
                 continue
             index += 1
             continue
         if state == "word":
             if _shell_keyword_at(content, index, "in"):
-                stack[-1] = ["pattern", 0]
+                stack[-1] = ["pattern", 0, False]
                 index += 2
                 continue
             if _shell_keyword_at(content, index, "esac"):
@@ -2143,15 +2180,15 @@ def _blank_case_arm_patterns(content: str) -> str:
                 return content
             if len(stack) + 1 > _MAX_CASE_NESTING:
                 return content
-            stack.append(["word", 0])
+            stack.append(["word", 0, False])
             index += 4
             continue
         if content.startswith(";;&", index):
-            stack[-1] = ["pattern", 0]
+            stack[-1] = ["pattern", 0, False]
             index += 3
             continue
         if content.startswith(";;", index) or content.startswith(";&", index):
-            stack[-1] = ["pattern", 0]
+            stack[-1] = ["pattern", 0, False]
             index += 2
             continue
         index += 1

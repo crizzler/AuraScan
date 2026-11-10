@@ -46,3 +46,11 @@ Changes after v0.15.1:
   comparison operands are data. Unrecognized or unbounded test grammar withholds
   a complete result. Package-scanner rule version advances to `1.20.0`,
   invalidating cached results from earlier rule versions.
+- Repository-provenance `case` arm masking now treats Bash's optional leading
+  `(` group (`case $x in (a) …`) as part of the pattern list, so the `)` that
+  closes it is the arm terminator instead of a subshell close. That shape used
+  to blank the whole arm body and could drop an `install` command while still
+  reporting a complete result; a pattern list that never reaches its `)` is
+  malformed and now falls back to the unmasked text. Package-scanner rule
+  version advances to `1.21.0`, invalidating cached results from earlier rule
+  versions.

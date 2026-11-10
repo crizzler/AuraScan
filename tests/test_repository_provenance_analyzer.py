@@ -3574,6 +3574,45 @@ def test_case_arm_body_commands_still_captured():
     assert "src/b" in _syntax_required(body).paths
 
 
+def test_parenthesised_case_patterns_preserve_arm_body():
+    """A leading ``(pattern)`` group must not swallow the arm terminator.
+
+    Bash accepts an optional leading ``(`` before a pattern list, so the
+    ``)`` closing it is the arm terminator rather than a subshell close.
+    Reading it as a subshell close kept the scan in pattern state and blanked
+    the whole arm body, silently dropping the command while the collector
+    still reported a complete result.
+    """
+
+    shapes = {
+        "leading": 'case $x in (a) install -Dm755 "$srcdir/b" d ;; esac',
+        "double": 'case $x in ((a)) install -Dm755 "$srcdir/b" d ;; esac',
+        "alternation": 'case $x in a|(b) install -Dm755 "$srcdir/b" d ;; esac',
+        "leading-alternation": (
+            'case $x in (a|b) install -Dm755 "$srcdir/b" d ;; esac'
+        ),
+        "second-arm": (
+            'case $x in (a) y=1 ;; (b) install -Dm755 "$srcdir/b" d ;; esac'
+        ),
+    }
+    for label, body in shapes.items():
+        masked = _blank_case_arm_patterns(body)
+        assert masked != body, label
+        # Only the pattern list is blanked; the ``)`` boundary and the arm
+        # body survive verbatim.
+        assert "install" in masked, label
+        assert '"$srcdir/b"' in masked, label
+        assert ")" in masked, label
+
+        scoped = _syntax_scope(body)
+        assert scoped is not None, label
+        executables = [item.command.executable for item in scoped]
+        assert "install" in executables, label
+        assert "(" not in executables, label
+        assert ")" not in executables, label
+        assert "src/b" in _syntax_required(body).paths, label
+
+
 def test_case_suppression_fallback_fails_closed():
     """Unbounded case text keeps today's phantom-command outcome."""
 
@@ -3586,6 +3625,17 @@ def test_case_suppression_fallback_fails_closed():
     for _depth in range(5):
         nested = "case $x in\n  a) " + nested + " ;;\nesac"
     assert _blank_case_arm_patterns(nested) == nested
+
+    # A pattern list that never reaches its ``)`` is malformed Bash.  Blanking
+    # it would hide whatever follows as if it were pattern text, so the whole
+    # text is returned unchanged (today's outcome) instead.
+    for malformed in (
+        'case $x in a install -Dm755 "$srcdir/b" d ;; esac',
+        'case $x in (a install -Dm755 "$srcdir/b" d ;; esac',
+        'case $x in \'(\'a\')\' install -Dm755 "$srcdir/b" d ;; esac',
+        'case $x in a install -Dm755 "$srcdir/b" d esac',
+    ):
+        assert _blank_case_arm_patterns(malformed) == malformed
 
     # A refusal is not an allow: the phantom ``*`` operand still flips
     # repository completeness exactly as it did before suppression existed.

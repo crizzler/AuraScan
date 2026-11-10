@@ -156,6 +156,18 @@ _MAX_SCOPED_CONSTANTS = 4_096
 _MAX_FUNCTION_SCOPES = 512
 _MAX_FUNCTION_INVOCATIONS = 1_024
 _MAX_FUNCTION_ARGUMENTS = 64
+# The provenance-local shell-syntax pre-pass is bounded so hostile package text
+# can never turn it into unbounded work or a new evidence source.  Every
+# refusal returns the unmodified text: today's conservative split-and-fail.
+_MAX_CONDITIONAL_SPANS = 8
+_MAX_CONDITIONAL_NESTING = 4
+_MAX_CONDITIONAL_SPAN_CHARS = 4_096
+# Inert single-byte placeholders must not collide with the input, must not be
+# whitespace to ``str.isspace``/``shlex`` (so they neither split segments nor
+# split words), and must not be remote-stage's internal command marker.
+_CONDITIONAL_PLACEHOLDER_CHARS = tuple(
+    chr(value) for value in list(range(1, 9)) + list(range(14, 28))
+) + ("\x7f",)
 _PKGBUILD_LIFECYCLE_FUNCTIONS = {
     "build", "check", "package", "pkgver", "prepare", "verify",
 }
@@ -1561,6 +1573,358 @@ def _dynamic_function_call_requires_failure(
     return False
 
 
+_COMMAND_PREFIX_WORDS = frozenset(
+    {
+        "!", "(", "{", "coproc", "do", "elif", "else", "for", "function",
+        "if", "select", "then", "time", "until", "while",
+    }
+)
+_SHELL_KEYWORD_SEPARATORS = " \t\r\n;|&(){}"
+
+
+def _shell_keyword_at(text: str, index: int, keyword: str) -> bool:
+    """Return whether ``keyword`` is a standalone shell word at ``index``."""
+
+    if not text.startswith(keyword, index):
+        return False
+    before = text[index - 1] if index > 0 else " "
+    end = index + len(keyword)
+    after = text[end] if end < len(text) else " "
+    return before in _SHELL_KEYWORD_SEPARATORS and after in _SHELL_KEYWORD_SEPARATORS
+
+
+def _command_position(text: str, index: int) -> bool:
+    """Return a bounded approximation of a shell command-word position.
+
+    Reserved words such as ``[[`` and ``case`` only introduce a compound in
+    command position.  A keyword-shaped argument (``printf case``) must not
+    open a span, because masking or blanking there would change which
+    commands the shared segmenter sees.
+    """
+
+    cursor = index - 1
+    while cursor >= 0 and text[cursor] in " \t":
+        cursor -= 1
+    if cursor < 0 or text[cursor] in "\n\r;|&(){}":
+        return True
+    start = cursor
+    while start >= 0 and (text[start].isalnum() or text[start] in "_!-"):
+        start -= 1
+    return text[start + 1 : cursor + 1] in _COMMAND_PREFIX_WORDS
+
+
+def _shell_quote_end(text: str, index: int) -> Optional[int]:
+    """Return the offset after a quoted shell word, or ``None`` if unbounded."""
+
+    quote = text[index]
+    ansi_c = quote == "'" and index > 0 and text[index - 1] == "$"
+    cursor = index + 1
+    escaped = False
+    while cursor < len(text):
+        char = text[cursor]
+        if quote == "'" and not ansi_c:
+            if char == "'":
+                return cursor + 1
+        elif escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == quote:
+            return cursor + 1
+        cursor += 1
+    return None
+
+
+def _shell_backtick_end(text: str, index: int) -> Optional[int]:
+    """Return the offset after a closed backtick substitution, or ``None``."""
+
+    cursor = index + 1
+    escaped = False
+    while cursor < len(text):
+        char = text[cursor]
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "`":
+            return cursor + 1
+        cursor += 1
+    return None
+
+
+def _shell_command_substitution_end(text: str, index: int) -> Optional[int]:
+    """Return the offset after a balanced ``$( ... )``, or ``None``."""
+
+    cursor = index + 2
+    depth = 1
+    limit = min(len(text), index + _MAX_CONDITIONAL_SPAN_CHARS)
+    while cursor < limit:
+        char = text[cursor]
+        if char in {"'", '"'}:
+            end = _shell_quote_end(text, cursor)
+            if end is None or end > limit:
+                return None
+            cursor = end
+            continue
+        if char == "\\":
+            cursor += 2
+            continue
+        if char == "`":
+            end = _shell_backtick_end(text, cursor)
+            if end is None or end > limit:
+                return None
+            cursor = end
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return cursor + 1
+        cursor += 1
+    return None
+
+
+def _mask_conditional_span(
+    content: str,
+    chars: List[str],
+    start: int,
+    markers: Tuple[str, str, str],
+) -> Tuple[Optional[int], bool]:
+    """Mask ``&``, ``|`` and newline in one ``[[ ... ]]`` expression.
+
+    Quoted words and the interiors of ``$(...)`` and backticks are skipped
+    with their own bounds, so a pipeline inside a command substitution keeps
+    its separate commands.  Returns the closing ``]]`` offset and whether any
+    character was masked, or ``(None, ...)`` for an unbounded span.
+    """
+
+    and_marker, or_marker, newline_marker = markers
+    depth = 1
+    changed = False
+    index = start
+    limit = min(len(content), start + _MAX_CONDITIONAL_SPAN_CHARS)
+    while index < limit:
+        char = content[index]
+        if char in {"'", '"'}:
+            end = _shell_quote_end(content, index)
+            if end is None:
+                return None, changed
+            index = end
+            continue
+        if char == "\\":
+            index += 2
+            continue
+        if char == "`":
+            end = _shell_backtick_end(content, index)
+            if end is None:
+                return None, changed
+            index = end
+            continue
+        if char == "$" and content.startswith("$(", index):
+            end = _shell_command_substitution_end(content, index)
+            if end is None:
+                return None, changed
+            index = end
+            continue
+        if content.startswith("[[", index) and _shell_keyword_at(content, index, "[["):
+            depth += 1
+            if depth > _MAX_CONDITIONAL_NESTING:
+                return None, changed
+            index += 2
+            continue
+        if content.startswith("]]", index) and _shell_keyword_at(content, index, "]]"):
+            depth -= 1
+            if depth == 0:
+                return index, changed
+            index += 2
+            continue
+        if char == "&":
+            chars[index] = and_marker
+            changed = True
+        elif char == "|":
+            chars[index] = or_marker
+            changed = True
+        elif char == "\n":
+            chars[index] = newline_marker
+            changed = True
+        index += 1
+    return None, changed
+
+
+def _mask_conditional_compound_operators(
+    content: str,
+) -> Tuple[str, Dict[str, str]]:
+    """Mask ``&``, ``|`` and newline inside bounded ``[[ ... ]]`` spans.
+
+    ``[[ ... ]]`` is a single conditional expression in Bash: ``&&`` and
+    ``||`` inside it are expression operators, never command separators.  The
+    shared segmenter splits on them anyway, so the head parses as ``[[`` and
+    the tail parses as a phantom command whose executable is the next test
+    operand.  A tainted operand in that position then withholds the whole
+    scope, which makes the outcome depend on operand order.
+
+    This provenance-local pre-pass keeps the compound as one command without
+    touching the shared segmenter.  Anything unbounded, unbalanced, nested
+    too deeply or otherwise unsupported returns the original text and an
+    empty map, so today's conservative outcome survives unchanged.
+    """
+
+    if "[[" not in content:
+        return content, {}
+    available = [
+        char for char in _CONDITIONAL_PLACEHOLDER_CHARS if char not in content
+    ]
+    if len(available) < 3:
+        return content, {}
+    markers = (available[0], available[1], available[2])
+    restore_map = {markers[0]: "&", markers[1]: "|", markers[2]: "\n"}
+    chars = list(content)
+    changed = False
+    spans = 0
+    index = 0
+    length = len(content)
+    while index < length:
+        char = content[index]
+        if char in {"'", '"'}:
+            end = _shell_quote_end(content, index)
+            if end is None:
+                return content, {}
+            index = end
+            continue
+        if char == "\\":
+            index += 2
+            continue
+        if char == "`":
+            end = _shell_backtick_end(content, index)
+            if end is None:
+                return content, {}
+            index = end
+            continue
+        if char == "$" and content.startswith("$(", index):
+            end = _shell_command_substitution_end(content, index)
+            if end is None:
+                return content, {}
+            index = end
+            continue
+        if (
+            content.startswith("[[", index)
+            and _shell_keyword_at(content, index, "[[")
+            and _command_position(content, index)
+        ):
+            spans += 1
+            if spans > _MAX_CONDITIONAL_SPANS:
+                return content, {}
+            end, span_changed = _mask_conditional_span(
+                content,
+                chars,
+                index + 2,
+                markers,
+            )
+            if end is None:
+                return content, {}
+            changed = changed or span_changed
+            index = end + 2
+            continue
+        index += 1
+    if not changed:
+        return content, {}
+    return "".join(chars), restore_map
+
+
+def _restore_conditional_masks(value: str, restore_map: Dict[str, str]) -> str:
+    """Restore pre-pass placeholders so no marker byte reaches evidence."""
+
+    if not value or not restore_map:
+        return value
+    for marker, original in restore_map.items():
+        if marker in value:
+            value = value.replace(marker, original)
+    return value
+
+
+def _restore_conditional_word_list(
+    values: Sequence[str],
+    restore_map: Dict[str, str],
+) -> List[str]:
+    """Restore placeholders and re-split words joined by a masked newline.
+
+    A masked newline is real shell word separation.  When it directly follows
+    an operator (``&&\\n``) the masked parse produced one word, so the restored
+    line break is split back into the two words Bash would have seen.
+    """
+
+    restored: List[str] = []
+    for value in values:
+        text = _restore_conditional_masks(value, restore_map)
+        if "\n" not in text:
+            restored.append(text)
+            continue
+        restored.extend(piece for piece in text.split("\n") if piece)
+    return restored
+
+
+def _restore_conditional_command(
+    command,
+    restore_map: Dict[str, str],
+):
+    """Restore a parsed command's token fields before any evidence use."""
+
+    if not restore_map:
+        return command
+    words = _restore_conditional_word_list(
+        (command.executable,) + tuple(command.arguments),
+        restore_map,
+    )
+    if not words:
+        return command
+    return command._replace(
+        executable=words[0],
+        arguments=tuple(words[1:]),
+        assignments=tuple(
+            _restore_conditional_word_list(command.assignments, restore_map)
+        ),
+    )
+
+
+def _masked_newline_line_corrections(
+    text: str,
+    placeholder: Optional[str],
+) -> Optional[List[int]]:
+    """Return per-masked-line extra counts for replaced newline characters.
+
+    A masked newline no longer increments the segmenter's counter, so every
+    later line number in that text would drift.  The correction keeps emitted
+    evidence line numbers identical to the unmodified file.
+    """
+
+    if not placeholder or placeholder not in text:
+        return None
+    positions = [index for index, char in enumerate(text) if char == placeholder]
+    corrections: List[int] = []
+    seen = 0
+    cursor = 0
+    for line_start in [0] + [
+        index + 1 for index, char in enumerate(text) if char == "\n"
+    ]:
+        while cursor < len(positions) and positions[cursor] < line_start:
+            cursor += 1
+            seen += 1
+        corrections.append(seen)
+    return corrections
+
+
+def _restore_masked_line(
+    line: int,
+    corrections: Optional[List[int]],
+) -> int:
+    """Map a masked line number back to the unmodified file's line number."""
+
+    if corrections is None or line < 1:
+        return line
+    return line + corrections[min(line, len(corrections)) - 1]
+
+
 def _sequential_scope_commands(
     content: str,
     initial_constants: Dict[str, str],
@@ -1584,6 +1948,21 @@ def _sequential_scope_commands(
         or _has_relevant_extglob_operand(content)
     ):
         return None, {}, {}, set()
+    masked_content, conditional_restore = _mask_conditional_compound_operators(
+        content
+    )
+    newline_marker = next(
+        (
+            marker
+            for marker, original in conditional_restore.items()
+            if original == "\n"
+        ),
+        None,
+    )
+    content_line_corrections = _masked_newline_line_corrections(
+        masked_content,
+        newline_marker,
+    )
     constants = dict(initial_constants)
     exported_loaders = dict(initial_exported_loaders)
     tainted_constants = set(initial_tainted_constants)
@@ -1592,14 +1971,24 @@ def _sequential_scope_commands(
     track_repository_cwd = _linear_scope_allows_cwd_tracking(content)
     possible_repository_cwd = initial_repository_cwd_possible
     for segment, segment_line in _iter_shell_segments(
-        content,
+        masked_content,
         preserve_simple_stdout_redirections=True,
     ):
+        segment_line = _restore_masked_line(segment_line, content_line_corrections)
         assignment, updates, exports, unexports = _constant_assignment_statement(
             segment,
             constants,
         )
         if assignment:
+            if conditional_restore:
+                updates = {
+                    name: (
+                        None
+                        if value is None
+                        else _restore_conditional_masks(value, conditional_restore)
+                    )
+                    for name, value in updates.items()
+                }
             nameref_names = _nameref_declaration_names(segment)
             for name, value in updates.items():
                 if value is None:
@@ -1632,10 +2021,23 @@ def _sequential_scope_commands(
         if parsed is None:
             return None, {}, {}, set()
         commands, _unused_constants = parsed
+        segment_line_corrections = _masked_newline_line_corrections(
+            segment,
+            newline_marker,
+        )
         dispatch_allowed = _function_dispatch_allowed(segment)
         for command in commands:
+            command = _restore_conditional_command(command, conditional_restore)
             adjusted = command._replace(
-                line_number=line_offset + segment_line + command.line_number - 1
+                line_number=(
+                    line_offset
+                    + segment_line
+                    + _restore_masked_line(
+                        command.line_number,
+                        segment_line_corrections,
+                    )
+                    - 1
+                )
             )
             collected.append(
                 _ScopedCommand(

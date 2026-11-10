@@ -20,3 +20,11 @@ Changes after v0.15.1:
   (`:=`/`=`), subscript, substring-offset, indirection, nested and glob-pattern
   forms stay fail closed and unchanged. Package-scanner rule version advances to
   `1.17.0`, invalidating cached results from earlier rule versions.
+- Repository-provenance analysis now masks `&`, `|` and newline inside bounded
+  `[[ … ]]` compound spans before the shared segmenter sees the text, so a
+  compound conditional parses as one `[[` command instead of splitting into a
+  phantom command whose executable is the next test operand. Operand order no
+  longer changes the result, and every unbounded or unbalanced span keeps the
+  previous split-and-fail outcome. The shared segmenter is unchanged.
+  Package-scanner rule version advances to `1.18.0`, invalidating cached results
+  from earlier rule versions.

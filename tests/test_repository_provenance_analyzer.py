@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from aurascan.analyzers.repository_provenance import (
     _declared_split_package_functions,
     _function_regions,
     _MAX_SPLIT_HELPER_VISITS,
+    _mask_conditional_compound_operators,
     _nameref_declaration_names,
     _resolve,
     _resolve_bounded_expansion,
@@ -3383,4 +3385,154 @@ def test_denied_expansion_masks_only_itself():
     assert (
         _resolve_bounded_expansion("${x:=0}$cmd", {"cmd": "install"})
         == "${x:=0}$cmd"
+    )
+
+
+# --- bounded compound/case/test syntax classification (R4/R5/R6) -----------
+
+_SYNTAX_CHECKOUT = Path("/tmp/fixture-package")
+
+
+def _syntax_package(body):
+    return (
+        "pkgname=('fixture')\n"
+        "pkgver=3.2.0\n"
+        'source=("fixture-${pkgver}.tar.gz::https://example.invalid/x.tar.gz")\n'
+        "\n"
+        "package_fixture() {\n" + body + "\n}\n"
+    )
+
+
+def _syntax_scope(body):
+    return _scoped_commands(
+        _syntax_package(body),
+        _SYNTAX_CHECKOUT,
+        top_level_repository_cwd=True,
+        lifecycle_kind="pkgbuild",
+    )
+
+
+def _syntax_required(body):
+    return collect_required_repository_paths(
+        (_syntax_package(body),),
+        _SYNTAX_CHECKOUT,
+    )
+
+
+_COMPOUND_TAINTED_SECOND = (
+    "x=$(printf hello)\nb=lit\n"
+    "if [[ $b == lit && $x == *'ell'* ]]; then return 1; fi"
+)
+_COMPOUND_TAINTED_FIRST = (
+    "x=$(printf hello)\nb=lit\n"
+    "if [[ $x == *'ell'* && $b == lit ]]; then return 1; fi"
+)
+
+
+def test_compound_conditional_is_operand_order_invariant():
+    """``[[ A && B ]]`` is one expression, so operand order cannot matter.
+
+    The shared segmenter splits the compound at ``&&``; the tail then parsed
+    as a phantom command whose executable was the tainted ``$x`` operand, so
+    one operand order withheld the scope and the reversed one did not.
+    """
+
+    for body in (_COMPOUND_TAINTED_SECOND, _COMPOUND_TAINTED_FIRST):
+        scoped = _syntax_scope(body)
+        assert scoped is not None
+        compounds = [
+            item.command for item in scoped if item.command.executable == "[["
+        ]
+        assert len(compounds) == 1
+        assert "&&" in compounds[0].arguments
+        assert compounds[0].arguments[-1] == "]]"
+        assert all(item.command.executable != "$x" for item in scoped)
+        # No pre-pass placeholder byte may survive into emitted evidence.
+        for item in scoped:
+            for value in (item.command.executable,) + item.command.arguments:
+                assert all(ord(char) >= 32 for char in value)
+
+    assert _syntax_required(_COMPOUND_TAINTED_SECOND) == _syntax_required(
+        _COMPOUND_TAINTED_FIRST
+    )
+
+
+def test_conditional_fallback_fails_closed():
+    """Every unbounded ``[[`` shape keeps today's split-and-fail outcome."""
+
+    unbalanced = (
+        "x=$(printf hello)\nb=lit\n"
+        "if [[ $b == lit && $x == *ell*; then return 1; fi"
+    )
+    oversized = (
+        "x=$(printf hello)\nb=lit\n"
+        "if [[ $b == " + "a" * 4100 + " && $x == *ell* ]]; then return 1; fi"
+    )
+    too_many = "true\n" + "[[ $a == b ]];\n" * 9
+    quoted_argument = 'printf "%s" "[[ a && b ]]"\n'
+
+    for text in (unbalanced, oversized, too_many, quoted_argument):
+        assert _mask_conditional_compound_operators(text) == (text, {})
+
+    # A pre-pass refusal is not an allow: the tainted tail still withholds
+    # the same scope it did before the pre-pass existed.
+    assert _syntax_scope(unbalanced) is None
+    assert _syntax_scope(oversized) is None
+
+
+def test_operator_outside_compound_still_splits():
+    """Only operators inside a bounded span are masked, never shell ones."""
+
+    body = (
+        "if [[ $a == b ]]; then :; fi\n"
+        '[[ $c == d ]] && install -Dm755 "$srcdir/e" d'
+    )
+    scoped = _syntax_scope(body)
+    assert scoped is not None
+    compounds = [
+        item.command for item in scoped if item.command.executable == "[["
+    ]
+    assert len(compounds) == 2
+    assert any(item.command.executable == "install" for item in scoped)
+    assert "src/e" in _syntax_required(body).paths
+
+
+def test_shelly_recipe_remains_required_incomplete():
+    """The recorded recipe stays blocked by the retained dynamic-lang limit.
+
+    R4/R5/R6 classify bounded compound, case-arm and test syntax only.  The
+    recipe still fails closed because a dynamically produced ``lang`` value
+    feeds an install path (the retained R2 limit), not because of a family
+    fixed here: replacing only those assignments with a literal lets the
+    recorded recipe parse.
+    """
+
+    content = SHELLY_PKGBUILD.read_text(encoding="utf-8")
+    result = analyze(content, artifact())
+    incomplete = finding(result, "AUR-REPO-INSPECTION-INCOMPLETE-001")
+    assert incomplete.blocks_installation is True
+    assert result.is_safe is False
+
+    required = collect_required_repository_paths(
+        (content,),
+        _SYNTAX_CHECKOUT,
+    )
+    assert required.complete is False
+    assert required.paths == ()
+
+    control = re.sub(
+        r"(?m)^(\s*)lang=\$\([^\n]*\)$",
+        r"\1lang=lit",
+        content,
+    )
+    assert control != content
+    assert control.count("lang=lit") == 4
+    assert (
+        _scoped_commands(
+            control,
+            _SYNTAX_CHECKOUT,
+            top_level_repository_cwd=True,
+            lifecycle_kind="pkgbuild",
+        )
+        is not None
     )

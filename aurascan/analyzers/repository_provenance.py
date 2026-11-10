@@ -164,6 +164,27 @@ _MAX_CONDITIONAL_NESTING = 4
 _MAX_CONDITIONAL_SPAN_CHARS = 4_096
 _MAX_CASE_COMPOUNDS = 64
 _MAX_CASE_NESTING = 4
+# Test commands (``[``/``[[``/``test``) are builtin names, not repository
+# operands.  Their argument grammar is classified with a bounded table: only
+# file-test primary operands are path operands; string/integer operands are
+# data; anything outside the table withholds a complete result.
+_TEST_COMMAND_NAMES = frozenset({"[", "[[", "test"})
+_TEST_FILE_UNARY_PRIMARIES = frozenset(
+    {
+        "-a", "-b", "-c", "-d", "-e", "-f", "-g", "-h", "-k", "-L", "-p",
+        "-r", "-s", "-S", "-u", "-w", "-x",
+    }
+)
+_TEST_FILE_BINARY_PRIMARIES = frozenset({"-ef", "-nt", "-ot"})
+_TEST_STRING_UNARY_PRIMARIES = frozenset({"-n", "-z"})
+_TEST_STRING_BINARY_PRIMARIES = frozenset(
+    {
+        "=", "==", "!=", "=~", "<", ">", "-eq", "-ne", "-lt", "-le", "-gt",
+        "-ge",
+    }
+)
+_TEST_MAX_TOKENS = 256
+_TEST_MAX_NESTING = 16
 # Inert single-byte placeholders must not collide with the input, must not be
 # whitespace to ``str.isspace``/``shlex`` (so they neither split segments nor
 # split words), and must not be remote-stage's internal command marker.
@@ -2981,6 +3002,156 @@ def _invalidate_command_mutations(
     return True
 
 
+def _classify_test_command(
+    executable: str,
+    arguments: Sequence[str],
+) -> Tuple[List[str], bool]:
+    """Classify a bounded ``[``/``[[``/``test`` expression.
+
+    Returns ``(file_operands, complete)``.  Only operands of file-test
+    primaries (``-f``, ``-d``, ``-ef`` and friends) are path operands; the
+    operands of string/integer primaries are data.  Unrecognized, ambiguous
+    or unbounded grammar returns ``complete=False`` so the collector withholds
+    a complete result instead of silently dropping a path operand.
+    """
+
+    tokens = list(arguments)
+    if executable == "[":
+        if not tokens or tokens[-1] != "]":
+            return [], False
+        tokens = tokens[:-1]
+    elif executable == "[[":
+        if not tokens or tokens[-1] != "]]":
+            return [], False
+        tokens = tokens[:-1]
+    if len(tokens) > _TEST_MAX_TOKENS:
+        return [], False
+    if not tokens:
+        return [], True
+
+    operands: List[str] = []
+    position = 0
+    complete = True
+    depth = 0
+    double_bracket = executable == "[["
+
+    def peek() -> Optional[str]:
+        return tokens[position] if position < len(tokens) else None
+
+    def advance() -> str:
+        nonlocal position
+        value = tokens[position]
+        position += 1
+        return value
+
+    def fail() -> bool:
+        nonlocal complete
+        complete = False
+        return False
+
+    def parse_expression() -> bool:
+        if not parse_and():
+            return False
+        while True:
+            token = peek()
+            if double_bracket:
+                if token != "||":
+                    return True
+                advance()
+            else:
+                if token != "-o":
+                    return True
+                # ``-o`` is also a unary primary in some shells, so an
+                # ``-o`` composition is ambiguous and stays incomplete.
+                return fail()
+            if not parse_and():
+                return False
+
+    def parse_and() -> bool:
+        if not parse_not():
+            return False
+        while True:
+            token = peek()
+            if double_bracket:
+                if token != "&&":
+                    return True
+                advance()
+            else:
+                if token != "-a":
+                    return True
+                # ``-a`` is also the unary file-exists primary.
+                return fail()
+            if not parse_not():
+                return False
+
+    def parse_not() -> bool:
+        if peek() == "!":
+            advance()
+            return parse_not()
+        return parse_primary()
+
+    def parse_primary() -> bool:
+        nonlocal depth
+        token = peek()
+        if token is None:
+            return fail()
+        if token == "(":
+            depth += 1
+            if depth > _TEST_MAX_NESTING:
+                return fail()
+            advance()
+            if not parse_expression():
+                return False
+            if peek() != ")":
+                return fail()
+            advance()
+            depth -= 1
+            return True
+        if token in _TEST_FILE_UNARY_PRIMARIES:
+            advance()
+            if peek() is None:
+                return fail()
+            operands.append(advance())
+            return True
+        if token in _TEST_STRING_UNARY_PRIMARIES:
+            advance()
+            if peek() is None:
+                return fail()
+            advance()
+            return True
+        if (
+            token in _TEST_FILE_BINARY_PRIMARIES
+            or token in _TEST_STRING_BINARY_PRIMARIES
+        ):
+            # A binary primary without a left operand is malformed.
+            return fail()
+        if token.startswith("-") and len(token) > 1:
+            # Unknown option-like token: unrecognized test grammar.
+            return fail()
+        first = advance()
+        following = peek()
+        if following in _TEST_FILE_BINARY_PRIMARIES:
+            advance()
+            if peek() is None:
+                return fail()
+            operands.extend((first, advance()))
+            return True
+        if following in _TEST_STRING_BINARY_PRIMARIES:
+            advance()
+            if peek() is None:
+                return fail()
+            advance()
+            return True
+        return True
+
+    if not parse_expression():
+        return operands, False
+    if position != len(tokens):
+        # Leftover words (``[ a b ]``) are not valid test grammar.
+        complete = False
+    return operands, complete
+
+
 def collect_required_repository_paths(
     contents: Iterable[str],
     checkout_dir: Path,
@@ -3076,6 +3247,15 @@ def collect_required_repository_paths(
                     loading_values.extend(raw_value.split(":"))
             repository_path_operands: List[str] = list(loading_values)
             effective_basename = _basename(effective_executable).lower()
+            if effective_basename in _TEST_COMMAND_NAMES:
+                test_operands, test_complete = _classify_test_command(
+                    effective_basename,
+                    effective_arguments,
+                )
+                if test_operands:
+                    repository_path_operands.extend(test_operands)
+                if not test_complete:
+                    complete = False
             if effective_basename in _TRANSFER_COMMANDS:
                 transfer = analyzer._parse_command_transfer(
                     effective_basename,
@@ -3137,9 +3317,19 @@ def collect_required_repository_paths(
                 + tuple(command.arguments)
                 + tuple(loading_values)
             )
+            last_token_index = len(tokens) - 1
             for token_index, token in enumerate(tokens):
                 resolved = analyzer._resolve_constants(token, command_constants)
-                token_is_repository_operand = (
+                test_command_name = (
+                    token_index == 0 and resolved in _TEST_COMMAND_NAMES
+                )
+                trailing_test_terminator = (
+                    token_index == last_token_index
+                    and resolved in {"]", "]]"}
+                )
+                token_is_repository_operand = not (
+                    test_command_name or trailing_test_terminator
+                ) and (
                     (
                         token_index == 0
                         and re.match(

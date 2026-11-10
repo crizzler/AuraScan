@@ -2246,14 +2246,17 @@ def test_split_pkgname_reference_does_not_enroll_dead_helper():
 
 
 def test_split_reference_resolution_does_not_imply_capture_complete():
-    content = "pkgname=('a' 'b')\n[[ $pkgname == a ]] && :\n" + SPLIT_DEFINITIONS
+    content = (
+        "pkgname=('a' 'b')\ninstall -Dm755 *.c d\n" + SPLIT_DEFINITIONS
+    )
     required = collect_required_repository_paths(
         (content,),
         Path("/tmp/fixture-package"),
     )
 
     assert split_roots(content) == {"package_a", "package_b"}
-    # The collector cannot classify the inline test guard; roots still resolve.
+    # An ambiguous glob transfer operand withholds capture completeness; split
+    # reference resolution and collector completeness stay independent.
     assert required.complete is False
 
 
@@ -2600,7 +2603,7 @@ def test_split_pkgname_family_is_bound_to_its_own_capture(tmp_path: Path):
 
 
 def test_split_package_independent_required_path_failure_has_no_family(tmp_path: Path):
-    pkgbuild = _write_split_package(tmp_path, "[[ $pkgname == a ]] && :", hook=False)
+    pkgbuild = _write_split_package(tmp_path, "install -Dm755 *.c d", hook=False)
     captured = capture_package_scan_input(pkgbuild)
 
     assert captured.repository_snapshot.error_code == "required_path_ambiguous"
@@ -3590,6 +3593,85 @@ def test_case_suppression_fallback_fails_closed():
     assert collect_required_repository_paths(
         (text,), _SYNTAX_CHECKOUT
     ).complete is False
+
+
+def test_test_command_name_is_not_a_repository_operand():
+    """``[``/``[[``/``test`` are builtin names, never ambiguous operands.
+
+    The name itself carries a glob character, so the old classification
+    flipped completeness for ``[`` and ``[[`` while the equivalent ``test``
+    spelling passed.
+    """
+
+    def guarded(command):
+        return (
+            'cd "$srcdir/x"\n'
+            "if " + command + '; then install -Dm755 "$srcdir/b" d; fi'
+        )
+
+    bracket = _syntax_required(guarded("[ -f a ]"))
+    builtin = _syntax_required(guarded("test -f a"))
+    assert bracket == builtin
+    # ``a`` is a relative file-test operand under an uncertain cwd.
+    assert bracket.complete is False
+
+    compound = _syntax_required(guarded("[[ $a == b ]]"))
+    test_form = _syntax_required(guarded("test $a = b"))
+    assert compound == test_form
+    # String-comparison operands are data; nothing withholds the result.
+    assert compound.complete is True
+
+
+def test_file_test_operands_capture_and_fail_closed():
+    """File-test operands follow the same capture and ambiguity rules."""
+
+    absolute = _syntax_required('if [ -f "$srcdir/b" ]; then :; fi')
+    assert absolute.complete is True
+    assert "src/b" in absolute.paths
+
+    relative = _syntax_required('cd "$srcdir/x"\n[ -f a ]')
+    assert relative.complete is False
+    assert "src/x/a" in relative.paths
+
+    compound = _syntax_required('[[ -f "$srcdir/a" && -d "$srcdir/b" ]]')
+    assert compound.complete is True
+    assert set(compound.paths) == {"src/a", "src/b"}
+
+    # An unresolved operand must behave exactly like the transfer spelling in
+    # both working-directory states.
+    for cd_command in ("", 'cd "$srcdir/x"\n'):
+        assert _syntax_required(
+            cd_command + 'if [ -f "$srcdir/$x" ]; then :; fi'
+        ) == _syntax_required(
+            cd_command + 'install -Dm755 "$srcdir/$x" d'
+        )
+
+
+def test_string_comparison_operands_are_neutral():
+    """String and integer comparison operands are data, never paths."""
+
+    required = _syntax_required(
+        'cd "$srcdir/x"\n'
+        "if [[ $pkgname == a ]]; then :; fi\n"
+        "if [[ $a =~ ^[a-z]+$ ]]; then :; fi\n"
+        'if [ "$x" -eq 1 ]; then :; fi'
+    )
+    assert required.complete is True
+    assert required.paths == ("src/x",)
+
+
+def test_unrecognized_test_grammar_fails_closed():
+    """Grammar outside the bounded table withholds a complete result."""
+
+    for body in (
+        "if [ -f a -a -d b ]; then :; fi",
+        "if [ -Q a ]; then :; fi",
+        "if [ -f a; then :; fi",
+        "if [[ -f a; then :; fi",
+        "if [ a b ]; then :; fi",
+        "if [[ -v x ]]; then :; fi",
+    ):
+        assert _syntax_required(body).complete is False
 
 
 def test_shelly_recipe_remains_required_incomplete():

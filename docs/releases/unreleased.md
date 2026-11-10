@@ -37,3 +37,12 @@ Changes after v0.15.1:
   or unbalanced `case` text keeps the previous outcome. Package-scanner rule
   version advances to `1.19.0`, invalidating cached results from earlier rule
   versions.
+- Repository-provenance path collection now classifies `[`, `[[` and `test`
+  commands instead of treating them as ordinary operands. The builtin name is
+  never a repository operand (its `[` character used to trip the glob-ambiguity
+  rule), and test arguments are classified operator-aware: operands of
+  file-test primaries (`-f`, `-d`, `-ef`, …) are captured with the same
+  cwd-joined ambiguity rules as transfer sources, while string/integer
+  comparison operands are data. Unrecognized or unbounded test grammar withholds
+  a complete result. Package-scanner rule version advances to `1.20.0`,
+  invalidating cached results from earlier rule versions.

@@ -6,6 +6,7 @@ import pytest
 from aurascan.analyzers.repository_provenance import (
     RepositoryProvenanceAnalyzer,
     _active_shell_text,
+    _blank_case_arm_patterns,
     _constant_assignment_statement,
     _declared_split_package_functions,
     _function_regions,
@@ -3495,6 +3496,100 @@ def test_operator_outside_compound_still_splits():
     assert len(compounds) == 2
     assert any(item.command.executable == "install" for item in scoped)
     assert "src/e" in _syntax_required(body).paths
+
+
+def _top_level_case_package(top_level):
+    return _syntax_package("").replace(
+        "package_fixture() {",
+        top_level + "\npackage_fixture() {",
+        1,
+    )
+
+
+def test_case_arm_patterns_are_not_commands():
+    """Arm patterns are string-match data, never commands or operands.
+
+    The shared segmenter treats each ``)`` as a boundary, so ``a)`` and ``*)``
+    used to emit phantom ``a``/``*`` commands; the ``*`` operand then flipped
+    repository completeness through the glob-ambiguity rule.
+    """
+
+    with_star = _top_level_case_package(
+        "case $x in\n  a) y=1 ;;\n  *) return 1 ;;\nesac"
+    )
+    without_star = _top_level_case_package(
+        "case $x in\n  a) y=1 ;;\nesac"
+    )
+
+    for text in (with_star, without_star):
+        scoped = _scoped_commands(
+            text,
+            _SYNTAX_CHECKOUT,
+            top_level_repository_cwd=True,
+            lifecycle_kind="pkgbuild",
+        )
+        assert scoped is not None
+        executables = [item.command.executable for item in scoped]
+        assert "a" not in executables
+        assert "*" not in executables
+
+    assert collect_required_repository_paths(
+        (with_star,), _SYNTAX_CHECKOUT
+    ) == collect_required_repository_paths((without_star,), _SYNTAX_CHECKOUT)
+    assert (
+        collect_required_repository_paths(
+            (with_star,), _SYNTAX_CHECKOUT
+        ).complete
+        is True
+    )
+
+    # A command substitution in a pattern still runs in Bash, so only literal
+    # pattern text is blanked and the substituted command stays visible.
+    substitution = _syntax_scope(
+        "case $x in\n  $(printf p)) y=1 ;;\nesac"
+    )
+    assert substitution is not None
+    assert any(
+        item.command.executable == "printf" for item in substitution
+    )
+
+
+def test_case_arm_body_commands_still_captured():
+    """Suppressing patterns must not suppress the commands inside the arms."""
+
+    body = (
+        "case $x in\n"
+        '  a) install -Dm755 "$srcdir/b" d ;;\n'
+        "  *) return 1 ;;\n"
+        "esac"
+    )
+    scoped = _syntax_scope(body)
+    assert scoped is not None
+    assert any(
+        item.command.executable == "install" for item in scoped
+    )
+    assert "src/b" in _syntax_required(body).paths
+
+
+def test_case_suppression_fallback_fails_closed():
+    """Unbounded case text keeps today's phantom-command outcome."""
+
+    unterminated = "case $x in\n  a) y=1 ;;\n  *) y=2 ;;"
+    assert _blank_case_arm_patterns(unterminated) == unterminated
+    missing_in = "case $x esac"
+    assert _blank_case_arm_patterns(missing_in) == missing_in
+
+    nested = "esac"
+    for _depth in range(5):
+        nested = "case $x in\n  a) " + nested + " ;;\nesac"
+    assert _blank_case_arm_patterns(nested) == nested
+
+    # A refusal is not an allow: the phantom ``*`` operand still flips
+    # repository completeness exactly as it did before suppression existed.
+    text = _top_level_case_package(unterminated + "\n")
+    assert collect_required_repository_paths(
+        (text,), _SYNTAX_CHECKOUT
+    ).complete is False
 
 
 def test_shelly_recipe_remains_required_incomplete():

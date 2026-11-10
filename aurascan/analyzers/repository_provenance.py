@@ -162,6 +162,8 @@ _MAX_FUNCTION_ARGUMENTS = 64
 _MAX_CONDITIONAL_SPANS = 8
 _MAX_CONDITIONAL_NESTING = 4
 _MAX_CONDITIONAL_SPAN_CHARS = 4_096
+_MAX_CASE_COMPOUNDS = 64
+_MAX_CASE_NESTING = 4
 # Inert single-byte placeholders must not collide with the input, must not be
 # whitespace to ``str.isspace``/``shlex`` (so they neither split segments nor
 # split words), and must not be remote-stage's internal command marker.
@@ -1925,6 +1927,218 @@ def _restore_masked_line(
     return line + corrections[min(line, len(corrections)) - 1]
 
 
+def _shell_arithmetic_end(text: str, index: int) -> Optional[int]:
+    """Return the offset after a balanced ``(( ... ))``, or ``None``."""
+
+    cursor = index + 2
+    depth = 2
+    limit = min(len(text), index + _MAX_CONDITIONAL_SPAN_CHARS)
+    while cursor < limit:
+        char = text[cursor]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return cursor + 1
+        cursor += 1
+    return None
+
+
+def _blank_case_region(chars: List[str], start: int, end: int) -> bool:
+    """Blank one bounded pattern-list region, preserving newlines."""
+
+    changed = False
+    for position in range(start, end):
+        if chars[position] not in "\r\n":
+            chars[position] = " "
+            changed = True
+    return changed
+
+
+def _blank_case_arm_patterns(content: str) -> str:
+    """Blank case-arm pattern lists in bounded ``case ... esac`` compounds.
+
+    ``case`` arm patterns are string-match data (Bash case grammar), never
+    commands or path references.  The shared segmenter nevertheless treats
+    ``)`` as a boundary, so every pattern list parsed as a phantom command
+    (``*`` even flips repository completeness).  Pattern lists between
+    ``in``/``;;``/``;&``/``;;&`` and the terminating ``)`` are blanked to
+    spaces, while the ``)`` boundaries, the ``case`` word and every arm body
+    stay intact so arm-body commands are still analyzed and captured.
+
+    Embedded command substitutions are left in place: a pattern word can
+    undergo command substitution, and blanking it with the pattern would hide
+    a command the shared parser used to see.  Anything unterminated,
+    unbalanced, nested deeper than four compounds or otherwise unsupported
+    returns the original text, so today's conservative outcome survives
+    unchanged.
+    """
+
+    if "case" not in content:
+        return content
+    chars = list(content)
+    stack: List[List] = []
+    compounds = 0
+    changed = False
+    index = 0
+    length = len(content)
+    while index < length:
+        char = content[index]
+        state = stack[-1][0] if stack else None
+        if state == "pattern":
+            if _shell_keyword_at(content, index, "esac") and _command_position(
+                content, index
+            ):
+                # The final arm terminator is followed directly by ``esac``;
+                # Bash accepts no further pattern there.
+                stack.pop()
+                index += 4
+                continue
+            if char in {"'", '"'}:
+                end = _shell_quote_end(content, index)
+                if end is None:
+                    return content
+                region = content[index:end]
+                # A double-quoted word may carry a command substitution, and
+                # a substitution can run a command even inside a pattern.
+                # Leave those words for the shared parser instead of hiding
+                # the command with the rest of the pattern text.
+                if char == "'" or (
+                    "$(" not in region and "`" not in region
+                ):
+                    changed = _blank_case_region(chars, index, end) or changed
+                index = end
+                continue
+            if char == "\\":
+                chars[index] = " "
+                changed = True
+                if index + 1 < length and content[index + 1] == "\n":
+                    index += 1
+                else:
+                    if index + 1 < length and content[index + 1] != "\n":
+                        chars[index + 1] = " "
+                    index += 2
+                continue
+            if char == "`":
+                end = _shell_backtick_end(content, index)
+                if end is None:
+                    return content
+                # Backtick content executes; keep it visible to the parser.
+                index = end
+                continue
+            if char == "$" and content.startswith("$(", index):
+                end = _shell_command_substitution_end(content, index)
+                if end is None:
+                    return content
+                # $(...) content executes; keep it visible to the parser.
+                index = end
+                continue
+            if char == "(":
+                stack[-1][1] = int(stack[-1][1]) + 1
+                chars[index] = " "
+                changed = True
+                index += 1
+                continue
+            if char == ")":
+                if int(stack[-1][1]) > 0:
+                    stack[-1][1] = int(stack[-1][1]) - 1
+                    chars[index] = " "
+                    changed = True
+                else:
+                    stack[-1] = ["body", 0]
+                index += 1
+                continue
+            if char in "\r\n":
+                index += 1
+                continue
+            chars[index] = " "
+            changed = True
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            end = _shell_quote_end(content, index)
+            if end is None:
+                return content
+            index = end
+            continue
+        if char == "\\":
+            index += 2
+            continue
+        if char == "`":
+            end = _shell_backtick_end(content, index)
+            if end is None:
+                return content
+            index = end
+            continue
+        if char == "$" and content.startswith("$(", index):
+            end = _shell_command_substitution_end(content, index)
+            if end is None:
+                return content
+            index = end
+            continue
+        if content.startswith("((", index):
+            end = _shell_arithmetic_end(content, index)
+            if end is None:
+                return content
+            index = end
+            continue
+        if state is None:
+            if (
+                _shell_keyword_at(content, index, "case")
+                and _command_position(content, index)
+            ):
+                compounds += 1
+                if compounds > _MAX_CASE_COMPOUNDS:
+                    return content
+                stack.append(["word", 0])
+                index += 4
+                continue
+            index += 1
+            continue
+        if state == "word":
+            if _shell_keyword_at(content, index, "in"):
+                stack[-1] = ["pattern", 0]
+                index += 2
+                continue
+            if _shell_keyword_at(content, index, "esac"):
+                return content
+            index += 1
+            continue
+        # state == "body": arm-body text is preserved; only the structural
+        # arm terminators and a nested compound change the state.
+        if _shell_keyword_at(content, index, "esac") and _command_position(
+            content, index
+        ):
+            stack.pop()
+            index += 4
+            continue
+        if (
+            _shell_keyword_at(content, index, "case")
+            and _command_position(content, index)
+        ):
+            compounds += 1
+            if compounds > _MAX_CASE_COMPOUNDS:
+                return content
+            if len(stack) + 1 > _MAX_CASE_NESTING:
+                return content
+            stack.append(["word", 0])
+            index += 4
+            continue
+        if content.startswith(";;&", index):
+            stack[-1] = ["pattern", 0]
+            index += 3
+            continue
+        if content.startswith(";;", index) or content.startswith(";&", index):
+            stack[-1] = ["pattern", 0]
+            index += 2
+            continue
+        index += 1
+    if stack or not changed:
+        return content
+    return "".join(chars)
+
+
 def _sequential_scope_commands(
     content: str,
     initial_constants: Dict[str, str],
@@ -1951,6 +2165,7 @@ def _sequential_scope_commands(
     masked_content, conditional_restore = _mask_conditional_compound_operators(
         content
     )
+    masked_content = _blank_case_arm_patterns(masked_content)
     newline_marker = next(
         (
             marker

@@ -28,3 +28,12 @@ Changes after v0.15.1:
   previous split-and-fail outcome. The shared segmenter is unchanged.
   Package-scanner rule version advances to `1.18.0`, invalidating cached results
   from earlier rule versions.
+- Repository-provenance analysis now blanks `case` arm pattern lists before the
+  shared segmenter sees the text. Arm patterns are string-match data, not
+  commands, but each pattern used to become a phantom command (the `*)` wildcard
+  arm even flipped repository completeness through the glob-ambiguity rule).
+  The `)`/`;;`/`;&`/`;;&` boundaries, the `case` word and every arm body stay
+  intact, so commands inside an arm are still analyzed and captured; unbounded
+  or unbalanced `case` text keeps the previous outcome. Package-scanner rule
+  version advances to `1.19.0`, invalidating cached results from earlier rule
+  versions.

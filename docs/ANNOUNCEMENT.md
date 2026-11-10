@@ -4,6 +4,22 @@ Use this as a starting point for Arch-family communities, Reddit, Mastodon,
 Matrix, or Discord posts. Keep the tone transparent: AuraScan reduces risk, but
 it does not prove package safety.
 
+## v0.16.0 release
+
+The v0.16.0 release is a package-only correctness update to the static
+repository-provenance analysis that runs beside a PKGBUILD. A single-line
+control-word-prefixed assignment (`for f in a; do lang=...; install
+"d/$lang" x; done`) used to lose its taint and could report `complete=True` for
+a path that was never inspected; that shape now fails closed like its
+multi-line spelling, so a PKGBUILD that previously reported complete coverage
+there now reports the HIGH blocking `AUR-REPO-INSPECTION-INCOMPLETE-001` until
+the manual review is done. That is a deliberate tightening, not a regression.
+The release also adds bounded resolution of side-effect-free parameter
+expansions, and it stops reading bounded `[[ … ]]` compounds, `case` arm
+patterns and `[`/`test` operands as phantom commands. The v0.10.11 recovery
+image remains the retained image, and the ISO and local-UKI gates were not
+rerun for v0.16.0.
+
 ## v0.15.1 release
 
 The v0.15.1 release is a package-only security update. It hardens the MCP file

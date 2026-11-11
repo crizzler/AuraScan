@@ -1768,7 +1768,9 @@ aurascan recovery --write-usb /dev/sdX
 ```
 
 The internal image is built locally with mkosi's `mkosi-initrd` profile and `ukify` from an
-installed alternate/LTS kernel when available. AuraScan creates a zipapp from
+installed alternate/LTS kernel when available. Structural validation requires
+`ukify`; when it is unavailable, validation fails closed and the staged image is
+not installed instead of falling back to the byte and PE checks alone. AuraScan creates a zipapp from
 the exact installed AuraScan code without intentionally copying provider or
 user configuration, builds in private staging, and performs bounded byte checks
 for credential assignments with bounded values, known provider-token prefixes,

@@ -136,7 +136,9 @@ reviewer gate pending]
   makepkg-sourcing consequence is `[Inference]`).
 - **R8** — `validate_recovery_image` silently applies a weaker check when
   `ukify` is absent, indistinguishable in the return value (verified by source
-  inspection; caller-disclosure impact NOT EXECUTED).
+  inspection; caller-disclosure impact NOT EXECUTED). **Remediation in tree:**
+  validation now fails closed when `ukify` is unavailable; publication requires
+  a recovery-bearing release with fresh ISO and UKI gates.
 
 [Inference — needs validation] R3 (sandbox artifact scan→install not
 re-bound), R4 (`sudo cp -a` to a user-writable `build_root/root`), R5

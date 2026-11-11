@@ -116,6 +116,16 @@ def test_uki_command_uses_supported_mkosi_initrd_profile_without_host_config_imp
     assert "console=tty0 console=ttyS0,115200n8" in kernel_command_line
 
 
+def test_image_validation_fails_closed_without_ukify(tmp_path):
+    image = tmp_path / "recovery.efi"
+    image.write_bytes(b"MZfixture")
+
+    valid, errors = validate_recovery_image(image, minimum_size=2, which=lambda _name: None)
+
+    assert valid is False
+    assert any("ukify is unavailable" in item for item in errors)
+
+
 def test_image_validation_scans_entire_file_for_credentials(tmp_path):
     image = tmp_path / "recovery.efi"
     image.write_bytes(b"MZ" + b"x" * (5 * 1024 * 1024) + b"AURASCAN_AI_KEY=secret")

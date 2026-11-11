@@ -181,7 +181,16 @@ def cached_downgrade_path(
             continue
         if not stat.S_ISREG(metadata.st_mode):
             continue
-        candidates.append((metadata.st_mtime, path))
+        candidates.append((metadata.st_mtime, candidate_version, path))
     if not candidates:
         return None
-    return max(candidates, key=lambda item: item[0])[1]
+    best = candidates[0]
+    for candidate in candidates[1:]:
+        if candidate[0] > best[0]:
+            best = candidate
+            continue
+        if candidate[0] == best[0]:
+            comparison = version_compare(candidate[1], best[1])
+            if comparison is not None and comparison > 0:
+                best = candidate
+    return best[2]

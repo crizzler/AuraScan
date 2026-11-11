@@ -82,8 +82,9 @@ if ! grep -q "sha256sums = $hash" "$SRCINFO"; then
     printf 'refusing: .SRCINFO still lacks the pinned digest\n' >&2
     exit 6
 fi
-if grep -q 'SKIP' "$PKGBUILD" "$SRCINFO"; then
-    printf 'refusing: SKIP remains after pinning\n' >&2
+if grep -q "^sha256sums=('SKIP')$" "$PKGBUILD" || \
+   grep -q "^[[:space:]]*sha256sums = SKIP$" "$SRCINFO"; then
+    printf 'refusing: the checksum placeholder remains after pinning\n' >&2
     exit 6
 fi
 

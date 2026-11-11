@@ -201,6 +201,31 @@ def test_download_disables_proxies_bounds_bytes_and_suppresses_url_errors():
     assert "fake-secret" not in str(failure.value)
 
 
+def test_download_falls_back_when_default_verify_paths_are_missing(monkeypatch):
+    class Response(io.BytesIO):
+        status = 200
+        headers = {}
+
+    monkeypatch.setattr(
+        transport.ssl,
+        "get_default_verify_paths",
+        lambda: SimpleNamespace(
+            openssl_cafile="/nonexistent/aurascan-ca.pem",
+            openssl_capath="/nonexistent/aurascan-ca-dir",
+        ),
+    )
+
+    result = transport._download(
+        BASE,
+        "manifest.json",
+        4,
+        transport.time.monotonic() + 30,
+        opener_factory=lambda *_args: SimpleNamespace(open=lambda *_a, **_k: Response(b"abcd")),
+    )
+
+    assert result == b"abcd"
+
+
 def test_staging_fetch_never_activates_and_preserves_existing_bundle_on_network_failure(tmp_path):
     directory = tmp_path / "stage"
     directory.mkdir(mode=0o700)

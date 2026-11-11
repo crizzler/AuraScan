@@ -79,8 +79,8 @@ def test_cached_downgrade_path_selects_newest_older_version(tmp_path):
         package="demo",
         installed_version="2.0-1",
         cache_root=tmp_path,
-        version_compare=lambda installed_version, candidate: (
-            1 if installed_version == "2.0-1" and candidate.startswith("1.") else -1
+        version_compare=lambda left, right: (
+            (left > right) - (left < right)
         ),
     )
 

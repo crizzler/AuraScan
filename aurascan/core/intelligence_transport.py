@@ -114,7 +114,17 @@ def _download(base, name, limit, deadline, *, opener_factory=build_opener):
     # Explicit system trust store prevents SSL_CERT_FILE/SSL_CERT_DIR overrides.
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     defaults = ssl.get_default_verify_paths()
-    context.load_verify_locations(cafile=defaults.openssl_cafile, capath=defaults.openssl_capath)
+    try:
+        context.load_verify_locations(cafile=defaults.openssl_cafile, capath=defaults.openssl_capath)
+    except (FileNotFoundError, ssl.SSLError, TypeError):
+        # Some minimal CI images expose no OpenSSL CA file path. Fall back to
+        # the platform certificate store instead of crashing with a raw
+        # FileNotFoundError; a real request still fails closed if no trust
+        # anchor is available.
+        try:
+            context.load_default_certs()
+        except (OSError, ssl.SSLError):
+            raise IntelligenceError("intelligence trust store unavailable") from None
     opener = opener_factory(ProxyHandler({}), HTTPSHandler(context=context),
                             _ReleaseRedirects(prefix, name, deadline))
     remaining = deadline - time.monotonic()

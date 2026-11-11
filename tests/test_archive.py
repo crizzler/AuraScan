@@ -391,7 +391,7 @@ def test_archive_changed_during_snapshot_is_rejected(tmp_path: Path, monkeypatch
         reads += 1
         if reads == 1:
             with archive.open("r+b") as handle:
-                handle.seek(1024)
+                handle.seek(0, os.SEEK_END)
                 handle.write(b"changed")
         return payload
 

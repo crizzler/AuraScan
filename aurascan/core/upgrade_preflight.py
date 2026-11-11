@@ -215,6 +215,15 @@ class UpgradeFailureDiagnosis:
     evidence: List[str] = field(default_factory=list)
 
 
+def _path_exists(path: Path) -> bool:
+    """Return whether ``path`` exists without turning a permission denial into a crash."""
+
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def collect_system_snapshot(
     runner: Callable = subprocess.run,
     etc_root: Path = Path("/etc"),
@@ -242,7 +251,11 @@ def collect_system_snapshot(
         installed_versions_complete = not version_error
     ignored_packages = _command_lines(runner, ["pacman-conf", "IgnorePkg"])
     ignored_groups = _command_lines(runner, ["pacman-conf", "IgnoreGroup"])
-    boot_paths = [str(path) for path in (Path("/boot"), Path("/boot/efi")) if path.exists()]
+    boot_paths = [
+        str(path)
+        for path in (Path("/boot"), Path("/boot/efi"))
+        if _path_exists(path)
+    ]
     pacnew_count, pacsave_count, truncated = count_pacnew_pacsave(etc_root)
 
     return SystemSnapshot(
@@ -258,7 +271,7 @@ def collect_system_snapshot(
         ignored_packages=ignored_packages,
         ignored_groups=ignored_groups,
         root_free_mib=_free_mib(Path("/")),
-        boot_free_mib=_free_mib(Path("/boot")) if Path("/boot").exists() else None,
+        boot_free_mib=_free_mib(Path("/boot")) if _path_exists(Path("/boot")) else None,
         boot_paths=boot_paths,
         dkms_packages=[name for name in installed_packages if "dkms" in name],
         nvidia_packages=[name for name in installed_packages if name.startswith("nvidia") or "nvidia" in name],

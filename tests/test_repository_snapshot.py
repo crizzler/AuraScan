@@ -392,7 +392,7 @@ def test_oversized_unreferenced_root_generated_archive_uses_metadata_identity(
 
     first = capture_repository_snapshot(tmp_path)
     before = generated.stat()
-    generated.write_bytes(b"\x28\xb5\x2f\xfd" + b"B" * 8)
+    generated.write_bytes(b"\x28\xb5\x2f\xfd" + b"B" * 9)
     os.utime(str(generated), ns=(before.st_atime_ns, before.st_mtime_ns))
     second = capture_repository_snapshot(tmp_path)
 
@@ -556,7 +556,7 @@ def test_oversized_excluded_source_uses_stable_metadata_identity(
         excluded_relative_paths=("declared.bin",),
     )
     before = source.stat()
-    source.write_bytes(b"B" * 9)
+    source.write_bytes(b"B" * 10)
     os.utime(str(source), ns=(before.st_atime_ns, before.st_mtime_ns))
     second = capture_repository_snapshot(
         tmp_path,

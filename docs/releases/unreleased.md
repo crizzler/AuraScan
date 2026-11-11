@@ -1,5 +1,5 @@
 # AuraScan Unreleased
 
-Changes after v0.16.0:
+Changes after v0.16.1:
 
 - None yet.

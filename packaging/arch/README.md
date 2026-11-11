@@ -8,7 +8,7 @@ Before publishing to the AUR, verify the checksum against the public GitHub
 release/tag source archive, then regenerate `.SRCINFO` from the final PKGBUILD.
 The pinning helper refuses to run until the tag is public and HEAD is that tag
 commit; it downloads the exact archive, replaces `SKIP`, regenerates
-`.SRCINFO`, and fails if any `SKIP` remains:
+`.SRCINFO`, and fails if the checksum placeholder remains:
 
 ```bash
 ./packaging/arch/pin-release-checksum.sh

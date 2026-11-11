@@ -4,6 +4,18 @@ Use this as a starting point for Arch-family communities, Reddit, Mastodon,
 Matrix, or Discord posts. Keep the tone transparent: AuraScan reduces risk, but
 it does not prove package safety.
 
+## v0.16.1 release
+
+The v0.16.1 release is a package-only maintenance update. It fixes an upgrade
+preflight crash when `/boot` or `/boot/efi` exists but cannot be read by the
+invoking user, adds a platform trust-store fallback when OpenSSL has no default
+CA path, selects the newest older cached package when archive timestamps tie,
+and makes the AUR checksum pinning helper reject only a real checksum
+placeholder. The 0.16.0 repository-provenance tightening and rule version
+`1.21.0` are unchanged. The v0.10.11 recovery image remains the retained image,
+and the ISO and local-UKI gates were not rerun for v0.16.1. R8 remains deferred
+to a recovery-bearing release.
+
 ## v0.16.0 release
 
 The v0.16.0 release is a package-only correctness update to the static

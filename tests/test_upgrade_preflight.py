@@ -356,6 +356,19 @@ def test_upgrade_snapshot_does_not_fabricate_installed_versions():
     assert "collect_installed_packages" in source
 
 
+def test_path_exists_treats_permission_denied_as_absent(monkeypatch):
+    real_exists = Path.exists
+
+    def denied(self):
+        if str(self) == "/boot/efi":
+            raise PermissionError("unreadable boot path")
+        return real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", denied)
+
+    assert upgrade_preflight._path_exists(Path("/boot/efi")) is False
+
+
 def test_snapshot_captures_installed_versions_through_the_trusted_identity(tmp_path):
     runner = FakeRunner(responses={
         (PACMAN_PATH, "-Qq"): completed("chromium\nlinux\n"),

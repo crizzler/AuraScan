@@ -16,6 +16,7 @@ opener is still the real one, the redirect handler is still the real one.
 import json
 import os
 import shutil
+import socket
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -45,6 +46,30 @@ FIRST_FIVE = (
 MANIFEST = "aur-campaign-2026-06-11.json"
 PACKAGES = "aur-campaign-2026-06-11-packages.txt"
 SOURCE_URL = "https://example.invalid/aurvulnlist20260611.txt"
+
+
+def _loopback_available():
+    server = None
+    client = None
+    try:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        client = socket.create_connection(server.getsockname(), timeout=1)
+        return True
+    except OSError:
+        return False
+    finally:
+        if client is not None:
+            client.close()
+        if server is not None:
+            server.close()
+
+
+pytestmark = pytest.mark.skipif(
+    not _loopback_available(),
+    reason="loopback networking is unavailable in this isolation namespace",
+)
 
 SURFACE = Path(__file__).resolve().parent / "fixtures" / "mcp" / "tool_surface.json"
 

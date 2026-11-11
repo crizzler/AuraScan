@@ -52,6 +52,46 @@ def test_current_release_recovery_manifest_policy_is_versioned_and_fresh():
         )
 
 
+def test_current_recovery_bearing_release_contract():
+    version = tomllib.loads(read_text("pyproject.toml"))["project"]["version"]
+    manifest = json.loads(read_text("aurascan/assets/aurascan-recovery-iso.json"))
+    if version != "0.17.0" or manifest.get("release_disposition") != "recovery-bearing":
+        pytest.skip("this contract describes the 0.17.0 recovery-bearing release")
+    release_text = read_text(f"docs/releases/v{version}.md")
+
+    assert manifest["application_version"] == version
+    assert manifest["version"] == version
+    assert manifest["status"] == "release-ready"
+    assert manifest["filename"] == f"aurascan-recovery-{version}-x86_64.iso"
+    assert manifest["url"] == (
+        f"https://github.com/crizzler/AuraScan/releases/download/v{version}/"
+        f"aurascan-recovery-{version}-x86_64.iso"
+    )
+    assert re.fullmatch(r"[0-9a-f]{64}", manifest["sha256"])
+    assert re.findall(
+        r"^(?:- )?Recovery build candidate: `([0-9a-f]{40})`$", release_text, re.MULTILINE
+    ) == ["8ae0b7e77d5f253f6ed8bfabef9488ce04eb6548"]
+    assert re.findall(
+        r"^(?:- )?ISO SHA-256: `([0-9a-f]{64})`$", release_text, re.MULTILINE
+    ) == [manifest["sha256"]]
+    assert re.findall(
+        r"^(?:- )?Validation UKI SHA-256: `([0-9a-f]{64})`$", release_text, re.MULTILINE
+    ) == ["e45a3245030266495d1cd7672d265471f9ac34634c1835cecba00ad34570222f"]
+    assert re.findall(r"^(?:- )?ISO size: `([0-9]+)` bytes$", release_text, re.MULTILINE) == [
+        "1335476224"
+    ]
+    for outcome in (
+        "- Hybrid ISO, SeaBIOS readiness: `pass`",
+        "- Hybrid ISO, ordinary OVMF UEFI readiness: `pass`",
+        "- Local validation UKI, ordinary OVMF UEFI readiness: `pass`",
+        "- Local validation UKI, disposable-key Secure Boot unsigned rejection and\n  signed readiness: `pass`",
+        "- Expanded-artifact privacy/path audit and ISO package inventory: `pass`",
+        "- Strict sub-2-GiB ISO size gate: `pass`",
+        "- Deterministic Limine, systemd-boot, GRUB and recovery fixtures: `pass`",
+    ):
+        assert outcome in release_text
+
+
 def test_recovery_builder_pins_match_current_release_metadata():
     # The recovery builder validates its candidate against pinned identity
     # constants; a package-only release retains the preceding image, so the

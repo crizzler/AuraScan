@@ -211,20 +211,18 @@ See [`docs/AI_PROVIDER_CONFIGURATION.md`](docs/AI_PROVIDER_CONFIGURATION.md) and
 
 ## Status
 
-AuraScan is a developer preview. The current package is **0.16.1**.
+AuraScan is a developer preview. The current package is **0.17.0**.
 
-The 0.16.1 release is a package-only maintenance update. It fixes an upgrade
-preflight crash when a boot path exists but is not readable, a certificate
-trust-store fallback for intelligence downloads, cached downgrade selection
-when archive timestamps tie, and the AUR checksum pinning helper. It retains
-the 0.16.0 repository-provenance tightening and rule version `1.21.0`. The
-release retains the validated v0.10.11 recovery image; no new ISO or UKI was
-built for this release. R8 remains deferred to a recovery-bearing release.
-Release notes, retained image details, and known limits are in
-[`docs/releases/v0.16.1.md`](docs/releases/v0.16.1.md).
+The 0.17.0 release is recovery-bearing because recovery-image validation now
+fails closed when `ukify` is unavailable. A fresh 0.17.0 ISO and local validation
+UKI were built and passed the BIOS, UEFI and disposable-key Secure Boot gates.
+The release also carries the 0.16.1 runtime-portability fixes and the 0.16.0
+repository-provenance tightening at rule version `1.21.0`. Release notes,
+image details, gate results, and known limits are in
+[`docs/releases/v0.17.0.md`](docs/releases/v0.17.0.md).
 
-The verified release runtime is Python 3.14. The Python 3.8 source suite now
-passes locally (`5909 passed, 3 skipped`); CI status is confirmed separately.
+The verified release runtime is Python 3.14. The Python 3.8 source suite also
+passes locally; CI status is confirmed separately.
 
 ## Documentation
 

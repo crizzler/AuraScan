@@ -1,7 +1,5 @@
 # AuraScan Unreleased
 
-Changes after v0.16.1:
+Changes after v0.17.0:
 
-- Recovery image validation now fails closed when `ukify` is unavailable
-  instead of silently accepting a weaker check (R8). This requires a
-  recovery-bearing release with a fresh ISO and UKI gates before publication.
+- No uncommitted release-blocking changes.

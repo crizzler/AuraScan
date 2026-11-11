@@ -4,6 +4,17 @@ Use this as a starting point for Arch-family communities, Reddit, Mastodon,
 Matrix, or Discord posts. Keep the tone transparent: AuraScan reduces risk, but
 it does not prove package safety.
 
+## v0.17.0 release
+
+The v0.17.0 release is recovery-bearing because recovery-image validation now
+fails closed when `ukify` is unavailable instead of accepting a weaker byte and
+PE check (R8). A fresh 0.17.0 ISO and local validation UKI were built and passed
+the BIOS, ordinary UEFI and disposable-key Secure Boot gates, including the
+unsigned-rejection control. The release keeps the 0.16.1 runtime-portability
+fixes and the 0.16.0 repository-provenance tightening at rule version `1.21.0`.
+The recovery markers prove the boot and service boundary, not storage recovery.
+Release notes and hashes are in `docs/releases/v0.17.0.md`.
+
 ## v0.16.1 release
 
 The v0.16.1 release is a package-only maintenance update. It fixes an upgrade

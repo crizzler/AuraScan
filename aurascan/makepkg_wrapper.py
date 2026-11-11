@@ -992,6 +992,9 @@ def _run_sandboxed_handoff(
         return EXIT_SANDBOX_UNAVAILABLE
     except SandboxBuildError as exc:
         print(f"[AuraScan] The isolated build failed: {exc}.", file=stderr)
+        cleanup_warning = getattr(exc, "cleanup_warning", "")
+        if cleanup_warning:
+            print(f"[AuraScan] {cleanup_warning}", file=stderr)
         return EXIT_SANDBOX_FAILED
 
     wants_install = _wants_host_install(options.makepkg_args)

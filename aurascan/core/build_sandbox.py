@@ -106,6 +106,7 @@ class SandboxBuildError(RuntimeError):
     def __init__(self, message: str, *, retained_root: str = ""):
         super().__init__(message)
         self.retained_root = retained_root
+        self.cleanup_warning = ""
 
 
 @dataclass(frozen=True)
@@ -184,8 +185,25 @@ class SandboxBuildResult:
     command: Tuple[str, ...] = ()
     sudo_path: str = ""
     rm_path: str = ""
+    sudo_tool: Optional[TrustedTool] = None
+    rm_tool: Optional[TrustedTool] = None
     chroot_root: str = ""
     package_dir: str = ""
+
+
+@dataclass(frozen=True)
+class SandboxCleanupOutcome:
+    """Observed result of one private build-tree removal attempt.
+
+    ``removed`` reports the observed tree state, while ``verified`` is true
+    only when the removal path completed cleanly. A completion status of zero
+    is necessary but not sufficient: the tree must also be observed absent.
+    """
+
+    removed: bool
+    verified: bool
+    warning: str = ""
+    exit_status: Optional[int] = None
 
 
 def resolve_sandbox_config(env: Optional[Mapping[str, str]] = None) -> SandboxConfig:
@@ -376,8 +394,9 @@ def build_in_sandbox(
     """Copy the reviewed checkout and build it inside the devtools chroot.
 
     The returned build root belongs to the caller, who must scan the listed
-    artifacts and then remove ``build_root``. On failure the work tree is
-    removed before the error is raised.
+    artifacts and then remove ``build_root``. On failure cleanup is attempted;
+    if the tree is retained or removal cannot be verified, the raised
+    ``SandboxBuildError`` carries a truthful ``cleanup_warning``.
     """
 
     source = Path(package_dir)
@@ -504,36 +523,49 @@ def build_in_sandbox(
             command=tuple(command),
             sudo_path=tools["sudo"].path,
             rm_path=tools["rm"].path,
+            sudo_tool=tools["sudo"],
+            rm_tool=tools["rm"],
             chroot_root=str(chroot_copy),
             package_dir=str(package_copy),
         )
-    except Exception:
-        _remove_work_tree(
+    except Exception as exc:
+        outcome = _remove_work_tree(
             build_root,
             work_root,
             tools.get("sudo"),
             tools.get("rm"),
             runner,
+            tool_revalidate=tool_revalidate,
         )
+        if outcome.warning and isinstance(exc, SandboxBuildError):
+            exc.cleanup_warning = outcome.warning
         raise
 
 
-def cleanup_sandbox_build(result: SandboxBuildResult) -> str:
-    """Remove the private build tree; return a short warning when it remains."""
+def cleanup_sandbox_build(
+    result: SandboxBuildResult,
+    *,
+    runner: Callable[..., object] = subprocess.run,
+    tool_revalidate: Callable[[TrustedTool], None] = revalidate_trusted_system_tool,
+) -> str:
+    """Remove the private build tree; return a truthful warning when needed.
+
+    The captured ``sudo_tool``/``rm_tool`` objects from the build are reused
+    and revalidated immediately before the privileged command. A warning is
+    returned when the tree remains, the command status is nonzero, the
+    completion evidence is malformed, or removal otherwise cannot be verified.
+    """
 
     root = Path(result.build_root)
-    removed = _remove_work_tree(
+    outcome = _remove_work_tree(
         root,
         root.parent,
-        None,
-        None,
-        subprocess.run,
-        sudo_path=result.sudo_path,
-        rm_path=result.rm_path,
+        result.sudo_tool,
+        result.rm_tool,
+        runner,
+        tool_revalidate=tool_revalidate,
     )
-    if not removed:
-        return "The isolated build tree could not be removed; remove it manually."
-    return ""
+    return outcome.warning
 
 
 def _run_root_command(
@@ -559,6 +591,47 @@ def _run_root_command(
     return int(getattr(result, "returncode", 1))
 
 
+def _tree_present(root: Path) -> bool:
+    """Report whether the tree entry still exists without following links."""
+
+    return os.path.lexists(str(root))
+
+
+def _unverified_cleanup_warning(root: Path, detail: str) -> SandboxCleanupOutcome:
+    """Build a truthful outcome for a cleanup attempt that is not verified.
+
+    The wording never promises the tree is intact after a failed or partial
+    removal, and never demands manual removal of a tree observed absent.
+    """
+
+    if _tree_present(root):
+        return SandboxCleanupOutcome(
+            removed=False,
+            verified=False,
+            warning=(
+                f"{detail}; the build tree may be partially removed. "
+                "Remove any remaining files manually."
+            ),
+        )
+    return SandboxCleanupOutcome(
+        removed=True,
+        verified=False,
+        warning=(
+            f"{detail}, but the build tree is no longer present; "
+            "removal may have been partial."
+        ),
+    )
+
+
+def _completed_status(completed) -> Optional[int]:
+    """Return the integer completion status, or None for unusable evidence."""
+
+    status = getattr(completed, "returncode", None)
+    if isinstance(status, bool) or not isinstance(status, int):
+        return None
+    return status
+
+
 def _remove_work_tree(
     root: Path,
     work_root: Path,
@@ -566,40 +639,111 @@ def _remove_work_tree(
     rm_tool: Optional[TrustedTool],
     runner: Callable[..., object],
     *,
-    sudo_path: str = "",
-    rm_path: str = "",
-) -> bool:
-    """Remove one private build tree, using the captured root tools if needed."""
+    tool_revalidate: Callable[[TrustedTool], None] = revalidate_trusted_system_tool,
+) -> SandboxCleanupOutcome:
+    """Remove one private build tree, using the captured root tools if needed.
 
+    Privileged removal never executes a stored path string. The capture-time
+    tool identities must be revalidated immediately before the command; a
+    missing or changed identity leaves the tree in place. The completed
+    command's status and the observed tree state are both required before the
+    removal counts as verified success.
+    """
+
+    if not _tree_present(root):
+        return SandboxCleanupOutcome(removed=True, verified=True)
     try:
         resolved_root = root.resolve()
         resolved_parent = Path(work_root).resolve()
-    except OSError:
-        return False
-    if resolved_root.parent != resolved_parent:
-        return False
-    if not resolved_root.name.startswith("aurascan-devbuild-"):
-        return False
+    except (OSError, RuntimeError):
+        return SandboxCleanupOutcome(
+            removed=False,
+            verified=False,
+            warning=(
+                "The isolated build tree path could not be resolved and was not "
+                "removed; inspect it manually."
+            ),
+        )
+    if resolved_root.parent != resolved_parent or not resolved_root.name.startswith(
+        "aurascan-devbuild-"
+    ):
+        return SandboxCleanupOutcome(
+            removed=False,
+            verified=False,
+            warning=(
+                "The isolated build tree did not match the private cleanup path "
+                "policy and was not removed; inspect it manually."
+            ),
+        )
     if root.is_symlink():
-        return False
+        return SandboxCleanupOutcome(
+            removed=False,
+            verified=False,
+            warning=(
+                "The isolated build tree is a symbolic link and was not removed; "
+                "inspect it manually."
+            ),
+        )
     try:
         shutil.rmtree(str(root))
-        return True
     except OSError:
-        pass
-    sudo = sudo_path or (sudo_tool.path if sudo_tool is not None else "")
-    rm = rm_path or (rm_tool.path if rm_tool is not None else "")
-    if not sudo or not rm:
-        return False
+        if not _tree_present(root):
+            return _unverified_cleanup_warning(
+                root, "Local removal of the isolated build tree did not complete cleanly"
+            )
+    else:
+        if not _tree_present(root):
+            return SandboxCleanupOutcome(removed=True, verified=True)
+    if sudo_tool is None or rm_tool is None:
+        return _unverified_cleanup_warning(
+            root,
+            "The isolated build tree could not be removed because no captured "
+            "privileged helper was available",
+        )
     try:
-        runner(
-            [sudo, rm, "-rf", "--one-file-system", str(root)],
+        tool_revalidate(sudo_tool)
+        tool_revalidate(rm_tool)
+    except (OSError, TypeError, TrustedToolError):
+        return _unverified_cleanup_warning(
+            root,
+            "The isolated build tree could not be removed because a privileged "
+            "helper identity could not be revalidated",
+        )
+    try:
+        completed = runner(
+            [sudo_tool.path, rm_tool.path, "-rf", "--one-file-system", str(root)],
             check=False,
             timeout=300.0,
         )
-    except (OSError, TypeError, subprocess.TimeoutExpired):
-        return False
-    return not root.exists()
+    except subprocess.TimeoutExpired:
+        return _unverified_cleanup_warning(
+            root, "The privileged cleanup command timed out"
+        )
+    except (OSError, TypeError):
+        return _unverified_cleanup_warning(
+            root, "The privileged cleanup command could not be started"
+        )
+    status = _completed_status(completed)
+    if status is None:
+        return _unverified_cleanup_warning(
+            root, "The privileged cleanup command did not report a usable exit status"
+        )
+    if status != 0:
+        return _unverified_cleanup_warning(
+            root,
+            f"The privileged cleanup command failed with exit status {status}",
+        )
+    if _tree_present(root):
+        return SandboxCleanupOutcome(
+            removed=False,
+            verified=False,
+            warning=(
+                "The privileged cleanup command reported success, but the build "
+                "tree is still present; remove it manually."
+            ),
+            exit_status=status,
+        )
+    return SandboxCleanupOutcome(removed=True, verified=True, exit_status=status)
 
 
 def _sandbox_environment(

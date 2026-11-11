@@ -1,14 +1,17 @@
 import hashlib
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+import aurascan.core.build_sandbox as build_sandbox
 from aurascan.core.build_sandbox import (
     AUR_SANDBOX_ENV,
     AUR_SANDBOX_WORK_ROOT_ENV,
     SandboxBuildError,
+    SandboxBuildResult,
     SandboxConfig,
     SandboxUnavailable,
     build_in_sandbox,
@@ -17,7 +20,7 @@ from aurascan.core.build_sandbox import (
     sandbox_makepkg_arguments,
     sandbox_status,
 )
-from aurascan.core.trusted_tools import TrustedTool
+from aurascan.core.trusted_tools import TrustedTool, TrustedToolError
 
 
 @pytest.fixture(autouse=True)
@@ -319,3 +322,445 @@ def test_build_requires_enabled_backend(tmp_path):
             base_root=tmp_path / "archbuild",
             tool_capture=_tools(),
         )
+
+
+def _cleanup_result(
+    tmp_path,
+    *,
+    sudo_tool=None,
+    rm_tool=None,
+    sudo_path="/usr/bin/sudo",
+    rm_path="/usr/bin/rm",
+):
+    root = tmp_path / "aurascan-devbuild-r10"
+    root.mkdir()
+    return SandboxBuildResult(
+        backend="devtools",
+        build_root=root,
+        artifacts=(),
+        duration_seconds=0.0,
+        sudo_path=sudo_path,
+        rm_path=rm_path,
+        sudo_tool=sudo_tool,
+        rm_tool=rm_tool,
+    )
+
+
+def _refuse_tree_delete(_path):
+    raise OSError("root-owned tree requires the privileged removal path")
+
+
+def _cleanup_tools():
+    return _tool("sudo"), _tool("rm")
+
+
+def test_cleanup_trace_revalidates_the_captured_objects_before_the_command(tmp_path, monkeypatch):
+    sudo_tool, rm_tool = _cleanup_tools()
+    result = _cleanup_result(tmp_path, sudo_tool=sudo_tool, rm_tool=rm_tool)
+    root = result.build_root
+    events = []
+    calls = []
+    monkeypatch.setattr(build_sandbox.shutil, "rmtree", _refuse_tree_delete)
+
+    def recapture_forbidden(*_args, **_kwargs):
+        raise AssertionError("cleanup must not recapture privileged tools")
+
+    monkeypatch.setattr(build_sandbox, "capture_trusted_system_tool", recapture_forbidden)
+
+    def revalidate(tool):
+        events.append(("revalidate", tool.name, tool))
+
+    def runner(command, **kwargs):
+        events.append(("runner", tuple(command)))
+        calls.append((list(command), dict(kwargs)))
+        root.rmdir()
+        return subprocess.CompletedProcess(list(command), 0)
+
+    warning = cleanup_sandbox_build(result, runner=runner, tool_revalidate=revalidate)
+
+    assert warning == ""
+    assert [event[0] for event in events] == ["revalidate", "revalidate", "runner"]
+    assert events[0][1] == "sudo"
+    assert events[0][2] is sudo_tool
+    assert events[1][1] == "rm"
+    assert events[1][2] is rm_tool
+    assert events[2][1] == (
+        "/usr/bin/sudo",
+        "/usr/bin/rm",
+        "-rf",
+        "--one-file-system",
+        str(root),
+    )
+    assert calls == [
+        (
+            ["/usr/bin/sudo", "/usr/bin/rm", "-rf", "--one-file-system", str(root)],
+            {"check": False, "timeout": 300.0},
+        )
+    ]
+    assert result.sudo_tool is sudo_tool
+    assert result.rm_tool is rm_tool
+    assert not root.exists()
+
+
+def test_cleanup_refuses_an_unexpected_tree_name_without_claiming_partial_removal(
+    tmp_path
+):
+    root = tmp_path / "not-a-build-tree"
+    root.mkdir()
+    result = SandboxBuildResult(
+        backend="devtools",
+        build_root=root,
+        artifacts=(),
+        duration_seconds=0.0,
+        sudo_path="/usr/bin/sudo",
+        rm_path="/usr/bin/rm",
+        sudo_tool=_tool("sudo"),
+        rm_tool=_tool("rm"),
+    )
+    calls = []
+
+    warning = cleanup_sandbox_build(
+        result,
+        runner=lambda command, **_kwargs: calls.append(command),
+        tool_revalidate=lambda _tool: None,
+    )
+
+    assert warning == (
+        "The isolated build tree did not match the private cleanup path policy "
+        "and was not removed; inspect it manually."
+    )
+    assert calls == []
+    assert root.exists()
+
+
+@pytest.mark.parametrize("missing", ["sudo", "rm", "both"])
+def test_cleanup_retains_tree_and_reports_when_a_captured_object_is_missing(
+    tmp_path, monkeypatch, missing
+):
+    sudo_tool = None if missing in {"sudo", "both"} else _tool("sudo")
+    rm_tool = None if missing in {"rm", "both"} else _tool("rm")
+    result = _cleanup_result(tmp_path, sudo_tool=sudo_tool, rm_tool=rm_tool)
+    calls = []
+    monkeypatch.setattr(build_sandbox.shutil, "rmtree", _refuse_tree_delete)
+
+    warning = cleanup_sandbox_build(
+        result, runner=lambda command, **_kwargs: calls.append(command)
+    )
+
+    assert warning.startswith("The isolated build tree could not be removed")
+    assert "build tree may be partially removed" in warning
+    assert calls == []
+    assert result.build_root.exists()
+    # Display strings stay populated but the missing object is never replaced.
+    assert result.sudo_path and result.rm_path
+
+
+@pytest.mark.parametrize("tool_name", ["sudo", "rm"])
+@pytest.mark.parametrize(
+    "error",
+    [
+        TrustedToolError("changed after capture"),
+        OSError("identity unavailable"),
+        TypeError("bad identity"),
+    ],
+    ids=["trusted-tool-error", "oserror", "typeerror"],
+)
+def test_cleanup_refuses_when_each_privileged_identity_validation_raises(
+    tmp_path, monkeypatch, tool_name, error
+):
+    sudo_tool, rm_tool = _cleanup_tools()
+    result = _cleanup_result(tmp_path, sudo_tool=sudo_tool, rm_tool=rm_tool)
+    calls = []
+    events = []
+    monkeypatch.setattr(build_sandbox.shutil, "rmtree", _refuse_tree_delete)
+
+    def revalidate(tool):
+        events.append(tool.name)
+        if tool.name == tool_name:
+            raise error
+
+    warning = cleanup_sandbox_build(
+        result,
+        runner=lambda command, **_kwargs: calls.append(command),
+        tool_revalidate=revalidate,
+    )
+
+    assert "could not be removed" in warning
+    assert "identity could not be revalidated" in warning
+    assert "build tree may be partially removed" in warning
+    assert calls == []
+    assert result.build_root.exists()
+    assert events == (["sudo"] if tool_name == "sudo" else ["sudo", "rm"])
+
+
+def test_cleanup_reports_a_timed_out_privileged_command(tmp_path, monkeypatch):
+    sudo_tool, rm_tool = _cleanup_tools()
+    result = _cleanup_result(tmp_path, sudo_tool=sudo_tool, rm_tool=rm_tool)
+    monkeypatch.setattr(build_sandbox.shutil, "rmtree", _refuse_tree_delete)
+
+    def runner(command, **kwargs):
+        raise subprocess.TimeoutExpired(list(command), kwargs["timeout"])
+
+    warning = cleanup_sandbox_build(
+        result, runner=runner, tool_revalidate=lambda _tool: None
+    )
+
+    assert warning == (
+        "The privileged cleanup command timed out; the build tree may be "
+        "partially removed. Remove any remaining files manually."
+    )
+    assert result.build_root.exists()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [OSError("spawn failed"), TypeError("bad runner")],
+    ids=["oserror", "typeerror"],
+)
+def test_cleanup_reports_a_privileged_command_that_cannot_start(
+    tmp_path, monkeypatch, error
+):
+    sudo_tool, rm_tool = _cleanup_tools()
+    result = _cleanup_result(tmp_path, sudo_tool=sudo_tool, rm_tool=rm_tool)
+    monkeypatch.setattr(build_sandbox.shutil, "rmtree", _refuse_tree_delete)
+
+    def runner(_command, **_kwargs):
+        raise error
+
+    warning = cleanup_sandbox_build(
+        result, runner=runner, tool_revalidate=lambda _tool: None
+    )
+
+    assert warning == (
+        "The privileged cleanup command could not be started; the build tree "
+        "may be partially removed. Remove any remaining files manually."
+    )
+    assert result.build_root.exists()
+
+
+def test_cleanup_does_not_verify_a_nonzero_command_with_a_retained_tree(
+    tmp_path, monkeypatch
+):
+    sudo_tool, rm_tool = _cleanup_tools()
+    result = _cleanup_result(tmp_path, sudo_tool=sudo_tool, rm_tool=rm_tool)
+    monkeypatch.setattr(build_sandbox.shutil, "rmtree", _refuse_tree_delete)
+
+    def runner(command, **_kwargs):
+        return subprocess.CompletedProcess(list(command), 1)
+
+    warning = cleanup_sandbox_build(
+        result, runner=runner, tool_revalidate=lambda _tool: None
+    )
+
+    assert warning == (
+        "The privileged cleanup command failed with exit status 1; the build "
+        "tree may be partially removed. Remove any remaining files manually."
+    )
+    assert result.build_root.exists()
+
+
+def test_cleanup_reports_a_nonzero_command_even_when_the_tree_is_absent(
+    tmp_path, monkeypatch
+):
+    sudo_tool, rm_tool = _cleanup_tools()
+    result = _cleanup_result(tmp_path, sudo_tool=sudo_tool, rm_tool=rm_tool)
+    root = result.build_root
+    monkeypatch.setattr(build_sandbox.shutil, "rmtree", _refuse_tree_delete)
+
+    def runner(command, **_kwargs):
+        root.rmdir()
+        return subprocess.CompletedProcess(list(command), 1)
+
+    warning = cleanup_sandbox_build(
+        result, runner=runner, tool_revalidate=lambda _tool: None
+    )
+
+    assert warning == (
+        "The privileged cleanup command failed with exit status 1, but the "
+        "build tree is no longer present; removal may have been partial."
+    )
+    assert not root.exists()
+
+
+def test_cleanup_reports_a_zero_status_that_left_the_tree_in_place(tmp_path, monkeypatch):
+    sudo_tool, rm_tool = _cleanup_tools()
+    result = _cleanup_result(tmp_path, sudo_tool=sudo_tool, rm_tool=rm_tool)
+    monkeypatch.setattr(build_sandbox.shutil, "rmtree", _refuse_tree_delete)
+
+    def runner(command, **_kwargs):
+        return subprocess.CompletedProcess(list(command), 0)
+
+    warning = cleanup_sandbox_build(
+        result, runner=runner, tool_revalidate=lambda _tool: None
+    )
+
+    assert warning == (
+        "The privileged cleanup command reported success, but the build tree "
+        "is still present; remove it manually."
+    )
+    assert result.build_root.exists()
+
+
+class _Completion:
+    """Minimal completion double for deliberately malformed status values."""
+
+    def __init__(self, returncode):
+        self.returncode = returncode
+
+
+@pytest.mark.parametrize(
+    "completed",
+    [
+        None,
+        object(),
+        _Completion(None),
+        _Completion(True),
+        _Completion("0"),
+    ],
+    ids=["none", "no-returncode", "none-status", "bool-status", "text-status"],
+)
+def test_cleanup_fails_closed_on_missing_or_malformed_completion_evidence(
+    tmp_path, monkeypatch, completed
+):
+    sudo_tool, rm_tool = _cleanup_tools()
+    result = _cleanup_result(tmp_path, sudo_tool=sudo_tool, rm_tool=rm_tool)
+    monkeypatch.setattr(build_sandbox.shutil, "rmtree", _refuse_tree_delete)
+
+    warning = cleanup_sandbox_build(
+        result,
+        runner=lambda _command, **_kwargs: completed,
+        tool_revalidate=lambda _tool: None,
+    )
+
+    assert warning == (
+        "The privileged cleanup command did not report a usable exit status; "
+        "the build tree may be partially removed. Remove any remaining files "
+        "manually."
+    )
+    assert result.build_root.exists()
+
+
+def test_cleanup_fails_closed_on_malformed_evidence_but_does_not_demand_absence_work(
+    tmp_path, monkeypatch
+):
+    sudo_tool, rm_tool = _cleanup_tools()
+    result = _cleanup_result(tmp_path, sudo_tool=sudo_tool, rm_tool=rm_tool)
+    root = result.build_root
+    monkeypatch.setattr(build_sandbox.shutil, "rmtree", _refuse_tree_delete)
+
+    def runner(_command, **_kwargs):
+        root.rmdir()
+        return None
+
+    warning = cleanup_sandbox_build(
+        result, runner=runner, tool_revalidate=lambda _tool: None
+    )
+
+    assert warning == (
+        "The privileged cleanup command did not report a usable exit status, "
+        "but the build tree is no longer present; removal may have been partial."
+    )
+    assert not root.exists()
+
+
+def test_failed_build_cleanup_keeps_the_original_error_and_reports_the_retained_tree(
+    tmp_path, monkeypatch
+):
+    checkout = _checkout(tmp_path)
+    work = tmp_path / "work"
+    real_rmtree = shutil.rmtree
+    table = {
+        name: _tool(name)
+        for name in (
+            build_sandbox.AUR_SANDBOX_REQUIRED_TOOLS
+            + build_sandbox.AUR_SANDBOX_ROOT_COMMANDS
+        )
+    }
+    capture_calls = []
+    revalidated = []
+    cleanup_calls = []
+
+    def capture(name):
+        capture_calls.append(name)
+        return table.get(name)
+
+    def revalidate(tool):
+        revalidated.append(tool)
+
+    def runner(command, **kwargs):
+        command = list(command)
+        if "/bin/bash" in command:
+            return subprocess.CompletedProcess(command, 1)
+        if command[1:2] == ["/usr/bin/cp"]:
+            return subprocess.CompletedProcess(command, 0)
+        cleanup_calls.append((command, dict(kwargs)))
+        return subprocess.CompletedProcess(command, 1)
+
+    monkeypatch.setattr(build_sandbox.shutil, "rmtree", _refuse_tree_delete)
+
+    with pytest.raises(SandboxBuildError) as caught:
+        build_in_sandbox(
+            checkout,
+            config=SandboxConfig(backend="devtools", work_root=work),
+            runner=runner,
+            base_root=tmp_path / "archbuild",
+            tool_capture=capture,
+            tool_revalidate=revalidate,
+            base_probe=_base_ready,
+        )
+
+    exc = caught.value
+    assert type(exc) is SandboxBuildError
+    assert str(exc) == "the isolated build failed with exit status 1"
+    assert exc.cleanup_warning == (
+        "The privileged cleanup command failed with exit status 1; the build "
+        "tree may be partially removed. Remove any remaining files manually."
+    )
+    retained = list(work.glob("aurascan-devbuild-*"))
+    assert len(retained) == 1
+    assert retained[0].is_dir()
+    assert len(cleanup_calls) == 1
+    assert cleanup_calls[0][0][1] == "/usr/bin/rm"
+    assert cleanup_calls[0][1] == {"check": False, "timeout": 300.0}
+    # The cleanup revalidated the captured objects themselves, only after the
+    # build-time capture pass, and never recaptured a tool.
+    assert len(capture_calls) == len(table) * 2
+    assert revalidated.count(table["sudo"]) == 2
+    assert revalidated.count(table["rm"]) == 2
+    assert revalidated[-2] is table["sudo"]
+    assert revalidated[-1] is table["rm"]
+    real_rmtree(retained[0])
+
+
+def test_successful_build_carries_the_original_captured_tool_objects(tmp_path):
+    checkout = _checkout(tmp_path)
+    table = {
+        name: _tool(name)
+        for name in (
+            build_sandbox.AUR_SANDBOX_REQUIRED_TOOLS
+            + build_sandbox.AUR_SANDBOX_ROOT_COMMANDS
+        )
+    }
+    capture_calls = []
+
+    def capture(name):
+        capture_calls.append(name)
+        return table.get(name)
+
+    result = build_in_sandbox(
+        checkout,
+        config=SandboxConfig(backend="devtools", work_root=tmp_path / "work"),
+        runner=_Runner(),
+        base_root=tmp_path / "archbuild",
+        tool_capture=capture,
+        tool_revalidate=lambda _tool: None,
+        base_probe=_base_ready,
+    )
+    try:
+        assert result.sudo_tool is table["sudo"]
+        assert result.rm_tool is table["rm"]
+        assert result.sudo_path == table["sudo"].path
+        assert result.rm_path == table["rm"].path
+        assert len(capture_calls) == len(table) * 2
+    finally:
+        assert cleanup_sandbox_build(result) == ""

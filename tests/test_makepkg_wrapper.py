@@ -32,6 +32,7 @@ from aurascan.core.review import (
 from aurascan.core.trusted_tools import TrustedTool, TrustedToolError
 from aurascan.core.build_sandbox import (
     SandboxArtifact,
+    SandboxBuildError,
     SandboxBuildResult,
     SandboxConfig,
     SandboxStatus,
@@ -40,6 +41,7 @@ from aurascan.core.trusted_executable import TrustedExecutable
 from aurascan.makepkg_wrapper import (
     EXIT_MANUAL_REVIEW,
     EXIT_MAKEPKG_NOT_FOUND,
+    EXIT_SANDBOX_FAILED,
     EXIT_SANDBOX_UNAVAILABLE,
     EXIT_SCAN_BLOCKED,
     EXIT_USAGE,
@@ -3720,3 +3722,33 @@ def test_wrapper_sandbox_refuses_json(tmp_path):
         stderr=io.StringIO(),
     )
     assert code == EXIT_USAGE
+
+
+def test_wrapper_reports_cleanup_warning_after_the_exact_original_error(tmp_path, monkeypatch):
+    (tmp_path / "PKGBUILD").write_text("pkgname=demo\npkgver=1\n")
+    original_message = "the isolated build failed with exit status 1"
+    cleanup_warning = (
+        "The privileged cleanup command failed with exit status 1; the build "
+        "tree may be partially removed. Remove any remaining files manually."
+    )
+
+    def failing_build(*_args, **_kwargs):
+        error = SandboxBuildError(original_message)
+        error.cleanup_warning = cleanup_warning
+        raise error
+
+    monkeypatch.setattr(makepkg_wrapper, "build_in_sandbox", failing_build)
+    monkeypatch.setattr(
+        makepkg_wrapper,
+        "sandbox_status",
+        lambda *args, **kwargs: SandboxStatus(True, True, "devtools", base_ready=True),
+    )
+
+    code, _created, _stdout, stderr = _sandbox_run(tmp_path, [])
+
+    assert code == EXIT_SANDBOX_FAILED
+    assert code == 124
+    assert stderr.getvalue() == (
+        f"[AuraScan] The isolated build failed: {original_message}.\n"
+        f"[AuraScan] {cleanup_warning}\n"
+    )

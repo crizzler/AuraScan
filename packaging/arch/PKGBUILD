@@ -48,7 +48,7 @@ source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 # Source archive for the public v0.16.1 tag. The digest is pinned only after
 # that tag is public: `packaging/arch/pin-release-checksum.sh` replaces the
 # placeholder digest line in place and refuses to guess.
-sha256sums=('SKIP')
+sha256sums=('d4194ff825455ee182f0531165ff2ad91440ee9d1fa0040c6f76064489f765f1')
 
 build() {
   cd "AuraScan-$pkgver"

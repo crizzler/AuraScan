@@ -55,8 +55,8 @@ def test_current_release_recovery_manifest_policy_is_versioned_and_fresh():
 def test_current_recovery_bearing_release_contract():
     version = tomllib.loads(read_text("pyproject.toml"))["project"]["version"]
     manifest = json.loads(read_text("aurascan/assets/aurascan-recovery-iso.json"))
-    if version != "0.17.0" or manifest.get("release_disposition") != "recovery-bearing":
-        pytest.skip("this contract describes the 0.17.0 recovery-bearing release")
+    if version != "0.18.0" or manifest.get("release_disposition") != "recovery-bearing":
+        pytest.skip("this contract describes the 0.18.0 recovery-bearing release")
     release_text = read_text(f"docs/releases/v{version}.md")
 
     assert manifest["application_version"] == version
@@ -70,13 +70,13 @@ def test_current_recovery_bearing_release_contract():
     assert re.fullmatch(r"[0-9a-f]{64}", manifest["sha256"])
     assert re.findall(
         r"^(?:- )?Recovery build candidate: `([0-9a-f]{40})`$", release_text, re.MULTILINE
-    ) == ["8ae0b7e77d5f253f6ed8bfabef9488ce04eb6548"]
+    ) == ["7f214b2ad5fdb1368520c1f5de694680096be21e"]
     assert re.findall(
         r"^(?:- )?ISO SHA-256: `([0-9a-f]{64})`$", release_text, re.MULTILINE
     ) == [manifest["sha256"]]
     assert re.findall(
         r"^(?:- )?Validation UKI SHA-256: `([0-9a-f]{64})`$", release_text, re.MULTILINE
-    ) == ["e45a3245030266495d1cd7672d265471f9ac34634c1835cecba00ad34570222f"]
+    ) == ["8e274e915893f5767f4a9a966c037a4d492f9e122497b446b82c11bd4906fa58"]
     assert re.findall(r"^(?:- )?ISO size: `([0-9]+)` bytes$", release_text, re.MULTILINE) == [
         "1335476224"
     ]

@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from aurascan.core import recovery_boot
+from aurascan.core.trusted_tools import TrustedTool, TrustedToolError
 from aurascan.core.recovery_boot import (
     RECOVERY_LIMINE_BEGIN,
     RECOVERY_LIMINE_END,
@@ -20,11 +21,75 @@ from aurascan.core.recovery_boot import (
     merge_marked_block,
     render_grub_recovery_script,
     render_limine_recovery_entry,
+    sbctl_owner_key_ready,
     sign_recovery_image,
     validate_recovery_image,
     verify_recovery_iso,
     write_iso_to_usb,
 )
+
+
+def trusted_boot_tool(name: str) -> TrustedTool:
+    """Fake trusted identity for a fixed /usr/bin tool used by rootless tests."""
+
+    return TrustedTool(
+        name=name,
+        path=f"/usr/bin/{name}",
+        device=1,
+        inode=1,
+        owner=0,
+        group=0,
+        mode=0o100755,
+    )
+
+
+def allow_trusted_boot_tools(monkeypatch, *names):
+    """Make the fixed-path host-tool seam succeed for ``names`` (or all names)."""
+
+    allowed = set(names) or None
+
+    def fake(name):
+        if allowed is not None and name not in allowed:
+            raise TrustedToolError(f"{name} was not available")
+        return trusted_boot_tool(name)
+
+    monkeypatch.setattr("aurascan.core.recovery_boot.require_trusted_system_tool", fake)
+    return fake
+
+
+def untrusted_boot_tool(_name):
+    raise TrustedToolError("the fixture tool was absent or unsafe")
+
+
+def recording_boot_runner(commands, *, result=0, output=""):
+    def runner(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, result, output, "")
+
+    return runner
+
+
+def trapping_boot_runner(_command, **_kwargs):
+    raise AssertionError("a real host command was attempted during a trust refusal")
+
+
+class BootToolSequence:
+    """Fake fixed-path seam that fails at a chosen use index."""
+
+    def __init__(self, monkeypatch, *, fail_at=None):
+        self.calls = []
+        self.fail_at = fail_at
+        monkeypatch.setattr("aurascan.core.recovery_boot.require_trusted_system_tool", self)
+
+    def __call__(self, name):
+        self.calls.append(name)
+        if self.fail_at is not None and len(self.calls) == self.fail_at:
+            raise TrustedToolError(f"{name} failed trust revalidation")
+        return trusted_boot_tool(name)
+
+
+def boot_tool_sequence(monkeypatch, *, fail_at=None):
+    return BootToolSequence(monkeypatch, fail_at=fail_at)
 
 
 def test_limine_entry_uses_documented_efi_protocol_and_is_idempotent():
@@ -146,9 +211,10 @@ def test_image_validation_rejects_local_ai_token(tmp_path):
     assert any("credential" in item for item in errors)
 
 
-def test_image_validation_requires_selected_kernel_in_ukify_metadata(tmp_path):
+def test_image_validation_requires_selected_kernel_in_ukify_metadata(tmp_path, monkeypatch):
     image = tmp_path / "recovery.efi"
     image.write_bytes(b"MZfixture")
+    allow_trusted_boot_tools(monkeypatch)
 
     valid, errors = validate_recovery_image(
         image,
@@ -169,9 +235,10 @@ def test_image_validation_requires_selected_kernel_in_ukify_metadata(tmp_path):
     assert any("selected recovery kernel" in item for item in errors)
 
 
-def test_image_validation_requires_recovery_service_boot_request(tmp_path):
+def test_image_validation_requires_recovery_service_boot_request(tmp_path, monkeypatch):
     image = tmp_path / "recovery.efi"
     image.write_bytes(b"MZfixture")
+    allow_trusted_boot_tools(monkeypatch)
 
     valid, errors = validate_recovery_image(
         image,
@@ -190,9 +257,10 @@ def test_image_validation_requires_recovery_service_boot_request(tmp_path):
     assert any("recovery service" in item for item in errors)
 
 
-def test_image_validation_requires_vm_readiness_marker_boot_request(tmp_path):
+def test_image_validation_requires_vm_readiness_marker_boot_request(tmp_path, monkeypatch):
     image = tmp_path / "recovery.efi"
     image.write_bytes(b"MZfixture")
+    allow_trusted_boot_tools(monkeypatch)
 
     valid, errors = validate_recovery_image(
         image,
@@ -440,9 +508,10 @@ def test_usb_inspection_sanitizes_untrusted_device_labels():
     assert "\n" not in info.serial
 
 
-def test_secure_boot_signing_requires_explicit_enrolled_sbctl_key(tmp_path):
+def test_secure_boot_signing_requires_explicit_enrolled_sbctl_key(tmp_path, monkeypatch):
     image = tmp_path / "recovery.efi"
     image.write_bytes(b"MZfixture")
+    allow_trusted_boot_tools(monkeypatch)
     commands = []
 
     def runner(command, **_kwargs):
@@ -454,6 +523,7 @@ def test_secure_boot_signing_requires_explicit_enrolled_sbctl_key(tmp_path):
     assert result.ok is False
     assert result.status == "refused"
     assert len(commands) == 1
+    assert commands[0][0] == "/usr/bin/sbctl"
 
 
 def test_secure_boot_detection_uses_efi_variable_when_bootctl_is_unavailable(tmp_path):
@@ -540,7 +610,7 @@ def test_grub_entry_install_refuses_when_configuration_generator_is_missing(tmp_
     assert not (root / "etc/grub.d/41_aurascan_recovery").exists()
 
 
-def test_grub_entry_refuses_output_symlink_before_changing_the_script(tmp_path):
+def test_grub_entry_refuses_output_symlink_before_changing_the_script(tmp_path, monkeypatch):
     root = tmp_path / "root"
     esp = root / "boot"
     (root / "etc/default").mkdir(parents=True)
@@ -554,6 +624,7 @@ def test_grub_entry_refuses_output_symlink_before_changing_the_script(tmp_path):
     outside.write_text("existing menu\n", encoding="utf-8")
     (esp / "grub/grub.cfg").symlink_to(outside)
     loader = detect_bootloader(root, esp)
+    allow_trusted_boot_tools(monkeypatch)
 
     result = install_bootloader_entry(
         loader,
@@ -567,6 +638,300 @@ def test_grub_entry_refuses_output_symlink_before_changing_the_script(tmp_path):
     assert result.status == "refused"
     assert not (root / "etc/grub.d/41_aurascan_recovery").exists()
     assert outside.read_text(encoding="utf-8") == "existing menu\n"
+
+
+# ---------------------------------------------------------------------------
+# R7 — fixed-path host-tool trust for boot/image helpers (design §5.2.3, §6.1)
+# ---------------------------------------------------------------------------
+
+
+def test_image_validation_present_but_untrusted_ukify_keeps_the_exact_r8_error(tmp_path, monkeypatch):
+    image = tmp_path / "recovery.efi"
+    image.write_bytes(b"MZfixture")
+    monkeypatch.setattr("aurascan.core.recovery_boot.require_trusted_system_tool", untrusted_boot_tool)
+    commands = []
+
+    valid, errors = validate_recovery_image(
+        image,
+        minimum_size=2,
+        which=lambda name: "/usr/bin/ukify" if name == "ukify" else None,
+        runner=recording_boot_runner(commands),
+    )
+
+    assert valid is False
+    assert errors == ["ukify is unavailable; the recovery image cannot be structurally validated."]
+    assert commands == []
+
+
+def test_image_validation_runs_the_trusted_ukify_path(tmp_path, monkeypatch):
+    image = tmp_path / "recovery.efi"
+    image.write_bytes(b"MZfixture")
+    allow_trusted_boot_tools(monkeypatch)
+    commands = []
+
+    valid, errors = validate_recovery_image(
+        image,
+        minimum_size=2,
+        expected_kernel_version="6.18.1-lts",
+        which=lambda name: "/usr/bin/ukify" if name == "ukify" else None,
+        runner=recording_boot_runner(
+            commands,
+            output=(
+                "Kernel Version: 6.18.1-lts\n"
+                "systemd.wants=aurascan-recovery.service\n"
+                "systemd.wants=aurascan-recovery-smoke-marker.service\n"
+            ),
+        ),
+    )
+
+    assert valid is True
+    assert errors == []
+    assert commands == [["/usr/bin/ukify", "inspect", str(image)]]
+
+
+def test_detect_secure_boot_falls_back_when_bootctl_is_present_but_untrusted(tmp_path, monkeypatch):
+    efivars = tmp_path / "efivars"
+    efivars.mkdir()
+    (efivars / "SecureBoot-fixture").write_bytes(b"\x07\x00\x00\x00\x01")
+    monkeypatch.setattr("aurascan.core.recovery_boot.require_trusted_system_tool", untrusted_boot_tool)
+    commands = []
+
+    result = detect_secure_boot(
+        which=lambda _name: "/usr/bin/bootctl",
+        runner=recording_boot_runner(commands),
+        efivars_root=efivars,
+    )
+
+    assert result == "enabled"
+    assert commands == []
+
+
+def test_sbctl_owner_key_ready_treats_untrusted_sbctl_as_unavailable(monkeypatch):
+    monkeypatch.setattr("aurascan.core.recovery_boot.require_trusted_system_tool", untrusted_boot_tool)
+    commands = []
+
+    present = sbctl_owner_key_ready(
+        which=lambda _name: "/usr/bin/sbctl",
+        runner=recording_boot_runner(commands),
+    )
+    absent = sbctl_owner_key_ready(which=lambda _name: None, runner=recording_boot_runner(commands))
+
+    assert present == (False, "sbctl is unavailable.")
+    assert absent == (False, "sbctl is unavailable.")
+    assert commands == []
+
+
+def test_recovery_image_status_leaves_untrusted_sbctl_unsigned(tmp_path, monkeypatch):
+    esp = tmp_path / "esp"
+    image = esp / recovery_boot.RECOVERY_UKI_RELATIVE
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"MZfixture")
+    monkeypatch.setattr(recovery_boot, "detect_secure_boot", lambda **_kwargs: "enabled")
+    monkeypatch.setattr("aurascan.core.recovery_boot.require_trusted_system_tool", untrusted_boot_tool)
+    commands = []
+
+    status = recovery_boot.recovery_image_status(
+        root=tmp_path,
+        esp_path=esp,
+        which=lambda _name: "/usr/bin/sbctl",
+        runner=recording_boot_runner(commands),
+    )
+
+    assert status.installed is True
+    assert status.signed is False
+    assert "signature was not verified" in status.errors[0]
+    assert commands == []
+
+
+def test_sign_recovery_image_treats_untrusted_sbctl_as_unavailable(tmp_path, monkeypatch):
+    image = tmp_path / "recovery.efi"
+    image.write_bytes(b"MZfixture")
+    monkeypatch.setattr("aurascan.core.recovery_boot.require_trusted_system_tool", untrusted_boot_tool)
+    commands = []
+
+    result = sign_recovery_image(
+        image,
+        which=lambda _name: "/usr/bin/sbctl",
+        runner=recording_boot_runner(commands),
+    )
+
+    assert result.ok is False
+    assert result.status == "unavailable"
+    assert result.message == "Secure Boot is enabled but sbctl is unavailable."
+    assert commands == []
+
+
+def test_sign_recovery_image_refuses_after_status_when_sbctl_turns_untrusted(tmp_path, monkeypatch):
+    image = tmp_path / "recovery.efi"
+    image.write_bytes(b"MZfixture")
+    boot_tool_sequence(monkeypatch, fail_at=3)
+    commands = []
+
+    result = sign_recovery_image(
+        image,
+        which=lambda _name: "/usr/bin/sbctl",
+        runner=recording_boot_runner(commands, output=json.dumps({"installed": True})),
+    )
+
+    assert result.ok is False
+    assert result.status == "refused"
+    assert result.message == (
+        "The sbctl owner-key status was queried, but sbctl failed trust revalidation before "
+        "signing; the recovery image was not modified."
+    )
+    assert commands == [["/usr/bin/sbctl", "status", "--json"]]
+    assert image.read_bytes() == b"MZfixture"
+
+
+def test_sign_recovery_image_reports_an_unverified_signature_truthfully(tmp_path, monkeypatch):
+    image = tmp_path / "recovery.efi"
+    image.write_bytes(b"MZfixture")
+    boot_tool_sequence(monkeypatch, fail_at=4)
+    commands = []
+
+    result = sign_recovery_image(
+        image,
+        which=lambda _name: "/usr/bin/sbctl",
+        runner=recording_boot_runner(commands, output=json.dumps({"installed": True})),
+    )
+
+    assert result.ok is False
+    assert result.status == "failed"
+    assert result.message == (
+        "sbctl signed the recovery image, but sbctl failed trust revalidation before "
+        "verification; the signed image is unverified."
+    )
+    assert [command[0] for command in commands] == ["/usr/bin/sbctl", "/usr/bin/sbctl"]
+    assert commands[1][1:] == ["sign", "--save", str(image)]
+    assert result.command == ["/usr/bin/sbctl", "sign", "--save", str(image)]
+
+
+def test_sign_recovery_image_uses_the_trusted_sbctl_path(tmp_path, monkeypatch):
+    image = tmp_path / "recovery.efi"
+    image.write_bytes(b"MZfixture")
+    allow_trusted_boot_tools(monkeypatch)
+    commands = []
+
+    result = sign_recovery_image(
+        image,
+        which=lambda _name: "/usr/bin/sbctl",
+        runner=recording_boot_runner(commands, output=json.dumps({"installed": True})),
+    )
+
+    assert result.ok is True
+    assert result.status == "signed"
+    assert result.message == "Recovery image was signed with the enrolled local owner key."
+    assert [command for command in commands] == [
+        ["/usr/bin/sbctl", "status", "--json"],
+        ["/usr/bin/sbctl", "sign", "--save", str(image)],
+        ["/usr/bin/sbctl", "verify", str(image)],
+    ]
+
+
+def grub_entry_fixture(tmp_path):
+    root = tmp_path / "root"
+    esp = root / "boot"
+    (root / "etc/default").mkdir(parents=True)
+    (root / "usr/bin").mkdir(parents=True)
+    (esp / "EFI/GRUB").mkdir(parents=True)
+    (esp / "grub").mkdir(parents=True)
+    (root / "etc/default/grub").write_text("GRUB_TIMEOUT=5\n", encoding="utf-8")
+    (root / "usr/bin/grub-mkconfig").write_text("fixture\n", encoding="utf-8")
+    (esp / "EFI/GRUB/grubx64.efi").write_bytes(b"MZfixture")
+    (esp / "grub/grub.cfg").write_text("existing menu\n", encoding="utf-8")
+    return root, esp, detect_bootloader(root, esp)
+
+
+def test_grub_entry_first_use_trust_failure_is_unavailable_before_writing(tmp_path, monkeypatch):
+    root, esp, loader = grub_entry_fixture(tmp_path)
+    seam = BootToolSequence(monkeypatch, fail_at=1)
+
+    result = install_bootloader_entry(
+        loader,
+        root=root,
+        esp_path=esp,
+        backup_root=tmp_path / "backup",
+        which=lambda name: "/usr/bin/arch-chroot" if name == "arch-chroot" else None,
+        runner=trapping_boot_runner,
+    )
+
+    assert loader.kind == "grub"
+    assert result.ok is False
+    assert result.status == "unavailable"
+    assert result.message == (
+        "A required recovery host tool could not be validated as a trusted system executable; "
+        "no command was executed."
+    )
+    assert seam.calls == ["arch-chroot"]
+    assert not (root / "etc/grub.d/41_aurascan_recovery").exists()
+    assert (esp / "grub/grub.cfg").read_text(encoding="utf-8") == "existing menu\n"
+
+
+def test_grub_entry_later_trust_failure_restores_script_and_configuration(tmp_path, monkeypatch):
+    root, esp, loader = grub_entry_fixture(tmp_path)
+    script = root / "etc/grub.d/41_aurascan_recovery"
+    script.parent.mkdir(parents=True)
+    script.write_text("existing recovery script\n", encoding="utf-8")
+    seam = BootToolSequence(monkeypatch, fail_at=2)
+    commands = []
+
+    result = install_bootloader_entry(
+        loader,
+        root=root,
+        esp_path=esp,
+        backup_root=tmp_path / "backup",
+        which=lambda name: "/usr/bin/arch-chroot" if name == "arch-chroot" else None,
+        runner=recording_boot_runner(commands),
+    )
+
+    assert result.ok is False
+    assert result.status == "failed"
+    assert result.message == (
+        "The GRUB recovery script was written, but arch-chroot failed trust revalidation; "
+        "the previous script and configuration were restored."
+    )
+    assert result.backup_paths
+    assert seam.calls == ["arch-chroot", "arch-chroot"]
+    assert commands == []
+    assert script.read_text(encoding="utf-8") == "existing recovery script\n"
+    assert (esp / "grub/grub.cfg").read_text(encoding="utf-8") == "existing menu\n"
+
+
+def test_grub_entry_host_generator_uses_the_fixed_grub_mkconfig_path(tmp_path, monkeypatch):
+    fixture_root = tmp_path / "host-root"
+    script = fixture_root / "etc/grub.d/41_aurascan_recovery"
+    output = fixture_root / "boot/grub/grub.cfg"
+    output.parent.mkdir(parents=True)
+    output.write_text("existing menu\n", encoding="utf-8")
+    monkeypatch.setattr(
+        recovery_boot,
+        "rooted",
+        lambda _root, absolute: fixture_root / str(absolute).lstrip("/"),
+    )
+    allow_trusted_boot_tools(monkeypatch)
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        output.write_text("menuentry 'AuraScan Recovery' {}\n", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    loader = BootloaderInfo("grub", "GRUB", str(fixture_root / "etc/default/grub"), True, True, True, [])
+    result = install_bootloader_entry(
+        loader,
+        root=Path("/"),
+        esp_path=fixture_root / "boot",
+        backup_root=tmp_path / "backup",
+        which=lambda name: "/usr/bin/grub-mkconfig" if name == "grub-mkconfig" else None,
+        runner=runner,
+    )
+
+    assert result.ok is True
+    assert result.status == "installed"
+    assert commands == [["/usr/bin/grub-mkconfig", "-o", str(output)]]
+    assert "AuraScan Recovery" in output.read_text(encoding="utf-8")
+    assert script.is_file()
+    assert "AuraScan Recovery" in script.read_text(encoding="utf-8")
 
 
 def test_iso_verification_accepts_matching_local_sidecar_and_rejects_change(tmp_path):

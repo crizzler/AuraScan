@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from aurascan.core.redaction import redact_incident_text
+from aurascan.core.trusted_tools import (
+    HOST_TOOL_FIRST_USE_MESSAGE,
+    TrustedToolError,
+    require_trusted_system_tool,
+)
 from aurascan.core.recovery import (
     CRITICAL_UNIT_PREFIXES,
     RECOVERY_STATE_ROOT,
@@ -46,6 +51,140 @@ RECOVERY_ALLOWED_RECIPES = {
 MAX_BACKUP_FILE_SIZE = 1024 * 1024 * 1024
 MAX_PACKAGE_ARCHIVE_SIZE = 2 * 1024 * 1024 * 1024
 MAX_BOOT_BACKUPS = 100
+SNAPSHOT_ID_RE = re.compile(r"0|[1-9][0-9]{0,18}")
+
+# Finding-driven recovery host-tool messages.  ``HOST_TOOL_FIRST_USE_MESSAGE``
+# (imported from the trust boundary) may only be reported while no runner
+# command and no target-visible mutation has happened in the action; later
+# trust failures use the per-site text below.
+PACMAN_CONF_TRUST_LATER_MESSAGE = (
+    "Package-signature policy queries were interrupted because pacman-conf failed trust "
+    "revalidation; the target policy is not proven."
+)
+FINDMNT_QUERY_TRUST_LATER_MESSAGE = (
+    "Mountpoint queries were interrupted because findmnt failed trust revalidation; "
+    "the target was not modified."
+)
+MOUNT_TRUST_LATER_MESSAGE = (
+    "Mountpoint queries ran, but mount failed trust revalidation; no remount was attempted "
+    "and the target was not modified."
+)
+MOUNT_TRUST_LATER_REMOUNTED_MESSAGE = (
+    "A target mount was remounted writable, but mount failed trust revalidation before a "
+    "later remount; the earlier remount was retained."
+)
+FINDMNT_VERIFY_TRUST_LATER_MESSAGE = (
+    "The target mount was remounted writable, but findmnt failed trust revalidation before "
+    "verification; writability is unproven and the remount was retained."
+)
+STALE_LOCK_TRUST_LATER_RESTORED_MESSAGE = (
+    "The stale pacman lock was removed, but pacman failed trust revalidation before database "
+    "validation; the lock was restored from backup."
+)
+STALE_LOCK_TRUST_LATER_RETAINED_MESSAGE = (
+    "The stale pacman lock was removed, but pacman failed trust revalidation before database "
+    "validation; the lock could not be restored and the backup was retained."
+)
+PACMAN_KEY_TRUST_LATER_MESSAGE = (
+    "Package-signature policy queries ran, but arch-chroot failed trust revalidation before "
+    "keyring verification; no package transaction was executed."
+)
+PACMAN_TRANSACTION_TRUST_LATER_MESSAGE = (
+    "Package-signature preconditions ran, but the transaction command failed trust "
+    "revalidation; no package transaction was executed."
+)
+INITRAMFS_TRUST_LATER_MESSAGE = (
+    "Initramfs images were backed up, but the generator failed trust revalidation; no rebuild "
+    "command was executed and the backups were retained."
+)
+SNAPSHOT_TEST_TRUST_LATER_MESSAGE = (
+    "The one-shot snapshot entry was written, but bootctl failed trust revalidation; "
+    "the entry was removed again."
+)
+SNAPSHOT_RESTORE_TRUST_LATER_MESSAGE = (
+    "Pre-recovery snapshot {created} was created and retained; snapper failed trust "
+    "revalidation and the rollback was not executed."
+)
+EXPORT_LSBLK_TRUST_LATER_MESSAGE = (
+    "The export destination probe was interrupted because lsblk failed trust revalidation; "
+    "the report was not exported."
+)
+# ``_execute_bootloader`` runs a real inspection and takes loader backups before
+# its per-command revalidation, so a failure there is never a first use.  When it
+# happens before command 1 the target files are untouched; say so without
+# claiming any repair progress or inventing backups that were not taken.
+BOOTLOADER_TRUST_BEFORE_COMMAND_BACKED_UP_MESSAGE = (
+    "{name} was revalidated, but arch-chroot failed trust revalidation before the first "
+    "reinstall command; no bootloader file was changed and the backed-up loader files were retained."
+)
+BOOTLOADER_TRUST_BEFORE_COMMAND_NO_BACKUP_MESSAGE = (
+    "{name} was revalidated, but arch-chroot failed trust revalidation before the first "
+    "reinstall command; no bootloader file was changed."
+)
+# A plan can prepare the target (mount queries, a writable remount, recovery
+# state) before an executor makes its own fresh capture.  That later capture
+# can still fail, and it is then not a first use even though the executor
+# itself has not run a command.  ``RepairProgress`` carries that ownership
+# across the plan/preparation/executor boundaries so only a genuinely
+# zero-progress outcome may carry ``HOST_TOOL_FIRST_USE_MESSAGE``.
+PARTIAL_PREPARATION_TRUST_MESSAGE = (
+    "Recovery preparation already ran {commands} command(s) and recorded {mutations} "
+    "target or recovery-state change step(s); a required host tool then failed trust "
+    "revalidation, so this action executed no repair command and nothing was rolled back."
+)
+
+
+class RepairProgress:
+    """Ordered ownership of side effects for one recovery plan."""
+
+    def __init__(self) -> None:
+        self.commands = 0
+        self.remounts = 0
+        self.state_created = False
+
+    def command(self) -> None:
+        self.commands += 1
+
+    def remount(self) -> None:
+        self.remounts += 1
+
+    def created_state(self) -> None:
+        self.state_created = True
+
+    @property
+    def mutations(self) -> int:
+        return self.remounts + (1 if self.state_created else 0)
+
+    @property
+    def advanced(self) -> bool:
+        return bool(self.commands or self.mutations)
+
+
+def _validated_snapshot_id(value: object) -> str:
+    """Return the canonical snapshot id, or ``""`` when the value is not one.
+
+    Total contract (never raises, never converts untrusted objects):
+
+    - Only exact builtin ``str`` and ``int`` values are accepted
+      (``type(value) is str`` / ``type(value) is int``).  ``bool`` is refused
+      (``type(True) is bool`` never reaches the int branch), as are all
+      subclasses and all other types, without running ``__str__``,
+      ``__repr__``, or any other conversion hook.
+    - ``int`` inputs must satisfy ``0 <= value < 10**19``; the bound is checked
+      before any stringification, so no int-to-str conversion limit can raise.
+    - ``str`` inputs must match :data:`SNAPSHOT_ID_RE` exactly (``fullmatch``):
+      ``"0"`` or a 1-19 digit ASCII decimal without leading zeros.
+    - Zero behaves consistently: ``0`` and ``"0"`` both return ``"0"``.
+    - Every other input returns ``""``; the caller refuses.
+    """
+
+    if type(value) is int:
+        if value < 0 or value >= 10 ** 19:
+            return ""
+        return str(value)
+    if type(value) is str:
+        return value if SNAPSHOT_ID_RE.fullmatch(value) else ""
+    return ""
 
 
 def _within(path: Path, root: Path) -> bool:
@@ -274,6 +413,60 @@ def _restore_backup_records(
     return restored
 
 
+def _retained_backup_records(
+    records: Sequence[Mapping[str, object]],
+    *,
+    backup_root: Path,
+) -> bool:
+    """True only when every record still names a stable, verified backup file.
+
+    ``_restore_backup_records`` returning ``False`` only says that writing the
+    destination failed; it does not prove that usable backup bytes remain.
+    Availability messages and ``rollback_available`` must be derived from the
+    backup bytes re-read and re-hashed now, never from a stale manifest record.
+    """
+
+    if not records:
+        return False
+    for record in records:
+        backup = Path(str(record.get("backup") or ""))
+        expected = str(record.get("sha256") or "")
+        try:
+            metadata = backup.lstat()
+            size = int(str(record.get("size", -1)))
+        except (OSError, TypeError, ValueError):
+            return False
+        if (
+            not expected
+            or not _within(backup, backup_root)
+            or backup.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size != size
+            or _sha256_file(backup) != expected
+        ):
+            return False
+    return True
+
+
+def _loader_backup_outcome(
+    records: Sequence[Mapping[str, object]],
+    *,
+    backup_root: Path,
+    restored: bool,
+) -> Tuple[str, bool, str]:
+    """Truthful restore suffix, rollback availability and backup path."""
+
+    if restored:
+        return "backed-up loader files were restored.", True, str(backup_root)
+    if _retained_backup_records(records, backup_root=backup_root):
+        return (
+            "the destination restore failed, but the backed-up loader bytes were verified and retained.",
+            True,
+            str(backup_root),
+        )
+    return "no verified loader backup remains, so a rollback is not available.", False, ""
+
+
 def _run(
     runner: Callable,
     command: Sequence[str],
@@ -291,7 +484,11 @@ def _run(
 
 
 def _package_manager_running(runner: Callable) -> bool:
-    code, output = _run(runner, ["ps", "-eo", "comm="], timeout=15)
+    try:
+        ps = require_trusted_system_tool("ps")
+    except TrustedToolError:
+        return True
+    code, output = _run(runner, [ps.path, "-eo", "comm="], timeout=15)
     if code != 0:
         return True
     package_managers = {"pacman", "paru", "yay", "shelly", "pamac", "packagekitd", "makepkg"}
@@ -307,62 +504,123 @@ def _signature_policy_is_strict(output: str) -> bool:
 
 
 def _pacman_transaction_preconditions(root: Path, runner: Callable) -> Tuple[bool, str]:
-    base = ["pacman-conf", f"--sysroot={root}"]
-    code, global_policy = _run(runner, [*base, "SigLevel"], timeout=30)
-    if code != 0 or not _signature_policy_is_strict(global_policy):
-        return False, "The target does not prove a required, trusted package-signature policy."
-    code, repo_output = _run(runner, [*base, "--repo-list"], timeout=30)
-    repositories = [line.strip() for line in repo_output.splitlines() if SAFE_NAME_RE.fullmatch(line.strip())]
-    if code != 0 or not repositories or len(repositories) > 50:
-        return False, "Configured target repositories could not be bounded and validated."
-    for repository in repositories:
-        code, servers = _run(runner, [*base, f"--repo={repository}", "Server"], timeout=30)
-        if code != 0 or not any(line.strip() for line in servers.splitlines()):
-            return False, f"Repository {repository} has no validated package server."
-        code, override = _run(runner, [*base, f"--repo={repository}", "SigLevel"], timeout=30)
-        if code != 0:
-            return False, f"Repository {repository} signature policy could not be queried."
-        if override.strip() and not _signature_policy_is_strict(override):
-            return False, f"Repository {repository} overrides the required trusted-signature policy."
+    base = [f"--sysroot={root}"]
+
+    def query(*arguments: str, timeout: int = 30) -> Tuple[int, str]:
+        tool = require_trusted_system_tool("pacman-conf")
+        return _run(runner, [tool.path, *base, *arguments], timeout=timeout)
+
+    try:
+        require_trusted_system_tool("pacman-conf")
+    except TrustedToolError:
+        return False, HOST_TOOL_FIRST_USE_MESSAGE
+    completed_queries = 0
+    try:
+        code, global_policy = query("SigLevel")
+        completed_queries += 1
+        if code != 0 or not _signature_policy_is_strict(global_policy):
+            return False, "The target does not prove a required, trusted package-signature policy."
+        code, repo_output = query("--repo-list")
+        completed_queries += 1
+        repositories = [line.strip() for line in repo_output.splitlines() if SAFE_NAME_RE.fullmatch(line.strip())]
+        if code != 0 or not repositories or len(repositories) > 50:
+            return False, "Configured target repositories could not be bounded and validated."
+        for repository in repositories:
+            code, servers = query(f"--repo={repository}", "Server")
+            completed_queries += 1
+            if code != 0 or not any(line.strip() for line in servers.splitlines()):
+                return False, f"Repository {repository} has no validated package server."
+            code, override = query(f"--repo={repository}", "SigLevel")
+            completed_queries += 1
+            if code != 0:
+                return False, f"Repository {repository} signature policy could not be queried."
+            if override.strip() and not _signature_policy_is_strict(override):
+                return False, f"Repository {repository} overrides the required trusted-signature policy."
+    except TrustedToolError:
+        # A capture failure before the first query completes is still a first
+        # use: no command has run and nothing was changed.
+        if completed_queries == 0:
+            return False, HOST_TOOL_FIRST_USE_MESSAGE
+        return False, PACMAN_CONF_TRUST_LATER_MESSAGE
     return True, "Target package signatures and repositories passed validation."
 
 
-def _prepare_write_target(report: RecoveryReport, runner: Callable) -> Tuple[bool, str]:
+def _prepare_write_target(
+    report: RecoveryReport,
+    runner: Callable,
+    *,
+    required_tools: Sequence[str] = (),
+    progress: Optional[RepairProgress] = None,
+) -> Tuple[bool, str]:
     root = Path(report.target.root_path)
     if root == Path("/"):
         return False, "AuraScan refuses recovery repair against the running recovery environment itself."
     if os.geteuid() != 0:
         return False, "Recovery repairs require root privileges."
+    # Caller-owned actions must be preflighted before the first preparation
+    # mutation (remount or recovery-state creation) so that a first-use refusal
+    # in the executor can never be reported after progress.
+    if required_tools:
+        try:
+            for name in required_tools:
+                require_trusted_system_tool(name)
+        except TrustedToolError:
+            return False, HOST_TOOL_FIRST_USE_MESSAGE
     if report.target.mounted_read_only:
         requested_paths = [root]
         esp = Path(report.target.esp_path)
         if esp != root and _within(esp, root):
             requested_paths.append(esp)
+        try:
+            require_trusted_system_tool("findmnt")
+            require_trusted_system_tool("mount")
+        except TrustedToolError:
+            return False, HOST_TOOL_FIRST_USE_MESSAGE
         mountpoints: Dict[str, Tuple[Path, set]] = {}
-        for requested in requested_paths:
-            code, output = _run(
-                runner,
-                ["findmnt", "--noheadings", "--output", "TARGET,OPTIONS", "--target", str(requested)],
-                timeout=15,
-                redact=False,
-            )
-            fields = output.splitlines()[0].split(None, 1) if code == 0 and output.splitlines() else []
-            if len(fields) != 2:
-                return False, f"The mountpoint containing {requested} could not be proven."
-            mountpoint = Path(fields[0]).resolve(strict=False)
-            options = {item.strip() for item in fields[1].split(",") if item.strip()}
-            if mountpoint == Path("/") or not _within(requested, mountpoint):
-                return False, f"The mountpoint containing {requested} failed path validation."
-            mountpoints[str(mountpoint)] = (mountpoint, options)
+        completed_queries = 0
+        try:
+            for requested in requested_paths:
+                findmnt = require_trusted_system_tool("findmnt")
+                code, output = _run(
+                    runner,
+                    [findmnt.path, "--noheadings", "--output", "TARGET,OPTIONS", "--target", str(requested)],
+                    timeout=15,
+                    redact=False,
+                )
+                completed_queries += 1
+                fields = output.splitlines()[0].split(None, 1) if code == 0 and output.splitlines() else []
+                if len(fields) != 2:
+                    return False, f"The mountpoint containing {requested} could not be proven."
+                mountpoint = Path(fields[0]).resolve(strict=False)
+                options = {item.strip() for item in fields[1].split(",") if item.strip()}
+                if mountpoint == Path("/") or not _within(requested, mountpoint):
+                    return False, f"The mountpoint containing {requested} failed path validation."
+                mountpoints[str(mountpoint)] = (mountpoint, options)
+        except TrustedToolError:
+            if completed_queries == 0:
+                return False, HOST_TOOL_FIRST_USE_MESSAGE
+            return False, FINDMNT_QUERY_TRUST_LATER_MESSAGE
+        remounted = 0
         for mountpoint, options in mountpoints.values():
             if "rw" in options and "ro" not in options:
                 continue
-            code, output = _run(runner, ["mount", "-o", "remount,rw", str(mountpoint)], timeout=60)
+            try:
+                mount = require_trusted_system_tool("mount")
+            except TrustedToolError:
+                return False, MOUNT_TRUST_LATER_REMOUNTED_MESSAGE if remounted else MOUNT_TRUST_LATER_MESSAGE
+            code, output = _run(runner, [mount.path, "-o", "remount,rw", str(mountpoint)], timeout=60)
             if code != 0:
                 return False, f"The target mount {mountpoint} could not be remounted writable: " + output[:500]
+            remounted += 1
+            if progress is not None:
+                progress.remount()
+            try:
+                findmnt = require_trusted_system_tool("findmnt")
+            except TrustedToolError:
+                return False, FINDMNT_VERIFY_TRUST_LATER_MESSAGE
             code, verify = _run(
                 runner,
-                ["findmnt", "--noheadings", "--output", "OPTIONS", "--target", str(mountpoint)],
+                [findmnt.path, "--noheadings", "--output", "OPTIONS", "--target", str(mountpoint)],
                 timeout=15,
                 redact=False,
             )
@@ -378,9 +636,13 @@ def _unit_still_failed(root: Path, unit: str, runner: Callable) -> bool:
     journal_root = root / "var/log/journal"
     if not journal_root.is_dir() or journal_root.is_symlink():
         return False
+    try:
+        journalctl = require_trusted_system_tool("journalctl")
+    except TrustedToolError:
+        return False
     code, output = _run(
         runner,
-        ["journalctl", f"--directory={journal_root}", "--boot=0", "--priority=0..3", "--no-pager", "--lines=2000", "_COMM=systemd", "_PID=1"],
+        [journalctl.path, f"--directory={journal_root}", "--boot=0", "--priority=0..3", "--no-pager", "--lines=2000", "_COMM=systemd", "_PID=1"],
         timeout=45,
     )
     if code not in {0, 1}:
@@ -419,6 +681,10 @@ def _fresh_action(report: RecoveryReport, action: RecoveryAction, runner: Callab
             Path(target.root_path) / "usr/lib/systemd/system" / unit,
             Path(target.root_path) / "etc/systemd/system" / unit,
         ]
+        try:
+            require_trusted_system_tool("journalctl")
+        except TrustedToolError:
+            return None
         if (
             SAFE_UNIT_RE.fullmatch(unit)
             and not unit.startswith(CRITICAL_UNIT_PREFIXES)
@@ -433,8 +699,18 @@ def _fresh_action(report: RecoveryReport, action: RecoveryAction, runner: Callab
         cache = Path(target.root_path) / "var/cache/pacman/pkg"
         signature = Path(str(archive) + ".sig")
         expected_digest = str(action.parameters.get("archive_sha256") or "")
-        foreign_code, _foreign = _run(runner, ["arch-chroot", target.root_path, "pacman", "-Qm", package], timeout=30)
-        integrity_code, integrity = _run(runner, ["arch-chroot", target.root_path, "pacman", "-Qkk", package], timeout=120)
+        if not _trusted_target_binary(rooted(Path(target.root_path), Path("/usr/bin/pacman")), Path(target.root_path)):
+            return None
+        try:
+            arch_chroot = require_trusted_system_tool("arch-chroot")
+        except TrustedToolError:
+            return None
+        foreign_code, _foreign = _run(runner, [arch_chroot.path, target.root_path, "pacman", "-Qm", package], timeout=30)
+        try:
+            arch_chroot = require_trusted_system_tool("arch-chroot")
+        except TrustedToolError:
+            return None
+        integrity_code, integrity = _run(runner, [arch_chroot.path, target.root_path, "pacman", "-Qkk", package], timeout=120)
         if (
             SAFE_NAME_RE.fullmatch(package)
             and target.installed_packages.get(package) == version
@@ -530,6 +806,11 @@ def _execute_stale_lock(
     root = Path(report.target.root_path)
     if not _within(lock, root / "var/lib/pacman") or lock.name != "db.lck" or lock.is_symlink():
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "Pacman lock path validation failed.")
+    try:
+        require_trusted_system_tool("ps")
+        require_trusted_system_tool("pacman")
+    except TrustedToolError:
+        return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", HOST_TOOL_FIRST_USE_MESSAGE)
     if _package_manager_running(runner):
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "A package manager is running in the recovery environment.")
     try:
@@ -543,7 +824,31 @@ def _execute_stale_lock(
         return RecoveryRepairResult(action.action_id, action.recipe_id, "failed", "The pacman lock could not be backed up.")
     lock.unlink()
     dbpath = root / "var/lib/pacman"
-    code, output = _run(runner, ["pacman", "--root", str(root), "--dbpath", str(dbpath), "-Dk"], timeout=60)
+    try:
+        pacman = require_trusted_system_tool("pacman")
+    except TrustedToolError:
+        try:
+            shutil.copy2(backup, lock)
+        except OSError:
+            return RecoveryRepairResult(
+                action.action_id,
+                action.recipe_id,
+                "failed",
+                STALE_LOCK_TRUST_LATER_RETAINED_MESSAGE,
+                False,
+                str(backup),
+                True,
+            )
+        return RecoveryRepairResult(
+            action.action_id,
+            action.recipe_id,
+            "rolled_back",
+            STALE_LOCK_TRUST_LATER_RESTORED_MESSAGE,
+            False,
+            str(backup),
+            False,
+        )
+    code, output = _run(runner, [pacman.path, "--root", str(root), "--dbpath", str(dbpath), "-Dk"], timeout=60)
     if code != 0:
         shutil.copy2(backup, lock)
         return RecoveryRepairResult(action.action_id, action.recipe_id, "rolled_back", "Package database validation failed; the lock was restored.", False, str(backup), False, output)
@@ -555,12 +860,21 @@ def _execute_cache_cleanup(report: RecoveryReport, action: RecoveryAction, runne
     root = Path(report.target.root_path)
     if not _within(cache, root / "var/cache/pacman") or cache.name != "pkg":
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "Package cache path validation failed.")
-    code, output = _run(runner, ["paccache", "-r", "-k", "2", "-c", str(cache)], timeout=300)
+    try:
+        paccache = require_trusted_system_tool("paccache")
+    except TrustedToolError:
+        return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", HOST_TOOL_FIRST_USE_MESSAGE)
+    code, output = _run(runner, [paccache.path, "-r", "-k", "2", "-c", str(cache)], timeout=300)
     return RecoveryRepairResult(action.action_id, action.recipe_id, "applied" if code == 0 else "failed", "Bounded package-cache cleanup completed." if code == 0 else "Package-cache cleanup failed.", code == 0, output_excerpt=output)
 
 
 def _execute_pacman_action(report: RecoveryReport, action: RecoveryAction, runner: Callable) -> RecoveryRepairResult:
     root = Path(report.target.root_path)
+    try:
+        require_trusted_system_tool("pacman-conf")
+        require_trusted_system_tool("arch-chroot")
+    except TrustedToolError:
+        return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", HOST_TOOL_FIRST_USE_MESSAGE)
     ready, reason = _pacman_transaction_preconditions(root, runner)
     if not ready:
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", reason)
@@ -603,9 +917,13 @@ def _execute_pacman_action(report: RecoveryReport, action: RecoveryAction, runne
                 "refused",
                 "The target keyring helper is not a root-owned non-symlink executable; refusing to execute it as recovery root.",
             )
+        try:
+            arch_chroot = require_trusted_system_tool("arch-chroot")
+        except TrustedToolError:
+            return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", PACMAN_KEY_TRUST_LATER_MESSAGE)
         verify_code, verify_output = _run(
             runner,
-            ["arch-chroot", str(root), "pacman-key", "--verify", target_signature, target_archive],
+            [arch_chroot.path, str(root), "pacman-key", "--verify", target_signature, target_archive],
             timeout=60,
         )
         if verify_code != 0:
@@ -613,7 +931,11 @@ def _execute_pacman_action(report: RecoveryReport, action: RecoveryAction, runne
         command = ["arch-chroot", str(root), "pacman", "-U", "--noconfirm", target_archive]
     else:
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "Unsupported package repair recipe.")
-    code, output = _run(runner, command, timeout=1800)
+    try:
+        arch_chroot = require_trusted_system_tool("arch-chroot")
+    except TrustedToolError:
+        return RecoveryRepairResult(action.action_id, action.recipe_id, "failed", PACMAN_TRANSACTION_TRUST_LATER_MESSAGE)
+    code, output = _run(runner, [arch_chroot.path, *command[1:]], timeout=1800)
     return RecoveryRepairResult(action.action_id, action.recipe_id, "applied" if code == 0 else "failed", "Package recovery transaction completed." if code == 0 else "Package recovery transaction failed.", code == 0, output_excerpt=output)
 
 
@@ -628,6 +950,10 @@ def _execute_initramfs(
     generator = str(action.parameters.get("generator") or "")
     if generator not in {"mkinitcpio", "dracut"} or not _trusted_target_binary(rooted(root, Path(f"/usr/bin/{generator}")), root):
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "Installed initramfs generator validation failed.")
+    try:
+        require_trusted_system_tool("arch-chroot")
+    except TrustedToolError:
+        return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", HOST_TOOL_FIRST_USE_MESSAGE)
     boot = rooted(root, Path("/boot"))
     try:
         if shutil.disk_usage(boot).free < 256 * 1024 * 1024:
@@ -645,7 +971,23 @@ def _execute_initramfs(
         if _backup_file(image, backup_root, backups) is None:
             return RecoveryRepairResult(action.action_id, action.recipe_id, "failed", f"Could not back up {image.name}.")
     command = ["arch-chroot", str(root), "mkinitcpio", "-P"] if generator == "mkinitcpio" else ["arch-chroot", str(root), "dracut", "--regenerate-all", "--force"]
-    code, output = _run(runner, command, timeout=900)
+    try:
+        arch_chroot = require_trusted_system_tool("arch-chroot")
+    except TrustedToolError:
+        if not backups[backup_start:]:
+            # No image existed to back up and no command ran: this is still a
+            # truthful first-use refusal, not a retained-backup failure.
+            return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", HOST_TOOL_FIRST_USE_MESSAGE)
+        return RecoveryRepairResult(
+            action.action_id,
+            action.recipe_id,
+            "failed",
+            INITRAMFS_TRUST_LATER_MESSAGE,
+            False,
+            str(backup_root),
+            True,
+        )
+    code, output = _run(runner, [arch_chroot.path, *command[1:]], timeout=900)
     if code != 0:
         cleanup_ok = True
         for path in list(boot.glob("initramfs*.img"))[:MAX_BOOT_BACKUPS * 2]:
@@ -671,8 +1013,11 @@ def _execute_initramfs(
 
 def _execute_config_drift(report: RecoveryReport, action: RecoveryAction, runner: Callable) -> RecoveryRepairResult:
     root = Path(report.target.root_path)
-    executable = shutil.which("aurascan") or "/usr/bin/aurascan"
-    code, output = _run(runner, [executable, "config-drift", "--root", str(root), "--yes", "--no-ai"], timeout=600)
+    try:
+        aurascan = require_trusted_system_tool("aurascan")
+    except TrustedToolError:
+        return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", HOST_TOOL_FIRST_USE_MESSAGE)
+    code, output = _run(runner, [aurascan.path, "config-drift", "--root", str(root), "--yes", "--no-ai"], timeout=600)
     return RecoveryRepairResult(action.action_id, action.recipe_id, "applied" if code == 0 else "failed", "Boot-critical config drift assistant completed." if code == 0 else "Boot-critical config drift assistant did not complete.", code == 0, output_excerpt=output)
 
 
@@ -681,7 +1026,11 @@ def _execute_dkms(report: RecoveryReport, action: RecoveryAction, runner: Callab
     headers = list((root / "usr/lib/modules").glob("*/build"))
     if not headers or not _trusted_target_binary(rooted(root, Path("/usr/bin/dkms")), root):
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "DKMS or matching kernel headers are unavailable.")
-    code, output = _run(runner, ["arch-chroot", str(root), "dkms", "autoinstall"], timeout=1200)
+    try:
+        arch_chroot = require_trusted_system_tool("arch-chroot")
+    except TrustedToolError:
+        return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", HOST_TOOL_FIRST_USE_MESSAGE)
+    code, output = _run(runner, [arch_chroot.path, str(root), "dkms", "autoinstall"], timeout=1200)
     return RecoveryRepairResult(action.action_id, action.recipe_id, "applied" if code == 0 else "failed", "DKMS modules were rebuilt." if code == 0 else "DKMS autoinstall failed.", code == 0, output_excerpt=output)
 
 
@@ -690,14 +1039,18 @@ def _execute_disable_service(report: RecoveryReport, action: RecoveryAction, run
     unit = str(action.parameters.get("unit") or "")
     if not SAFE_UNIT_RE.fullmatch(unit) or unit.startswith(CRITICAL_UNIT_PREFIXES):
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "Service is invalid or belongs to the critical denylist.")
-    code, output = _run(runner, ["systemctl", f"--root={root}", "disable", unit], timeout=60)
+    try:
+        systemctl = require_trusted_system_tool("systemctl")
+    except TrustedToolError:
+        return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", HOST_TOOL_FIRST_USE_MESSAGE)
+    code, output = _run(runner, [systemctl.path, f"--root={root}", "disable", unit], timeout=60)
     return RecoveryRepairResult(action.action_id, action.recipe_id, "applied" if code == 0 else "failed", f"Disabled proven noncritical boot-blocking service {unit}." if code == 0 else "Service disable failed.", code == 0, output_excerpt=output)
 
 
 def _execute_snapshot_test(report: RecoveryReport, action: RecoveryAction, runner: Callable) -> RecoveryRepairResult:
     root = Path(report.target.root_path)
-    snapshot_id = str(action.parameters.get("snapshot_id") or "")
-    if not snapshot_id.isdigit() or not (root / f".snapshots/{snapshot_id}/snapshot").is_dir():
+    snapshot_id = _validated_snapshot_id(action.parameters.get("snapshot_id"))
+    if not snapshot_id or not (root / f".snapshots/{snapshot_id}/snapshot").is_dir():
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "Snapshot validation failed.")
     if report.target.bootloader.kind != "systemd-boot":
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "Automatic one-shot snapshot boot is currently available only for positively detected systemd-boot targets.")
@@ -722,6 +1075,10 @@ def _execute_snapshot_test(report: RecoveryReport, action: RecoveryAction, runne
     new_text = re.sub(r"(?m)^title\s+.*$", f"title AuraScan Snapshot {snapshot_id} (one shot)", text, count=1)
     new_text = re.sub(r"(?m)^options\s+.*$", f"options {current} rootflags=subvol=/.snapshots/{snapshot_id}/snapshot", new_text, count=1)
     target = entries / f"aurascan-snapshot-{snapshot_id}.conf"
+    try:
+        require_trusted_system_tool("bootctl")
+    except TrustedToolError:
+        return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", HOST_TOOL_FIRST_USE_MESSAGE)
     fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=str(entries), text=True)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -733,7 +1090,12 @@ def _execute_snapshot_test(report: RecoveryReport, action: RecoveryAction, runne
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-    code, output = _run(runner, ["bootctl", f"--root={root}", f"--esp-path={target_esp}", "set-oneshot", target.stem], timeout=30)
+    try:
+        bootctl = require_trusted_system_tool("bootctl")
+    except TrustedToolError:
+        target.unlink(missing_ok=True)
+        return RecoveryRepairResult(action.action_id, action.recipe_id, "failed", SNAPSHOT_TEST_TRUST_LATER_MESSAGE)
+    code, output = _run(runner, [bootctl.path, f"--root={root}", f"--esp-path={target_esp}", "set-oneshot", target.stem], timeout=30)
     if code != 0:
         target.unlink(missing_ok=True)
         return RecoveryRepairResult(action.action_id, action.recipe_id, "failed", "systemd-boot rejected the one-shot snapshot entry.", output_excerpt=output)
@@ -746,10 +1108,16 @@ def _execute_snapshot_restore(
     runner: Callable,
 ) -> RecoveryRepairResult:
     root = Path(report.target.root_path)
-    snapshot_id = str(action.parameters.get("snapshot_id") or "")
+    snapshot_id = _validated_snapshot_id(action.parameters.get("snapshot_id"))
+    if not snapshot_id:
+        return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "Snapshot restore prerequisites changed.")
     snapshot = root / f".snapshots/{snapshot_id}/snapshot"
     if report.target.filesystem != "btrfs" or not snapshot.is_dir() or not _trusted_target_binary(rooted(root, Path("/usr/bin/snapper")), root):
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "Snapshot restore prerequisites changed.")
+    try:
+        require_trusted_system_tool("arch-chroot")
+    except TrustedToolError:
+        return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", HOST_TOOL_FIRST_USE_MESSAGE)
     snapshot_root = root / ".snapshots"
     try:
         existing_ids = {
@@ -760,7 +1128,11 @@ def _execute_snapshot_restore(
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "Existing snapshot state could not be bounded before restore.")
     label = f"AuraScan pre-recovery {report.recovery_id}"
     create = ["arch-chroot", str(root), "snapper", "create", "--print-number", "--type", "single", "--description", label]
-    code, output = _run(runner, create, timeout=180)
+    try:
+        arch_chroot = require_trusted_system_tool("arch-chroot")
+    except TrustedToolError:
+        return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", HOST_TOOL_FIRST_USE_MESSAGE)
+    code, output = _run(runner, [arch_chroot.path, *create[1:]], timeout=180)
     if code != 0:
         return RecoveryRepairResult(action.action_id, action.recipe_id, "failed", "Pre-recovery snapshot creation failed; restore was not attempted.", output_excerpt=output)
     created = next((token for token in reversed(re.findall(r"\b\d+\b", output)) if token.isdigit()), "")
@@ -768,7 +1140,19 @@ def _execute_snapshot_restore(
     if not created or created in existing_ids or not created_path.is_dir() or created_path.is_symlink():
         return RecoveryRepairResult(action.action_id, action.recipe_id, "failed", "Pre-recovery snapshot could not be validated; restore was not attempted.", output_excerpt=output)
     command = ["arch-chroot", str(root), "snapper", "rollback", snapshot_id]
-    code, restore_output = _run(runner, command, timeout=900)
+    try:
+        arch_chroot = require_trusted_system_tool("arch-chroot")
+    except TrustedToolError:
+        return RecoveryRepairResult(
+            action.action_id,
+            action.recipe_id,
+            "failed",
+            SNAPSHOT_RESTORE_TRUST_LATER_MESSAGE.format(created=created),
+            False,
+            str(created_path),
+            True,
+        )
+    code, restore_output = _run(runner, [arch_chroot.path, *command[1:]], timeout=900)
     message = f"Snapshot {snapshot_id} was restored after validating pre-recovery snapshot {created}." if code == 0 else f"Snapshot rollback failed; pre-recovery snapshot {created} was retained."
     return RecoveryRepairResult(action.action_id, action.recipe_id, "applied" if code == 0 else "failed", message, code == 0, str(created_path), True, restore_output)
 
@@ -782,8 +1166,18 @@ def _execute_bootloader(
 ) -> RecoveryRepairResult:
     root = Path(report.target.root_path)
     esp = Path(report.target.esp_path)
-    info = inspect_recovery_target(root, runner=runner).bootloader
     expected = str(action.parameters.get("bootloader") or "")
+    # The reinstall recipe for Limine and GRUB executes through the host
+    # ``arch-chroot``.  Preflight it before the inspection below runs a
+    # command, so a first-use refusal really has zero commands and zero
+    # target mutations.  The systemd-boot recipe uses ``bootctl`` and is
+    # refused by the unchanged tool gate instead.
+    if expected in {"limine", "grub"}:
+        try:
+            require_trusted_system_tool("arch-chroot")
+        except TrustedToolError:
+            return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", HOST_TOOL_FIRST_USE_MESSAGE)
+    info = inspect_recovery_target(root, runner=runner).bootloader
     if not info.installed or info.kind != expected or not info.supports_reinstall:
         return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "The exact bootloader could not be freshly revalidated.")
     raw_paths = [Path(item) for item in [info.config_path, *info.evidence[:20]] if item]
@@ -809,8 +1203,48 @@ def _execute_bootloader(
             "A bootloader reinstall tool is not a root-owned non-symlink executable; refusing to execute it as recovery root.",
         )
     outputs = []
-    for command in commands:
-        code, output = _run(runner, command, timeout=900)
+    for index, command in enumerate(commands):
+        try:
+            arch_chroot = require_trusted_system_tool("arch-chroot")
+        except TrustedToolError:
+            action_backups = backups[backup_start:]
+            if index == 0:
+                # The inspection above already ran a command, so this is not a
+                # first use; no reinstall command ran and the target files are
+                # untouched.  Only claim retained backups when the recorded
+                # backup bytes are still present and verified now.
+                retained = _retained_backup_records(action_backups, backup_root=backup_root)
+                message = (
+                    BOOTLOADER_TRUST_BEFORE_COMMAND_BACKED_UP_MESSAGE.format(name=info.name)
+                    if retained
+                    else BOOTLOADER_TRUST_BEFORE_COMMAND_NO_BACKUP_MESSAGE.format(name=info.name)
+                )
+                return RecoveryRepairResult(
+                    action.action_id,
+                    action.recipe_id,
+                    "failed",
+                    message,
+                    False,
+                    str(backup_root) if retained else "",
+                    retained,
+                )
+            restored = _restore_backup_records(
+                backups[backup_start:],
+                backup_root=backup_root,
+                allowed_roots=[root, esp],
+            )
+            status = "rolled_back" if restored else "failed"
+            suffix, rollback_available, backup_path = _loader_backup_outcome(
+                backups[backup_start:],
+                backup_root=backup_root,
+                restored=restored,
+            )
+            message = (
+                f"{info.name} reinstall commands 1..{index} ran; command {index + 1} failed trust "
+                "revalidation and the remaining commands were not executed; " + suffix
+            )
+            return RecoveryRepairResult(action.action_id, action.recipe_id, status, message, False, backup_path, rollback_available, "\n".join(outputs))
+        code, output = _run(runner, [arch_chroot.path, *command[1:]], timeout=900)
         outputs.append(output)
         if code != 0:
             restored = _restore_backup_records(
@@ -819,8 +1253,12 @@ def _execute_bootloader(
                 allowed_roots=[root, esp],
             )
             status = "rolled_back" if restored else "failed"
-            message = f"{info.name} reinstall failed; backed-up loader files were restored." if restored else f"{info.name} reinstall failed and its backups were retained."
-            return RecoveryRepairResult(action.action_id, action.recipe_id, status, message, False, str(backup_root), bool(backups), "\n".join(outputs))
+            suffix, rollback_available, backup_path = _loader_backup_outcome(
+                backups[backup_start:],
+                backup_root=backup_root,
+                restored=restored,
+            )
+            return RecoveryRepairResult(action.action_id, action.recipe_id, status, f"{info.name} reinstall failed; {suffix}", False, backup_path, rollback_available, "\n".join(outputs))
     refreshed = inspect_recovery_target(root, runner=runner).bootloader
     config = Path(refreshed.config_path) if refreshed.config_path else Path("")
     config_valid = bool(
@@ -838,9 +1276,52 @@ def _execute_bootloader(
             allowed_roots=[root, esp],
         )
         status = "rolled_back" if restored else "failed"
-        message = "Bootloader commands completed but post-validation failed; backed-up loader files were restored." if restored else "Bootloader commands completed but post-validation failed."
-        return RecoveryRepairResult(action.action_id, action.recipe_id, status, message, False, str(backup_root), bool(backups), "\n".join(outputs))
+        suffix, rollback_available, backup_path = _loader_backup_outcome(
+            backups[backup_start:],
+            backup_root=backup_root,
+            restored=restored,
+        )
+        return RecoveryRepairResult(
+            action.action_id,
+            action.recipe_id,
+            status,
+            f"Bootloader commands completed but post-validation failed; {suffix}",
+            False,
+            backup_path,
+            rollback_available,
+            "\n".join(outputs),
+        )
     return RecoveryRepairResult(action.action_id, action.recipe_id, "applied", f"{info.name} was reinstalled without changing firmware variables and detected again.", True, str(backup_root), bool(backups), "\n".join(outputs))
+
+
+def _truthful_first_use_result(
+    result: RecoveryRepairResult,
+    progress: Optional[RepairProgress],
+) -> RecoveryRepairResult:
+    """Never keep first-use wording once the plan has made progress.
+
+    ``HOST_TOOL_FIRST_USE_MESSAGE`` asserts that no command ran and nothing
+    changed.  A later fresh capture inside an executor can still fail after
+    the caller prepared the target, so the shared tracker decides whether that
+    claim is true; if it is not, the result becomes a partial-preparation
+    failure with an explicit, non-first-use message.
+    """
+
+    if progress is None or result.message != HOST_TOOL_FIRST_USE_MESSAGE or not progress.advanced:
+        return result
+    return RecoveryRepairResult(
+        result.action_id,
+        result.recipe_id,
+        "failed",
+        PARTIAL_PREPARATION_TRUST_MESSAGE.format(
+            commands=progress.commands,
+            mutations=progress.mutations,
+        ),
+        False,
+        result.backup_path,
+        result.rollback_available,
+        result.output_excerpt,
+    )
 
 
 def execute_recovery_action(
@@ -850,32 +1331,78 @@ def execute_recovery_action(
     backup_root: Path,
     backups: List[Dict[str, object]],
     runner: Callable = subprocess.run,
+    progress: Optional[RepairProgress] = None,
 ) -> RecoveryRepairResult:
     if action.recipe_id not in RECOVERY_ALLOWED_RECIPES:
-        return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "Repair recipe is not allowlisted.")
-    if action.recipe_id == "repository_restore":
-        return _execute_repository_restore(report, action, backup_root, backups)
-    if action.recipe_id == "stale_pacman_lock":
-        return _execute_stale_lock(report, action, backup_root, backups, runner)
-    if action.recipe_id == "package_cache_cleanup":
-        return _execute_cache_cleanup(report, action, runner)
-    if action.recipe_id in {"complete_pacman_transaction", "kernel_module_restore", "kernel_headers_install", "exact_package_reinstall"}:
-        return _execute_pacman_action(report, action, runner)
-    if action.recipe_id == "boot_config_drift":
-        return _execute_config_drift(report, action, runner)
-    if action.recipe_id == "initramfs_rebuild":
-        return _execute_initramfs(report, action, backup_root, backups, runner)
-    if action.recipe_id == "dkms_autoinstall":
-        return _execute_dkms(report, action, runner)
-    if action.recipe_id == "disable_boot_service":
-        return _execute_disable_service(report, action, runner)
-    if action.recipe_id == "snapshot_test_boot":
-        return _execute_snapshot_test(report, action, runner)
-    if action.recipe_id == "snapshot_restore":
-        return _execute_snapshot_restore(report, action, runner)
+        result = RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "Repair recipe is not allowlisted.")
+    elif action.recipe_id == "repository_restore":
+        result = _execute_repository_restore(report, action, backup_root, backups)
+    elif action.recipe_id == "stale_pacman_lock":
+        result = _execute_stale_lock(report, action, backup_root, backups, runner)
+    elif action.recipe_id == "package_cache_cleanup":
+        result = _execute_cache_cleanup(report, action, runner)
+    elif action.recipe_id in {"complete_pacman_transaction", "kernel_module_restore", "kernel_headers_install", "exact_package_reinstall"}:
+        result = _execute_pacman_action(report, action, runner)
+    elif action.recipe_id == "boot_config_drift":
+        result = _execute_config_drift(report, action, runner)
+    elif action.recipe_id == "initramfs_rebuild":
+        result = _execute_initramfs(report, action, backup_root, backups, runner)
+    elif action.recipe_id == "dkms_autoinstall":
+        result = _execute_dkms(report, action, runner)
+    elif action.recipe_id == "disable_boot_service":
+        result = _execute_disable_service(report, action, runner)
+    elif action.recipe_id == "snapshot_test_boot":
+        result = _execute_snapshot_test(report, action, runner)
+    elif action.recipe_id == "snapshot_restore":
+        result = _execute_snapshot_restore(report, action, runner)
+    elif action.recipe_id == "bootloader_reinstall":
+        result = _execute_bootloader(report, action, backup_root, backups, runner)
+    else:
+        result = RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "No recovery executor exists for this action.")
+    return _truthful_first_use_result(result, progress)
+
+
+# Host tools each allowlisted recipe needs before it can execute anything.
+# ``execute_recovery_plan`` preflights these before it remounts a target or
+# creates recovery state, so a genuinely first-use refusal keeps its
+# zero-command/zero-mutation meaning at the plan level.  The preflight does not
+# guarantee that the executor's later fresh capture succeeds: ``RepairProgress``
+# records the plan's mount queries, remount, state creation and earlier actions
+# so such a later failure is reported as a partial-preparation failure instead
+# of reusing the first-use text.
+ACTION_REQUIRED_HOST_TOOLS: Dict[str, Tuple[str, ...]] = {
+    "stale_pacman_lock": ("ps", "pacman"),
+    "package_cache_cleanup": ("paccache",),
+    "complete_pacman_transaction": ("pacman-conf", "arch-chroot"),
+    "kernel_module_restore": ("pacman-conf", "arch-chroot"),
+    "kernel_headers_install": ("pacman-conf", "arch-chroot"),
+    "exact_package_reinstall": ("pacman-conf", "arch-chroot"),
+    "boot_config_drift": ("aurascan",),
+    "initramfs_rebuild": ("arch-chroot",),
+    "dkms_autoinstall": ("arch-chroot",),
+    "disable_boot_service": ("systemctl",),
+    "snapshot_test_boot": ("bootctl",),
+    "snapshot_restore": ("arch-chroot",),
+}
+
+
+def _action_required_host_tools(action: RecoveryAction) -> Tuple[str, ...]:
     if action.recipe_id == "bootloader_reinstall":
-        return _execute_bootloader(report, action, backup_root, backups, runner)
-    return RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "No recovery executor exists for this action.")
+        # The systemd-boot recipe uses bootctl and is refused by the unchanged
+        # tool gate; only Limine/GRUB execute through arch-chroot.
+        if str(action.parameters.get("bootloader") or "") == "systemd-boot":
+            return ()
+        return ("arch-chroot",)
+    return ACTION_REQUIRED_HOST_TOOLS.get(action.recipe_id, ())
+
+
+def _plan_required_host_tools(actions: Sequence[RecoveryAction]) -> Tuple[str, ...]:
+    names: List[str] = []
+    for action in actions:
+        for name in _action_required_host_tools(action):
+            if name not in names:
+                names.append(name)
+    return tuple(names)
 
 
 def execute_recovery_plan(
@@ -900,7 +1427,21 @@ def execute_recovery_plan(
         results = [RecoveryRepairResult(item.action_id, item.recipe_id, "declined", "Required typed confirmation was not supplied.") for item in actions]
         report.repair_results = results
         return results
-    ready, message = _prepare_write_target(report, runner)
+    # One shared tracker and one shared runner funnel: every command the plan,
+    # freshness inspection or executor runs is preparation progress that no
+    # later layer may describe as a first use.
+    progress = RepairProgress()
+
+    def tracked_runner(command, **kwargs):
+        progress.command()
+        return runner(command, **kwargs)
+
+    ready, message = _prepare_write_target(
+        report,
+        tracked_runner,
+        required_tools=_plan_required_host_tools(runnable),
+        progress=progress,
+    )
     if not ready:
         results = [RecoveryRepairResult("plan", "plan", "refused", message)]
         report.repair_results = results
@@ -910,6 +1451,7 @@ def execute_recovery_plan(
         return [RecoveryRepairResult("plan", "plan", "refused", "Recovery state path contains an unsafe symlink or non-directory component.")]
     run_root.mkdir(parents=True, mode=0o700, exist_ok=True)
     os.chmod(run_root, 0o700)
+    progress.created_state()
     backups: List[Dict[str, object]] = []
     results: List[RecoveryRepairResult] = []
     manifest_path = run_root / "manifest.json"
@@ -919,11 +1461,11 @@ def execute_recovery_plan(
             continue
         if progress_callback:
             progress_callback(f"Applying verified repair: {action.title}")
-        fresh = _fresh_action(report, action, runner)
+        fresh = _fresh_action(report, action, tracked_runner)
         if fresh is None or not fresh.eligible or not fresh.verified:
             results.append(RecoveryRepairResult(action.action_id, action.recipe_id, "refused", "Fresh root-side revalidation no longer approves this action."))
             break
-        result = execute_recovery_action(report, fresh, backup_root=run_root, backups=backups, runner=runner)
+        result = execute_recovery_action(report, fresh, backup_root=run_root, backups=backups, runner=tracked_runner, progress=progress)
         results.append(result)
         _atomic_json(manifest_path, {
             "schema": "recovery_repair_manifest/1.0",
@@ -1003,7 +1545,16 @@ def export_recovery_report(
             return None, "Export destination is not a regular mounted directory."
     except OSError as exc:
         return None, f"Export destination could not be inspected: {exc}"
-    code, output = _run(runner, ["findmnt", "--json", "--target", str(destination_root), "--output", "SOURCE,TARGET"], timeout=15)
+    try:
+        require_trusted_system_tool("findmnt")
+        require_trusted_system_tool("lsblk")
+    except TrustedToolError:
+        return None, HOST_TOOL_FIRST_USE_MESSAGE
+    try:
+        findmnt = require_trusted_system_tool("findmnt")
+    except TrustedToolError:
+        return None, HOST_TOOL_FIRST_USE_MESSAGE
+    code, output = _run(runner, [findmnt.path, "--json", "--target", str(destination_root), "--output", "SOURCE,TARGET"], timeout=15)
     if code != 0:
         return None, "Export destination is not a proven mountpoint."
     try:
@@ -1014,7 +1565,11 @@ def export_recovery_report(
         source = ""
     if not source.startswith("/dev/"):
         return None, "Export destination is not backed by a removable block device."
-    code, removable = _run(runner, ["lsblk", "--noheadings", "--output", "RM", source.split("[")[0]], timeout=15)
+    try:
+        lsblk = require_trusted_system_tool("lsblk")
+    except TrustedToolError:
+        return None, EXPORT_LSBLK_TRUST_LATER_MESSAGE
+    code, removable = _run(runner, [lsblk.path, "--noheadings", "--output", "RM", source.split("[")[0]], timeout=15)
     if code != 0 or removable.strip().splitlines()[:1] != ["1"]:
         return None, "Export destination is not reported as removable."
     export_root = destination_root / "AuraScan-Recovery"

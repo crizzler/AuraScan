@@ -1,4 +1,5 @@
 import io
+import hashlib
 import json
 import os
 import subprocess
@@ -45,18 +46,43 @@ from aurascan.core.recovery_cli import (
     run_recovery,
     schedule_recovery_refresh,
 )
-from aurascan.core.recovery_boot import UsbDeviceInfo
+from aurascan.core.recovery_boot import BootloaderInfo, UsbDeviceInfo, bootloader_reinstall_commands
+from aurascan.core.trusted_tools import TrustedTool, TrustedToolError
 from aurascan.core.recovery_network import RecoveryNetworkState
 from aurascan.core.recovery_repairs import (
+    EXPORT_LSBLK_TRUST_LATER_MESSAGE,
+    FINDMNT_QUERY_TRUST_LATER_MESSAGE,
+    FINDMNT_VERIFY_TRUST_LATER_MESSAGE,
+    HOST_TOOL_FIRST_USE_MESSAGE,
+    INITRAMFS_TRUST_LATER_MESSAGE,
+    MOUNT_TRUST_LATER_MESSAGE,
+    PACMAN_CONF_TRUST_LATER_MESSAGE,
+    PACMAN_KEY_TRUST_LATER_MESSAGE,
+    PACMAN_TRANSACTION_TRUST_LATER_MESSAGE,
+    PARTIAL_PREPARATION_TRUST_MESSAGE,
+    SNAPSHOT_RESTORE_TRUST_LATER_MESSAGE,
+    SNAPSHOT_TEST_TRUST_LATER_MESSAGE,
+    STALE_LOCK_TRUST_LATER_RETAINED_MESSAGE,
+    STALE_LOCK_TRUST_LATER_RESTORED_MESSAGE,
+    _execute_bootloader,
+    _execute_cache_cleanup,
+    _execute_config_drift,
+    _execute_disable_service,
     _execute_dkms,
     _execute_initramfs,
     _execute_pacman_action,
     _execute_snapshot_restore,
+    _execute_snapshot_test,
+    _execute_stale_lock,
+    _fresh_action,
+    _package_manager_running,
     _pacman_transaction_preconditions,
     _prepare_write_target,
     _trusted_arch_chroot_tools,
     _unit_still_failed,
+    _validated_snapshot_id,
     execute_recovery_plan,
+    export_recovery_report,
     save_recovery_report,
 )
 
@@ -67,6 +93,35 @@ def path_is_relative_to(path: Path, parent: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def trusted_tool(name: str) -> TrustedTool:
+    """Fake trusted identity for a fixed /usr/bin tool used by rootless tests."""
+
+    return TrustedTool(
+        name=name,
+        path=f"/usr/bin/{name}",
+        device=1,
+        inode=1,
+        owner=0,
+        group=0,
+        mode=0o100755,
+    )
+
+
+def allow_trusted_host_tools(monkeypatch, *names):
+    """Make the fixed-path host-tool seam succeed for ``names`` (or all names)."""
+
+    allowed = set(names) or None
+
+    def fake(name):
+        if allowed is not None and name not in allowed:
+            raise TrustedToolError(f"{name} was not available")
+        return trusted_tool(name)
+
+    monkeypatch.setattr("aurascan.core.recovery_repairs.require_trusted_system_tool", fake)
+    monkeypatch.setattr("aurascan.core.recovery_boot.require_trusted_system_tool", fake)
+    return fake
 
 
 class Response:
@@ -350,17 +405,18 @@ def test_recovery_write_preparation_remounts_proven_containing_mount(tmp_path, m
 
     def runner(command, **_kwargs):
         commands.append(command)
-        if command[:5] == ["findmnt", "--noheadings", "--output", "TARGET,OPTIONS", "--target"]:
+        if command[:5] == ["/usr/bin/findmnt", "--noheadings", "--output", "TARGET,OPTIONS", "--target"]:
             return subprocess.CompletedProcess(command, 0, f"{root} ro,nosuid,nodev\n", "")
-        if command[:4] == ["findmnt", "--noheadings", "--output", "OPTIONS"]:
+        if command[:4] == ["/usr/bin/findmnt", "--noheadings", "--output", "OPTIONS"]:
             return subprocess.CompletedProcess(command, 0, "rw,nosuid,nodev\n", "")
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr("aurascan.core.recovery_repairs.os.geteuid", lambda: 0)
+    allow_trusted_host_tools(monkeypatch)
     ready, _message = _prepare_write_target(report, runner)
 
     assert ready is True
-    assert ["mount", "-o", "remount,rw", str(root)] in commands
+    assert ["/usr/bin/mount", "-o", "remount,rw", str(root)] in commands
     assert report.target.mounted_read_only is False
 
 
@@ -672,7 +728,7 @@ def test_latest_target_boot_service_failure_is_probed_without_ai(tmp_path):
     assert all("_COMM=systemd" in command and "_PID=1" in command for command in journal_commands)
 
 
-def test_unit_failure_revalidation_requires_systemd_producer(tmp_path):
+def test_unit_failure_revalidation_requires_systemd_producer(tmp_path, monkeypatch):
     root = make_target(tmp_path)
     (root / "var/log/journal").mkdir(parents=True)
     commands = []
@@ -681,7 +737,9 @@ def test_unit_failure_revalidation_requires_systemd_producer(tmp_path):
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, "Failed to start apparmor.service.\n", "")
 
+    allow_trusted_host_tools(monkeypatch)
     assert _unit_still_failed(root, "apparmor.service", runner) is True
+    assert commands[0][0] == "/usr/bin/journalctl"
     assert commands[0][-2:] == ["_COMM=systemd", "_PID=1"]
 
 
@@ -1157,6 +1215,7 @@ def test_snapshot_restore_validates_a_new_pre_recovery_snapshot_before_rollback(
         "aurascan.core.recovery_repairs._trusted_target_binary",
         lambda *_args, **_kwargs: True,
     )
+    allow_trusted_host_tools(monkeypatch)
     allow_fixture_snapshot_metadata(monkeypatch)
     root = make_target(tmp_path, interrupted=True)
     write_snapshot(root, 7)
@@ -1191,6 +1250,7 @@ def test_snapshot_restore_refuses_rollback_when_new_snapshot_cannot_be_proven(tm
         "aurascan.core.recovery_repairs._trusted_target_binary",
         lambda *_args, **_kwargs: True,
     )
+    allow_trusted_host_tools(monkeypatch)
     allow_fixture_snapshot_metadata(monkeypatch)
     root = make_target(tmp_path, interrupted=True)
     write_snapshot(root, 7)
@@ -1216,6 +1276,7 @@ def test_failed_initramfs_rebuild_restores_previous_image_set(tmp_path, monkeypa
         "aurascan.core.recovery_repairs._trusted_target_binary",
         lambda *_args, **_kwargs: True,
     )
+    allow_trusted_host_tools(monkeypatch)
     root = make_target(tmp_path, interrupted=True)
     generator = root / "usr/bin/mkinitcpio"
     generator.parent.mkdir(parents=True, exist_ok=True)
@@ -1323,10 +1384,11 @@ def test_dkms_autoinstall_refuses_replaced_dkms_binary(tmp_path):
     assert commands == []
 
 
-def test_pacman_action_refuses_replaced_package_manager(tmp_path):
+def test_pacman_action_refuses_replaced_package_manager(tmp_path, monkeypatch):
     root = make_target(tmp_path)
     (root / "usr/bin").mkdir(parents=True, exist_ok=True)
     (root / "usr/bin/pacman").write_text("fixture\n", encoding="utf-8")
+    allow_trusted_host_tools(monkeypatch)
     report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
     action = RecoveryAction(
         "fixture-pacman-replaced",
@@ -1373,8 +1435,9 @@ def test_arch_chroot_tool_validation_fails_closed(tmp_path):
     ) is False
 
 
-def test_recovery_pacman_transaction_requires_trusted_signatures_and_servers(tmp_path):
+def test_recovery_pacman_transaction_requires_trusted_signatures_and_servers(tmp_path, monkeypatch):
     root = make_target(tmp_path)
+    allow_trusted_host_tools(monkeypatch)
 
     def runner(command, **_kwargs):
         if command[-1] == "SigLevel" and not any(item.startswith("--repo=") for item in command):
@@ -1393,8 +1456,9 @@ def test_recovery_pacman_transaction_requires_trusted_signatures_and_servers(tmp
     assert "passed" in message
 
 
-def test_recovery_pacman_transaction_refuses_optional_package_signatures(tmp_path):
+def test_recovery_pacman_transaction_refuses_optional_package_signatures(tmp_path, monkeypatch):
     root = make_target(tmp_path)
+    allow_trusted_host_tools(monkeypatch)
 
     def runner(command, **_kwargs):
         output = "PackageOptional\nPackageTrustAll\n" if command[-1] == "SigLevel" else "core\n"
@@ -1430,3 +1494,1641 @@ def test_recovery_report_refuses_target_state_symlink_and_falls_back_to_runtime(
     assert path.relative_to(runtime)
     assert not list(outside.iterdir())
     assert "recovery RAM" in message
+
+
+# ---------------------------------------------------------------------------
+# R5 — canonical snapshot-id validation (design §5.1, §6.1.1-§6.1.5)
+# ---------------------------------------------------------------------------
+
+
+class _ConversionSpy:
+    """Foreign object that must never have its conversion hooks invoked."""
+
+    def __init__(self, result="7", *, raises=False):
+        self.calls = 0
+        self.result = result
+        self.raises = raises
+
+    def __str__(self):
+        self.calls += 1
+        if self.raises:
+            raise RuntimeError("snapshot id conversion hook must not run")
+        return self.result
+
+    def __repr__(self):
+        return f"_ConversionSpy(calls={self.calls})"
+
+
+class _StrSubclass(str):
+    pass
+
+
+class _IntSubclass(int):
+    pass
+
+
+def repair_action(recipe_id, parameters, *, action_id="fixture-action", risk=Severity.HIGH):
+    return RecoveryAction(
+        action_id,
+        recipe_id,
+        "Fixture recovery action",
+        "Fixture recovery action used by a rootless executor test.",
+        risk,
+        parameters=dict(parameters),
+        eligible=True,
+        verified=True,
+    )
+
+
+class TrustSequence:
+    """Fake fixed-path host-tool seam that fails at a chosen use (by index or name)."""
+
+    def __init__(self, monkeypatch, *, fail_at=None, fail_name=None, module="aurascan.core.recovery_repairs"):
+        self.calls = []
+        self.fail_at = fail_at
+        self.fail_name = fail_name
+        monkeypatch.setattr(f"{module}.require_trusted_system_tool", self)
+
+    def __call__(self, name):
+        self.calls.append(name)
+        if (self.fail_name is not None and name == self.fail_name) or (
+            self.fail_at is not None and len(self.calls) == self.fail_at
+        ):
+            raise TrustedToolError(f"{name} failed trust revalidation")
+        return trusted_tool(name)
+
+
+def always_untrusted(_name):
+    raise TrustedToolError("the fixture tool was absent or unsafe")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (0, "0"),
+        ("0", "0"),
+        (7, "7"),
+        ("7", "7"),
+        (2147483647, "2147483647"),
+        ("2147483647", "2147483647"),
+        (1234567890123456789, "1234567890123456789"),
+        ("1234567890123456789", "1234567890123456789"),
+        (10 ** 18, "1000000000000000000"),
+        ("1000000000000000000", "1000000000000000000"),
+    ],
+)
+def test_validated_snapshot_id_accepts_paired_zero_and_bounded_ids(value, expected):
+    assert _validated_snapshot_id(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        None,
+        True,
+        False,
+        7.0,
+        b"7",
+        ["7"],
+        {"7"},
+        (),
+        -1,
+        "+7",
+        " 7",
+        "7 ",
+        "007",
+        "0x7",
+        "1e3",
+        "abc",
+        "7a",
+        "../x",
+        "..",
+        "1/2",
+        "/7",
+        "7/",
+        "7/../8",
+        "7\n",
+        "7\t",
+        "7\\x",
+        "\u0667",
+        "\u00b2",
+        "\uff11\uff12\uff13",
+        "7\x00",
+        12345678901234567890,
+        "12345678901234567890",
+        10 ** 19,
+        "9" * 20,
+    ],
+)
+def test_validated_snapshot_id_refuses_noncanonical_values(value):
+    assert _validated_snapshot_id(value) == ""
+
+
+def test_validated_snapshot_id_refuses_very_large_integers_before_conversion():
+    huge = 10 ** 5000
+
+    assert _validated_snapshot_id(huge) == ""
+    assert _validated_snapshot_id(-huge) == ""
+
+
+def test_validated_snapshot_id_never_invokes_conversion_hooks():
+    spy = _ConversionSpy("7")
+    raising = _ConversionSpy(raises=True)
+
+    assert _validated_snapshot_id(spy) == ""
+    assert _validated_snapshot_id(raising) == ""
+    assert spy.calls == 0
+    assert raising.calls == 0
+
+
+def test_validated_snapshot_id_refuses_builtin_subclasses():
+    assert _validated_snapshot_id(_StrSubclass("7")) == ""
+    assert _validated_snapshot_id(_IntSubclass(7)) == ""
+
+
+def test_producer_overlong_snapshot_id_is_a_fail_closed_narrowing():
+    # `recovery.py` normalizes any digit-only directory with int() and emits
+    # str(id); a canonical 20-digit id therefore survives producer
+    # normalization. The executor policy narrows that language to 19 digits.
+    produced = str(int("12345678901234567890"))
+
+    assert produced == "12345678901234567890"
+    assert _validated_snapshot_id(produced) == ""
+    assert _validated_snapshot_id(int(produced)) == ""
+
+
+@pytest.mark.parametrize(
+    "snapshot_id",
+    ["../x", "1/2", "", "abc", "007", "7/../8", 12345678901234567890, "12345678901234567890"],
+)
+def test_snapshot_executors_refuse_invalid_ids_without_running_commands(tmp_path, monkeypatch, snapshot_id):
+    monkeypatch.setattr("aurascan.core.recovery_repairs._trusted_target_binary", lambda *_args, **_kwargs: True)
+    allow_trusted_host_tools(monkeypatch)
+    allow_fixture_snapshot_metadata(monkeypatch)
+    root = make_target(tmp_path, interrupted=True)
+    write_snapshot(root, 7)
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    restore = _execute_snapshot_restore(
+        report,
+        repair_action("snapshot_restore", {"snapshot_id": snapshot_id}, action_id="fixture-restore", risk=Severity.CRITICAL),
+        runner,
+    )
+    test_boot = _execute_snapshot_test(
+        report,
+        repair_action("snapshot_test_boot", {"snapshot_id": snapshot_id}, action_id="fixture-test"),
+        runner,
+    )
+
+    assert restore.status == "refused"
+    assert restore.message == "Snapshot restore prerequisites changed."
+    assert test_boot.status == "refused"
+    assert test_boot.message == "Snapshot validation failed."
+    assert commands == []
+
+
+def test_snapshot_test_prepares_a_one_shot_entry_with_the_trusted_bootctl(tmp_path, monkeypatch):
+    allow_trusted_host_tools(monkeypatch)
+    root = make_target(tmp_path)
+    write_snapshot(root, 7)
+    entries = root / "boot/loader/entries"
+    entries.mkdir(parents=True)
+    (entries / "arch.conf").write_text(
+        "title Arch\nlinux /vmlinuz-linux-lts\noptions root=UUID=fixture rw\n",
+        encoding="utf-8",
+    )
+    report = scan_recovery_target(inspect_target(root))
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    result = _execute_snapshot_test(
+        report,
+        repair_action("snapshot_test_boot", {"snapshot_id": 7}),
+        runner,
+    )
+
+    assert result.status == "applied"
+    assert commands == [
+        ["/usr/bin/bootctl", f"--root={root}", "--esp-path=/boot", "set-oneshot", "aurascan-snapshot-7"]
+    ]
+    entry = entries / "aurascan-snapshot-7.conf"
+    assert entry.is_file()
+    assert "rootflags=subvol=/.snapshots/7/snapshot" in entry.read_text(encoding="utf-8")
+
+
+def test_fresh_action_rejects_a_poisoned_snapshot_id_and_accepts_the_valid_one(tmp_path, monkeypatch):
+    allow_fixture_snapshot_metadata(monkeypatch)
+    root = make_target(tmp_path, interrupted=True)
+    write_snapshot(root, 7)
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
+    monkeypatch.setattr("aurascan.core.recovery_repairs.inspect_recovery_target", lambda *_args, **_kwargs: report.target)
+    monkeypatch.setattr("aurascan.core.recovery_repairs.scan_recovery_target", lambda *_args, **_kwargs: report)
+    valid = next(item for item in report.eligible_actions if item.recipe_id == "snapshot_restore")
+    poisoned = RecoveryAction(
+        valid.action_id,
+        valid.recipe_id,
+        valid.title,
+        valid.summary,
+        valid.risk,
+        parameters={**valid.parameters, "snapshot_id": "../7"},
+        eligible=True,
+        verified=True,
+    )
+    runner = lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "", "")
+
+    assert _fresh_action(report, valid, runner) is not None
+    assert _fresh_action(report, poisoned, runner) is None
+
+
+# ---------------------------------------------------------------------------
+# R7 — fixed-path host-tool trust at every recovery executor site
+# (design §5.2, §6.1.6-§6.1.16)
+# ---------------------------------------------------------------------------
+
+
+def write_stale_lock(root: Path) -> Path:
+    lock = root / "var/lib/pacman/db.lck"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("lock", encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(lock, (old, old))
+    return lock
+
+
+def recording_runner(commands, *, result=0, output=""):
+    def runner(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, result, output, "")
+
+    return runner
+
+
+def test_package_manager_running_is_conservative_when_ps_is_untrusted(monkeypatch):
+    monkeypatch.setattr("aurascan.core.recovery_repairs.require_trusted_system_tool", always_untrusted)
+
+    assert _package_manager_running(lambda *_args, **_kwargs: pytest.fail("runner must not be called")) is True
+
+
+def test_stale_lock_first_use_trust_failure_refuses_before_removing_the_lock(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    lock = write_stale_lock(root)
+    report = scan_recovery_target(inspect_target(root))
+    monkeypatch.setattr("aurascan.core.recovery_repairs.require_trusted_system_tool", always_untrusted)
+    commands = []
+
+    result = _execute_stale_lock(
+        report,
+        repair_action("stale_pacman_lock", {"lock_path": str(lock)}),
+        tmp_path / "backups",
+        [],
+        recording_runner(commands),
+    )
+
+    assert result.status == "refused"
+    assert result.message == HOST_TOOL_FIRST_USE_MESSAGE
+    assert lock.read_text(encoding="utf-8") == "lock"
+    assert commands == []
+
+
+def test_stale_lock_later_trust_failure_restores_the_lock_from_backup(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    lock = write_stale_lock(root)
+    report = scan_recovery_target(inspect_target(root))
+    TrustSequence(monkeypatch, fail_at=4)
+    commands = []
+
+    result = _execute_stale_lock(
+        report,
+        repair_action("stale_pacman_lock", {"lock_path": str(lock)}),
+        tmp_path / "backups",
+        [],
+        recording_runner(commands),
+    )
+
+    assert result.status == "rolled_back"
+    assert result.message == STALE_LOCK_TRUST_LATER_RESTORED_MESSAGE
+    assert result.backup_path
+    assert lock.read_text(encoding="utf-8") == "lock"
+    assert commands == [["/usr/bin/ps", "-eo", "comm="]]
+
+
+def test_stale_lock_later_trust_failure_retains_the_backup_when_restore_fails(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    lock = write_stale_lock(root)
+    report = scan_recovery_target(inspect_target(root))
+    TrustSequence(monkeypatch, fail_at=4)
+
+    def failing_copy2(*_args, **_kwargs):
+        raise OSError("fixture restore failure")
+
+    monkeypatch.setattr("aurascan.core.recovery_repairs.shutil.copy2", failing_copy2)
+
+    result = _execute_stale_lock(
+        report,
+        repair_action("stale_pacman_lock", {"lock_path": str(lock)}),
+        tmp_path / "backups",
+        [],
+        recording_runner([]),
+    )
+
+    assert result.status == "failed"
+    assert result.message == STALE_LOCK_TRUST_LATER_RETAINED_MESSAGE
+    assert result.rollback_available is True
+    assert not lock.exists()
+
+
+def test_cache_cleanup_uses_trusted_paccache_and_refuses_on_first_use(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    cache = root / "var/cache/pacman/pkg"
+    cache.mkdir(parents=True)
+    report = scan_recovery_target(inspect_target(root))
+    action = repair_action("package_cache_cleanup", {"cache_root": str(cache)}, risk=Severity.LOW)
+    commands = []
+    allow_trusted_host_tools(monkeypatch)
+
+    applied = _execute_cache_cleanup(report, action, recording_runner(commands))
+
+    assert applied.status == "applied"
+    assert applied.message == "Bounded package-cache cleanup completed."
+    assert commands == [["/usr/bin/paccache", "-r", "-k", "2", "-c", str(cache)]]
+
+    monkeypatch.setattr("aurascan.core.recovery_repairs.require_trusted_system_tool", always_untrusted)
+    refused = _execute_cache_cleanup(report, action, recording_runner(commands))
+
+    assert refused.status == "refused"
+    assert refused.message == HOST_TOOL_FIRST_USE_MESSAGE
+    assert len(commands) == 1
+
+
+def test_recovery_result_output_excerpt_stays_bounded_and_redacted(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    cache = root / "var/cache/pacman/pkg"
+    cache.mkdir(parents=True)
+    report = scan_recovery_target(inspect_target(root))
+    action = repair_action("package_cache_cleanup", {"cache_root": str(cache)}, risk=Severity.LOW)
+    allow_trusted_host_tools(monkeypatch)
+
+    result = _execute_cache_cleanup(
+        report,
+        action,
+        recording_runner([], output="API_KEY=supersecretvalue " + "x" * 6000),
+    )
+
+    assert len(result.output_excerpt) == 4000
+    assert "supersecretvalue" not in result.output_excerpt
+    assert "<redacted>" in result.output_excerpt
+
+
+def test_disable_service_uses_trusted_systemctl_and_refuses_on_first_use(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    report = scan_recovery_target(inspect_target(root))
+    action = repair_action("disable_boot_service", {"unit": "demo.service"})
+    commands = []
+    allow_trusted_host_tools(monkeypatch)
+
+    applied = _execute_disable_service(report, action, recording_runner(commands))
+
+    assert applied.status == "applied"
+    assert applied.message == "Disabled proven noncritical boot-blocking service demo.service."
+    assert commands == [["/usr/bin/systemctl", f"--root={root}", "disable", "demo.service"]]
+
+    monkeypatch.setattr("aurascan.core.recovery_repairs.require_trusted_system_tool", always_untrusted)
+    refused = _execute_disable_service(report, action, recording_runner(commands))
+
+    assert refused.status == "refused"
+    assert refused.message == HOST_TOOL_FIRST_USE_MESSAGE
+    assert len(commands) == 1
+
+
+def test_config_drift_uses_fixed_aurascan_and_refuses_on_first_use(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    report = scan_recovery_target(inspect_target(root))
+    action = repair_action("boot_config_drift", {}, risk=Severity.MEDIUM)
+    commands = []
+    allow_trusted_host_tools(monkeypatch)
+
+    applied = _execute_config_drift(report, action, recording_runner(commands))
+
+    assert applied.status == "applied"
+    assert applied.message == "Boot-critical config drift assistant completed."
+    assert commands == [["/usr/bin/aurascan", "config-drift", "--root", str(root), "--yes", "--no-ai"]]
+
+    monkeypatch.setattr("aurascan.core.recovery_repairs.require_trusted_system_tool", always_untrusted)
+    refused = _execute_config_drift(report, action, recording_runner(commands))
+
+    assert refused.status == "refused"
+    assert refused.message == HOST_TOOL_FIRST_USE_MESSAGE
+    assert len(commands) == 1
+
+
+def test_dkms_refuses_on_first_use_trust_failure(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    (root / "usr/lib/modules/6.12.1-arch1-1/build").mkdir(parents=True)
+    report = scan_recovery_target(inspect_target(root))
+    monkeypatch.setattr("aurascan.core.recovery_repairs._trusted_target_binary", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("aurascan.core.recovery_repairs.require_trusted_system_tool", always_untrusted)
+    commands = []
+
+    result = _execute_dkms(report, repair_action("dkms_autoinstall", {}), recording_runner(commands))
+
+    assert result.status == "refused"
+    assert result.message == HOST_TOOL_FIRST_USE_MESSAGE
+    assert commands == []
+
+
+def test_initramfs_first_use_trust_failure_refuses_before_backups(tmp_path, monkeypatch):
+    root = make_target(tmp_path, interrupted=True)
+    backup_root = tmp_path / "backups"
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
+    monkeypatch.setattr("aurascan.core.recovery_repairs._trusted_target_binary", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("aurascan.core.recovery_repairs.require_trusted_system_tool", always_untrusted)
+    commands = []
+
+    result = _execute_initramfs(
+        report,
+        repair_action("initramfs_rebuild", {"generator": "mkinitcpio"}),
+        backup_root,
+        [],
+        recording_runner(commands),
+    )
+
+    assert result.status == "refused"
+    assert result.message == HOST_TOOL_FIRST_USE_MESSAGE
+    assert commands == []
+    assert not (backup_root / "files").exists()
+
+
+def test_initramfs_later_trust_failure_retains_the_backups(tmp_path, monkeypatch):
+    root = make_target(tmp_path, interrupted=True)
+    backup_root = tmp_path / "backups"
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
+    monkeypatch.setattr("aurascan.core.recovery_repairs._trusted_target_binary", lambda *_args, **_kwargs: True)
+    TrustSequence(monkeypatch, fail_at=2)
+    commands = []
+
+    result = _execute_initramfs(
+        report,
+        repair_action("initramfs_rebuild", {"generator": "mkinitcpio"}),
+        backup_root,
+        [],
+        recording_runner(commands),
+    )
+
+    assert result.status == "failed"
+    assert result.message == INITRAMFS_TRUST_LATER_MESSAGE
+    assert result.backup_path == str(backup_root)
+    assert result.rollback_available is True
+    assert commands == []
+    assert list((backup_root / "files").glob("*"))
+    assert (root / "boot/initramfs-linux-lts.img").read_bytes() == b"image"
+
+
+def snapshot_test_fixture(tmp_path, monkeypatch):
+    allow_trusted_host_tools(monkeypatch)
+    root = make_target(tmp_path)
+    write_snapshot(root, 7)
+    entries = root / "boot/loader/entries"
+    entries.mkdir(parents=True)
+    (entries / "arch.conf").write_text(
+        "title Arch\nlinux /vmlinuz-linux-lts\noptions root=UUID=fixture rw\n",
+        encoding="utf-8",
+    )
+    report = scan_recovery_target(inspect_target(root))
+    action = repair_action("snapshot_test_boot", {"snapshot_id": 7})
+    return root, entries, report, action
+
+
+def test_snapshot_test_first_use_trust_failure_refuses_before_writing_the_entry(tmp_path, monkeypatch):
+    root, entries, report, action = snapshot_test_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr("aurascan.core.recovery_repairs.require_trusted_system_tool", always_untrusted)
+    commands = []
+
+    result = _execute_snapshot_test(report, action, recording_runner(commands))
+
+    assert result.status == "refused"
+    assert result.message == HOST_TOOL_FIRST_USE_MESSAGE
+    assert commands == []
+    assert not (entries / "aurascan-snapshot-7.conf").exists()
+
+
+def test_snapshot_test_later_trust_failure_removes_the_written_entry(tmp_path, monkeypatch):
+    root, entries, report, action = snapshot_test_fixture(tmp_path, monkeypatch)
+    TrustSequence(monkeypatch, fail_at=2)
+    commands = []
+
+    result = _execute_snapshot_test(report, action, recording_runner(commands))
+
+    assert result.status == "failed"
+    assert result.message == SNAPSHOT_TEST_TRUST_LATER_MESSAGE
+    assert commands == []
+    assert not (entries / "aurascan-snapshot-7.conf").exists()
+
+
+def test_snapshot_restore_first_use_trust_failure_refuses_before_creating_a_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr("aurascan.core.recovery_repairs._trusted_target_binary", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("aurascan.core.recovery_repairs.require_trusted_system_tool", always_untrusted)
+    allow_fixture_snapshot_metadata(monkeypatch)
+    root = make_target(tmp_path, interrupted=True)
+    write_snapshot(root, 7)
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
+    commands = []
+
+    result = _execute_snapshot_restore(
+        report,
+        repair_action("snapshot_restore", {"snapshot_id": 7}, risk=Severity.CRITICAL),
+        recording_runner(commands),
+    )
+
+    assert result.status == "refused"
+    assert result.message == HOST_TOOL_FIRST_USE_MESSAGE
+    assert commands == []
+    assert not (root / ".snapshots/9").exists()
+
+
+def test_snapshot_restore_later_trust_failure_retains_the_pre_recovery_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr("aurascan.core.recovery_repairs._trusted_target_binary", lambda *_args, **_kwargs: True)
+    allow_fixture_snapshot_metadata(monkeypatch)
+    root = make_target(tmp_path, interrupted=True)
+    write_snapshot(root, 7)
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
+    TrustSequence(monkeypatch, fail_at=3)
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        (root / ".snapshots/9/snapshot").mkdir(parents=True)
+        return subprocess.CompletedProcess(command, 0, "9\n", "")
+
+    result = _execute_snapshot_restore(
+        report,
+        repair_action("snapshot_restore", {"snapshot_id": 7}, risk=Severity.CRITICAL),
+        runner,
+    )
+
+    assert result.status == "failed"
+    assert result.message == SNAPSHOT_RESTORE_TRUST_LATER_MESSAGE.format(created="9")
+    assert result.backup_path.endswith("/.snapshots/9/snapshot")
+    assert result.rollback_available is True
+    assert commands == [["/usr/bin/arch-chroot", str(root), "snapper", "create", "--print-number", "--type", "single", "--description", f"AuraScan pre-recovery {report.recovery_id}"]]
+    assert (root / ".snapshots/9/snapshot").is_dir()
+
+
+def pacman_policy_runner(commands):
+    def runner(command, **_kwargs):
+        commands.append(command)
+        if command[-1] == "SigLevel" and not any(item.startswith("--repo=") for item in command):
+            output = "PackageRequired\nPackageTrustedOnly\nDatabaseOptional\nDatabaseTrustedOnly\n"
+        elif command[-1] == "--repo-list":
+            output = "core\nextra\n"
+        elif command[-1] == "Server":
+            output = "https://mirror.example/$repo/os/$arch\n"
+        else:
+            output = ""
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    return runner
+
+
+def test_pacman_action_first_use_trust_failure_refuses_without_commands(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    report = scan_recovery_target(inspect_target(root))
+    report.network = RecoveryNetworkState(True, True, "full", "ethernet")
+    monkeypatch.setattr("aurascan.core.recovery_repairs._trusted_target_binary", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("aurascan.core.recovery_repairs.require_trusted_system_tool", always_untrusted)
+    commands = []
+
+    result = _execute_pacman_action(
+        report,
+        repair_action("complete_pacman_transaction", {}),
+        pacman_policy_runner(commands),
+    )
+
+    assert result.status == "refused"
+    assert result.message == HOST_TOOL_FIRST_USE_MESSAGE
+    assert commands == []
+
+
+def test_pacman_action_later_trust_failure_after_preconditions_is_truthful(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    report = scan_recovery_target(inspect_target(root))
+    report.network = RecoveryNetworkState(True, True, "full", "ethernet")
+    monkeypatch.setattr("aurascan.core.recovery_repairs._trusted_target_binary", lambda *_args, **_kwargs: True)
+    TrustSequence(monkeypatch, fail_at=10)
+    commands = []
+
+    result = _execute_pacman_action(
+        report,
+        repair_action("complete_pacman_transaction", {}),
+        pacman_policy_runner(commands),
+    )
+
+    assert result.status == "failed"
+    assert result.message == PACMAN_TRANSACTION_TRUST_LATER_MESSAGE
+    assert len(commands) == 6
+    assert all(command[0] == "/usr/bin/pacman-conf" for command in commands)
+
+
+def test_pacman_action_keyring_verify_trust_failure_does_not_execute_a_transaction(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    write_package(root, "demo", "1-1")
+    cache = root / "var/cache/pacman/pkg"
+    cache.mkdir(parents=True)
+    archive = cache / "demo-1-1-x86_64.pkg.tar.zst"
+    archive.write_bytes(b"payload")
+    Path(str(archive) + ".sig").write_bytes(b"signature")
+    report = scan_recovery_target(inspect_target(root))
+    report.network = RecoveryNetworkState(True, True, "full", "ethernet")
+    monkeypatch.setattr("aurascan.core.recovery_repairs._safe_regular", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("aurascan.core.recovery_repairs._trusted_target_binary", lambda *_args, **_kwargs: True)
+    TrustSequence(monkeypatch, fail_at=10)
+    commands = []
+    action = repair_action(
+        "exact_package_reinstall",
+        {
+            "package": "demo",
+            "version": "1-1",
+            "archive": str(archive),
+            "archive_sha256": hashlib.sha256(b"payload").hexdigest(),
+        },
+        risk=Severity.CRITICAL,
+    )
+
+    result = _execute_pacman_action(report, action, pacman_policy_runner(commands))
+
+    assert result.status == "refused"
+    assert result.message == PACMAN_KEY_TRUST_LATER_MESSAGE
+    assert len(commands) == 6
+    assert not any("pacman-key" in command for command in commands)
+
+
+def test_pacman_action_preserves_the_target_keyring_gate_message(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    cache = root / "var/cache/pacman/pkg"
+    cache.mkdir(parents=True)
+    archive = cache / "demo-1-1-x86_64.pkg.tar.zst"
+    archive.write_bytes(b"payload")
+    Path(str(archive) + ".sig").write_bytes(b"signature")
+    report = scan_recovery_target(inspect_target(root))
+    report.network = RecoveryNetworkState(True, True, "full", "ethernet")
+    monkeypatch.setattr("aurascan.core.recovery_repairs._safe_regular", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        "aurascan.core.recovery_repairs._trusted_target_binary",
+        lambda path, _root: Path(path).name == "pacman",
+    )
+    allow_trusted_host_tools(monkeypatch)
+    action = repair_action(
+        "exact_package_reinstall",
+        {
+            "package": "demo",
+            "version": "1-1",
+            "archive": str(archive),
+            "archive_sha256": hashlib.sha256(b"payload").hexdigest(),
+        },
+        risk=Severity.CRITICAL,
+    )
+
+    result = _execute_pacman_action(report, action, pacman_policy_runner([]))
+
+    assert result.status == "refused"
+    assert "keyring helper" in result.message
+
+
+@pytest.mark.parametrize(
+    ("fail_at", "expected_message", "expected_commands"),
+    [
+        (1, HOST_TOOL_FIRST_USE_MESSAGE, 0),
+        (2, HOST_TOOL_FIRST_USE_MESSAGE, 0),
+        (3, HOST_TOOL_FIRST_USE_MESSAGE, 0),
+        (4, FINDMNT_QUERY_TRUST_LATER_MESSAGE, 1),
+        (5, MOUNT_TRUST_LATER_MESSAGE, 2),
+        (6, FINDMNT_VERIFY_TRUST_LATER_MESSAGE, 3),
+    ],
+)
+def test_prepare_write_target_trust_failure_boundaries(
+    tmp_path, monkeypatch, fail_at, expected_message, expected_commands
+):
+    root = make_target(tmp_path)
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=True))
+    monkeypatch.setattr("aurascan.core.recovery_repairs.os.geteuid", lambda: 0)
+    TrustSequence(monkeypatch, fail_at=fail_at)
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        if command[0] == "/usr/bin/findmnt" and "TARGET,OPTIONS" in command:
+            return subprocess.CompletedProcess(command, 0, f"{root} ro,nosuid,nodev\n", "")
+        if command[0] == "/usr/bin/findmnt":
+            return subprocess.CompletedProcess(command, 0, "rw,nosuid,nodev\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    ready, message = _prepare_write_target(report, runner)
+
+    assert ready is False
+    assert message == expected_message
+    assert len(commands) == expected_commands
+    assert report.target.mounted_read_only is True
+
+
+def test_pacman_preconditions_fail_after_the_first_queries(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    TrustSequence(monkeypatch, fail_at=4)
+    commands = []
+
+    ready, message = _pacman_transaction_preconditions(root, pacman_policy_runner(commands))
+
+    assert ready is False
+    assert message == PACMAN_CONF_TRUST_LATER_MESSAGE
+    assert [command[0] for command in commands] == ["/usr/bin/pacman-conf"] * 2
+
+
+def test_pacman_preconditions_first_use_failure_returns_m0(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    monkeypatch.setattr("aurascan.core.recovery_repairs.require_trusted_system_tool", always_untrusted)
+    commands = []
+
+    ready, message = _pacman_transaction_preconditions(root, pacman_policy_runner(commands))
+
+    assert ready is False
+    assert message == HOST_TOOL_FIRST_USE_MESSAGE
+    assert commands == []
+
+
+def test_export_report_trust_boundaries(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    report = scan_recovery_target(inspect_target(root))
+    destination = tmp_path / "export"
+    destination.mkdir()
+    commands = []
+
+    TrustSequence(monkeypatch, fail_at=1)
+    assert export_recovery_report(report, destination, runner=recording_runner(commands)) == (
+        None,
+        HOST_TOOL_FIRST_USE_MESSAGE,
+    )
+    assert commands == []
+
+    TrustSequence(monkeypatch, fail_at=4)
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        if command[0] == "/usr/bin/findmnt":
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps({"filesystems": [{"source": "/dev/sdb1"}]}), ""
+            )
+        return subprocess.CompletedProcess(command, 0, "1\n", "")
+
+    assert export_recovery_report(report, destination, runner=runner) == (
+        None,
+        EXPORT_LSBLK_TRUST_LATER_MESSAGE,
+    )
+    assert [command[0] for command in commands] == ["/usr/bin/findmnt"]
+    assert not (destination / "AuraScan-Recovery").exists()
+
+    TrustSequence(monkeypatch)
+    path, message = export_recovery_report(report, destination, runner=runner)
+
+    assert path is not None
+    assert path.is_file()
+    assert [command[0] for command in commands[-2:]] == ["/usr/bin/findmnt", "/usr/bin/lsblk"]
+    assert "exported" in message
+
+
+def test_bootloader_first_use_trust_failure_refuses_before_any_reinstall_command(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    report = scan_recovery_target(inspect_target(root))
+    info = BootloaderInfo("limine", "Limine", "", True, True, True, [])
+    monkeypatch.setattr(
+        "aurascan.core.recovery_repairs.inspect_recovery_target",
+        lambda *_args, **_kwargs: SimpleNamespace(bootloader=info),
+    )
+    monkeypatch.setattr("aurascan.core.recovery_repairs._trusted_arch_chroot_tools", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("aurascan.core.recovery_repairs.require_trusted_system_tool", always_untrusted)
+    commands = []
+
+    result = _execute_bootloader(
+        report,
+        repair_action("bootloader_reinstall", {"bootloader": "limine"}),
+        tmp_path / "backups",
+        [],
+        recording_runner(commands),
+    )
+
+    assert result.status == "refused"
+    assert result.message == HOST_TOOL_FIRST_USE_MESSAGE
+    assert commands == []
+
+
+def test_bootloader_later_trust_failure_restores_backed_up_loader_files(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    config = root / "etc/default/grub"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("GRUB_TIMEOUT=5\n", encoding="utf-8")
+    report = scan_recovery_target(inspect_target(root))
+    info = BootloaderInfo("grub", "GRUB", str(config), True, True, True, [])
+    monkeypatch.setattr(
+        "aurascan.core.recovery_repairs.inspect_recovery_target",
+        lambda *_args, **_kwargs: SimpleNamespace(bootloader=info),
+    )
+    monkeypatch.setattr("aurascan.core.recovery_repairs._safe_regular", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("aurascan.core.recovery_repairs._trusted_arch_chroot_tools", lambda *_args, **_kwargs: True)
+    TrustSequence(monkeypatch, fail_at=3)
+    backups = []
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        config.write_text("regenerated by fixture grub-install\n", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    result = _execute_bootloader(
+        report,
+        repair_action("bootloader_reinstall", {"bootloader": "grub"}),
+        tmp_path / "backups",
+        backups,
+        runner,
+    )
+
+    assert result.status == "rolled_back"
+    assert result.message == (
+        "GRUB reinstall commands 1..1 ran; command 2 failed trust revalidation and the "
+        "remaining commands were not executed; backed-up loader files were restored."
+    )
+    assert result.rollback_available is True
+    assert config.read_text(encoding="utf-8") == "GRUB_TIMEOUT=5\n"
+    assert len(commands) == 1
+    assert commands[0][0] == "/usr/bin/arch-chroot"
+    assert commands[0][1:] == [
+        str(root),
+        "grub-install",
+        "--target=x86_64-efi",
+        "--efi-directory=/boot",
+        "--bootloader-id=GRUB",
+        "--no-nvram",
+    ]
+
+
+def test_bootloader_systemd_boot_reinstall_refusal_is_preserved(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    report = scan_recovery_target(inspect_target(root))
+    esp = Path(report.target.esp_path)
+    info = BootloaderInfo("systemd-boot", "systemd-boot", "", True, True, True, [])
+    monkeypatch.setattr(
+        "aurascan.core.recovery_repairs.inspect_recovery_target",
+        lambda *_args, **_kwargs: SimpleNamespace(bootloader=info),
+    )
+    commands = []
+
+    result = _execute_bootloader(
+        report,
+        repair_action("bootloader_reinstall", {"bootloader": "systemd-boot"}),
+        tmp_path / "backups",
+        [],
+        recording_runner(commands),
+    )
+
+    assert result.status == "refused"
+    assert result.message == (
+        "A bootloader reinstall tool is not a root-owned non-symlink executable; "
+        "refusing to execute it as recovery root."
+    )
+    assert commands == []
+    assert bootloader_reinstall_commands(info, root=root, esp_path=esp)[0][0] == "bootctl"
+
+
+def exact_package_fixture(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    write_package(root, "demo", "1-1")
+    cache = root / "var/cache/pacman/pkg"
+    cache.mkdir(parents=True)
+    archive = cache / "demo-1-1-x86_64.pkg.tar.zst"
+    archive.write_bytes(b"payload")
+    Path(str(archive) + ".sig").write_bytes(b"signature")
+    report = scan_recovery_target(inspect_target(root))
+    monkeypatch.setattr("aurascan.core.recovery_repairs.inspect_recovery_target", lambda *_args, **_kwargs: report.target)
+    monkeypatch.setattr("aurascan.core.recovery_repairs.scan_recovery_target", lambda *_args, **_kwargs: report)
+    monkeypatch.setattr("aurascan.core.recovery_repairs._safe_regular", lambda *_args, **_kwargs: True)
+    action = repair_action(
+        "exact_package_reinstall",
+        {
+            "package": "demo",
+            "version": "1-1",
+            "archive": str(archive),
+            "archive_sha256": hashlib.sha256(b"payload").hexdigest(),
+        },
+        risk=Severity.CRITICAL,
+    )
+
+    def runner(command, **_kwargs):
+        if "-Qm" in command:
+            return subprocess.CompletedProcess(command, 1, "", "")
+        if "-Qkk" in command:
+            return subprocess.CompletedProcess(command, 1, "warning: missing file: demo /usr/bin/demo\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    return report, action, runner
+
+
+def test_fresh_action_requires_the_trusted_target_pacman(tmp_path, monkeypatch):
+    report, action, runner = exact_package_fixture(tmp_path, monkeypatch)
+    commands = []
+
+    def recording(command, **kwargs):
+        commands.append(command)
+        return runner(command, **kwargs)
+
+    monkeypatch.setattr("aurascan.core.recovery_repairs._trusted_target_binary", lambda *_args, **_kwargs: False)
+    assert _fresh_action(report, action, recording) is None
+    assert commands == []
+
+    monkeypatch.setattr("aurascan.core.recovery_repairs._trusted_target_binary", lambda *_args, **_kwargs: True)
+    allow_trusted_host_tools(monkeypatch)
+    assert _fresh_action(report, action, recording) is not None
+    assert [command[0] for command in commands] == ["/usr/bin/arch-chroot", "/usr/bin/arch-chroot"]
+
+    commands.clear()
+    TrustSequence(monkeypatch, fail_at=2)
+    assert _fresh_action(report, action, recording) is None
+    assert [command[0] for command in commands] == ["/usr/bin/arch-chroot"]
+
+
+def test_plan_refusal_message_for_a_stale_fresh_match_is_preserved(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    report = scan_recovery_target(inspect_target(root))
+    report.repair_actions = [repair_action("package_cache_cleanup", {}, risk=Severity.LOW)]
+    report.target.mounted_read_only = False
+    monkeypatch.setattr("aurascan.core.recovery_repairs._prepare_write_target", lambda *_args, **_kwargs: (True, "Target is writable."))
+    monkeypatch.setattr("aurascan.core.recovery_repairs._fresh_action", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("aurascan.core.recovery_repairs.inspect_recovery_target", lambda *_args, **_kwargs: report.target)
+    monkeypatch.setattr("aurascan.core.recovery_repairs.scan_recovery_target", lambda *_args, **_kwargs: report)
+
+    results = execute_recovery_plan(
+        report,
+        runner=lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "", ""),
+    )
+
+    assert results[0].status == "refused"
+    assert results[0].message == "Fresh root-side revalidation no longer approves this action."
+
+
+# ---------------------------------------------------------------------------
+# R5/R7 rework — progress-aware refusals and behavioural oracles
+# (reviewer gate t_c2dc2072 findings 2-4)
+# ---------------------------------------------------------------------------
+
+JOURNAL_FAILED_LINE = "Jan 01 00:00:01 fixture systemd[1]: Failed to start demo.service.\n"
+
+
+def unit_journal_fixture(tmp_path):
+    """A target with a real unit file and a journal directory."""
+
+    root = make_target(tmp_path)
+    (root / "var/log/journal").mkdir(parents=True, exist_ok=True)
+    unit = root / "usr/lib/systemd/system/demo.service"
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text("[Unit]\nDescription=Fixture demo service\n", encoding="utf-8")
+    return root
+
+
+def journal_runner(commands):
+    def runner(command, **_kwargs):
+        commands.append(command)
+        if command[0] == "/usr/bin/journalctl":
+            return subprocess.CompletedProcess(command, 0, JOURNAL_FAILED_LINE, "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    return runner
+
+
+def expected_journalctl_command(root):
+    return [
+        "/usr/bin/journalctl",
+        f"--directory={root / 'var/log/journal'}",
+        "--boot=0",
+        "--priority=0..3",
+        "--no-pager",
+        "--lines=2000",
+        "_COMM=systemd",
+        "_PID=1",
+    ]
+
+
+def assert_unit_failure_check_is_conservative(root):
+    """The negative expectation; a permissive seam must break it (calibration)."""
+
+    commands = []
+    result = _unit_still_failed(root, "demo.service", journal_runner(commands))
+    assert result is False
+    assert commands == []
+
+
+def test_unit_failure_check_reads_a_failing_journal_through_the_trusted_path(tmp_path, monkeypatch):
+    root = unit_journal_fixture(tmp_path)
+    seam = TrustSequence(monkeypatch)
+    commands = []
+
+    result = _unit_still_failed(root, "demo.service", journal_runner(commands))
+
+    assert result is True
+    assert seam.calls == ["journalctl"]
+    assert commands == [expected_journalctl_command(root)]
+
+
+def test_unit_failure_check_is_conservative_when_journalctl_is_untrusted(tmp_path, monkeypatch):
+    root = unit_journal_fixture(tmp_path)
+    seam = TrustSequence(monkeypatch, fail_at=1)
+
+    assert_unit_failure_check_is_conservative(root)
+
+    assert seam.calls == ["journalctl"]
+
+
+def test_unit_failure_negative_oracle_fails_when_the_trust_boundary_is_bypassed(tmp_path, monkeypatch):
+    root = unit_journal_fixture(tmp_path)
+    allow_trusted_host_tools(monkeypatch)  # deliberate calibration bypass
+
+    with pytest.raises(AssertionError):
+        assert_unit_failure_check_is_conservative(root)
+
+
+def fresh_action_journal_fixture(tmp_path, monkeypatch):
+    root = unit_journal_fixture(tmp_path)
+    report = scan_recovery_target(inspect_target(root))
+    monkeypatch.setattr("aurascan.core.recovery_repairs.inspect_recovery_target", lambda *_args, **_kwargs: report.target)
+    monkeypatch.setattr("aurascan.core.recovery_repairs.scan_recovery_target", lambda *_args, **_kwargs: report)
+    return root, report, repair_action("disable_boot_service", {"unit": "demo.service"})
+
+
+def assert_fresh_action_journalctl_is_required(report, action):
+    """The negative expectation; a permissive seam must break it (calibration)."""
+
+    commands = []
+    result = _fresh_action(report, action, journal_runner(commands))
+    assert result is None
+    assert commands == []
+
+
+def test_fresh_action_requires_the_trusted_journalctl_and_a_real_journal(tmp_path, monkeypatch):
+    root, report, action = fresh_action_journal_fixture(tmp_path, monkeypatch)
+    seam = TrustSequence(monkeypatch)
+    commands = []
+
+    result = _fresh_action(report, action, journal_runner(commands))
+
+    assert result is action
+    # The entry preflight and the nested unit check each capture afresh.
+    assert seam.calls == ["journalctl", "journalctl"]
+    assert commands == [expected_journalctl_command(root)]
+
+
+def test_fresh_action_preflights_journalctl_and_returns_none(tmp_path, monkeypatch):
+    _root, report, action = fresh_action_journal_fixture(tmp_path, monkeypatch)
+    seam = TrustSequence(monkeypatch, fail_at=1)
+
+    assert_fresh_action_journalctl_is_required(report, action)
+
+    assert seam.calls == ["journalctl"]
+
+
+def test_fresh_action_negative_oracle_fails_when_the_trust_boundary_is_bypassed(tmp_path, monkeypatch):
+    _root, report, action = fresh_action_journal_fixture(tmp_path, monkeypatch)
+    allow_trusted_host_tools(monkeypatch)  # deliberate calibration bypass
+
+    with pytest.raises(AssertionError):
+        assert_fresh_action_journalctl_is_required(report, action)
+
+
+def test_pacman_preconditions_first_query_capture_failure_returns_m0(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    seam = TrustSequence(monkeypatch, fail_at=2)
+    commands = []
+
+    ready, message = _pacman_transaction_preconditions(root, pacman_policy_runner(commands))
+
+    assert ready is False
+    assert message == HOST_TOOL_FIRST_USE_MESSAGE
+    assert commands == []
+    assert seam.calls == ["pacman-conf", "pacman-conf"]
+
+
+def test_initramfs_zero_image_trust_failure_refuses_without_claiming_backups(tmp_path, monkeypatch):
+    root = make_target(tmp_path, interrupted=True)
+    (root / "boot/initramfs-linux-lts.img").unlink()
+    backup_root = tmp_path / "backups"
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
+    monkeypatch.setattr("aurascan.core.recovery_repairs._trusted_target_binary", lambda *_args, **_kwargs: True)
+    seam = TrustSequence(monkeypatch, fail_at=2)
+    commands = []
+
+    result = _execute_initramfs(
+        report,
+        repair_action("initramfs_rebuild", {"generator": "mkinitcpio"}),
+        backup_root,
+        [],
+        recording_runner(commands),
+    )
+
+    assert not list((root / "boot").glob("initramfs*.img"))
+    assert result.status == "refused"
+    assert result.message == HOST_TOOL_FIRST_USE_MESSAGE
+    assert result.backup_path == ""
+    assert result.rollback_available is False
+    assert not backup_root.exists()
+    assert commands == []
+    assert seam.calls == ["arch-chroot", "arch-chroot"]
+
+
+def test_plan_preflights_action_tools_before_remount_or_state_creation(tmp_path, monkeypatch):
+    root = make_target(tmp_path, interrupted=True)
+    cache = root / "var/cache/pacman/pkg"
+    cache.mkdir(parents=True)
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=True))
+    action = repair_action("package_cache_cleanup", {"cache_root": str(cache)}, risk=Severity.LOW)
+    report.repair_actions = [action]
+    monkeypatch.setattr("aurascan.core.recovery_repairs.os.geteuid", lambda: 0)
+    seam = TrustSequence(monkeypatch, fail_name="paccache")
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        if command[0] == "/usr/bin/findmnt" and "TARGET,OPTIONS" in command:
+            return subprocess.CompletedProcess(command, 0, f"{root} ro,nosuid,nodev\n", "")
+        if command[0] == "/usr/bin/findmnt":
+            return subprocess.CompletedProcess(command, 0, "rw,nosuid,nodev\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    results = execute_recovery_plan(report, runner=runner)
+
+    assert [item.status for item in results] == ["refused"]
+    assert results[0].message == HOST_TOOL_FIRST_USE_MESSAGE
+    assert commands == []
+    assert seam.calls == ["paccache"]
+    assert report.target.mounted_read_only is True
+    assert not (root / "var/lib/aurascan/recovery" / report.recovery_id).exists()
+    assert report.repair_results == results
+    assert report.backups == []
+
+
+def test_plan_preflight_control_runs_after_trust_succeeds(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    cache = root / "var/cache/pacman/pkg"
+    cache.mkdir(parents=True)
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
+    action = repair_action("package_cache_cleanup", {"cache_root": str(cache)}, risk=Severity.LOW)
+    report.repair_actions = [action]
+    monkeypatch.setattr("aurascan.core.recovery_repairs.os.geteuid", lambda: 0)
+    monkeypatch.setattr("aurascan.core.recovery_repairs._fresh_action", lambda *_args, **_kwargs: action)
+    allow_trusted_host_tools(monkeypatch)
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    results = execute_recovery_plan(report, runner=runner)
+
+    assert results[0].status == "applied"
+    assert commands[0] == ["/usr/bin/paccache", "-r", "-k", "2", "-c", str(cache)]
+    assert (root / "var/lib/aurascan/recovery" / report.recovery_id).is_dir()
+
+
+class PlanProbe:
+    """One shared ordered trust/runner/state trace for a plan execution."""
+
+    def __init__(self, root, run_root):
+        self.root = root
+        self.run_root = run_root
+        self.events = []
+        self.commands = []
+        self.paccache_uses = 0
+        self.fail_paccache_use = None
+
+    def seam(self, name):
+        self.events.append(("trust", name, self.run_root.exists()))
+        if name == "paccache":
+            self.paccache_uses += 1
+            if self.fail_paccache_use == self.paccache_uses:
+                raise TrustedToolError("fixture identity change")
+        return trusted_tool(name)
+
+    def runner(self, command, **_kwargs):
+        self.events.append(("command", Path(command[0]).name, self.run_root.exists()))
+        self.commands.append(command)
+        if command[0] == "/usr/bin/findmnt" and "TARGET,OPTIONS" in command:
+            return subprocess.CompletedProcess(command, 0, f"{self.root} ro,nosuid,nodev\n", "")
+        if command[0] == "/usr/bin/findmnt":
+            return subprocess.CompletedProcess(command, 0, "rw,nosuid,nodev\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def state(self, _message):
+        self.events.append(("state", "recovery-state", self.run_root.exists()))
+
+
+def configure_plan_probe(monkeypatch, report, *, fail_paccache_use=None):
+    run_root = Path(report.target.root_path) / "var/lib/aurascan/recovery" / report.recovery_id
+    probe = PlanProbe(Path(report.target.root_path), run_root)
+    probe.fail_paccache_use = fail_paccache_use
+    monkeypatch.setattr("aurascan.core.recovery_repairs.os.geteuid", lambda: 0)
+    monkeypatch.setattr("aurascan.core.recovery_repairs.require_trusted_system_tool", probe.seam)
+    monkeypatch.setattr(
+        "aurascan.core.recovery_repairs._fresh_action",
+        lambda _report, selected, _runner: selected,
+    )
+    monkeypatch.setattr(
+        "aurascan.core.recovery_repairs.inspect_recovery_target",
+        lambda *_args, **_kwargs: report.target,
+    )
+    monkeypatch.setattr(
+        "aurascan.core.recovery_repairs.scan_recovery_target",
+        lambda *_args, **_kwargs: report,
+    )
+    return probe
+
+
+def cache_plan_fixture(tmp_path, monkeypatch, *, mounted_read_only, fail_paccache_use=None):
+    root = make_target(tmp_path, interrupted=True)
+    cache = root / "var/cache/pacman/pkg"
+    cache.mkdir(parents=True)
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=mounted_read_only))
+    action = repair_action("package_cache_cleanup", {"cache_root": str(cache)}, risk=Severity.LOW)
+    report.repair_actions = [action]
+    return root, cache, report, configure_plan_probe(
+        monkeypatch,
+        report,
+        fail_paccache_use=fail_paccache_use,
+    )
+
+
+def test_plan_shared_trace_entry_rejection_is_zero_progress(tmp_path, monkeypatch):
+    _root, _cache, report, probe = cache_plan_fixture(
+        tmp_path, monkeypatch, mounted_read_only=True, fail_paccache_use=1
+    )
+
+    results = execute_recovery_plan(report, runner=probe.runner, progress_callback=probe.state)
+
+    assert [event[:2] for event in probe.events] == [("trust", "paccache")]
+    assert all(event[2] is False for event in probe.events)
+    assert results[0].status == "refused"
+    assert results[0].message == HOST_TOOL_FIRST_USE_MESSAGE
+    assert probe.commands == []
+    assert not probe.run_root.exists()
+    assert report.target.mounted_read_only is True
+
+
+def test_plan_shared_trace_positive_preparation_is_ordered(tmp_path, monkeypatch):
+    _root, cache, report, probe = cache_plan_fixture(
+        tmp_path, monkeypatch, mounted_read_only=True
+    )
+
+    results = execute_recovery_plan(report, runner=probe.runner, progress_callback=probe.state)
+
+    assert [(kind, name) for kind, name, _exists in probe.events] == [
+        ("trust", "paccache"),
+        ("trust", "findmnt"),
+        ("trust", "mount"),
+        ("trust", "findmnt"),
+        ("command", "findmnt"),
+        ("trust", "findmnt"),
+        ("command", "findmnt"),
+        ("trust", "mount"),
+        ("command", "mount"),
+        ("trust", "findmnt"),
+        ("command", "findmnt"),
+        ("state", "recovery-state"),
+        ("trust", "paccache"),
+        ("command", "paccache"),
+        ("state", "recovery-state"),
+    ]
+    assert [exists for _kind, _name, exists in probe.events] == [False] * 11 + [True] * 4
+    assert results[0].status == "applied"
+    assert probe.commands[-1] == ["/usr/bin/paccache", "-r", "-k", "2", "-c", str(cache)]
+    assert probe.run_root.is_dir()
+    assert report.target.mounted_read_only is False
+
+
+def test_plan_shared_trace_later_capture_failure_reports_partial_preparation(tmp_path, monkeypatch):
+    _root, _cache, report, probe = cache_plan_fixture(
+        tmp_path, monkeypatch, mounted_read_only=True, fail_paccache_use=2
+    )
+
+    results = execute_recovery_plan(report, runner=probe.runner, progress_callback=probe.state)
+
+    result = results[0]
+    assert result.status == "failed"
+    assert result.message == PARTIAL_PREPARATION_TRUST_MESSAGE.format(commands=4, mutations=2)
+    assert result.message != HOST_TOOL_FIRST_USE_MESSAGE
+    assert len(probe.commands) == 4
+    assert all(command[0] != "/usr/bin/paccache" for command in probe.commands)
+    assert report.target.mounted_read_only is False
+    manifest = json.loads((probe.run_root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["results"][0]["status"] == "failed"
+    assert manifest["results"][0]["message"] == result.message
+    assert manifest["results"][0]["message"] != HOST_TOOL_FIRST_USE_MESSAGE
+    # Ordering: the writable preparation and state creation precede the
+    # executor's failing fresh capture; the capture is not a first use.
+    assert probe.events[-3][:2] == ("state", "recovery-state")
+    assert probe.events[-3][2] is True
+    assert probe.events[-2] == ("trust", "paccache", True)
+    assert probe.events[-1][:2] == ("state", "recovery-state")
+    assert probe.paccache_uses == 2
+
+
+def test_plan_shared_trace_already_writable_state_creation_is_not_first_use(tmp_path, monkeypatch):
+    _root, _cache, report, probe = cache_plan_fixture(
+        tmp_path, monkeypatch, mounted_read_only=False, fail_paccache_use=2
+    )
+
+    results = execute_recovery_plan(report, runner=probe.runner, progress_callback=probe.state)
+
+    result = results[0]
+    assert result.status == "failed"
+    assert result.message == PARTIAL_PREPARATION_TRUST_MESSAGE.format(commands=0, mutations=1)
+    assert result.message != HOST_TOOL_FIRST_USE_MESSAGE
+    assert probe.commands == []
+    assert [(kind, name) for kind, name, _exists in probe.events] == [
+        ("trust", "paccache"),
+        ("state", "recovery-state"),
+        ("trust", "paccache"),
+        ("state", "recovery-state"),
+    ]
+    assert [exists for _kind, _name, exists in probe.events] == [False, True, True, True]
+    assert (probe.run_root / "manifest.json").is_file()
+
+
+def test_plan_shared_trace_prior_action_progress_is_not_first_use(tmp_path, monkeypatch):
+    root = make_target(tmp_path, interrupted=True)
+    first_cache = root / "var/cache/pacman/one/pkg"
+    second_cache = root / "var/cache/pacman/two/pkg"
+    first_cache.mkdir(parents=True)
+    second_cache.mkdir(parents=True)
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
+    report.repair_actions = [
+        repair_action("package_cache_cleanup", {"cache_root": str(first_cache)}, risk=Severity.LOW, action_id="a1"),
+        repair_action("package_cache_cleanup", {"cache_root": str(second_cache)}, risk=Severity.LOW, action_id="a2"),
+    ]
+    probe = configure_plan_probe(monkeypatch, report, fail_paccache_use=3)
+
+    results = execute_recovery_plan(report, runner=probe.runner, progress_callback=probe.state)
+
+    assert [item.status for item in results] == ["applied", "failed"]
+    assert results[1].message == PARTIAL_PREPARATION_TRUST_MESSAGE.format(commands=1, mutations=1)
+    assert results[1].message != HOST_TOOL_FIRST_USE_MESSAGE
+    assert probe.commands == [["/usr/bin/paccache", "-r", "-k", "2", "-c", str(first_cache)]]
+    assert probe.paccache_uses == 3
+    manifest = json.loads((probe.run_root / "manifest.json").read_text(encoding="utf-8"))
+    assert [item["status"] for item in manifest["results"]] == ["applied", "failed"]
+    assert manifest["results"][1]["message"] == results[1].message
+
+
+def test_bootloader_preflights_the_host_tool_before_its_inspection_runs_a_command(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    report = scan_recovery_target(inspect_target(root))
+    seam = TrustSequence(monkeypatch, fail_at=1)
+    commands = []
+
+    result = _execute_bootloader(
+        report,
+        repair_action("bootloader_reinstall", {"bootloader": "grub"}),
+        tmp_path / "backups",
+        [],
+        recording_runner(commands),
+    )
+
+    assert result.status == "refused"
+    assert result.message == HOST_TOOL_FIRST_USE_MESSAGE
+    assert commands == []
+    assert seam.calls == ["arch-chroot"]
+    assert not (tmp_path / "backups").exists()
+
+
+def test_bootloader_inspection_runs_after_the_trust_preflight_succeeds(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    report = scan_recovery_target(inspect_target(root))
+    allow_trusted_host_tools(monkeypatch)
+    commands = []
+
+    result = _execute_bootloader(
+        report,
+        repair_action("bootloader_reinstall", {"bootloader": "grub"}),
+        tmp_path / "backups",
+        [],
+        recording_runner(commands),
+    )
+
+    assert result.status == "refused"
+    assert result.message == "The exact bootloader could not be freshly revalidated."
+    # The nested recovery.py inspection query is unchanged and is the progress
+    # evidence that makes a zero-progress message here untruthful.
+    assert commands
+    assert commands[0][0] == "findmnt"
+
+
+def bootloader_later_trust_fixture(tmp_path, monkeypatch):
+    """A GRUB reinstall whose second command fails trust revalidation."""
+
+    root = make_target(tmp_path)
+    config = root / "etc/default/grub"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("GRUB_TIMEOUT=5\n", encoding="utf-8")
+    report = scan_recovery_target(inspect_target(root))
+    info = BootloaderInfo("grub", "GRUB", str(config), True, True, True, [])
+    monkeypatch.setattr(
+        "aurascan.core.recovery_repairs.inspect_recovery_target",
+        lambda *_args, **_kwargs: SimpleNamespace(bootloader=info),
+    )
+    monkeypatch.setattr("aurascan.core.recovery_repairs._safe_regular", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("aurascan.core.recovery_repairs._trusted_arch_chroot_tools", lambda *_args, **_kwargs: True)
+    return root, config, report, tmp_path / "backups"
+
+
+def test_bootloader_later_trust_failure_does_not_claim_deleted_backups(tmp_path, monkeypatch):
+    _root, config, report, backup_root = bootloader_later_trust_fixture(tmp_path, monkeypatch)
+    calls = []
+
+    def seam(name):
+        calls.append(name)
+        if len(calls) == 3:
+            for item in list((backup_root / "files").glob("*")):
+                item.unlink()
+            raise TrustedToolError("fixture identity change")
+        return trusted_tool(name)
+
+    monkeypatch.setattr("aurascan.core.recovery_repairs.require_trusted_system_tool", seam)
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        config.write_text("regenerated by fixture grub-install\n", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    result = _execute_bootloader(
+        report,
+        repair_action("bootloader_reinstall", {"bootloader": "grub"}),
+        backup_root,
+        [],
+        runner,
+    )
+
+    assert result.status == "failed"
+    assert result.message == (
+        "GRUB reinstall commands 1..1 ran; command 2 failed trust revalidation and the remaining "
+        "commands were not executed; no verified loader backup remains, so a rollback is not available."
+    )
+    assert result.rollback_available is False
+    assert result.backup_path == ""
+    assert not [path for path in (backup_root / "files").glob("*") if path.is_file()]
+    assert calls == ["arch-chroot", "arch-chroot", "arch-chroot"]
+    assert len(commands) == 1
+    assert commands[0][0] == "/usr/bin/arch-chroot"
+    assert config.read_text(encoding="utf-8") == "regenerated by fixture grub-install\n"
+
+
+def test_bootloader_later_trust_failure_does_not_claim_corrupt_backup(tmp_path, monkeypatch):
+    _root, config, report, backup_root = bootloader_later_trust_fixture(tmp_path, monkeypatch)
+    calls = []
+
+    def seam(name):
+        calls.append(name)
+        if len(calls) == 3:
+            for item in list((backup_root / "files").glob("*")):
+                item.write_bytes(b"GRUB_TIMEOUT=6\n")
+            raise TrustedToolError("fixture identity change")
+        return trusted_tool(name)
+
+    monkeypatch.setattr("aurascan.core.recovery_repairs.require_trusted_system_tool", seam)
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        config.write_text("regenerated by fixture grub-install\n", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    result = _execute_bootloader(
+        report,
+        repair_action("bootloader_reinstall", {"bootloader": "grub"}),
+        backup_root,
+        [],
+        runner,
+    )
+
+    assert result.status == "failed"
+    assert result.message == (
+        "GRUB reinstall commands 1..1 ran; command 2 failed trust revalidation and the remaining "
+        "commands were not executed; no verified loader backup remains, so a rollback is not available."
+    )
+    assert result.rollback_available is False
+    assert result.backup_path == ""
+    backups = [path for path in (backup_root / "files").glob("*") if path.is_file()]
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == b"GRUB_TIMEOUT=6\n"
+    assert len(commands) == 1
+    assert config.read_text(encoding="utf-8") == "regenerated by fixture grub-install\n"
+
+
+def test_bootloader_later_trust_failure_keeps_verified_backups_when_destination_restore_fails(tmp_path, monkeypatch):
+    _root, config, report, backup_root = bootloader_later_trust_fixture(tmp_path, monkeypatch)
+    calls = []
+
+    def seam(name):
+        calls.append(name)
+        if len(calls) == 3:
+            raise TrustedToolError("fixture identity change")
+        return trusted_tool(name)
+
+    monkeypatch.setattr("aurascan.core.recovery_repairs.require_trusted_system_tool", seam)
+    real_replace = os.replace
+
+    def failing_replace(source, destination):
+        if str(destination) == str(config):
+            raise OSError("inert destination write failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("aurascan.core.recovery_repairs.os.replace", failing_replace)
+    commands = []
+
+    def runner(command, **_kwargs):
+        commands.append(command)
+        config.write_text("regenerated by fixture grub-install\n", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    result = _execute_bootloader(
+        report,
+        repair_action("bootloader_reinstall", {"bootloader": "grub"}),
+        backup_root,
+        [],
+        runner,
+    )
+
+    assert result.status == "failed"
+    assert result.message == (
+        "GRUB reinstall commands 1..1 ran; command 2 failed trust revalidation and the remaining "
+        "commands were not executed; the destination restore failed, but the backed-up loader bytes "
+        "were verified and retained."
+    )
+    assert result.rollback_available is True
+    assert result.backup_path == str(backup_root)
+    backups = [path for path in (backup_root / "files").glob("*") if path.is_file()]
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == b"GRUB_TIMEOUT=5\n"
+    assert calls == ["arch-chroot", "arch-chroot", "arch-chroot"]
+    assert len(commands) == 1
+    assert config.read_text(encoding="utf-8") == "regenerated by fixture grub-install\n"
+
+
+def test_pacman_action_uses_the_fixed_path_host_tools_for_every_argv(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    report = scan_recovery_target(inspect_target(root))
+    report.network = RecoveryNetworkState(True, True, "full", "ethernet")
+    monkeypatch.setattr("aurascan.core.recovery_repairs._trusted_target_binary", lambda *_args, **_kwargs: True)
+    allow_trusted_host_tools(monkeypatch)
+    commands = []
+
+    result = _execute_pacman_action(
+        report,
+        repair_action("complete_pacman_transaction", {}),
+        pacman_policy_runner(commands),
+    )
+
+    assert result.status == "applied"
+    assert all(command[0] == "/usr/bin/pacman-conf" for command in commands[:-1])
+    assert commands[-1] == ["/usr/bin/arch-chroot", str(root), "pacman", "-Syu", "--noconfirm"]
+
+
+def test_dkms_autoinstall_uses_the_fixed_path_host_arch_chroot(tmp_path, monkeypatch):
+    root = make_target(tmp_path, interrupted=True)
+    (root / "usr/lib/modules/6.12.1-arch1-1/build").mkdir(parents=True)
+    (root / "usr/bin").mkdir(parents=True, exist_ok=True)
+    (root / "usr/bin/dkms").write_text("fixture\n", encoding="utf-8")
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=False))
+    monkeypatch.setattr("aurascan.core.recovery_repairs._trusted_target_binary", lambda *_args, **_kwargs: True)
+    allow_trusted_host_tools(monkeypatch)
+    commands = []
+
+    result = _execute_dkms(report, repair_action("dkms_autoinstall", {}), recording_runner(commands))
+
+    assert result.status == "applied"
+    assert commands == [["/usr/bin/arch-chroot", str(root), "dkms", "autoinstall"]]
+
+
+def test_prepare_write_target_preflights_caller_required_tools_before_queries(tmp_path, monkeypatch):
+    root = make_target(tmp_path)
+    report = scan_recovery_target(inspect_target(root, mounted_read_only=True))
+    monkeypatch.setattr("aurascan.core.recovery_repairs.os.geteuid", lambda: 0)
+    seam = TrustSequence(monkeypatch, fail_name="paccache")
+    commands = []
+
+    ready, message = _prepare_write_target(report, recording_runner(commands), required_tools=("paccache",))
+
+    assert ready is False
+    assert message == HOST_TOOL_FIRST_USE_MESSAGE
+    assert seam.calls == ["paccache"]
+    assert commands == []
+    assert report.target.mounted_read_only is True

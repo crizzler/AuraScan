@@ -14,6 +14,13 @@ from typing import Callable, Dict, Optional
 
 MAX_TRUSTED_TOOL_OUTPUT_BYTES = 256 * 1024
 
+# Fixed, secret-free message for a first-use recovery host-tool refuse: it may
+# only be reported while no command has run and no target state has changed.
+HOST_TOOL_FIRST_USE_MESSAGE = (
+    "A required recovery host tool could not be validated as a trusted system executable; "
+    "no command was executed."
+)
+
 
 class TrustedToolError(RuntimeError):
     """A required executable was missing, unsafe, or changed after capture."""
@@ -90,6 +97,26 @@ def capture_trusted_system_tool(
         group=int(metadata.st_gid),
         mode=int(metadata.st_mode),
     )
+
+
+def require_trusted_system_tool(name: str) -> TrustedTool:
+    """Capture the fixed ``/usr/bin/<name>`` identity and revalidate it now.
+
+    Raises :class:`TrustedToolError` when the tool is absent or fails the
+    root-owned, non-symlink, non-writable, executable identity checks.  Call
+    immediately before each execution: every call is a fresh capture plus
+    revalidation, so no cached identity crosses a use boundary.  There is no
+    PATH fallback.
+    """
+
+    tool = capture_trusted_system_tool(
+        name,
+        which=lambda _name: str(Path("/usr/bin") / name),
+    )
+    if tool is None:
+        raise TrustedToolError("trusted system tool was unavailable")
+    revalidate_trusted_system_tool(tool)
+    return tool
 
 
 def revalidate_trusted_system_tool(tool: TrustedTool) -> None:

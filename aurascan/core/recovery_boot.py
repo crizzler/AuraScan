@@ -13,9 +13,11 @@ from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from aurascan.core.trusted_tools import (
+    HOST_TOOL_FIRST_USE_MESSAGE,
     TrustedTool,
     TrustedToolError,
     capture_trusted_system_tool,
+    require_trusted_system_tool,
     revalidate_trusted_system_tool,
     run_bounded_trusted_tool,
 )
@@ -346,12 +348,18 @@ def validate_recovery_image(
         return False, [f"Recovery image could not be read: {exc}"]
     ukify = which("ukify")
     if not errors:
-        if not ukify:
+        tool: Optional[TrustedTool] = None
+        if ukify:
+            try:
+                tool = require_trusted_system_tool("ukify")
+            except TrustedToolError:
+                tool = None
+        if tool is None:
             errors.append(
                 "ukify is unavailable; the recovery image cannot be structurally validated."
             )
         else:
-            result = runner([ukify, "inspect", str(path)], capture_output=True, text=True, timeout=30, check=False)
+            result = runner([tool.path, "inspect", str(path)], capture_output=True, text=True, timeout=30, check=False)
             if result.returncode != 0:
                 errors.append("ukify could not validate the recovery image.")
             else:
@@ -377,12 +385,17 @@ def detect_secure_boot(
 ) -> str:
     bootctl = which("bootctl")
     if bootctl:
-        result = runner([bootctl, "status", "--no-pager"], capture_output=True, text=True, timeout=15, check=False)
-        combined = (result.stdout + "\n" + result.stderr).lower()
-        if "secure boot: enabled" in combined:
-            return "enabled"
-        if "secure boot: disabled" in combined:
-            return "disabled"
+        try:
+            tool = require_trusted_system_tool("bootctl")
+        except TrustedToolError:
+            tool = None
+        if tool is not None:
+            result = runner([tool.path, "status", "--no-pager"], capture_output=True, text=True, timeout=15, check=False)
+            combined = (result.stdout + "\n" + result.stderr).lower()
+            if "secure boot: enabled" in combined:
+                return "enabled"
+            if "secure boot: disabled" in combined:
+                return "disabled"
     try:
         candidates = list(efivars_root.glob("SecureBoot-*"))[:2]
     except OSError:
@@ -407,7 +420,11 @@ def sbctl_owner_key_ready(
     sbctl = which("sbctl")
     if not sbctl:
         return False, "sbctl is unavailable."
-    status = runner([sbctl, "status", "--json"], capture_output=True, text=True, timeout=20, check=False)
+    try:
+        tool = require_trusted_system_tool("sbctl")
+    except TrustedToolError:
+        return False, "sbctl is unavailable."
+    status = runner([tool.path, "status", "--json"], capture_output=True, text=True, timeout=20, check=False)
     if status.returncode != 0:
         return False, "AuraScan could not verify enrolled local Secure Boot keys."
     try:
@@ -434,14 +451,35 @@ def sign_recovery_image(path: Path, *, runner: Callable = subprocess.run, which:
     sbctl = which("sbctl")
     if not sbctl:
         return BootOperationResult(False, "unavailable", "Secure Boot is enabled but sbctl is unavailable.")
+    try:
+        tool = require_trusted_system_tool("sbctl")
+    except TrustedToolError:
+        return BootOperationResult(False, "unavailable", "Secure Boot is enabled but sbctl is unavailable.")
     ready, reason = sbctl_owner_key_ready(runner=runner, which=which)
     if not ready:
         return BootOperationResult(False, "refused", reason)
-    command = [sbctl, "sign", "--save", str(path)]
+    try:
+        tool = require_trusted_system_tool("sbctl")
+    except TrustedToolError:
+        return BootOperationResult(
+            False,
+            "refused",
+            "The sbctl owner-key status was queried, but sbctl failed trust revalidation before signing; the recovery image was not modified.",
+        )
+    command = [tool.path, "sign", "--save", str(path)]
     signed = runner(command, capture_output=True, text=True, timeout=120, check=False)
     if signed.returncode != 0:
         return BootOperationResult(False, "failed", "sbctl failed to sign the recovery image.", command=command)
-    verify = runner([sbctl, "verify", str(path)], capture_output=True, text=True, timeout=30, check=False)
+    try:
+        tool = require_trusted_system_tool("sbctl")
+    except TrustedToolError:
+        return BootOperationResult(
+            False,
+            "failed",
+            "sbctl signed the recovery image, but sbctl failed trust revalidation before verification; the signed image is unverified.",
+            command=command,
+        )
+    verify = runner([tool.path, "verify", str(path)], capture_output=True, text=True, timeout=30, check=False)
     if verify.returncode != 0:
         return BootOperationResult(False, "failed", "The signed recovery image failed sbctl verification.", command=command)
     return BootOperationResult(True, "signed", "Recovery image was signed with the enrolled local owner key.", command=command)
@@ -537,12 +575,17 @@ def install_bootloader_entry(
             changed.append(str(config))
         return BootOperationResult(True, "installed" if changed else "unchanged", "Limine AuraScan Recovery entry is ready.", changed, backups)
     script = rooted(root, Path("/") / RECOVERY_GRUB_SCRIPT)
-    grub_mkconfig = which("grub-mkconfig") if root == Path("/") else None
+    host_generator = root == Path("/")
+    grub_mkconfig = which("grub-mkconfig") if host_generator else None
     target_grub_mkconfig = rooted(root, Path("/usr/bin/grub-mkconfig"))
-    if root == Path("/") and not grub_mkconfig:
+    if host_generator and not grub_mkconfig:
         return BootOperationResult(False, "unavailable", "GRUB was detected but grub-mkconfig is unavailable.")
-    if root != Path("/") and (not target_grub_mkconfig.is_file() or target_grub_mkconfig.is_symlink() or not which("arch-chroot")):
+    if not host_generator and (not target_grub_mkconfig.is_file() or target_grub_mkconfig.is_symlink() or not which("arch-chroot")):
         return BootOperationResult(False, "unavailable", "The target GRUB generator or arch-chroot is unavailable.")
+    try:
+        require_trusted_system_tool("grub-mkconfig" if host_generator else "arch-chroot")
+    except TrustedToolError:
+        return BootOperationResult(False, "unavailable", HOST_TOOL_FIRST_USE_MESSAGE)
     output = rooted(root, Path("/boot/grub/grub.cfg"))
     if output.is_symlink():
         return BootOperationResult(False, "refused", "GRUB configuration is a symlink; AuraScan will not replace it.")
@@ -565,7 +608,26 @@ def install_bootloader_entry(
         output_backup = backup_file(output, backup_root)
         if output_backup:
             backups.append(str(output_backup))
-        command = [grub_mkconfig, "-o", str(output)] if root == Path("/") else ["arch-chroot", str(root), "grub-mkconfig", "-o", "/boot/grub/grub.cfg"]
+        try:
+            generator = require_trusted_system_tool("grub-mkconfig" if host_generator else "arch-chroot")
+        except TrustedToolError:
+            if old:
+                atomic_write(script, old.encode("utf-8"), mode=0o755)
+            else:
+                script.unlink(missing_ok=True)
+            if output_backup:
+                shutil.copy2(output_backup, output)
+            else:
+                output.unlink(missing_ok=True)
+            message = (
+                "The GRUB recovery script was written, but grub-mkconfig failed trust revalidation; "
+                "the previous script and configuration were restored."
+                if host_generator
+                else "The GRUB recovery script was written, but arch-chroot failed trust revalidation; "
+                "the previous script and configuration were restored."
+            )
+            return BootOperationResult(False, "failed", message, changed, backups)
+        command = [generator.path, "-o", str(output)] if host_generator else [generator.path, str(root), "grub-mkconfig", "-o", "/boot/grub/grub.cfg"]
         result = runner(command, capture_output=True, text=True, timeout=180, check=False)
         try:
             generated = output.read_text(encoding="utf-8", errors="replace") if output.is_file() and not output.is_symlink() else ""
@@ -637,8 +699,14 @@ def recovery_image_status(
     status.stale = bool(status.installed and expected_version and status.version != expected_version)
     if secure_boot == "enabled" and status.installed:
         sbctl = which("sbctl")
+        tool: Optional[TrustedTool] = None
         if sbctl:
-            result = runner([sbctl, "verify", str(image)], capture_output=True, text=True, timeout=20, check=False)
+            try:
+                tool = require_trusted_system_tool("sbctl")
+            except TrustedToolError:
+                tool = None
+        if tool is not None:
+            result = runner([tool.path, "verify", str(image)], capture_output=True, text=True, timeout=20, check=False)
             status.signed = result.returncode == 0
         if not status.signed:
             status.errors.append("Secure Boot is enabled but the recovery image signature was not verified.")

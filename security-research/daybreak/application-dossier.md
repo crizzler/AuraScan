@@ -142,12 +142,19 @@ reviewer gate pending]
   disposable-key Secure Boot gates.
 
 [Inference — needs validation] R3 (sandbox artifact scan→install not
-re-bound), R4 (`sudo cp -a` to a user-writable `build_root/root`), R5
-(`snapshot_id` unvalidated — latent), R7 (bare-name PATH tools in recovery
-steps), R9 (sudo timestamp re-arm window), R10 (cleanup `sudo rm -rf` without
-identity revalidation). Per `governance/vulnerability-handling.md`, no fix has
-been applied; findings and proposed remediations go to the owner first. No
-finding is described as exploitability or compromise; none was manufactured.
+re-bound), R4 (`sudo cp -a` to a user-writable `build_root/root`), and R9
+(sudo timestamp re-arm window) remain open. R5 (`snapshot_id` unvalidated —
+latent), R7 (bare-name PATH tools in recovery steps), and R10 (cleanup
+`sudo rm -rf` without identity revalidation) are remediated in 0.18.0:
+R5 uses a total canonical-ASCII snapshot-id validator before path or argv use;
+R7 captures every recovery host tool at its fixed `/usr/bin/<name>` identity
+and revalidates immediately before use; R10 cleanup reuses the captured
+`sudo`/`rm` identities and requires a zero status plus an observed-absent tree.
+The 0.18.0 recovery-bearing ISO and validation UKI passed the BIOS, UEFI and
+disposable-key Secure Boot gates, but booted target-disk repair scenarios and
+the two unchanged transport residuals remain unverified. Per
+`governance/vulnerability-handling.md`, no finding is described as
+exploitability or compromise; none was manufactured.
 
 ## 10. Benchmark results
 

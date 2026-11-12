@@ -1,5 +1,5 @@
 # AuraScan Unreleased
 
-Changes after v0.17.0:
+Changes after v0.18.0:
 
 - No uncommitted release-blocking changes.

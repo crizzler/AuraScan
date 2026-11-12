@@ -4,6 +4,19 @@ Use this as a starting point for Arch-family communities, Reddit, Mastodon,
 Matrix, or Discord posts. Keep the tone transparent: AuraScan reduces risk, but
 it does not prove package safety.
 
+## v0.18.0 release
+
+The v0.18.0 release is recovery-bearing because it hardens the recovery
+executor. Snapshot ids now pass a total canonical-ASCII validator before any
+path or argument use, and every host tool executed as recovery root is captured
+at its fixed `/usr/bin/<name>` identity and revalidated immediately before use.
+First-use refusals keep zero-progress wording only when nothing ran; later
+failures report partial preparation and preserve the existing backup, cleanup
+and rollback paths. A fresh 0.18.0 ISO and local validation UKI are built from
+the final candidate and gated before publication. The recovery markers prove
+the boot and service boundary, not storage recovery. Release notes and hashes
+are in `docs/releases/v0.18.0.md`.
+
 ## v0.17.0 release
 
 The v0.17.0 release is recovery-bearing because recovery-image validation now

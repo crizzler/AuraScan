@@ -1869,6 +1869,18 @@ symlinked tool refuses the action. This does not make a compromised target
 safe: an intact tool still runs the target's own hooks and configuration as
 recovery root, so review recovery results with that limit in mind.
 
+Host tools that the recovery executor runs itself (`arch-chroot`, `ps`,
+`pacman-conf`, `findmnt`, `mount`, `journalctl`, `pacman`, `paccache`,
+`systemctl`, `bootctl`, `ukify`, `sbctl`, `grub-mkconfig`, `lsblk`, and
+`aurascan`) are captured at their fixed `/usr/bin/<name>` identity and
+revalidated immediately before each use. A missing or changed identity refuses
+the action; optional probes fall back exactly as if the tool were absent and
+never execute an untrusted path. A first-use refusal says that no command ran
+only when that is true; later trust failures report partial preparation and
+retain the existing backup or rollback behavior. Snapshot ids are validated as
+canonical ASCII decimals before any path or argument use, and the two snapshot
+executors refuse non-canonical values with their existing messages.
+
 Snapshot restoration always creates a pre-recovery snapshot first and requires
 typing `RESTORE SNAPSHOT <id>`, and preparing a one-shot snapshot test boot
 requires typing `TEST BOOT SNAPSHOT <id>`. Snapshot actions are created only

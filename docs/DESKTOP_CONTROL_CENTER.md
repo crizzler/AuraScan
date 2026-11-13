@@ -153,7 +153,7 @@ Phase 1 is implemented end to end:
   covered by `desktop/src/settings.test.ts`;
 - four fixed shell operations (`refresh`, `openReport`, `readSettings`,
   `setAiKey`), with the credential validated and piped over stdin, covered by
-  the shell and boundary tests;
+  the shell and boundary tests, plus the fixed `agentAudit` project audit;
 - an Agent runtime view that audits one directory and surface through a fixed
   `agent-audit` argument vector, with aggregate output only and no hardening
   action;

@@ -131,7 +131,7 @@ a shell. Without a launcher, "AuraScan Settings" keeps the guided terminal
 wizard, which is still the supported fallback.
 
 `--view <name>` opens one of the published views (`settings`, `instructions`,
-`incidents`, `report`, `actions`, `overview`, `checks`, `about`). Any other value
+`agent`, `incidents`, `report`, `actions`, `overview`, `checks`, `about`). Any other value
 is ignored, so the argument cannot become data the renderer acts on. The
 unpackaged shell can be started with `npm run desktop` or through the development
 launcher described in its README.
@@ -154,6 +154,9 @@ Phase 1 is implemented end to end:
 - four fixed shell operations (`refresh`, `openReport`, `readSettings`,
   `setAiKey`), with the credential validated and piped over stdin, covered by
   the shell and boundary tests;
+- an Agent runtime view that audits one directory and surface through a fixed
+  `agent-audit` argument vector, with aggregate output only and no hardening
+  action;
 - a self-test that reads settings, renders the view, and — when
   `AURASCAN_DESKTOP_SELF_TEST_WRITE=1` is set against a throwaway `HOME` —
   stores and re-reads one sentinel credential.

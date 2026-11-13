@@ -4,6 +4,17 @@ Use this as a starting point for Arch-family communities, Reddit, Mastodon,
 Matrix, or Discord posts. Keep the tone transparent: AuraScan reduces risk, but
 it does not prove package safety.
 
+## v0.19.0 release
+
+The v0.19.0 release is package-only. It adds Agent Guard: a read-only
+`aurascan agent-audit --root PATH --surface codex|claude|cursor|mcp` preflight
+that reports execution authority, readable project secret classes and coverage
+without running the agent, a model, a hook, an MCP server or project code. The
+same aggregate preflight is available through `audit_agent_runtime` in the MCP
+server and the desktop **Agent runtime** view. The retained recovery image is
+the v0.10.11 image; ISO and local-UKI gates were not rerun for v0.19.0. Release
+notes and hashes are in `docs/releases/v0.19.0.md`.
+
 ## v0.18.0 release
 
 The v0.18.0 release is recovery-bearing because it hardens the recovery

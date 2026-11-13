@@ -297,6 +297,7 @@ def test_103_six_server_tools_but_four_profile_names(tmp_path):
         "scan_content",
         "scan_path",
         "audit_agent_config",
+        "audit_agent_runtime",
         "security_audit",
         "verify_evidence",
         "security_audit_online",

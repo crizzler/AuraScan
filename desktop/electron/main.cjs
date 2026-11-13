@@ -236,6 +236,45 @@ async function auditProject(event) {
   });
 }
 
+/**
+ * Audit one explicitly chosen project directory for external-agent blast radius.
+ *
+ * The directory is chosen in a native dialog in this process. The renderer
+ * supplies only a surface name; it never supplies a path. The helper parses the
+ * CLI report down to aggregate facts and drops root, input and location paths.
+ */
+async function auditAgent(event, surface) {
+  if (!helpers.AGENT_SURFACES.includes(surface)) {
+    return { ok: false, error: "Unsupported agent surface" };
+  }
+  const parent = BrowserWindow.fromWebContents(event.sender);
+  const options = {
+    title: "Audit an external agent project",
+    properties: ["openDirectory"],
+    message: "Choose the project or home directory to inspect"
+  };
+  const picked = parent
+    ? await dialog.showOpenDialog(parent, options)
+    : await dialog.showOpenDialog(options);
+  if (picked.canceled || picked.filePaths.length !== 1) {
+    return { ok: false, canceled: true };
+  }
+  const args = helpers.actionArgv("agent_audit", {
+    root_path: picked.filePaths[0],
+    surface
+  });
+  if (args === null) {
+    return { ok: false, error: "Unsupported desktop action" };
+  }
+  return runCli(args, {
+    parse: helpers.parseAgentAudit,
+    failure: "AuraScan could not audit that agent setup",
+    // 0 = clear, 1 = authority observed, 3 = incomplete coverage. All three
+    // carry a complete report and are displayed; 2 and 4 are failures.
+    okExitCodes: [0, 1, 3]
+  });
+}
+
 function findExecutable(name) {
   for (const dir of ["/usr/bin", "/usr/local/bin", "/bin"]) {
     const candidate = path.join(dir, name);
@@ -368,6 +407,8 @@ function registerIpc() {
   ipcMain.handle("aurascan:upgrade-terminal", () => openUpgradeTerminal());
 
   ipcMain.handle("aurascan:npm-audit", (event) => auditProject(event));
+
+  ipcMain.handle("aurascan:agent-audit", (event, surface) => auditAgent(event, surface));
 
   ipcMain.handle("aurascan:open-report", async (event) => {
     const parent = BrowserWindow.fromWebContents(event.sender);

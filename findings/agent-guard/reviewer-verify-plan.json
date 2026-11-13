@@ -1,0 +1,149 @@
+{
+  "task": "t_381dbe8e",
+  "source_file": "findings/agent-guard/red-findings.json",
+  "findings": [
+    {
+      "id": "B1",
+      "location": "design/agent-guard-plan.md:152",
+      "severity_claimed": "critical",
+      "source": "exit code 0 is defined as 'audit completed and no HIGH finding'",
+      "sink": "AGENT-RUNTIME-CONFIG-INCOMPLETE-001 is MEDIUM (plan:118), and exit 3 is only 'audit could not complete' (plan:155-156)",
+      "missing_check": "no mapping from incomplete coverage to a non-zero exit; 0 is reachable with an unparsed recognized surface",
+      "verdict": "upheld",
+      "evidence": "design/agent-guard-plan.md:152 \"0: audit completed and no HIGH finding\"; :118 AGENT-RUNTIME-CONFIG-INCOMPLETE-001 is MEDIUM; :155-156 exit 3 is only \"audit could not complete\"; plan:286-287 test 3 demands \"incomplete coverage, not a pass\" the exit table cannot express. Alternative reading of the :155-156 parenthetical tried and rejected: the table is explicit and nothing maps a MEDIUM coverage finding to non-zero.",
+      "reason": ""
+    },
+    {
+      "id": "H2",
+      "location": "design/agent-guard-plan.md:110",
+      "severity_claimed": "high",
+      "source": "rule table has no hook-command or MCP-stdio-command rule; policy says it evaluates config facts, not command strings (plan:248-250)",
+      "sink": "hooks execute automatically and MCP stdio commands run at startup without a model tool call; existing instruction_guard already flags hooks (instruction_guard.py:3621-3643, 3798-3816) and analyzes Cursor MCP commands (4156-4190)",
+      "missing_check": "execution authority is not derived from presence of hook commands or MCP command fields",
+      "verdict": "upheld",
+      "evidence": "design/agent-guard-plan.md:110-119 rule table has no hook/MCP-command rule; :248-250 \"evaluates configuration facts, not actual command strings\" excludes the executing fields; instruction_guard.py:3798-3822 IG-ACTIVE-DANGEROUS-HOOK HIGH and :4156-4190 Cursor MCP command/args (sh -c at :4182-4184) already treat this evidence as in scope, so a clean agent-audit would contradict an existing in-tree HIGH.",
+      "reason": ""
+    },
+    {
+      "id": "H3",
+      "location": "design/agent-guard-plan.md:226",
+      "severity_claimed": "high",
+      "source": "discovery lists user and project config layers without precedence",
+      "sink": "a project settings.local.json or project MCP manifest can grant what the user config denies",
+      "missing_check": "no per-agent layer order, merge rule, or unknown-precedence coverage state",
+      "verdict": "upheld",
+      "evidence": "design/agent-guard-plan.md:226-231 lists user and project layers with no merge/precedence rule; instruction_guard.py:4088 itself records \"effective permissions depend on Cursor mode and higher-priority policy\" and that repository-controlled settings cross a project trust boundary. Exact vendor precedence unverified (see not_verified); the absent model is verified.",
+      "reason": ""
+    },
+    {
+      "id": "H4",
+      "location": "design/agent-guard-plan.md:116",
+      "severity_claimed": "high",
+      "source": "secret classes are .env*, SSH, cloud credential files, AuraScan .env and 'another recognized secret store'",
+      "sink": "same-UID shell can read environment variables, agent auth stores, VCS/package credentials, sockets and absolute paths outside --root",
+      "missing_check": "no env/socket/auth-store/VCS-credential classes; reachability scoped to cwd/home rather than UID-readable",
+      "verdict": "upheld",
+      "evidence": "design/agent-guard-plan.md:116/:244-246 class list omits env vars, agent auth stores, VCS/package credentials and sockets; agent.py:138-148 AGENT_SENSITIVE_PATH_RE is broader (histories, rc files, /proc/self/environ at :142) and agent.py:1943-1960 minimal_agent_environment shows the repo treats inherited env as an authority channel.",
+      "reason": ""
+    },
+    {
+      "id": "H5",
+      "location": "design/agent-guard-plan.md:117",
+      "severity_claimed": "high",
+      "source": "egress is 'unrestricted' or ambiguous, and policy includes sandbox/egress claims and approval modes (plan:246)",
+      "sink": "config claims and an approval prompt are not OS boundaries; a shell on a normal host has network by default",
+      "missing_check": "no host-relative isolation fact; config claims are treated as proof and ambiguity as a HIGH detection",
+      "verdict": "upheld",
+      "evidence": "design/agent-guard-plan.md:117 asserts HIGH \"unrestricted\" from ambiguity and :246 evaluates \"sandbox/egress claims\" \u2014 config claims are not enforcement points; article-notes.md:21-24 records the allowlist lesson. Ambiguity-as-detection is the verified core; the host-relative prescription is design judgment on top.",
+      "reason": ""
+    },
+    {
+      "id": "H6",
+      "location": "design/agent-guard-plan.md:116",
+      "severity_claimed": "high",
+      "source": ".env* matches .env.example/.template/sample; ~/.ssh, keyrings and browser stores are ubiquitous",
+      "sink": "aggregate rule 119 fires on an ordinary developer machine with a shell tool",
+      "missing_check": "no separation between inventory (MEDIUM/INFO) and capability (HIGH); no example/template exclusion",
+      "verdict": "upheld",
+      "evidence": "design/agent-guard-plan.md:116 \".env*\" glob covers .env.example/.template/.sample by shelling-glob semantics; plan:269-270 admits the same-UID reality, so rule 119's aggregate (plan:119) fires whenever a shell tool and any matched class coexist. Prevalence on real machines is [Inference, Red-acknowledged]; the calibration defect (no template exclusion, no inventory-vs-capability split) is verified.",
+      "reason": ""
+    },
+    {
+      "id": "H7",
+      "location": "design/agent-guard-plan.md:265",
+      "severity_claimed": "high",
+      "source": "remote model reference is checked as a URL and trust state, not fetched; report digest only",
+      "sink": "config files and the model endpoint can change after the audit; no captured_at or input digest",
+      "missing_check": "no per-input digest (path/dev/ino/size/mtime/sha256), no freshness field, no revalidate-before-run requirement",
+      "verdict": "upheld",
+      "evidence": "design/agent-guard-plan.md:271-273 digests the report only; no per-input digest, captured_at or freshness field exists anywhere in the plan (full-text read); article-notes.md:19-20 records the operator-swappable payload, so snapshot staleness is a real channel.",
+      "reason": ""
+    },
+    {
+      "id": "H8",
+      "location": "design/agent-guard-plan.md:114",
+      "severity_claimed": "high",
+      "source": "model is UNVERIFIED unless a local trust entry exists",
+      "sink": "a user-created trust entry suppresses the provenance finding; a pinned hash proves identity at audit time, not safety",
+      "missing_check": "trust entry is treated as verification and is allowed to remove the finding",
+      "verdict": "upheld",
+      "evidence": "design/agent-guard-plan.md:114 makes the finding disappear on \"a locally approved trust entry\" \u2014 a user action, not verification; the rule name invites \"no finding = model verified\". Verified as plan text; operator swap behavior is [Inference].",
+      "reason": ""
+    },
+    {
+      "id": "M2",
+      "location": "design/agent-guard-plan.md:233",
+      "severity_claimed": "medium",
+      "source": "parsers are bounded but discovery traversal has no entry/depth/time bounds",
+      "sink": "the existing guard resolve_regular_file rejects directories (guards.py:43-77); a new walker is required",
+      "missing_check": "no bounded directory walker (entries/depth/time/prune) and no explicit coverage on truncation",
+      "verdict": "upheld",
+      "evidence": "design/agent-guard-plan.md:233-236 bounds parsers only; mcp/guards.py:43-79 resolve_regular_file is regular-file-only (rejects directory/FIFO/socket/device at :75-76); no walker primitive exists in-tree.",
+      "reason": ""
+    },
+    {
+      "id": "M3",
+      "location": "design/agent-guard-plan.md:271",
+      "severity_claimed": "medium",
+      "source": "report digest is computed by the same unprivileged code and the desktop refuses a changed report",
+      "sink": "a same-UID writer can rewrite the report and recompute the digest",
+      "missing_check": "no distinction between corruption detection and tamper protection; no key outside the UID's reach",
+      "verdict": "upheld",
+      "evidence": "design/agent-guard-plan.md:271-273 \"Report integrity ... must refuse a changed report\" immediately after :269-270 admits same-UID readers; the digest is computed by the same unprivileged code, so it is a consistency check, not tamper protection.",
+      "reason": ""
+    },
+    {
+      "id": "M5",
+      "location": "design/agent-guard-plan.md:96",
+      "severity_claimed": "medium",
+      "source": "--model accepts a local directory/file or HTTP(S) endpoint; report redacts raw model paths",
+      "sink": "local directory hashing is unbounded; URL userinfo/query/fragment is not specified for redaction",
+      "missing_check": "no byte cap for model metadata, no URL userinfo rejection or query/fragment stripping",
+      "verdict": "upheld",
+      "evidence": "design/agent-guard-plan.md:96 accepts PATH_OR_URL with no byte-cap rule for local hashing and no URL userinfo/query/fragment redaction (:252-257 covers raw paths only); AGENTS.md requires userinfo/query/fragment redaction in persisted acquisition metadata.",
+      "reason": ""
+    },
+    {
+      "id": "M6",
+      "location": "design/agent-guard-plan.md:277",
+      "severity_claimed": "medium",
+      "source": "ten proposed tests",
+      "sink": "no test for incomplete-surface exit code, defaults, precedence, hooks/MCP commands, env secrets, large/rooted trees, MCP oracle, terminal injection, 'no HIGH != safe' wording, post-audit config change, or model URL components",
+      "missing_check": "the test plan does not falsify the load-bearing claims",
+      "verdict": "upheld",
+      "evidence": "design/agent-guard-plan.md:277-302: the ten tests omit incomplete-surface exit codes, defaults/precedence, hook/MCP-command exec, env secrets, bounded trees, MCP oracle, terminal injection, post-audit change and URL components; the plan's core claims are unfalsified by its own test list.",
+      "reason": ""
+    },
+    {
+      "id": "L1",
+      "location": "design/agent-guard-plan.md:38",
+      "severity_claimed": "low",
+      "source": "plan says instruction_guard does not inspect an agent's shell/exec configuration and that the audit reduces reachability",
+      "sink": "instruction_guard.py:1577-1612 classifies settings/manifests, 3621-3643/3798-3816 flags hooks, 4156-4190 analyzes MCP commands, 2533-2540 flags project shell enablement",
+      "missing_check": "the plan does not state the relationship to existing Instruction Guard coverage; 'reduces reachability' is not what an audit does",
+      "verdict": "upheld",
+      "evidence": "design/agent-guard-plan.md:38-42 \"[Instruction Guard] does not inspect ... an agent's shell/exec configuration\" is false for classification/hook/MCP parts (instruction_guard.py:1577-1613, :3621-3643, :4156-4190); plan:269-270 \"The audit reduces reachability\" is wrong \u2014 an audit reports, only remediation or a sandbox reduces.",
+      "reason": ""
+    }
+  ]
+}

@@ -40,8 +40,9 @@ from aurascan.mcp.tools import security_audit_online as online_tool  # noqa: E40
 from helpers.mcp_client import Loop, spawn  # noqa: E402
 
 ONLINE = "security_audit_online"
-FIRST_FIVE = (
-    "scan_content", "scan_path", "audit_agent_config", "security_audit", "verify_evidence",
+FIRST_SIX = (
+    "scan_content", "scan_path", "audit_agent_config", "audit_agent_runtime",
+    "security_audit", "verify_evidence",
 )
 MANIFEST = "aur-campaign-2026-06-11.json"
 PACKAGES = "aur-campaign-2026-06-11-packages.txt"
@@ -212,8 +213,8 @@ def test_111_sixth_tool_is_last_and_stays_out_of_the_profile(tmp_path):
         client.send({"jsonrpc": "2.0", "method": "tools/list", "id": 1})
         names = [tool["name"] for tool in client.read()["result"]["tools"]]
 
-    assert tuple(names[:5]) == FIRST_FIVE
-    assert names[5:] == [ONLINE]
+    assert tuple(names[:6]) == FIRST_SIX
+    assert names[6:] == [ONLINE]
 
     text = (Path(__file__).resolve().parent / "fixtures" / "mcp" / "registration.yaml").read_text(
         encoding="utf-8"
@@ -240,11 +241,11 @@ def test_112_sixth_annotation_triple_is_truthful_and_the_rest_are_unchanged(tmp_
             annotations["openWorldHint"],
         )
 
-    assert triple(tools[5]) == (False, False, True)
+    assert triple(tools[6]) == (False, False, True)
     for tool in tools[:5]:
         assert triple(tool) == (True, False, False), tool["name"]
     surface = json.loads(SURFACE.read_text(encoding="utf-8"))
-    assert [entry["name"] for entry in surface] == list(FIRST_FIVE) + [ONLINE]
+    assert [entry["name"] for entry in surface] == list(FIRST_SIX) + [ONLINE]
     for tool, expected in zip(tools, surface):
         assert tool["annotations"] == expected["annotations"]
 
@@ -252,7 +253,7 @@ def test_112_sixth_annotation_triple_is_truthful_and_the_rest_are_unchanged(tmp_
 def test_113_schema_is_the_four_projection_fields(tmp_path):
     with spawn(_root(tmp_path)) as client:
         client.send({"jsonrpc": "2.0", "method": "tools/list", "id": 1})
-        schema = client.read()["result"]["tools"][5]["inputSchema"]
+        schema = client.read()["result"]["tools"][6]["inputSchema"]
 
     assert set(schema["properties"]) == {
         "refresh", "include_arch_audit", "max_findings", "include_evidence",
@@ -281,7 +282,7 @@ def test_114_invalid_arguments_keep_the_session(tmp_path):
 
 def test_115_budget_is_110_and_under_the_client_timeout():
     assert list(registry.TOOLS_BY_NAME)[-1] == ONLINE
-    assert len(registry.TOOLS_BY_NAME) == 6
+    assert len(registry.TOOLS_BY_NAME) == 7
     assert registry.TOOLS_BY_NAME[ONLINE].budget == 110 < 120
     assert registry.TOOLS_BY_NAME[ONLINE].annotations is registry._ONLINE_ANNOTATIONS
 

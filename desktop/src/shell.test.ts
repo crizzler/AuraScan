@@ -14,6 +14,7 @@ const helpers = require("../electron/argv.cjs") as {
   MAX_CANDIDATES: number;
   MAX_PROVIDERS: number;
   MAX_FINDINGS_SHELL: number;
+  AGENT_SURFACES: readonly string[];
   INCIDENT_TIMEOUT_MS: number;
   SNAPSHOT_TIMEOUT_MS: number;
   READ_ONLY_ACTIONS: readonly string[];
@@ -29,6 +30,7 @@ const helpers = require("../electron/argv.cjs") as {
   parseReview: (stdout: string) => { schema: string; report_id: string };
   parseInstructionAction: (stdout: string) => { status: string; file_id: string };
   parseIncidents: (stdout: string) => { schema: string; incident_id: string };
+  parseAgentAudit: (stdout: string) => { schema: string; surface: string; secret_classes: unknown[]; finding_counts: Record<string, number> };
   TERMINAL_CANDIDATES: ReadonlyArray<{ name: string; prefix: string[] }>;
   upgradeTerminalArgv: (terminalPath: string, terminalName: string) => string[] | null;
   requestedView: (argv: string[]) => string | null;
@@ -82,6 +84,7 @@ describe("shell action argv", () => {
       "project_report",
       "read_settings",
       "instruction_review",
+      "agent_audit",
       "npm_audit"
     ]);
     expect(helpers.actionArgv("refresh_snapshot")).toEqual(["ui", "--json"]);
@@ -114,6 +117,16 @@ describe("shell action argv", () => {
     expect(
       helpers.actionArgv("project_report", { report_path: "/tmp/report.json" })
     ).toEqual(["ui", "--report", "/tmp/report.json", "--json"]);
+    expect(helpers.actionArgv("agent_audit", { root_path: "/tmp/project", surface: "codex" })).toEqual([
+      "agent-audit",
+      "--root",
+      "/tmp/project",
+      "--surface",
+      "codex",
+      "--json"
+    ]);
+    expect(helpers.actionArgv("agent_audit", { root_path: "relative", surface: "codex" })).toBeNull();
+    expect(helpers.actionArgv("agent_audit", { root_path: "/tmp/project", surface: "other" })).toBeNull();
   });
 
   it("refuses anything else", () => {
@@ -170,6 +183,38 @@ describe("shell action argv", () => {
       "--json"
     ]);
     expect(helpers.INCIDENT_TIMEOUT_MS).toBeGreaterThan(helpers.SNAPSHOT_TIMEOUT_MS);
+  });
+
+  it("projects an agent audit to aggregate facts without paths", () => {
+    const raw = {
+      schema: "agent-runtime-audit/1.0",
+      surface: "codex",
+      banner: "This is not a model-safety verdict.",
+      captured_at: "2026-11-14T00:00:00Z",
+      coverage_complete: true,
+      facts: {
+        execution_authority: {
+          observed: true,
+          channels: [{ kind: "shell-tool", source: { path: "/home/example/.codex/config.toml" } }],
+          approval_mode: { normalized: "never" }
+        },
+        secret_classes_readable: [{ class: "project-env", count: 1 }],
+        host_isolation: { state: "unknown" }
+      },
+      findings: [
+        { rule_id: "AGENT-EXEC-AUTHORITY-001", severity: "HIGH" },
+        { rule_id: "AGENT-SECRET-CLASS-READABLE-001", severity: "MEDIUM" }
+      ],
+      aggregate: { status: "cannot-rule-out" },
+      evidence_digest: "a".repeat(64),
+      root: "/home/example/project",
+      inputs: [{ path: "/home/example/.codex/config.toml" }]
+    };
+    const projected = helpers.parseAgentAudit(JSON.stringify(raw));
+    expect(projected.surface).toBe("codex");
+    expect(projected.secret_classes).toEqual([{ class: "project-env", count: 1 }]);
+    expect(projected.finding_counts).toEqual({ LOW: 0, MEDIUM: 1, HIGH: 1, CRITICAL: 0 });
+    expect(JSON.stringify(projected)).not.toContain("/home/example");
   });
 
   it("builds a fixed upgrade wizard argv for known terminals", () => {

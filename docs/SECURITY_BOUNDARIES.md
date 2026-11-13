@@ -90,6 +90,21 @@ recorded, and no code path describes the package as clean.
 Content risk, integrity approval, scan coverage and neutral first-seen baseline
 enrollment are four distinct states and must never be collapsed into one badge.
 
+### 4a. External-agent runtime surface
+
+| Aspect | Detail |
+| --- | --- |
+| Trusted side | AuraScan's selected surface allowlist, bounded parsers, fixed rule IDs |
+| Untrusted side | Codex, Claude Code, Cursor and MCP project configuration; hook and stdio command fields; project secret candidates |
+| Validation | Explicit root and surface; fixed project-relative paths; no-follow opens; bounded JSON/JSONC and TOML-subset parsing; duplicate keys, symlinks, FIFOs, unknown execution keys and parse failures are incomplete coverage |
+| Allowed authority | Report execution authority, project secret classes and coverage; exit non-zero for authority or incomplete coverage |
+| Prohibited | Executing the agent, model, hook, MCP server or project code; reading secret values into the report; contacting a provider; treating a declared sandbox or approval flag as proof of isolation; claiming a model is safe |
+| Evidence | Configuration path, one-based line, full input digest and a digest of the sanitized projection; secret classes and counts only, never values or paths |
+
+`agent-audit` is a preflight, not containment. It cannot detect a backdoored
+model, and exit `0` means only that the selected configuration files parsed and
+no execution authority was observed in them.
+
 ### 5. Model input and output (package AI, instruction AI, upgrade AI, finding explanation)
 
 | Aspect | Detail |

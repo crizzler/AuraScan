@@ -47,6 +47,7 @@ PINNED_ANNOTATIONS = {
     "scan_content": (True, False, False),
     "scan_path": (True, False, False),
     "audit_agent_config": (True, False, False),
+    "audit_agent_runtime": (True, False, False),
     "security_audit": (True, False, False),
     "verify_evidence": (True, False, False),
     "security_audit_online": (False, False, True),

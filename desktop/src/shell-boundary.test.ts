@@ -56,6 +56,7 @@ describe("desktop shell boundary", () => {
       "aurascan:instruction-disable",
       "aurascan:incident-scan",
       "aurascan:incident-resolve",
+      "aurascan:agent-audit",
       "aurascan:upgrade-terminal"
     ]) {
       expect(preloadSource).toContain(channel);

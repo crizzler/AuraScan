@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld(
     scanIncidents: () => ipcRenderer.invoke("aurascan:incident-scan"),
     resolveIncidents: () => ipcRenderer.invoke("aurascan:incident-resolve"),
     openUpgrade: () => ipcRenderer.invoke("aurascan:upgrade-terminal"),
-    npmAudit: () => ipcRenderer.invoke("aurascan:npm-audit")
+    npmAudit: () => ipcRenderer.invoke("aurascan:npm-audit"),
+    auditAgent: (surface) => ipcRenderer.invoke("aurascan:agent-audit", surface)
   })
 );

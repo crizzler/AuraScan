@@ -13,7 +13,8 @@ advertised so a client can see them but are enforced by the handlers, which retu
 """
 
 from .tools import (
-    audit_agent_config, scan_content, scan_path, security_audit, security_audit_online, verify_evidence,
+    audit_agent_config, audit_agent_runtime, scan_content, scan_path, security_audit,
+    security_audit_online, verify_evidence,
 )
 
 HONESTY_LINE = (
@@ -74,6 +75,18 @@ _AUDIT_AGENT_CONFIG_SCHEMA = {
             "default": "cursor-mcp-manifest",
         },
         "path_hint": {"type": "string", "maxLength": 1024, "default": ""},
+    },
+}
+
+_AUDIT_AGENT_RUNTIME_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["surface"],
+    "properties": {
+        "surface": {
+            "type": "string",
+            "enum": ["codex", "claude", "cursor", "mcp"],
+        },
     },
 }
 
@@ -175,6 +188,19 @@ AUDIT_AGENT_CONFIG_DESCRIPTION = (
     "and `coverage_complete: false`. " + HONESTY_LINE
 )
 
+AUDIT_AGENT_RUNTIME_DESCRIPTION = (
+    "Report execution authority and readable project secret classes for one external agent surface "
+    "under the server's first configured root. Static and read-only: the agent, a model, an MCP "
+    "server, a hook and project code are never started or contacted. Codex, Claude Code and Cursor "
+    "include their built-in shell authority; hook and MCP stdio commands add explicit channels. "
+    "The projection is aggregate only: it returns no inspected file paths, root path, channel "
+    "locations, secret paths or input digests. `coverage_complete: false` is not a clean result and "
+    "the caller must not treat it as one. Secret classes are counted from fixed project-relative "
+    "candidates; home, environment, keyring and socket credentials are explicitly not inspected. "
+    "This is a blast-radius preflight, not a model-safety verdict, containment, or proof that a "
+    "trigger exists. " + HONESTY_LINE
+)
+
 SECURITY_AUDIT_DESCRIPTION = (
     "Check the local host against bounded AUR campaign intelligence, bundled vendor advisories and "
     "host indicators. Runs in offline mode by design: no network at all, and no state is written - "
@@ -263,6 +289,14 @@ TOOLS = (
         AUDIT_AGENT_CONFIG_DESCRIPTION,
         _AUDIT_AGENT_CONFIG_SCHEMA,
         audit_agent_config.handle,
+        20,
+    ),
+    Tool(
+        "audit_agent_runtime",
+        "Report agent runtime blast radius",
+        AUDIT_AGENT_RUNTIME_DESCRIPTION,
+        _AUDIT_AGENT_RUNTIME_SCHEMA,
+        audit_agent_runtime.handle,
         20,
     ),
     Tool(

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import sample from "./fixtures/snapshot.sample.json";
-import { countChecks, parseIncidentReport, parseNpmAuditReport, parseReview, parseSettings, parseSettingsWrite, parseSnapshot } from "./contract";
-import type { IncidentReport, NpmAuditReport, ReviewCandidate, ReviewReport, SettingsPayload, Snapshot } from "./contract";
+import { countChecks, parseAgentAudit, parseIncidentReport, parseNpmAuditReport, parseReview, parseSettings, parseSettingsWrite, parseSnapshot } from "./contract";
+import type { AgentAuditReport, AgentSurface, IncidentReport, NpmAuditReport, ReviewCandidate, ReviewReport, SettingsPayload, Snapshot } from "./contract";
 import { desktopBridge } from "./desktop";
 import type { ShellResult } from "./desktop";
 import { About } from "./views/About";
+import { AgentGuard } from "./views/AgentGuard";
 import { Actions } from "./views/Actions";
 import { Checks } from "./views/Checks";
 import { Incidents } from "./views/Incidents";
@@ -21,6 +22,7 @@ const VIEWS = [
   { id: "checks", label: "Checks", hint: "evidence" },
   { id: "incidents", label: "Incidents", hint: "attention" },
   { id: "instructions", label: "Agent files", hint: "triage" },
+  { id: "agent", label: "Agent runtime", hint: "blast radius" },
   { id: "settings", label: "Settings", hint: "config" },
   { id: "about", label: "About", hint: "contract" }
 ] as const;
@@ -34,6 +36,7 @@ const DESCRIPTIONS: Record<ViewId, string> = {
   checks: "Every collected check, grouped by subsystem.",
   incidents: "Crash markers that were collected for this user.",
   instructions: "Agent control files reviewed as inert text, with hash-bound triage actions.",
+  agent: "Read-only execution authority and project secret reach for one external agent surface.",
   settings: "Your AuraScan configuration and AI provider state. Secrets are never displayed.",
   about: "What this view is allowed to claim."
 };
@@ -64,6 +67,7 @@ function availableViews(snapshot: Snapshot) {
       case "incidents":
         return Boolean(snapshot.incidents);
       case "instructions":
+      case "agent":
         return true;
       case "settings":
         return true;
@@ -103,6 +107,18 @@ export function App() {
   const [settingsError, setSettingsError] = useState("");
   const [settingsNotice, setSettingsNotice] = useState("");
   const [settingsBusy, setSettingsBusy] = useState(false);
+  const [agentRaw, setAgentRaw] = useState<unknown>(null);
+  const [agentLoading, setAgentLoading] = useState(false);
+  const [agentError, setAgentError] = useState("");
+  const [agentNotice, setAgentNotice] = useState("");
+  const [agentBusy, setAgentBusy] = useState(false);
+  const agentParsed = useMemo(
+    () => (agentRaw === null ? null : parseAgentAudit(agentRaw)),
+    [agentRaw]
+  );
+  const agent: AgentAuditReport | null =
+    agentParsed && agentParsed.ok ? agentParsed.report : null;
+  const agentParseError = agentParsed && !agentParsed.ok ? agentParsed.reason : "";
   const [reviewRaw, setReviewRaw] = useState<unknown>(null);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewError, setReviewError] = useState("");
@@ -226,6 +242,10 @@ export function App() {
           ? review
             ? `${plural(review.candidate_count, "candidate")} · ${review.highest_severity}`
             : "no report"
+          : active.id === "agent"
+          ? agent
+            ? `${agent.surface} · ${agent.aggregate.status}`
+            : "not run"
           : active.id === "settings"
           ? settings
             ? `${settings.ai.provider_label || settings.ai.provider} · ${settings.ai.ready ? "ready" : "not ready"}`
@@ -234,7 +254,7 @@ export function App() {
             ? `${plural(counts.error, "error")} · ${plural(counts.warn, "warning")}`
             : reportMeta || actionsMeta;
   const hasError =
-    active.id === "actions" || active.id === "settings"
+    active.id === "actions" || active.id === "settings" || active.id === "agent"
       ? false
       : active.id === "report"
         ? blocking > 0
@@ -376,6 +396,36 @@ export function App() {
       })
       .catch(() => setUpgradeNotice("AuraScan could not be reached"));
   };
+
+  const auditAgent = useCallback(
+    (surface: AgentSurface) => {
+      if (!bridge) {
+        return;
+      }
+      setAgentLoading(true);
+      setAgentBusy(true);
+      setAgentError("");
+      setAgentNotice("");
+      bridge
+        .auditAgent(surface)
+        .then((result) => {
+          if (!result.ok) {
+            if (!result.canceled) {
+              setAgentError(result.error);
+            }
+            return;
+          }
+          setAgentRaw(result.payload);
+          setAgentNotice("Snapshot complete. No agent, model, or command was run.");
+        })
+        .catch(() => setAgentError("AuraScan could not be reached"))
+        .finally(() => {
+          setAgentLoading(false);
+          setAgentBusy(false);
+        });
+    },
+    [bridge]
+  );
 
   const auditProject = () => {
     if (!bridge) {
@@ -614,6 +664,17 @@ export function App() {
             onDisable={(candidate) =>
               review ? runInstructionAction("disable", candidate, review.report_id) : Promise.resolve()
             }
+          />
+        )}
+        {view === "agent" && (
+          <AgentGuard
+            report={agent}
+            loading={agentLoading}
+            error={agentError || agentParseError}
+            notice={agentNotice}
+            busy={agentBusy}
+            shellAvailable={Boolean(bridge)}
+            onAudit={auditAgent}
           />
         )}
         {view === "settings" && (

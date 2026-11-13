@@ -137,6 +137,34 @@
     }
   },
   {
+    "name": "audit_agent_runtime",
+    "description": "Report execution authority and readable project secret classes for one external agent surface under the server's first configured root. Static and read-only: the agent, a model, an MCP server, a hook and project code are never started or contacted. Codex, Claude Code and Cursor include their built-in shell authority; hook and MCP stdio commands add explicit channels. The projection is aggregate only: it returns no inspected file paths, root path, channel locations, secret paths or input digests. `coverage_complete: false` is not a clean result and the caller must not treat it as one. Secret classes are counted from fixed project-relative candidates; home, environment, keyring and socket credentials are explicitly not inspected. This is a blast-radius preflight, not a model-safety verdict, containment, or proof that a trigger exists. AuraScan's injection detector is a static, rule-based first signal \u2014 it reports text that looks like instructions aimed at an AI reader, nothing is executed, and the confidence value is a policy label, not a precision estimate.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "surface"
+      ],
+      "properties": {
+        "surface": {
+          "type": "string",
+          "enum": [
+            "codex",
+            "claude",
+            "cursor",
+            "mcp"
+          ]
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "title": "Report agent runtime blast radius"
+    }
+  },
+  {
     "name": "security_audit",
     "description": "Check the local host against bounded AUR campaign intelligence, bundled vendor advisories and host indicators. Runs in offline mode by design: no network at all, and no state is written - the campaign feed comes from the packaged assets or a previously refreshed cache, and `arch-audit` is skipped. It runs one read-only process (`pacman -Q`, bounded to 30 s) and stats or reads the reported artifact paths under `/etc`, `/usr/lib`, `/usr/bin` and `/usr/local/bin` (including `/etc/ufw/user.rules` and `/etc/ufw/user6.rules`), `/root/pamkeys`, `/var/log/pacman.log{,.1}`, `/sys/fs/bpf` and the AUR helper cache. Findings are exposure evidence: a package-name match is not proof a malicious commit executed, and no match is not proof of integrity. AuraScan never removes or quarantines anything. The honesty line in `instructions` applies to the injection detector; this tool additionally runs one read-only process. `include_evidence` (default false) adds each finding's `evidence` array. That array is host-local: it carries absolute paths of matched artifacts, `hidden_*` BPF object names and Tailscale peer markers, so a result pasted into a chat discloses this host's layout. `arch_audit.findings[].evidence` is not returned at all - the arch audit does not run offline today, so its evidence is unreachable and must not be assumed.",
     "inputSchema": {

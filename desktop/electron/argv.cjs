@@ -16,6 +16,8 @@ const SETTINGS_SCHEMA = "aurascan-settings/1";
 const REVIEW_SCHEMA = "instruction_guard_report/1.0";
 const INCIDENT_SCHEMA = "incident_report/1.3";
 const NPM_AUDIT_SCHEMA = "aurascan-npm-audit/1";
+const AGENT_AUDIT_SCHEMA = "agent-runtime-audit/1.0";
+const AGENT_SURFACES = Object.freeze(["codex", "claude", "cursor", "mcp"]);
 const PACKAGED_CLI = "/usr/bin/aurascan";
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_SECRET_CHARS = 4096;
@@ -52,6 +54,7 @@ const DESKTOP_VIEWS = Object.freeze([
   "checks",
   "incidents",
   "instructions",
+  "agent",
   "settings",
   "about"
 ]);
@@ -126,6 +129,7 @@ const READ_ONLY_ACTIONS = Object.freeze([
   "project_report",
   "read_settings",
   "instruction_review",
+  "agent_audit",
   "npm_audit"
 ]);
 const MUTATING_ACTIONS = Object.freeze([
@@ -204,6 +208,14 @@ function actionArgv(actionId, values) {
       return null;
     }
     return ["npm-audit", projectPath, "--json"];
+  }
+  if (actionId === "agent_audit") {
+    const rootPath = values && values.root_path;
+    const surface = values && values.surface;
+    if (!validPath(rootPath) || !AGENT_SURFACES.includes(surface)) {
+      return null;
+    }
+    return ["agent-audit", "--root", rootPath, "--surface", surface, "--json"];
   }
   if (actionId === "incident_resolve") {
     return ["incidents", "--resolve", "--json"];
@@ -683,6 +695,128 @@ function parseIncidents(stdout) {
  * only bounded text: rule ids, fixed severities, locations and prose. Anything
  * unexpected makes the whole payload unusable.
  */
+function parseAgentAudit(stdout) {
+  const parsed = parseJsonObject(stdout);
+  if (parsed.schema !== AGENT_AUDIT_SCHEMA) {
+    throw new Error("agent audit schema is not supported");
+  }
+  if (!AGENT_SURFACES.includes(parsed.surface)) {
+    throw new Error("agent audit surface is malformed");
+  }
+  const facts = parsed.facts;
+  if (facts === null || typeof facts !== "object" || Array.isArray(facts)) {
+    throw new Error("agent audit facts are malformed");
+  }
+  const execution = facts.execution_authority;
+  if (
+    execution === null ||
+    typeof execution !== "object" ||
+    Array.isArray(execution) ||
+    typeof execution.observed !== "boolean" ||
+    !Array.isArray(execution.channels) ||
+    execution.channels.length > MAX_FINDINGS_SHELL ||
+    execution.approval_mode === null ||
+    typeof execution.approval_mode !== "object" ||
+    Array.isArray(execution.approval_mode) ||
+    typeof execution.approval_mode.normalized !== "string"
+  ) {
+    throw new Error("agent audit execution authority is malformed");
+  }
+  const channels = [];
+  for (const channel of execution.channels) {
+    if (
+      channel === null ||
+      typeof channel !== "object" ||
+      Array.isArray(channel) ||
+      typeof channel.kind !== "string" ||
+      channel.kind.length === 0 ||
+      channel.kind.length > 64
+    ) {
+      throw new Error("agent audit channel is malformed");
+    }
+    channels.push(channel.kind);
+  }
+  if (!Array.isArray(facts.secret_classes_readable) || facts.secret_classes_readable.length > MAX_CANDIDATES) {
+    throw new Error("agent audit secret classes are malformed");
+  }
+  const secrets = [];
+  for (const item of facts.secret_classes_readable) {
+    if (
+      item === null ||
+      typeof item !== "object" ||
+      Array.isArray(item) ||
+      typeof item.class !== "string" ||
+      item.class.length === 0 ||
+      item.class.length > 64 ||
+      !Number.isInteger(item.count) ||
+      item.count < 1
+    ) {
+      throw new Error("agent audit secret class is malformed");
+    }
+    secrets.push({ class: item.class, count: item.count });
+  }
+  if (
+    typeof parsed.coverage_complete !== "boolean" ||
+    typeof parsed.banner !== "string" ||
+    typeof parsed.captured_at !== "string" ||
+    typeof parsed.evidence_digest !== "string" ||
+    !SHA256.test(parsed.evidence_digest) ||
+    !Array.isArray(parsed.findings) ||
+    parsed.findings.length > MAX_FINDINGS_SHELL
+  ) {
+    throw new Error("agent audit payload is malformed");
+  }
+  const findingCounts = { LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0 };
+  for (const finding of parsed.findings) {
+    if (
+      finding === null ||
+      typeof finding !== "object" ||
+      Array.isArray(finding) ||
+      typeof finding.severity !== "string"
+    ) {
+      throw new Error("agent audit finding is malformed");
+    }
+    if (Object.prototype.hasOwnProperty.call(findingCounts, finding.severity)) {
+      findingCounts[finding.severity] += 1;
+    }
+  }
+  const aggregate = parsed.aggregate;
+  if (
+    aggregate === null ||
+    typeof aggregate !== "object" ||
+    Array.isArray(aggregate) ||
+    typeof aggregate.status !== "string" ||
+    !["confirmed", "cannot-rule-out", "not-observed"].includes(aggregate.status)
+  ) {
+    throw new Error("agent audit aggregate is malformed");
+  }
+  const isolation = facts.host_isolation;
+  const hostIsolation =
+    isolation !== null &&
+    typeof isolation === "object" &&
+    !Array.isArray(isolation) &&
+    typeof isolation.state === "string"
+      ? isolation.state
+      : "unknown";
+  return {
+    schema: AGENT_AUDIT_SCHEMA,
+    surface: parsed.surface,
+    banner: parsed.banner.slice(0, 600),
+    captured_at: parsed.captured_at.slice(0, 80),
+    coverage_complete: parsed.coverage_complete,
+    execution_authority: {
+      observed: execution.observed,
+      channels,
+      approval_mode: execution.approval_mode.normalized.slice(0, 32)
+    },
+    secret_classes: secrets,
+    host_isolation: hostIsolation.slice(0, 32),
+    aggregate: { status: aggregate.status },
+    finding_counts: findingCounts,
+    evidence_digest: parsed.evidence_digest
+  };
+}
+
 function parseNpmAudit(stdout) {
   const parsed = parseJsonObject(stdout);
   if (parsed.schema !== NPM_AUDIT_SCHEMA) {
@@ -721,6 +855,8 @@ module.exports = {
   CONTRACT,
   SETTINGS_SCHEMA,
   NPM_AUDIT_SCHEMA,
+  AGENT_AUDIT_SCHEMA,
+  AGENT_SURFACES,
   PACKAGED_CLI,
   MAX_OUTPUT_BYTES,
   MAX_SECRET_CHARS,
@@ -748,5 +884,6 @@ module.exports = {
   parseReview,
   parseInstructionAction,
   parseIncidents,
-  parseNpmAudit
+  parseNpmAudit,
+  parseAgentAudit
 };

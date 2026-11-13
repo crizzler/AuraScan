@@ -1265,6 +1265,143 @@ export function parseNpmAuditReport(raw: unknown): NpmAuditParseResult {
   };
 }
 
+export const AGENT_AUDIT_SCHEMA = "agent-runtime-audit/1.0";
+export const AGENT_SURFACES = ["codex", "claude", "cursor", "mcp"] as const;
+export type AgentSurface = (typeof AGENT_SURFACES)[number];
+export type AgentAggregateStatus = "confirmed" | "cannot-rule-out" | "not-observed";
+
+export interface AgentAuditSecretClass {
+  class: string;
+  count: number;
+}
+
+export interface AgentAuditReport {
+  schema: string;
+  surface: AgentSurface;
+  banner: string;
+  captured_at: string;
+  coverage_complete: boolean;
+  execution_authority: {
+    observed: boolean;
+    channels: string[];
+    approval_mode: string;
+  };
+  secret_classes: AgentAuditSecretClass[];
+  host_isolation: string;
+  aggregate: {
+    status: AgentAggregateStatus;
+  };
+  finding_counts: Record<"LOW" | "MEDIUM" | "HIGH" | "CRITICAL", number>;
+  evidence_digest: string;
+}
+
+export type AgentAuditParseResult =
+  | { ok: true; report: AgentAuditReport }
+  | { ok: false; reason: string };
+
+const AGENT_SECRET_CLASS = /^[a-z][a-z0-9-]{0,63}$/;
+const AGENT_APPROVAL = /^[a-z-]{1,32}$/;
+const AGENT_CHANNEL = /^[a-z][a-z0-9-]{0,63}$/;
+
+/**
+ * Strict parser for the safe aggregate projection of `aurascan agent-audit`.
+ *
+ * The Electron main process removes root, input, finding and channel-location
+ * paths before this parser sees the payload. This parser additionally rejects
+ * anything that could turn into an unexpected path or unbounded string.
+ */
+export function parseAgentAudit(raw: unknown): AgentAuditParseResult {
+  if (!isRecord(raw)) {
+    return { ok: false, reason: "agent audit payload is not an object" };
+  }
+  if (raw.schema !== AGENT_AUDIT_SCHEMA) {
+    return { ok: false, reason: `unsupported agent audit schema: ${String(raw.schema)}` };
+  }
+  if (typeof raw.surface !== "string" || !AGENT_SURFACES.includes(raw.surface as AgentSurface)) {
+    return { ok: false, reason: "agent audit surface is malformed" };
+  }
+  const banner = boundedString(raw.banner, 600);
+  const capturedAt = boundedString(raw.captured_at, 80);
+  const digest = boundedString(raw.evidence_digest, 64);
+  if (!banner || !capturedAt || !digest || !/^[a-f0-9]{64}$/.test(digest)) {
+    return { ok: false, reason: "agent audit identity is malformed" };
+  }
+  if (typeof raw.coverage_complete !== "boolean") {
+    return { ok: false, reason: "agent audit coverage is malformed" };
+  }
+  if (!isRecord(raw.execution_authority)) {
+    return { ok: false, reason: "agent audit execution authority is malformed" };
+  }
+  const observed = raw.execution_authority.observed;
+  const approval = boundedString(raw.execution_authority.approval_mode, 32);
+  if (typeof observed !== "boolean" || !approval || !AGENT_APPROVAL.test(approval)) {
+    return { ok: false, reason: "agent audit execution authority is malformed" };
+  }
+  if (!Array.isArray(raw.execution_authority.channels)) {
+    return { ok: false, reason: "agent audit channels are malformed" };
+  }
+  const channels: string[] = [];
+  for (const entry of raw.execution_authority.channels) {
+    const channel = boundedString(entry, 64);
+    if (!channel || !AGENT_CHANNEL.test(channel)) {
+      return { ok: false, reason: "agent audit channel is malformed" };
+    }
+    channels.push(channel);
+  }
+  if (!Array.isArray(raw.secret_classes) || raw.secret_classes.length > 32) {
+    return { ok: false, reason: "agent audit secret classes are malformed" };
+  }
+  const secretClasses: AgentAuditSecretClass[] = [];
+  for (const entry of raw.secret_classes) {
+    if (!isRecord(entry)) {
+      return { ok: false, reason: "agent audit secret class is malformed" };
+    }
+    const name = boundedString(entry.class, 64);
+    if (!name || !AGENT_SECRET_CLASS.test(name) || !Number.isInteger(entry.count) || (entry.count as number) < 1) {
+      return { ok: false, reason: "agent audit secret class is malformed" };
+    }
+    secretClasses.push({ class: name, count: entry.count as number });
+  }
+  if (!isRecord(raw.aggregate) || typeof raw.aggregate.status !== "string") {
+    return { ok: false, reason: "agent audit aggregate is malformed" };
+  }
+  const status = raw.aggregate.status;
+  if (status !== "confirmed" && status !== "cannot-rule-out" && status !== "not-observed") {
+    return { ok: false, reason: "agent audit aggregate status is malformed" };
+  }
+  if (!isRecord(raw.finding_counts)) {
+    return { ok: false, reason: "agent audit finding counts are malformed" };
+  }
+  const findingCounts = { LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0 };
+  for (const severity of ["LOW", "MEDIUM", "HIGH", "CRITICAL"] as const) {
+    const value = raw.finding_counts[severity];
+    if (!Number.isInteger(value) || (value as number) < 0) {
+      return { ok: false, reason: "agent audit finding counts are malformed" };
+    }
+    findingCounts[severity] = value as number;
+  }
+  return {
+    ok: true,
+    report: {
+      schema: AGENT_AUDIT_SCHEMA,
+      surface: raw.surface as AgentSurface,
+      banner,
+      captured_at: capturedAt,
+      coverage_complete: raw.coverage_complete,
+      execution_authority: {
+        observed,
+        channels,
+        approval_mode: approval
+      },
+      secret_classes: secretClasses,
+      host_isolation: boundedString(raw.host_isolation, 32) || "unknown",
+      aggregate: { status },
+      finding_counts: findingCounts,
+      evidence_digest: digest
+    }
+  };
+}
+
 export function countChecks(checks: DoctorCheck[]): Record<CheckStatus, number> {
   const counts: Record<CheckStatus, number> = { ok: 0, warn: 0, error: 0 };
   for (const check of checks) {

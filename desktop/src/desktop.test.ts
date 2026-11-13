@@ -47,7 +47,8 @@ describe("desktopBridge", () => {
       scanIncidents: () => record("scanIncidents"),
       resolveIncidents: () => record("resolveIncidents"),
       openUpgrade: () => record("openUpgrade"),
-      npmAudit: () => record("npmAudit")
+      npmAudit: () => record("npmAudit"),
+      auditAgent: (surface: string) => record(`auditAgent:${surface}`)
     });
 
     const bridge = desktopBridge();
@@ -68,6 +69,7 @@ describe("desktopBridge", () => {
     await bridge.resolveIncidents();
     await bridge.openUpgrade();
     await bridge.npmAudit();
+    await bridge.auditAgent("codex");
 
     expect(calls).toEqual([
       "refresh",
@@ -82,7 +84,8 @@ describe("desktopBridge", () => {
       "scanIncidents",
       "resolveIncidents",
       "openUpgrade",
-      "npmAudit"
+      "npmAudit",
+      "auditAgent:codex"
     ]);
   });
 });

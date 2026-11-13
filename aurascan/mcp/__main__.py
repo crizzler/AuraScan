@@ -39,7 +39,7 @@ def build_parser():
         prog="aurascan-mcp",
         description=(
             "Read-only stdio MCP server for AuraScan. One JSON-RPC 2.0 message per line. "
-            "Four tools: %s." % (", ".join(registry.TOOLS_BY_NAME),)
+            "Tools: %s." % (", ".join(registry.TOOLS_BY_NAME),)
         ),
     )
     parser.add_argument(

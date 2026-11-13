@@ -7,6 +7,7 @@ import {
   MAX_FINDINGS,
   UI_CONTRACT,
   countChecks,
+  parseAgentAudit,
   parseSnapshot,
   shortDigest
 } from "./contract";
@@ -302,5 +303,45 @@ describe("helpers", () => {
     expect(shortDigest(undefined)).toBe("—");
     expect(shortDigest("abcd")).toBe("abcd");
     expect(shortDigest("0123456789abcdef0123456789abcdef")).toBe("0123456789ab…");
+  });
+});
+
+describe("parseAgentAudit", () => {
+  const digest = "a".repeat(64);
+  const safe = {
+    schema: "agent-runtime-audit/1.0",
+    surface: "codex",
+    banner: "This is not a model-safety verdict.",
+    captured_at: "2026-11-14T00:00:00Z",
+    coverage_complete: true,
+    execution_authority: {
+      observed: true,
+      channels: ["shell-tool", "mcp-stdio-command"],
+      approval_mode: "never"
+    },
+    secret_classes: [{ class: "project-env", count: 1 }],
+    host_isolation: "unknown",
+    aggregate: { status: "cannot-rule-out" },
+    finding_counts: { LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 0 },
+    evidence_digest: digest,
+    root: "/home/example/project",
+    inputs: [{ path: ".codex/config.toml" }]
+  };
+
+  it("accepts the safe aggregate projection and drops source paths", () => {
+    const result = parseAgentAudit(safe);
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    expect(result.report.surface).toBe("codex");
+    expect(result.report.secret_classes).toEqual([{ class: "project-env", count: 1 }]);
+    expect(JSON.stringify(result.report)).not.toContain("/home/example/project");
+    expect(JSON.stringify(result.report)).not.toContain(".codex");
+  });
+
+  it("rejects malformed aggregate status and digest", () => {
+    expect(parseAgentAudit({ ...safe, aggregate: { status: "clean" } }).ok).toBe(false);
+    expect(parseAgentAudit({ ...safe, evidence_digest: "short" }).ok).toBe(false);
   });
 });

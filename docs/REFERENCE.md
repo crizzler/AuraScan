@@ -73,7 +73,7 @@ the v0.13.0 release note records that ISO and local-UKI gates were not rerun.
 
 ## What You Can Try Now
 
-AuraScan currently provides ten practical entry points:
+AuraScan currently provides these practical entry points:
 
 - `aurascan --pkgbuild ./PKGBUILD` reviews package build metadata before trust.
 - `aurascan-makepkg` scans before handing control to `makepkg`.
@@ -85,6 +85,9 @@ AuraScan currently provides ten practical entry points:
   and optional official Arch advisories.
 - `aurascan instruction-audit` reviews recognized Claude Code, `AGENTS.md`, and
   Agent Skill control files for suspicious content and unexpected changes.
+- `aurascan agent-audit --surface codex|claude|cursor|mcp` reports execution
+  authority, readable project secret classes, and coverage for one external
+  agent surface without running the agent.
 - `aurascan config-drift --dry-run` explains `.pacnew` and `.pacsave` files and
   prepares safe fixes with backups.
 - `aurascan incidents --dry-run` diagnoses system and application crashes from
@@ -1141,6 +1144,32 @@ The user settings are `AURASCAN_INSTRUCTION_MONITOR_ENABLED`,
 general AuraScan AI provider does not enable Instruction Guard AI or either
 Instruction Guard timer.
 
+## Agent Runtime Audit
+
+`aurascan agent-audit --root PATH --surface codex|claude|cursor|mcp` reports
+the blast-radius facts that a poisoned coding-agent model needs: execution
+authority, readable project secret classes, and coverage. It is read-only. It
+does not run the agent, a model, an MCP server, a hook, or project code.
+
+Codex, Claude Code, and Cursor have built-in shell/exec authority; hook
+commands and MCP stdio commands are reported separately. The command reads only
+fixed project-relative configuration paths, never walks a directory, and never
+emits secret values or paths. Only class names and counts from an explicit
+project-scope candidate list are reported; home, environment, keyring, and
+socket credentials are marked not inspected.
+
+Exit `0` means every selected configuration file parsed and no execution
+authority was observed. Exit `1` means execution authority was observed with
+complete coverage. Exit `3` means a selected file was missing, unreadable,
+unsupported, malformed, or ambiguous; it takes precedence over `0` and `1`.
+Exit `2` is a usage error, and exit `4` is an internal schema failure. Do not
+treat exit `0` as a model-safety verdict.
+
+The detailed command and scope limits are in
+[`docs/AGENT_GUARD.md`](AGENT_GUARD.md). The audit is a preflight, not a
+containment layer; the hardened-launcher design remains a separate, unfunded
+slice.
+
 ## npm Pre-Install Audit
 
 `aurascan npm-audit [PATH]` reviews a JavaScript project before you install it.
@@ -2046,19 +2075,22 @@ for those flows.
 ## MCP Server
 
 `aurascan-mcp` exposes a small, strictly read-only slice of AuraScan to any MCP
-client over newline-delimited JSON-RPC 2.0 on stdin/stdout. It ships four tools
-and nothing else, plus two opt-in tools (`verify_evidence` and
-`security_audit_online`, below):
+client over newline-delimited JSON-RPC 2.0 on stdin/stdout. It ships seven tools;
+six are read-only and `security_audit_online` is the explicit network exception.
+`verify_evidence` is available but absent from the narrow allowlist below until
+you opt in:
 
 | Tool | What it does |
 | --- | --- |
 | `scan_content` | Scan caller-supplied text for prompt-injection signals. |
 | `scan_path` | Scan one bounded UTF-8 file that must resolve inside an explicit `--root`. |
 | `audit_agent_config` | Audit one agent/MCP configuration document as untrusted data. |
+| `audit_agent_runtime` | Report execution authority and readable project secret classes for one agent surface. |
 | `security_audit` | Check the local host offline: one bounded `pacman -Q`, reads only. |
+| `verify_evidence` | Check an evidence bundle's internal consistency and optional re-derivation. |
 | `security_audit_online` | Opt-in: the same host audit plus one HTTPS campaign refresh and `arch-audit`. |
 
-The four default tools and `verify_evidence` are annotated `readOnlyHint: true`,
+The six read-only tools are annotated `readOnlyHint: true`,
 `destructiveHint: false`, `openWorldHint: false`, so they run unprompted in
 headless sessions (`chat -q`, cron, unattended gateways) as well as approved in
 interactive ones. `security_audit_online` differs: it is `readOnlyHint: false`,
@@ -2095,7 +2127,7 @@ mcp_servers:
     connect_timeout: 30
     supports_parallel_tool_calls: false
     tools:
-      include: [scan_content, scan_path, audit_agent_config, security_audit]
+      include: [scan_content, scan_path, audit_agent_config, audit_agent_runtime, security_audit]
       resources: false
       prompts: false
     sampling:
@@ -2107,18 +2139,19 @@ command_allowlist:
   - mcp:aurascan/scan_content
   - mcp:aurascan/scan_path
   - mcp:aurascan/audit_agent_config
+  - mcp:aurascan/audit_agent_runtime
   - mcp:aurascan/security_audit
 ```
 
 `trust: untrusted` plus `readOnlyHint` keeps interactive consent visible;
 the allowlist is the second line of defence so a lost annotation cannot silently
-disable a tool headless. `tools.include` is an explicit four-name list: a fifth
-tool added to the server later stays invisible until someone opts in. Timeouts
+disable a tool headless. `tools.include` is an explicit five-name list: a tool added to the server later
+stays invisible until someone opts in. Timeouts
 are 20 s per scan, 60 s for `security_audit` and 110 s for
 `security_audit_online`, still under the client's `timeout: 120`, so the
 server's own `timeout` error arrives instead of a client kill.
 
-`verify_evidence` is that opt-in fifth tool and it is deliberately absent from
+`verify_evidence` is an opt-in read-only tool and it is deliberately absent from
 both lists above. Pass `emit_bundle: true` to either scan tool and the payload
 gains an `evidence_bundle` object: the exact payload returned to you, a SHA-256
 digest of it, and a digest of the scan input. `verify_evidence` recomputes the

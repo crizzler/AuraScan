@@ -1095,6 +1095,38 @@ EXACT_TEMPLATES: Dict[str, Dict[str, str]] = {
         "not_prove": "This does not prove the package is malicious. It means the signature could not be checked automatically.",
         "action": "Run --deep-static again later, provide the signing key locally, or manually verify the upstream signing key.",
     },
+    "AGENT-EXEC-AUTHORITY-001": {
+        "title": "The selected agent surface can execute commands.",
+        "summary": "A built-in shell tool, a lifecycle hook command, or an MCP stdio command gives the agent a path from model output to command execution.",
+        "why": "The article's demonstrated backdoor needed an execution path to turn a model response into credential access and out-of-band transfer.",
+        "checked": "AuraScan parsed the selected configuration as inert data and recorded execution authority without running the agent, a hook, an MCP server, or a command.",
+        "not_prove": "Execution authority does not prove the model is malicious, that a command ran, or that any secret was read.",
+        "action": "Remove execution channels you do not need, review hook and MCP commands as data, and keep project secrets out of the agent's working tree.",
+    },
+    "AGENT-SECRET-CLASS-READABLE-001": {
+        "title": "The agent account can read project secrets.",
+        "summary": "At least one inspected project secret class is readable by the account that would run the agent.",
+        "why": "A shell command driven by model output only needs one readable credential file to turn a configuration weakness into credential theft.",
+        "checked": "AuraScan checked fixed project-relative candidate paths with no-follow opens and reported classes and counts only.",
+        "not_prove": "This does not prove any secret was read, transmitted, or used; home, environment, keyring, and socket credentials were outside this project-only scope.",
+        "action": "Move secrets out of the project tree, use a dedicated low-privilege account, and provide only the credentials the agent needs.",
+    },
+    "AGENT-RUNTIME-CONFIG-INCOMPLETE-001": {
+        "title": "Agent runtime inspection did not complete.",
+        "summary": "A selected configuration file was missing, unreadable, unsupported, malformed, or bounded out before every authority fact could be established.",
+        "why": "An unparsed or ambiguous agent configuration cannot be treated as having no execution authority.",
+        "checked": "AuraScan applied bounded JSON/JSONC and TOML-subset parsing and no-follow file capture without executing or contacting the agent.",
+        "not_prove": "Incomplete coverage is not evidence of malware or compromise; it is a reason not to accept a clean result.",
+        "action": "Review the cited configuration as inert data and rerun the audit after fixing the parse or access problem.",
+    },
+    "AGENT-CREDENTIAL-EXFIL-RISK-001": {
+        "title": "Agent execution and project secret access coincide.",
+        "summary": "Execution authority and at least one readable project secret class are both observed, while host isolation is not proven.",
+        "why": "This is the blast-radius combination the demonstrated model backdoor used: model-controlled execution plus a readable project credential.",
+        "checked": "AuraScan combined observed execution channels, project secret classes, and an explicitly unproven isolation state without running the agent.",
+        "not_prove": "This does not prove the model is backdoored, a trigger fired, a command executed, or a credential left the host.",
+        "action": "Treat the setup as high blast radius: remove unnecessary execution channels, move secrets out of the project, and consider the hardened launcher design.",
+    },
 }
 
 DETERMINISTIC_TITLES = {

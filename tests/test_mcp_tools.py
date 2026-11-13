@@ -136,6 +136,71 @@ def test_36_seam_equals_the_router_for_every_surface():
             assert actual == expected, (surface, text)
 
 
+def test_46_agent_runtime_audit_is_aggregate_only(tmp_path):
+    root = _root(tmp_path)
+    (root / ".mcp.json").write_text(
+        '{"mcpServers":{"remote":{"url":"https://example.invalid/mcp"}}}',
+        encoding="utf-8",
+    )
+    with spawn(root) as client:
+        client.call("audit_agent_runtime", {"surface": "mcp"}, request_id=1)
+        body = client.read_result()
+
+    assert body["coverage_complete"] is True
+    assert body["execution_authority_observed"] is False
+    assert body["aggregate"]["status"] == "not-observed"
+    assert body["secret_class_count"] == 0
+    assert "root" not in body
+    assert "inputs" not in body
+    assert "paths" not in body
+    assert "channels" not in body
+
+
+def test_47_agent_runtime_audit_reports_counts_without_paths(tmp_path):
+    root = _root(tmp_path)
+    (root / ".mcp.json").write_text(
+        '{"mcpServers":{"local":{"command":"bash","args":["-c","sentinel"]}}}',
+        encoding="utf-8",
+    )
+    (root / ".env").write_text("SENTINEL=1\n", encoding="utf-8")
+    with spawn(root) as client:
+        client.call("audit_agent_runtime", {"surface": "mcp"}, request_id=1)
+        body = client.read_result()
+
+    assert body["coverage_complete"] is True
+    assert body["execution_authority_observed"] is True
+    assert body["secret_class_count"] == 1
+    assert body["secret_counts"] == [{"class": "project-env", "count": 1}]
+    assert body["aggregate"]["status"] == "cannot-rule-out"
+    assert body["finding_counts"]["HIGH"] >= 1
+    serialized = json.dumps(body)
+    assert "SENTINEL" not in serialized
+    assert str(root) not in serialized
+    assert ".mcp.json" not in serialized
+    assert "sentinel" not in serialized
+
+
+def test_48_agent_runtime_audit_incomplete_is_not_clean(tmp_path):
+    root = _root(tmp_path)
+    (root / ".mcp.json").write_text('{"mcpServers":{"local":{"shell":"bash"}}}', encoding="utf-8")
+    with spawn(root) as client:
+        client.call("audit_agent_runtime", {"surface": "mcp"}, request_id=1)
+        body = client.read_result()
+
+    assert body["coverage_complete"] is False
+    assert body["execution_authority_observed"] is False
+    assert body["finding_counts"]["MEDIUM"] >= 1
+
+
+def test_49_agent_runtime_audit_rejects_unknown_surface(tmp_path):
+    root = _root(tmp_path)
+    with spawn(root) as client:
+        client.call("audit_agent_runtime", {"surface": "other"}, request_id=1)
+        body = client.read_error()
+
+    assert body["code"] == "invalid_arguments"
+
+
 def _seed_host_fixture(root):
     config = root / "etc/pacman.d/mirrorlist-criteria"
     config.parent.mkdir(parents=True)

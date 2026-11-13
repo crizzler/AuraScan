@@ -1,9 +1,9 @@
 /**
  * Renderer-side handle for the desktop shell bridge.
  *
- * The browser prototype has no bridge. The Electron preload exposes exactly
- * four fixed operations. The renderer never receives a command, an executable,
- * or a path, and a credential it sends leaves only through that bridge.
+ * The browser prototype has no bridge. The Electron preload exposes only fixed
+ * operations. The renderer never receives a command, an executable, or a path,
+ * and a credential it sends leaves only through that bridge.
  */
 
 export interface ShellPayloadResult {
@@ -41,6 +41,7 @@ export interface DesktopBridge {
   resolveIncidents(): Promise<ShellResult>;
   openUpgrade(): Promise<ShellResult>;
   npmAudit(): Promise<ShellResult>;
+  auditAgent(surface: string): Promise<ShellResult>;
 }
 
 export function desktopBridge(): DesktopBridge | null {
@@ -62,7 +63,8 @@ export function desktopBridge(): DesktopBridge | null {
     "scanIncidents",
     "resolveIncidents",
     "openUpgrade",
-    "npmAudit"
+    "npmAudit",
+    "auditAgent"
   ] as const;
   for (const name of names) {
     if (typeof bridge[name] !== "function") {
@@ -86,6 +88,7 @@ export function desktopBridge(): DesktopBridge | null {
     scanIncidents: () => call("scanIncidents")(),
     resolveIncidents: () => call("resolveIncidents")(),
     openUpgrade: () => call("openUpgrade")(),
-    npmAudit: () => call("npmAudit")()
+    npmAudit: () => call("npmAudit")(),
+    auditAgent: (surface: string) => call("auditAgent")(surface)
   };
 }

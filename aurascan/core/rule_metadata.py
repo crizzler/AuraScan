@@ -20,6 +20,7 @@ class RuleCategory:
     archive_safety = "archive_safety"
     incident_recovery = "incident_recovery"
     agent_instruction = "agent_instruction"
+    agent_runtime = "agent_runtime"
     unknown = "unknown"
 
 
@@ -514,6 +515,26 @@ RULE_METADATA: Dict[str, RuleMetadata] = {
     "REC-BOOT-CONFIG-DRIFT": RuleMetadata("REC-BOOT-CONFIG-DRIFT", RuleCategory.incident_recovery, Severity.HIGH, "recovery-boot", 90, True, "finding_fields", "Boot-critical packaged configuration changes remain unresolved."),
     "REC-BOOTLOADER-UNKNOWN": RuleMetadata("REC-BOOTLOADER-UNKNOWN", RuleCategory.incident_recovery, Severity.HIGH, "recovery-bootloader", 95, True, "finding_fields", "No supported bootloader and ESP pair was positively detected."),
     "REC-ROOT-SPACE": RuleMetadata("REC-ROOT-SPACE", RuleCategory.incident_recovery, Severity.HIGH, "recovery-disk-space", 85, True, "finding_fields", "The recovery target has critically low free space."),
+    "AGENT-EXEC-AUTHORITY-001": RuleMetadata(
+        "AGENT-EXEC-AUTHORITY-001", RuleCategory.agent_runtime, Severity.HIGH,
+        "agent-runtime-authority", 95, True, "deterministic",
+        "The selected external agent surface exposes execution authority through a built-in shell tool, a lifecycle hook command, or an MCP stdio command. This is an observed configuration fact, not proof that a model is malicious.",
+    ),
+    "AGENT-SECRET-CLASS-READABLE-001": RuleMetadata(
+        "AGENT-SECRET-CLASS-READABLE-001", RuleCategory.agent_runtime, Severity.MEDIUM,
+        "agent-runtime-secrets", 85, True, "deterministic",
+        "At least one inspected project secret class is readable by the account that would run the agent. Counts and classes are reported; values and paths are not.",
+    ),
+    "AGENT-RUNTIME-CONFIG-INCOMPLETE-001": RuleMetadata(
+        "AGENT-RUNTIME-CONFIG-INCOMPLETE-001", RuleCategory.agent_runtime, Severity.MEDIUM,
+        "agent-runtime-coverage", 90, True, "deterministic",
+        "A selected agent surface or layer could not be parsed, bounded, or resolved with known precedence. Incomplete coverage blocks a clean result.",
+    ),
+    "AGENT-CREDENTIAL-EXFIL-RISK-001": RuleMetadata(
+        "AGENT-CREDENTIAL-EXFIL-RISK-001", RuleCategory.agent_runtime, Severity.HIGH,
+        "agent-runtime-exfiltration", 100, True, "deterministic",
+        "Execution authority and a readable project secret class are both observed while host isolation is not proven. The aggregate is a blast-radius statement, not a malware or model verdict.",
+    ),
 }
 
 

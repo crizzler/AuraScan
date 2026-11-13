@@ -75,6 +75,7 @@ a recovery boot entry. Those are explicit setup choices.
 | Upgrade preflight | Checks pacman and AUR-helper transactions, kernel and module issues, config drift, campaigns, and AI-raised risks before handoff. | `aurascan upgrade --dry-run` |
 | Installed-system audit | Compares installed packages and pacman history with bundled campaign intelligence and available advisories. | `aurascan security-audit` |
 | Agent control files | Reviews Claude Code, `AGENTS.md`, and Agent Skill files as untrusted text without executing them. | `aurascan instruction-audit` |
+| Agent runtime blast radius | Reports execution authority and readable project secret classes for Codex, Claude Code, Cursor, or MCP without running the agent. | `aurascan agent-audit --surface codex` |
 | Incident diagnosis | Reads bounded local crash evidence and prepares guarded repair plans. | `aurascan incidents --dry-run` |
 | Configuration drift | Explains `.pacnew` and `.pacsave` files and prepares fixes with backups. | `aurascan config-drift --dry-run` |
 
@@ -132,6 +133,7 @@ newline-delimited JSON-RPC over stdin/stdout.
 | `scan_content` | Scan caller-supplied text for prompt-injection signals. |
 | `scan_path` | Scan one bounded UTF-8 file inside an explicit `--root`. |
 | `audit_agent_config` | Audit an agent or MCP configuration document as data. |
+| `audit_agent_runtime` | Report execution authority and project secret reach for one agent surface. |
 | `security_audit` | Check the local host offline with bounded reads. |
 | `verify_evidence` | Optionally verify an evidence bundle's internal consistency. |
 | `security_audit_online` | Opt in to a bounded HTTPS campaign refresh and `arch-audit`. |
@@ -139,7 +141,7 @@ newline-delimited JSON-RPC over stdin/stdout.
 Registration, explicit-root setup, and the opt-in allowlist are documented in
 [MCP server](docs/REFERENCE.md#mcp-server).
 
-The first five tools are read-only. `security_audit_online` is not: it reaches
+The first six tools are read-only. `security_audit_online` is not: it reaches
 the network, runs `arch-audit`, and may update that tool's cache. Per-call
 approval is the MCP client's policy; the server advertises read-only hints for
 the default tools. Scanned content and package code are never executed, blocked,
@@ -211,18 +213,16 @@ See [`docs/AI_PROVIDER_CONFIGURATION.md`](docs/AI_PROVIDER_CONFIGURATION.md) and
 
 ## Status
 
-AuraScan is a developer preview. The current package is **0.18.0**.
+AuraScan is a developer preview. The current package is **0.19.0**.
 
-The 0.18.0 release is recovery-bearing because it hardens the recovery
-executor. Snapshot ids are validated before any path or argument use, and every
-host tool executed as recovery root is captured at its fixed `/usr/bin/<name>`
-identity and revalidated immediately before use. A fresh 0.18.0 ISO and local
-validation UKI are built from the final candidate and gated before publication.
-The release also carries the 0.17.0 R8 fail-closed recovery-image validation,
-the 0.16.1 runtime-portability fixes, and the 0.16.0 repository-provenance
-tightening at rule version `1.21.0`. Release notes, image details, gate results,
-and known limits are in
-[`docs/releases/v0.18.0.md`](docs/releases/v0.18.0.md).
+The 0.19.0 release is package-only. It adds Agent Guard, a read-only
+blast-radius preflight for Codex, Claude Code, Cursor and MCP surfaces, with
+CLI, MCP and desktop views. It reports execution authority and project secret
+classes without running the agent, a model, a hook, an MCP server or project
+code, and it does not claim model safety. The retained recovery image remains
+the v0.10.11 image; ISO and local-UKI gates were not rerun for 0.19.0. Release
+notes and limits are in
+[`docs/releases/v0.19.0.md`](docs/releases/v0.19.0.md).
 
 The verified release runtime is Python 3.14. The Python 3.8 source suite also
 passes locally; CI status is confirmed separately.
@@ -234,6 +234,8 @@ passes locally; CI status is confirmed separately.
 - [Architecture](docs/ARCHITECTURE.md): layers, trust boundaries, and data flow.
 - [Security boundaries](docs/SECURITY_BOUNDARIES.md): what each boundary proves
   and what it does not.
+- [Agent Guard](docs/AGENT_GUARD.md): read-only blast-radius audit for external
+  coding agents, exit codes, and scope limits.
 - [Privacy](docs/PRIVACY.md): local data, provider traffic, and retention.
 - [Desktop control center](docs/DESKTOP_CONTROL_CENTER.md): snapshot contract and
   fixed actions.

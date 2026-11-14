@@ -142,10 +142,10 @@ def test_arch_package_metadata_targets_current_public_release():
     assert 'cd "AuraScan-$pkgver"' in pkgbuild
     assert 'cd "$pkgname-$pkgver"' not in pkgbuild
     assert 'python -m installer --destdir="$pkgdir" --prefix=/usr dist/*.whl' in pkgbuild
-    assert "AI-assisted safety and recovery layer for Arch-family systems" in pkgbuild
+    assert "Arch/AUR package scanner: deterministic checks, optional AI reviewer, recovery" in pkgbuild
     assert "shelly: optional Shelly update handoff for aurascan upgrade" in pkgbuild
     assert f"pkgver = {version}" in srcinfo
-    assert "pkgdesc = AI-assisted safety and recovery layer for Arch-family systems" in srcinfo
+    assert "pkgdesc = Arch/AUR package scanner: deterministic checks, optional AI reviewer, recovery" in srcinfo
     assert "optdepends = shelly: optional Shelly update handoff for aurascan upgrade" in srcinfo
     assert f"aurascan-{version}.tar.gz::https://github.com/crizzler/AuraScan/archive/refs/tags/v{version}.tar.gz" in srcinfo
     if release_tag_exists and not head_is_release_tag:

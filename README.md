@@ -3,8 +3,9 @@
 **Package safety checks for Arch Linux before code runs.**
 
 AuraScan reviews PKGBUILDs, built packages, source archives, pending upgrades,
-installed-system state, agent control files, and crash evidence. It reports what
-it inspected, what it could not prove, and what needs a human decision.
+installed-system state, agent control files, agent runtime exposure, and crash
+evidence. It reports what it inspected, what it could not prove, and what needs a
+human decision.
 
 [![AUR package](https://img.shields.io/aur/version/aurascan?label=AUR&logo=archlinux)](https://aur.archlinux.org/packages/aurascan)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -170,8 +171,9 @@ it install authority, or turn a clean result into permission to proceed.
 
 ## Safety boundaries
 
-AuraScan is a review and blocking layer, not an antivirus, sandbox, or proof of
-safety. Keep these limits in view:
+AuraScan is an inspection and blocking layer. It is not an antivirus or proof
+of safety, and its optional AUR build sandbox is a devtools chroot, not kernel
+isolation. The normal `makepkg` handoff still executes package code.
 
 - A clean report, a clean ClamAV result, or a valid source signature does not
   guarantee that a package is safe.
@@ -211,17 +213,17 @@ are refused.
 See [`docs/AI_PROVIDER_CONFIGURATION.md`](docs/AI_PROVIDER_CONFIGURATION.md) and
 [`docs/PRIVACY.md`](docs/PRIVACY.md).
 
-## Status
+## What's new in 0.19.0
 
-AuraScan is a developer preview. The current package is **0.19.0**.
+AuraScan is a developer preview. The 0.19.0 release candidate is package-only;
+the current published package remains **0.18.0** until this release is published.
 
-The 0.19.0 release is package-only. It adds Agent Guard, a read-only
-blast-radius preflight for Codex, Claude Code, Cursor and MCP surfaces, with
-CLI, MCP and desktop views. It reports execution authority and project secret
-classes without running the agent, a model, a hook, an MCP server or project
-code, and it does not claim model safety. The retained recovery image remains
-the v0.10.11 image; ISO and local-UKI gates were not rerun for 0.19.0. Release
-notes and limits are in
+The 0.19.0 candidate adds Agent Guard, a read-only blast-radius preflight for
+Codex, Claude Code, Cursor and MCP surfaces, with CLI, MCP and desktop views. It
+reports execution authority and project secret classes without running the
+agent, a model, a hook, an MCP server or project code, and it does not claim
+model safety. The retained recovery image remains the v0.10.11 image; ISO and
+local-UKI gates were not rerun for 0.19.0. Release notes and limits are in
 [`docs/releases/v0.19.0.md`](docs/releases/v0.19.0.md).
 
 The verified release runtime is Python 3.14. The Python 3.8 source suite also

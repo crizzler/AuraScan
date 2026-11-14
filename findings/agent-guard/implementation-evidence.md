@@ -46,7 +46,7 @@ Scope: A0-core plus the reviewed MCP and desktop projections. Slice B remains de
 - New suite: `25 passed, 1 skipped` on Python 3.14.8; MCP focused suite `101 passed`;
   desktop suite `82 passed` with TypeScript and Vite build passing.
 - New suite on Python 3.8.20: `25 passed, 1 skipped`.
-- Full suite with `ANTICOPY_ROOT=/tmp/anticopy-golden-1860024`:
+- Full suite with the external fixture checkout pinned:
   `6101 passed, 5 skipped` in 348.60s.
 - `python -m compileall -q aurascan tests`: exit 0.
 - `tools/audit_presenter_coverage.py --strict`: exit 0.
@@ -54,10 +54,9 @@ Scope: A0-core plus the reviewed MCP and desktop projections. Slice B remains de
 - `git diff --check`: exit 0.
 - `ruff check` on the two new modules and the new test file: all checks passed.
 
-An unpinned full-suite run later failed only the external AntiCopy parity test
-because the live AntiCopy checkout advanced from the golden `1860024` pin to
-`3736ab2`. The pinned worktree run above is the repository verification used for
-this implementation.
+An unpinned full-suite run later failed only an external fixture-head check
+because the live checkout advanced past its recorded pin. The pinned run above is
+the repository verification used for this implementation.
 
 ## Not delivered
 

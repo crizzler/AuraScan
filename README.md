@@ -1,6 +1,7 @@
 # AuraScan
 
-**Package safety checks for Arch Linux before code runs.**
+**Package safety checks for Arch Linux before code runs. Deterministic rules
+decide; an optional AI reviewer explains and escalates what patterns miss.**
 
 AuraScan reviews PKGBUILDs, built packages, source archives, pending upgrades,
 installed-system state, agent control files, agent runtime exposure, and crash
@@ -65,6 +66,37 @@ aurascan --json --pkgbuild ./PKGBUILD
 
 Installation does not enable AI, monitoring, repair services, tray autostart, or
 a recovery boot entry. Those are explicit setup choices.
+
+## Why AuraScan
+
+AuraScan combines deterministic package inspection, built-archive inspection, a
+pacman transaction gate, and an optional AI reviewer. The deterministic layers
+catch known-bad shapes. The archive layer sees what only exists after the build.
+The transaction gate can stop a blocking finding before installation. The AI
+reviewer then reads the package text and bounded evidence for context that a
+fixed pattern list cannot express, such as an unusual but plausible build step
+or several individually mild findings that are dangerous together.
+
+The AI layer can raise a finding's severity and explain why it matters. It
+cannot lower, clear, or replace a deterministic finding, and it has no command,
+URL, or policy authority. It is off unless configured; without it, AuraScan
+remains a deterministic scanner.
+
+A static-only PKGBUILD checker, such as the `pkgscan` in CachyOS Package
+Installer 2.0, is a useful and fast first screen. It reads a bounded set of
+recipe files and points at risky lines before the build. That is a narrower
+job: it does not inspect the built package, gate the pacman transaction, or add
+a contextual reviewer. The practical difference is that a static checker stops
+at matching text, while AuraScan can combine deterministic findings,
+built-artifact evidence, and optional model reasoning before installation.
+AuraScan is built for that deeper gate, and its optional AI reviewer is a
+second layer, not a replacement for rules or evidence.
+
+The advantage is not blind trust in a model. Known-bad shapes are caught by
+rules; the built artifact is checked after the recipe has produced it; and the
+reviewer helps explain ambiguous combinations that a fixed list would miss. A
+clean result is still not proof of safety, and the AI is never allowed to turn
+a blocker into a pass.
 
 ## What it checks
 
